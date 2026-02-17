@@ -1,5 +1,8 @@
 """Orders API."""
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
@@ -12,8 +15,44 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 
 
 @router.get("", response_model=list[OrderRead])
-def list_orders(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return db.query(Order).order_by(Order.created_at.desc()).all()
+def list_orders(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    status: list[str] = Query(default=[], alias="status"),
+    buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+):
+    # Order-level filters: which orders to include
+    q = db.query(Order).order_by(Order.created_at.desc())
+    if status:
+        # Only orders that have at least one item with one of these statuses
+        q = q.join(Item).filter(Item.status.in_(status)).distinct()
+    if buying_group_id:
+        q = q.filter(Order.buying_group_id.in_(buying_group_id))
+    if date_from:
+        try:
+            d = date.fromisoformat(date_from)
+            q = q.filter(func.date(Order.purchase_date) >= d)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            d = date.fromisoformat(date_to)
+            q = q.filter(func.date(Order.purchase_date) <= d)
+        except ValueError:
+            pass
+    orders = q.all()
+    # Line-item filter: within each order, only include items matching status (keeps order grouping)
+    if status:
+        status_set = set(status)
+        result = []
+        for o in orders:
+            read = OrderRead.model_validate(o)
+            filtered_items = [i for i in read.items if i.status in status_set]
+            result.append(read.model_copy(update={"items": filtered_items}))
+        return result
+    return orders
 
 
 @router.post("", response_model=OrderRead)

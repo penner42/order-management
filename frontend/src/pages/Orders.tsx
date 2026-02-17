@@ -54,6 +54,22 @@ const STATUS_TO_DATE_FIELD: Record<string, keyof Item> = {
   payment_received: 'payment_received_at',
 }
 
+/** Build /orders API path with current filter query params (for backend filtering). */
+function ordersPath(
+  statuses: Set<string>,
+  buyingGroups: Set<number>,
+  dateFrom: string,
+  dateTo: string
+): string {
+  const params = new URLSearchParams()
+  statuses.forEach((s) => params.append('status', s))
+  buyingGroups.forEach((id) => params.append('buying_group_id', String(id)))
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  const q = params.toString()
+  return q ? `/orders?${q}` : '/orders'
+}
+
 export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([])
   const [groups, setGroups] = useState<BuyingGroup[]>([])
@@ -99,34 +115,16 @@ export default function Orders() {
   const paymentSaveTimeouts = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
   const navigate = useNavigate()
 
-  /** Parse ISO date string to YYYY-MM-DD for comparison */
-  const toDatePart = (iso: string | null) => (iso ? iso.slice(0, 10) : '')
-
-  const filteredOrders = useMemo(() => {
-    return orders.filter((o) => {
-      if (filterStatuses.size > 0) {
-        const itemStatuses = new Set((o.items ?? []).map((i) => i.status))
-        const hasMatchingStatus = [...filterStatuses].some((s) => itemStatuses.has(s as ItemStatus))
-        if (!hasMatchingStatus) return false
-      }
-      if (filterBuyingGroups.size > 0) {
-        if (!o.buying_group_id || !filterBuyingGroups.has(o.buying_group_id)) return false
-      }
-      const pd = toDatePart(o.purchase_date)
-      if (filterDateFrom && pd < filterDateFrom) return false
-      if (filterDateTo && pd > filterDateTo) return false
-      return true
-    })
-  }, [orders, filterStatuses, filterBuyingGroups, filterDateFrom, filterDateTo])
-
   const loadAccountsForStore = (storeId: number) =>
     api.get<StoreAccount[]>(`/stores/${storeId}/accounts`).then((list) => {
       setAccountsByStore((prev) => ({ ...prev, [storeId]: list }))
     })
 
   useEffect(() => {
+    setLoading(true)
+    const path = ordersPath(filterStatuses, filterBuyingGroups, filterDateFrom, filterDateTo)
     Promise.all([
-      api.get<Order[]>('/orders'),
+      api.get<Order[]>(path),
       api.get<BuyingGroup[]>('/buying-groups'),
       api.get<Shipment[]>('/shipments'),
       api.get<Store[]>('/stores'),
@@ -147,7 +145,7 @@ export default function Orders() {
       })
       .catch(console.error)
       .finally(() => setLoading(false))
-  }, [])
+  }, [filterStatuses, filterBuyingGroups, filterDateFrom, filterDateTo])
 
   /** Flat list of payment methods (parents + sub-methods) for order expanded view selection */
   const flatPaymentMethods = useMemo(
@@ -320,7 +318,7 @@ export default function Orders() {
         }
       }
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>('/orders'),
+        api.get<Order[]>(ordersPath(filterStatuses, filterBuyingGroups, filterDateFrom, filterDateTo)),
         api.get<Shipment[]>('/shipments'),
       ])
       setOrders(ordersData)
@@ -401,7 +399,7 @@ export default function Orders() {
         shipped_at: state.shippedAt ? `${state.shippedAt}T00:00:00.000Z` : undefined,
       })
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>('/orders'),
+        api.get<Order[]>(ordersPath(filterStatuses, filterBuyingGroups, filterDateFrom, filterDateTo)),
         api.get<Shipment[]>('/shipments'),
       ])
       setOrders(ordersData)
@@ -634,7 +632,7 @@ export default function Orders() {
     try {
       await api.delete(`/items/${itemId}`)
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>('/orders'),
+        api.get<Order[]>(ordersPath(filterStatuses, filterBuyingGroups, filterDateFrom, filterDateTo)),
         api.get<Shipment[]>('/shipments'),
       ])
       setOrders(ordersData)
@@ -891,14 +889,14 @@ export default function Orders() {
             </tr>
           </thead>
           <tbody>
-            {filteredOrders.length === 0 ? (
+            {orders.length === 0 ? (
               <tr>
                 <td colSpan={7} className="py-12 text-center text-ink-muted">
                   {orders.length === 0 ? 'No orders yet. Create one to get started.' : 'No orders match the current filters.'}
                 </td>
               </tr>
             ) : (
-              filteredOrders.map((o) => (
+              orders.map((o) => (
                 <React.Fragment key={o.id}>
                   <tr
                     className="border-b border-brand-100 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-600 cursor-pointer"
