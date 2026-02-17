@@ -1,0 +1,33 @@
+---
+description: Prefer icon links over text links unless otherwise specified
+alwaysApply: true
+---
+
+# Links as Icons
+
+When adding links in the UI, use **icons** instead of text labels unless the user asks for text or the context clearly requires a text label (e.g. primary CTA, accessibility need).
+
+## Do
+
+- Use an icon (e.g. external-link, edit, delete, view) inside an `<a>` or `Link` with `aria-label` for accessibility.
+- Keep the link target clear via tooltip or `aria-label`.
+
+```tsx
+// ✅ GOOD: icon link with accessible label
+<Link to={`/orders/${id}`} aria-label="View order">
+  <ExternalLinkIcon className="h-4 w-4" />
+</Link>
+```
+
+## Avoid
+
+- Using raw text like "View", "Edit", "Open" as the only link content when an icon would suffice.
+
+```tsx
+// ❌ PREFER ICON: text-only link when icon would do
+<Link to={`/orders/${id}`}>View order</Link>
+```
+
+## Exceptions
+
+- Use text (or icon + text) when the user specifies it, when it's a primary call-to-action, or when the design system or accessibility requirements call for it.

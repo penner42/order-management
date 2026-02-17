@@ -1,0 +1,28 @@
+---
+description: Never show database unique IDs in the UI unless user input or specified
+alwaysApply: true
+---
+
+# Don't Show Database IDs in the UI
+
+Never display database unique IDs (e.g. primary keys, UUIDs from the DB) in the **UI**—tables, labels, headings, tooltips, etc.—**unless**:
+
+- The value was **user-provided** (e.g. they typed or pasted it), or
+- The product/design **explicitly requires** showing it (e.g. "Order ID" that is the DB id by design).
+
+URLs may use DB ids; this rule is only about what the user sees on the page.
+
+## Do
+
+- Show human-friendly identifiers in the UI: order numbers, invoice numbers, short codes, slugs.
+- Use user-facing fields (e.g. `order_number`, `reference`) for labels and table columns.
+
+## Avoid
+
+- Rendering raw DB primary keys or UUIDs in table cells, labels, or any visible UI text.
+- Using DB id as the default display id in the UI when a separate user-facing id exists (e.g. order number vs order id).
+
+## Exceptions
+
+- User input: if the user enters or pastes an id (e.g. support lookup), showing that same value back is fine.
+- Explicit requirement: when specs or design say to show "Order ID" and that is defined as the database id, follow the spec.
