@@ -18,6 +18,10 @@ const STATUS_LABELS: Record<string, string> = {
   paid: 'Paid',
   canceled: 'Canceled',
   needs_return: 'Needs return',
+  return_started: 'Return started',
+  return_sent: 'Return sent',
+  return_received: 'Return received',
+  return_refunded: 'Refunded',
   returned: 'Returned',
   refunded: 'Refunded',
 }
@@ -74,9 +78,39 @@ export default function Orders() {
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
   const [confirmDeleteItemId, setConfirmDeleteItemId] = useState<number | null>(null)
   const [advancingGroupKey, setAdvancingGroupKey] = useState<string | null>(null)
+  const [filterStatuses, setFilterStatuses] = useState<Set<string>>(new Set())
+  const [filterBuyingGroups, setFilterBuyingGroups] = useState<Set<number>>(new Set())
+  const [filterDateFrom, setFilterDateFrom] = useState('')
+  const [filterDateTo, setFilterDateTo] = useState('')
+  const [filterStatusOpen, setFilterStatusOpen] = useState(false)
+  const [filterBuyingGroupOpen, setFilterBuyingGroupOpen] = useState(false)
+  const [filterDateOpen, setFilterDateOpen] = useState(false)
+  const filterStatusRef = useRef<HTMLDivElement>(null)
+  const filterBuyingGroupRef = useRef<HTMLDivElement>(null)
+  const filterDateRef = useRef<HTMLDivElement>(null)
   const hasSetInitialExpanded = useRef(false)
   const paymentSaveTimeouts = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
   const navigate = useNavigate()
+
+  /** Parse ISO date string to YYYY-MM-DD for comparison */
+  const toDatePart = (iso: string | null) => (iso ? iso.slice(0, 10) : '')
+
+  const filteredOrders = useMemo(() => {
+    return orders.filter((o) => {
+      if (filterStatuses.size > 0) {
+        const itemStatuses = new Set((o.items ?? []).map((i) => i.status))
+        const hasMatchingStatus = [...filterStatuses].some((s) => itemStatuses.has(s as ItemStatus))
+        if (!hasMatchingStatus) return false
+      }
+      if (filterBuyingGroups.size > 0) {
+        if (!o.buying_group_id || !filterBuyingGroups.has(o.buying_group_id)) return false
+      }
+      const pd = toDatePart(o.purchase_date)
+      if (filterDateFrom && pd < filterDateFrom) return false
+      if (filterDateTo && pd > filterDateTo) return false
+      return true
+    })
+  }, [orders, filterStatuses, filterBuyingGroups, filterDateFrom, filterDateTo])
 
   const loadAccountsForStore = (storeId: number) =>
     api.get<StoreAccount[]>(`/stores/${storeId}/accounts`).then((list) => {
@@ -130,6 +164,82 @@ export default function Orders() {
       setExpandedIds(new Set(orders.map((o) => o.id)))
     }
   }, [loading, orders])
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (filterStatusRef.current?.contains(target) || filterBuyingGroupRef.current?.contains(target) || filterDateRef.current?.contains(target)) return
+      setFilterStatusOpen(false)
+      setFilterBuyingGroupOpen(false)
+      setFilterDateOpen(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const toYyyyMmDd = (d: Date) => d.toISOString().slice(0, 10)
+
+  const applyDatePreset = (preset: 'today' | 'past7' | 'past30' | 'thisYear' | 'lastYear') => {
+    const now = new Date()
+    const today = toYyyyMmDd(now)
+    switch (preset) {
+      case 'today':
+        setFilterDateFrom(today)
+        setFilterDateTo(today)
+        break
+      case 'past7': {
+        const d = new Date(now)
+        d.setDate(d.getDate() - 6)
+        setFilterDateFrom(toYyyyMmDd(d))
+        setFilterDateTo(today)
+        break
+      }
+      case 'past30': {
+        const d = new Date(now)
+        d.setDate(d.getDate() - 29)
+        setFilterDateFrom(toYyyyMmDd(d))
+        setFilterDateTo(today)
+        break
+      }
+      case 'thisYear':
+        setFilterDateFrom(`${now.getFullYear()}-01-01`)
+        setFilterDateTo(today)
+        break
+      case 'lastYear': {
+        const y = now.getFullYear() - 1
+        setFilterDateFrom(`${y}-01-01`)
+        setFilterDateTo(`${y}-12-31`)
+        break
+      }
+    }
+    setFilterDateOpen(false)
+  }
+
+  const dateRangeLabel = (() => {
+    if (!filterDateFrom && !filterDateTo) return 'Date range'
+    if (filterDateFrom && filterDateTo) return `${filterDateFrom} – ${filterDateTo}`
+    return filterDateFrom ? `${filterDateFrom} –` : `– ${filterDateTo}`
+  })()
+
+  const toggleFilterStatus = (status: string) => {
+    setFilterStatuses((prev) => {
+      const next = new Set(prev)
+      if (next.has(status)) next.delete(status)
+      else next.add(status)
+      return next
+    })
+  }
+
+  const toggleFilterBuyingGroup = (id: number) => {
+    setFilterBuyingGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const hasActiveFilters = filterStatuses.size > 0 || filterBuyingGroups.size > 0 || filterDateFrom || filterDateTo
 
   const itemIdToTracking = shipments.reduce<Record<number, string>>((acc, s) => {
     const tn = s.tracking_number?.trim()
@@ -528,13 +638,167 @@ export default function Orders() {
 
   if (loading) return <div className="text-ink-muted">Loading orders…</div>
 
+  const STATUS_FILTER_OPTIONS: [ItemStatus, string][] = [
+    ['purchased', 'Purchased'],
+    ['shipped', 'Shipped'],
+    ['submitted', 'Submitted'],
+    ['delivered', 'Delivered'],
+    ['scanned', 'Scanned'],
+    ['payment_requested', 'Payment requested'],
+    ['payment_sent', 'Payment sent'],
+    ['payment_received', 'Paid'],
+    ['canceled', 'Canceled'],
+    ['needs_return', 'Needs return'],
+    ['return_started', 'Return started'],
+    ['return_sent', 'Return sent'],
+    ['return_received', 'Return received'],
+    ['return_refunded', 'Refunded'],
+  ]
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-8">
-        <h1 className="text-2xl font-semibold text-ink">Orders</h1>
+      <div className="flex items-center justify-between gap-4 mb-8 flex-wrap">
+        <h1 className="text-2xl font-semibold text-ink shrink-0">Orders</h1>
+        <div className="flex items-center gap-3 flex-1 min-w-0 justify-center">
+          <div className="flex items-center gap-3 shrink-0 flex-wrap">
+          <div ref={filterStatusRef} className="relative w-[110px]">
+            <button
+              type="button"
+              onClick={() => setFilterStatusOpen((v) => !v)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition w-full justify-between ${
+                filterStatuses.size > 0
+                  ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                  : 'border-brand-200 dark:border-gray-600 text-ink hover:bg-brand-50/50 dark:hover:bg-gray-700'
+              }`}
+            >
+              <span className="truncate">Status{filterStatuses.size > 0 ? ` (${filterStatuses.size})` : ''}</span>
+              <span className="inline-block transition-transform shrink-0" style={{ transform: filterStatusOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
+            </button>
+            {filterStatusOpen && (
+              <div className="absolute left-0 top-full mt-1 z-50 py-2 min-w-[180px] rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg max-h-64 overflow-auto">
+                {STATUS_FILTER_OPTIONS.map(([value, label]) => (
+                  <label key={value} className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={filterStatuses.has(value)}
+                      onChange={() => toggleFilterStatus(value)}
+                      className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                    />
+                    <span className="text-sm text-ink">{label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+          <div ref={filterBuyingGroupRef} className="relative w-[145px]">
+            <button
+              type="button"
+              onClick={() => setFilterBuyingGroupOpen((v) => !v)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition w-full justify-between ${
+                filterBuyingGroups.size > 0
+                  ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                  : 'border-brand-200 dark:border-gray-600 text-ink hover:bg-brand-50/50 dark:hover:bg-gray-700'
+              }`}
+            >
+              <span className="truncate">Buying group{filterBuyingGroups.size > 0 ? ` (${filterBuyingGroups.size})` : ''}</span>
+              <span className="inline-block transition-transform shrink-0" style={{ transform: filterBuyingGroupOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
+            </button>
+            {filterBuyingGroupOpen && (
+              <div className="absolute left-0 top-full mt-1 z-50 py-2 min-w-[180px] rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg max-h-64 overflow-auto">
+                {groups.length === 0 ? (
+                  <div className="px-3 py-2 text-sm text-ink-muted">No buying groups</div>
+                ) : (
+                  groups.map((g) => (
+                    <label key={g.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={filterBuyingGroups.has(g.id)}
+                        onChange={() => toggleFilterBuyingGroup(g.id)}
+                        className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                      />
+                      <span className="text-sm text-ink">{g.name}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+          <div ref={filterDateRef} className="relative w-[240px]">
+            <button
+              type="button"
+              onClick={() => setFilterDateOpen((v) => !v)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition w-full justify-between ${
+                filterDateFrom || filterDateTo
+                  ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                  : 'border-brand-200 dark:border-gray-600 text-ink hover:bg-brand-50/50 dark:hover:bg-gray-700'
+              }`}
+            >
+              <span className="truncate">{dateRangeLabel}</span>
+              <span className="inline-block transition-transform shrink-0" style={{ transform: filterDateOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
+            </button>
+            {filterDateOpen && (
+              <div className="absolute left-0 top-full mt-1 z-50 py-2 min-w-[220px] rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg">
+                <div className="px-3 pb-2 mb-2 border-b border-brand-100 dark:border-gray-600">
+                  <div className="text-xs font-medium text-ink-muted mb-2">Presets</div>
+                  <div className="flex flex-wrap gap-1">
+                    {(['today', 'past7', 'past30', 'thisYear', 'lastYear'] as const).map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => applyDatePreset(p)}
+                        className="px-2 py-1 rounded text-xs font-medium text-ink hover:bg-brand-100 dark:hover:bg-gray-700 transition"
+                      >
+                        {p === 'today' && 'Today'}
+                        {p === 'past7' && 'Past 7 Days'}
+                        {p === 'past30' && 'Past 30 Days'}
+                        {p === 'thisYear' && 'This Year'}
+                        {p === 'lastYear' && 'Last Year'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="px-3 space-y-2">
+                  <div className="text-xs font-medium text-ink-muted mb-1">Custom range</div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="date"
+                      value={filterDateFrom}
+                      onChange={(e) => setFilterDateFrom(e.target.value)}
+                      className="flex-1 px-2 py-1.5 rounded border border-brand-200 dark:border-gray-600 text-sm text-ink bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent min-w-0"
+                      title="From date"
+                    />
+                    <span className="text-ink-muted text-xs">–</span>
+                    <input
+                      type="date"
+                      value={filterDateTo}
+                      onChange={(e) => setFilterDateTo(e.target.value)}
+                      className="flex-1 px-2 py-1.5 rounded border border-brand-200 dark:border-gray-600 text-sm text-ink bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent min-w-0"
+                      title="To date"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setFilterStatuses(new Set())
+              setFilterBuyingGroups(new Set())
+              setFilterDateFrom('')
+              setFilterDateTo('')
+            }}
+            disabled={!hasActiveFilters}
+            aria-hidden={!hasActiveFilters}
+            className={`px-3 py-1.5 rounded-lg border border-brand-200 dark:border-gray-600 text-sm text-ink-muted hover:bg-brand-50 dark:hover:bg-gray-700 hover:text-ink transition shrink-0 ${!hasActiveFilters ? 'invisible' : ''}`}
+          >
+            Clear filters
+          </button>
+          </div>
+        </div>
         <Link
           to="/orders/new"
-          className="px-4 py-2 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition"
+          className="px-4 py-2 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition shrink-0"
         >
           New order
         </Link>
@@ -553,14 +817,14 @@ export default function Orders() {
             </tr>
           </thead>
           <tbody>
-            {orders.length === 0 ? (
+            {filteredOrders.length === 0 ? (
               <tr>
                 <td colSpan={7} className="py-12 text-center text-ink-muted">
-                  No orders yet. Create one to get started.
+                  {orders.length === 0 ? 'No orders yet. Create one to get started.' : 'No orders match the current filters.'}
                 </td>
               </tr>
             ) : (
-              orders.map((o) => (
+              filteredOrders.map((o) => (
                 <React.Fragment key={o.id}>
                   <tr
                     className="border-b border-brand-100 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-600 cursor-pointer"
