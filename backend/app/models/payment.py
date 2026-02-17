@@ -33,7 +33,10 @@ class PaymentLineItem(Base):
     payment_id = Column(Integer, ForeignKey("payments.id", ondelete="CASCADE"), nullable=False)
     item_id = Column(Integer, ForeignKey("items.id", ondelete="CASCADE"), nullable=False)
 
-    __table_args__ = (UniqueConstraint("payment_id", "item_id", name="uq_payment_line_item_payment_item"),)
+    __table_args__ = (
+        UniqueConstraint("payment_id", "item_id", name="uq_payment_line_item_payment_item"),
+        UniqueConstraint("item_id", name="uq_payment_line_item_item"),
+    )
 
     payment = relationship("Payment", back_populates="line_items")
     item = relationship("Item", back_populates="payment_line_items")

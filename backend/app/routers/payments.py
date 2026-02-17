@@ -98,6 +98,17 @@ def add_payment_line_item(
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     _ensure_item_from_buying_group(data.item_id, payment.buying_group_id, db)
+    existing = db.query(PaymentLineItem).filter(PaymentLineItem.item_id == data.item_id).first()
+    if existing:
+        if existing.payment_id == payment_id:
+            raise HTTPException(
+                status_code=400,
+                detail="This item is already on this payment.",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="This item is already on another payment. Each item can only be in one payment.",
+        )
     line_item = PaymentLineItem(payment_id=payment_id, item_id=data.item_id)
     db.add(line_item)
     try:
@@ -107,7 +118,7 @@ def add_payment_line_item(
         db.rollback()
         raise HTTPException(
             status_code=400,
-            detail="This item is already on the payment.",
+            detail="This item is already on a payment.",
         )
     return line_item
 
