@@ -6,6 +6,7 @@ import OrderDetail from './pages/OrderDetail'
 import BuyingGroups from './pages/BuyingGroups'
 import Rewards from './pages/Rewards'
 import PaymentMethods from './pages/PaymentMethods'
+import Payments from './pages/Payments'
 import Shipments from './pages/Shipments'
 import Stores from './pages/Stores'
 import Login from './pages/Login'
@@ -118,6 +119,14 @@ function AppShell() {
                   Payment Methods
                 </NavLink>
                 <NavLink
+                  to="/payments"
+                  className={({ isActive }) =>
+                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
+                  }
+                >
+                  Payments
+                </NavLink>
+                <NavLink
                   to="/shipments"
                   className={({ isActive }) =>
                     `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
@@ -165,6 +174,7 @@ function AppShell() {
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />
           <Route path="/payment-methods" element={<PaymentMethods />} />
+          <Route path="/payments" element={<Payments />} />
           <Route path="/shipments" element={<Shipments />} />
           <Route path="/stores" element={<Stores />} />
           <Route path="/profile" element={<Profile />} />

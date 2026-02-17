@@ -150,3 +150,20 @@ export interface Shipment {
   created_at: string
   shipment_items: ShipmentItem[]
 }
+
+export interface PaymentLineItem {
+  id: number
+  payment_id: number
+  item_id: number
+  item?: Item | null
+}
+
+export interface Payment {
+  id: number
+  buying_group_id: number
+  payment_id: string | null
+  created_at: string
+  updated_at?: string | null
+  buying_group?: BuyingGroup | null
+  line_items: PaymentLineItem[]
+}
