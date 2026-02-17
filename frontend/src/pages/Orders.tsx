@@ -56,8 +56,8 @@ export default function Orders() {
   const [loading, setLoading] = useState(true)
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set())
   const [selectedItemIds, setSelectedItemIds] = useState<Set<number>>(new Set())
-  const [trackingInput, setTrackingInput] = useState('')
-  const [shipping, setShipping] = useState(false)
+  const [bulkActionByOrder, setBulkActionByOrder] = useState<Record<number, { action: string; tracking: string; shippedAt: string }>>({})
+  const [bulkActionShippingOrderId, setBulkActionShippingOrderId] = useState<number | null>(null)
   const [trackingEdits, setTrackingEdits] = useState<Record<number, string>>({})
   const [savingTrackingId, setSavingTrackingId] = useState<number | null>(null)
 
@@ -247,25 +247,62 @@ export default function Orders() {
     const allSelected = ids.every((id) => selectedItemIds.has(id))
     setSelectedItemIds(allSelected ? new Set() : new Set(ids))
   }
-  const shipSelected = async () => {
-    const ids = [...selectedItemIds]
-    const tracking = trackingInput.trim()
-    if (ids.length === 0 || !tracking) return
-    setShipping(true)
+
+  const getSelectedIdsForOrder = (order: Order) =>
+    (order.items ?? []).filter((i) => selectedItemIds.has(i.id)).map((i) => i.id)
+
+  const getBulkActionState = (orderId: number) => {
+    const today = new Date().toISOString().slice(0, 10)
+    return (
+      bulkActionByOrder[orderId] ?? {
+        action: '',
+        tracking: '',
+        shippedAt: today,
+      }
+    )
+  }
+
+  const setBulkActionState = (orderId: number, patch: Partial<{ action: string; tracking: string; shippedAt: string }>) => {
+    setBulkActionByOrder((prev) => {
+      const today = new Date().toISOString().slice(0, 10)
+      const current = prev[orderId] ?? { action: '', tracking: '', shippedAt: today }
+      return { ...prev, [orderId]: { ...current, ...patch } }
+    })
+  }
+
+  const applyBulkInputTracking = async (order: Order) => {
+    const ids = getSelectedIdsForOrder(order)
+    if (ids.length === 0) return
+    const state = getBulkActionState(order.id)
+    const tracking = state.tracking.trim()
+    if (!tracking) return
+    setBulkActionShippingOrderId(order.id)
     try {
-      await api.post('/shipments', { item_ids: ids, tracking_number: tracking })
+      await api.post('/shipments', {
+        item_ids: ids,
+        tracking_number: tracking,
+        shipped_at: state.shippedAt ? `${state.shippedAt}T00:00:00.000Z` : undefined,
+      })
       const [ordersData, shipmentsData] = await Promise.all([
         api.get<Order[]>('/orders'),
         api.get<Shipment[]>('/shipments'),
       ])
       setOrders(ordersData)
       setShipments(shipmentsData)
-      setSelectedItemIds(new Set())
-      setTrackingInput('')
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev)
+        ids.forEach((id) => next.delete(id))
+        return next
+      })
+      setBulkActionByOrder((prev) => {
+        const next = { ...prev }
+        delete next[order.id]
+        return next
+      })
     } catch (e) {
       console.error(e)
     } finally {
-      setShipping(false)
+      setBulkActionShippingOrderId(null)
     }
   }
 
@@ -1094,23 +1131,43 @@ export default function Orders() {
                                 </tbody>
                               </table>
                             </div>
-                            <div className="mt-2 flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
-                              <input
-                                type="text"
-                                placeholder="Tracking number"
-                                value={trackingInput}
-                                onChange={(e) => setTrackingInput(e.target.value)}
-                                className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-0 text-sm w-48 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 focus:outline-none bg-white dark:bg-gray-700"
-                              />
-                              <button
-                                type="button"
-                                disabled={selectedItemIds.size === 0 || !trackingInput.trim() || shipping}
-                                onClick={() => shipSelected()}
-                                className="text-sm px-3 py-1.5 bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                              >
-                                {shipping ? 'Shipping…' : 'Ship selected'}
-                              </button>
-                            </div>
+                            {getSelectedIdsForOrder(o).length > 0 && (
+                              <div className="mt-2 flex flex-wrap items-center gap-3" onClick={(e) => e.stopPropagation()}>
+                                <select
+                                  value={getBulkActionState(o.id).action}
+                                  onChange={(e) => setBulkActionState(o.id, { action: e.target.value })}
+                                  className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none"
+                                >
+                                  <option value="">Choose action…</option>
+                                  <option value="input_tracking">Input Tracking</option>
+                                </select>
+                                {getBulkActionState(o.id).action === 'input_tracking' && (
+                                  <>
+                                    <input
+                                      type="text"
+                                      placeholder="Tracking number"
+                                      value={getBulkActionState(o.id).tracking}
+                                      onChange={(e) => setBulkActionState(o.id, { tracking: e.target.value })}
+                                      className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-0 text-sm w-48 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 focus:outline-none bg-white dark:bg-gray-700"
+                                    />
+                                    <input
+                                      type="date"
+                                      value={getBulkActionState(o.id).shippedAt}
+                                      onChange={(e) => setBulkActionState(o.id, { shippedAt: e.target.value })}
+                                      className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none bg-white dark:bg-gray-700"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={!getBulkActionState(o.id).tracking.trim() || bulkActionShippingOrderId === o.id}
+                                      onClick={() => applyBulkInputTracking(o)}
+                                      className="text-sm px-3 py-1.5 bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                    >
+                                      {bulkActionShippingOrderId === o.id ? 'Applying…' : 'Apply'}
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <div className="py-3 text-sm text-ink-muted">No line items.</div>

@@ -63,7 +63,14 @@ def create_shipment(data: ShipmentCreate, db: Session = Depends(get_db), current
         db.add(shipment)
         db.flush()
         for item_id in data.item_ids or []:
-            db.query(ShipmentItem).filter(ShipmentItem.item_id == item_id).delete()
+            old_si = db.query(ShipmentItem).filter(ShipmentItem.item_id == item_id).first()
+            if old_si:
+                old_ship_id = old_si.shipment_id
+                db.delete(old_si)
+                db.flush()
+                remaining = db.query(ShipmentItem).filter(ShipmentItem.shipment_id == old_ship_id).count()
+                if remaining == 0:
+                    db.query(Shipment).filter(Shipment.id == old_ship_id).delete()
             si = ShipmentItem(shipment_id=shipment.id, item_id=item_id)
             db.add(si)
             if data.tracking_number:
