@@ -1,10 +1,13 @@
 """Payments API."""
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import User, Payment, PaymentLineItem, Item
+from app.models.item import ItemStatus
 from app.schemas.payment import (
     PaymentRead,
     PaymentCreate,
@@ -97,7 +100,7 @@ def add_payment_line_item(
     payment = db.query(Payment).filter(Payment.id == payment_id).first()
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
-    _ensure_item_from_buying_group(data.item_id, payment.buying_group_id, db)
+    item = _ensure_item_from_buying_group(data.item_id, payment.buying_group_id, db)
     existing = db.query(PaymentLineItem).filter(PaymentLineItem.item_id == data.item_id).first()
     if existing:
         if existing.payment_id == payment_id:
@@ -111,6 +114,8 @@ def add_payment_line_item(
         )
     line_item = PaymentLineItem(payment_id=payment_id, item_id=data.item_id)
     db.add(line_item)
+    item.status = ItemStatus.PAYMENT_REQUESTED
+    item.payment_requested_at = datetime.now(timezone.utc)
     try:
         db.commit()
         db.refresh(line_item)

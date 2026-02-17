@@ -4,7 +4,8 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Item, User
+from app.models import Item, User, Payment, PaymentLineItem
+from app.models.item import ItemStatus
 from app.schemas.item import (
     ItemBulkUpdateRequest,
     ItemBulkUpdateResponse,
@@ -23,6 +24,30 @@ _ITEM_DATE_FIELDS = frozenset({
     "canceled_at", "needs_return_at", "return_started_at",
     "return_sent_at", "return_received_at", "return_refunded_at",
 })
+
+# Statuses that are "earlier" than payment_requested; moving item to these removes it from its payment
+_STATUSES_BEFORE_PAYMENT_REQUESTED = frozenset({
+    ItemStatus.PURCHASED,
+    ItemStatus.SHIPPED,
+    ItemStatus.SUBMITTED,
+    ItemStatus.DELIVERED,
+    ItemStatus.SCANNED,
+})
+
+
+def _remove_item_from_payment_if_earlier_status(item: Item, db: Session) -> None:
+    """If item is in an earlier-than-payment_requested status, remove from payment; delete payment if empty."""
+    if item.status not in _STATUSES_BEFORE_PAYMENT_REQUESTED:
+        return
+    line_item = db.query(PaymentLineItem).filter(PaymentLineItem.item_id == item.id).first()
+    if not line_item:
+        return
+    payment_id = line_item.payment_id
+    db.delete(line_item)
+    if db.query(PaymentLineItem).filter(PaymentLineItem.payment_id == payment_id).count() == 0:
+        payment = db.query(Payment).filter(Payment.id == payment_id).first()
+        if payment:
+            db.delete(payment)
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -72,6 +97,8 @@ def bulk_update_items(
             else:
                 setattr(item, k, v)
         updated.append(item)
+    for item in updated:
+        _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     for item in updated:
         db.refresh(item)
@@ -126,6 +153,7 @@ def update_item(item_id: int, data: ItemUpdate, db: Session = Depends(get_db), _
             setattr(item, k, to_date_only(v) if v is not None else None)
         else:
             setattr(item, k, v)
+    _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     db.refresh(item)
     return item
