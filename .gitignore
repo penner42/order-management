@@ -1,0 +1,30 @@
+# Dependencies & build
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+*.egg-info/
+*.egg
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Env & secrets (root and backend)
+.env
+.env.local
+.env.*.local
+
+# OS & misc
+.DS_Store
+Thumbs.db
+*.log

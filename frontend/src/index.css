@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-brand-50 text-ink antialiased;
+}
+
+@layer base {
+.dark body {
+    @apply bg-gray-900 text-gray-100;
+  }
+  .dark .text-ink {
+    @apply text-gray-100;
+  }
+  .dark .text-ink-muted {
+    @apply text-gray-400;
+  }
+  .dark .text-brand-800 {
+    @apply text-gray-100;
+  }
+  input,
+  select,
+  textarea {
+    @apply bg-white border-brand-200 text-ink;
+  }
+  .dark input,
+  .dark select,
+  .dark textarea {
+    @apply bg-gray-800 border-gray-600 text-gray-100;
+  }
+  .dark input::placeholder,
+  .dark textarea::placeholder {
+    @apply text-gray-400;
+  }
+  .dark select option {
+    @apply bg-gray-800 text-gray-100;
+  }
+}
