@@ -12,6 +12,7 @@ class ItemBase(BaseModel):
     status: ItemStatus = ItemStatus.PURCHASED
     quantity: int = 1
     description: str | None = None
+    submission_id: str | None = None
     receipt_id: str | None = None
     # Datetime when each status was (last) set
     purchased_at: datetime | None = None
@@ -45,6 +46,7 @@ class ItemUpdate(BaseModel):
     status: ItemStatus | None = None
     quantity: int | None = None
     description: str | None = None
+    submission_id: str | None = None
     receipt_id: str | None = None
     purchased_at: datetime | None = None
     shipped_at: datetime | None = None
@@ -75,6 +77,40 @@ class ItemReadWithRelations(ItemRead):
 
 class ItemSplitRequest(BaseModel):
     keep_quantity: int  # Quantity to keep on original item; remainder becomes new item
+
+
+class ItemBulkUpdateEntry(BaseModel):
+    """Single item update in a bulk request."""
+    item_id: int
+    price_paid: Decimal | None = None
+    price_sold: Decimal | None = None
+    status: ItemStatus | None = None
+    quantity: int | None = None
+    description: str | None = None
+    submission_id: str | None = None
+    receipt_id: str | None = None
+    purchased_at: datetime | None = None
+    shipped_at: datetime | None = None
+    submitted_at: datetime | None = None
+    delivered_at: datetime | None = None
+    scanned_at: datetime | None = None
+    payment_requested_at: datetime | None = None
+    payment_sent_at: datetime | None = None
+    payment_received_at: datetime | None = None
+    canceled_at: datetime | None = None
+    needs_return_at: datetime | None = None
+    return_started_at: datetime | None = None
+    return_sent_at: datetime | None = None
+    return_received_at: datetime | None = None
+    return_refunded_at: datetime | None = None
+
+
+class ItemBulkUpdateRequest(BaseModel):
+    updates: list[ItemBulkUpdateEntry]
+
+
+class ItemBulkUpdateResponse(BaseModel):
+    items: list[ItemRead]
 
 
 class ItemSplitResponse(BaseModel):

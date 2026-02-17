@@ -96,6 +96,7 @@ export interface Item {
   status: ItemStatus
   quantity: number
   description: string | null
+  submission_id: string | null
   receipt_id: string | null
   created_at: string
   updated_at?: string

@@ -5,7 +5,15 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Item, User
-from app.schemas.item import ItemCreate, ItemRead, ItemSplitRequest, ItemSplitResponse, ItemUpdate
+from app.schemas.item import (
+    ItemBulkUpdateRequest,
+    ItemBulkUpdateResponse,
+    ItemCreate,
+    ItemRead,
+    ItemSplitRequest,
+    ItemSplitResponse,
+    ItemUpdate,
+)
 from app.utils.dates import to_date_only
 
 # Item status date fields: date-only (time doesn't matter)
@@ -43,6 +51,31 @@ def create_item(data: ItemCreate, db: Session = Depends(get_db), _: User = Depen
     db.commit()
     db.refresh(item)
     return item
+
+
+@router.post("/bulk-update", response_model=ItemBulkUpdateResponse)
+def bulk_update_items(
+    data: ItemBulkUpdateRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Update multiple items in a single request."""
+    updated: list[Item] = []
+    for entry in data.updates:
+        item = db.query(Item).filter(Item.id == entry.item_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Item {entry.item_id} not found")
+        payload = entry.model_dump(exclude_unset=True, exclude={"item_id"})
+        for k, v in payload.items():
+            if k in _ITEM_DATE_FIELDS:
+                setattr(item, k, to_date_only(v) if v is not None else None)
+            else:
+                setattr(item, k, v)
+        updated.append(item)
+    db.commit()
+    for item in updated:
+        db.refresh(item)
+    return ItemBulkUpdateResponse(items=updated)
 
 
 @router.post("/{item_id}/split", response_model=ItemSplitResponse)
