@@ -70,11 +70,17 @@ document
         if (items.length === 0) {
           html += "<div>No items found.</div>";
         } else {
+          let orderTotal = 0;
           items.forEach(({ name, price, quantity, trackingNumber }) => {
-            let meta = `${escapeHtml(price)} · Qty ${quantity}`;
+            const qty = Math.max(0, quantity ?? 1);
+            const unitCost = parsePrice(price);
+            const lineTotal = unitCost * qty;
+            orderTotal += lineTotal;
+            let meta = `Unit ${escapeHtml(price)} × ${qty} = $${lineTotal.toFixed(2)}`;
             if (trackingNumber) meta += ` · ${escapeHtml(trackingNumber)}`;
             html += `<div class="item"><div class="item-name">${escapeHtml(name)}</div><div class="item-meta">${meta}</div></div>`;
           });
+          html += `<div class="order-total">Order total (calculated): $${orderTotal.toFixed(2)}</div>`;
         }
         resultsEl.innerHTML = html;
       }
@@ -119,4 +125,11 @@ function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+/** Parse price string to number for display-only totals (not saved). */
+function parsePrice(s) {
+  if (s == null || String(s).trim() === "") return 0;
+  const n = parseFloat(String(s).replace(/[^0-9.-]/g, ""));
+  return Number.isNaN(n) ? 0 : n;
 }

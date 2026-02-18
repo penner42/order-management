@@ -61,16 +61,27 @@
         if (!group.items || !Array.isArray(group.items)) continue;
         for (const it of group.items) {
           const priceInfo = it.priceInfo;
-          const price =
-            priceInfo?.linePrice?.displayValue ??
+          const qty = it.quantity ?? it.qty ?? 0;
+          // Prefer unit cost so quantity × unit = line total; fall back to line total ÷ quantity when only line price exists
+          let price =
             priceInfo?.unitPrice?.displayValue ??
-            (priceInfo?.linePrice?.value != null
-              ? String(priceInfo.linePrice.value)
-              : "") ??
-            "";
+            (priceInfo?.unitPrice?.value != null
+              ? String(priceInfo.unitPrice.value)
+              : "");
+          if (!price && priceInfo?.linePrice?.value != null && qty > 0) {
+            price = String(priceInfo.linePrice.value / qty);
+          }
+          if (!price) {
+            price =
+              priceInfo?.linePrice?.displayValue ??
+              (priceInfo?.linePrice?.value != null
+                ? String(priceInfo.linePrice.value)
+                : "") ??
+              "";
+          }
           rawItems.push({
             name: it.productInfo?.name ?? "",
-            quantity: it.quantity ?? it.qty ?? 0,
+            quantity: qty,
             price,
             trackingNumber,
           });

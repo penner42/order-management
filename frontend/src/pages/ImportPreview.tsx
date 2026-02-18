@@ -18,6 +18,13 @@ export interface ExtensionOrderDetails {
   }[]
 }
 
+/** Parse price string (e.g. "$1.23" or "1.23") to number for calculations. Totals are display-only, not saved. */
+function parsePrice(s: string | null | undefined): number {
+  if (s == null || String(s).trim() === '') return 0
+  const n = parseFloat(String(s).replace(/[^0-9.-]/g, ''))
+  return Number.isNaN(n) ? 0 : n
+}
+
 function decodeHashPayload(): ExtensionOrderDetails | null {
   const hash = window.location.hash.slice(1)
   if (!hash) return null
@@ -121,23 +128,43 @@ export default function ImportPreview() {
               Items ({items.length})
             </span>
             <ul className="mt-2 divide-y divide-brand-200/80 dark:divide-gray-700">
-              {items.map((item, idx) => (
-                <li
-                  key={idx}
-                  className="py-3 first:pt-0 last:pb-0 flex flex-col gap-0.5"
-                >
-                  <span className="font-medium text-ink dark:text-gray-200">
-                    {item.name || '—'}
-                  </span>
-                  <span className="text-sm text-ink-muted dark:text-gray-400">
-                    {item.price} · Qty {item.quantity}
-                    {item.trackingNumber
-                      ? ` · ${item.trackingNumber}`
-                      : ''}
-                  </span>
-                </li>
-              ))}
+              {items.map((item, idx) => {
+                const qty = Math.max(0, item.quantity ?? 1)
+                const unitCost = parsePrice(item.price)
+                const lineTotal = unitCost * qty
+                return (
+                  <li
+                    key={idx}
+                    className="py-3 first:pt-0 last:pb-0 flex flex-col gap-0.5"
+                  >
+                    <span className="font-medium text-ink dark:text-gray-200">
+                      {item.name || '—'}
+                    </span>
+                    <span className="text-sm text-ink-muted dark:text-gray-400">
+                      Unit {item.price} × {qty} = ${lineTotal.toFixed(2)}
+                      {item.trackingNumber
+                        ? ` · ${item.trackingNumber}`
+                        : ''}
+                    </span>
+                  </li>
+                )
+              })}
             </ul>
+            {items.length > 0 && (() => {
+              const orderTotal = items.reduce(
+                (sum, item) =>
+                  sum +
+                  parsePrice(item.price) * Math.max(0, item.quantity ?? 1),
+                0
+              )
+              return (
+                <div className="mt-3 pt-3 border-t border-brand-200/80 dark:border-gray-700">
+                  <span className="text-sm font-medium text-ink dark:text-gray-200">
+                    Order total (calculated): ${orderTotal.toFixed(2)}
+                  </span>
+                </div>
+              )
+            })()}
           </div>
         </div>
       </div>
