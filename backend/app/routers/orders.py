@@ -18,6 +18,7 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 def list_orders(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    order_status: str | None = Query(default=None, alias="order_status"),  # when "imported", only imported; else exclude imported
     status: list[str] = Query(default=[], alias="status"),
     buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
     date_from: str | None = None,
@@ -25,6 +26,11 @@ def list_orders(
 ):
     # Order-level filters: which orders to include
     q = db.query(Order).order_by(Order.created_at.desc())
+    if order_status == "imported":
+        q = q.filter(Order.status == "imported")
+    else:
+        # Default: exclude imported orders from main list
+        q = q.filter(Order.status != "imported")
     if status:
         # Only orders that have at least one item with one of these statuses
         q = q.join(Item).filter(Item.status.in_(status)).distinct()
@@ -66,6 +72,7 @@ def create_order(data: OrderCreate, db: Session = Depends(get_db), current_user:
         store_account_id=data.store_account_id,
         buying_group_id=data.buying_group_id,
         store_order_number=data.store_order_number,
+        status=getattr(data, "status", "active") or "active",
     )
     db.add(order)
     db.flush()

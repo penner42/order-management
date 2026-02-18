@@ -116,6 +116,8 @@ export interface Item {
   return_refunded_at: string | null
 }
 
+export type OrderStatus = 'active' | 'imported'
+
 export interface Order {
   id: number
   user_id: number | null
@@ -123,6 +125,7 @@ export interface Order {
   store_account_id: number | null
   buying_group_id: number | null
   store_order_number: string | null
+  status: OrderStatus
   purchase_date: string | null
   notes: string | null
   created_at: string

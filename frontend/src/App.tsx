@@ -13,6 +13,7 @@ import Login from './pages/Login'
 import Admin from './pages/Admin'
 import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
+import ImportedOrders from './pages/ImportedOrders'
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -143,6 +144,14 @@ function AppShell() {
                 >
                   Stores
                 </NavLink>
+                <NavLink
+                  to="/imported-orders"
+                  className={({ isActive }) =>
+                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
+                  }
+                >
+                  Imported Orders
+                </NavLink>
               </>
             )}
           </nav>
@@ -173,6 +182,7 @@ function AppShell() {
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
           <Route path="/orders/:orderId" element={<OrderDetail />} />
           <Route path="/import-preview" element={<ImportPreview />} />
+          <Route path="/imported-orders" element={<ImportedOrders />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />
           <Route path="/payment-methods" element={<PaymentMethods />} />

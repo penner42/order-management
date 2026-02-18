@@ -16,6 +16,7 @@ class Order(Base):
     store_account_id = Column(Integer, ForeignKey("store_accounts.id", ondelete="SET NULL"), nullable=True)
     buying_group_id = Column(Integer, ForeignKey("buying_groups.id", ondelete="SET NULL"), nullable=True)
     store_order_number = Column(String(255), nullable=True)  # order number from the store (e.g. Amazon order #)
+    status = Column(String(20), nullable=False, default="active", server_default="active")  # active | imported
     purchase_date = Column(DateTime(timezone=True), nullable=True)  # when the order was placed (order-level)
     notes = Column(String(2000), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
