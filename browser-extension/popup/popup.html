@@ -23,9 +23,24 @@
     button:hover {
       background: #005ba8;
     }
+    label {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: #555;
+    }
+    input {
+      width: 60px;
+      padding: 6px 8px;
+      margin-bottom: 12px;
+      font-size: 14px;
+      font-family: inherit;
+    }
   </style>
 </head>
 <body>
+  <label for="pageCount">Number of pages</label>
+  <input type="number" id="pageCount" min="1" value="1" />
   <button id="getOrders">Get Order Numbers</button>
   <script src="popup.js"></script>
 </body>
