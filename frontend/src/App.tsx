@@ -12,6 +12,7 @@ import Stores from './pages/Stores'
 import Login from './pages/Login'
 import Admin from './pages/Admin'
 import Profile from './pages/Profile'
+import ImportPreview from './pages/ImportPreview'
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -171,6 +172,7 @@ function AppShell() {
         <Routes>
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
           <Route path="/orders/:orderId" element={<OrderDetail />} />
+          <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />
           <Route path="/payment-methods" element={<PaymentMethods />} />

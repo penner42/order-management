@@ -15,11 +15,17 @@ document.getElementById("getOrders").addEventListener("click", async () => {
   }
 });
 
+/** Order details from the content script (getOrderDetails). Stored after a successful fetch so "Send to Order Manager" can use it. */
+let lastOrderDetails = null;
+
 document
   .getElementById("getOrderDetails")
   .addEventListener("click", async () => {
     const resultsEl = document.getElementById("results");
+    const sendBtn = document.getElementById("sendToApp");
     resultsEl.style.display = "block";
+    sendBtn.style.display = "none";
+    lastOrderDetails = null;
     try {
       const [tab] = await chrome.tabs.query({
         active: true,
@@ -38,6 +44,8 @@ document
       if (response.error) {
         resultsEl.innerHTML = `<span class="error">Not on an order detail page (orders/XXXX/...).</span>`;
       } else if (response.details) {
+        lastOrderDetails = response.details;
+        sendBtn.style.display = "block";
         const {
           orderNumber,
           items,
@@ -74,6 +82,19 @@ document
       resultsEl.innerHTML = `<span class="error">Open a Walmart order detail page (orders/XXXX/...) first, then try again.</span>`;
     }
   });
+
+document.getElementById("sendToApp").addEventListener("click", () => {
+  if (!lastOrderDetails) return;
+  const baseUrl = "http://localhost:5173";
+  try {
+    const json = JSON.stringify(lastOrderDetails);
+    const encoded = btoa(unescape(encodeURIComponent(json)));
+    const url = `${baseUrl}/import-preview#${encoded}`;
+    chrome.tabs.create({ url });
+  } catch (e) {
+    alert("Order Manager: Could not encode order data. Try again.");
+  }
+});
 
 function hardRefreshTab(tabId) {
   return new Promise((resolve) => {
