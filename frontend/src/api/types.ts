@@ -93,8 +93,6 @@ export interface Item {
   order_id: number
   price_paid: string | null
   price_sold: string | null
-  shipping: string | null
-  sales_tax: string | null
   status: ItemStatus
   quantity: number
   description: string | null
@@ -129,6 +127,8 @@ export interface Order {
   store_order_number: string | null
   status: OrderStatus
   purchase_date: string | null
+  shipping: string | null
+  sales_tax: string | null
   notes: string | null
   created_at: string
   updated_at?: string

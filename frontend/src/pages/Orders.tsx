@@ -93,9 +93,9 @@ export default function Orders() {
   const [stores, setStores] = useState<Store[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
-  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string }>>({})
+  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; shipping?: string; sales_tax?: string }>>({})
   const [savingOrderId, setSavingOrderId] = useState<number | null>(null)
-  const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus }>>({})
+  const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; status?: ItemStatus }>>({})
   const [paymentEdits, setPaymentEdits] = useState<Record<number, { payment_method_id: number; amount: string }[]>>({})
   const [savingItemId, setSavingItemId] = useState<number | null>(null)
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
@@ -525,7 +525,7 @@ export default function Orders() {
       if (!order) return
       const rows = paymentEdits[orderId]
       if (!rows?.length) return
-      const totalPaid = orderTotals(order.items ?? [])
+      const totalPaid = orderTotals(order.items ?? [], order.shipping, order.sales_tax)
       const paymentSum = rows.reduce((s, r) => s + parseDecimal(r.amount), 0)
       const usedIds = new Set(rows.map((r) => r.payment_method_id))
       const canSave =
@@ -664,12 +664,17 @@ export default function Orders() {
     const n = parseFloat(String(s))
     return Number.isNaN(n) ? 0 : n
   }
-  const orderTotals = (items: { price_paid?: string | null; price_sold?: string | null; shipping?: string | null; sales_tax?: string | null; quantity?: number }[]) => {
+  const orderTotals = (
+    items: { price_paid?: string | null; price_sold?: string | null; quantity?: number }[],
+    orderShipping?: string | null,
+    orderSalesTax?: string | null
+  ) => {
     let totalPaid = 0
     for (const item of items) {
       const qty = Math.max(0, item.quantity ?? 1)
-      totalPaid += parseDecimal(item.price_paid) * qty + parseDecimal(item.shipping) + parseDecimal(item.sales_tax)
+      totalPaid += parseDecimal(item.price_paid) * qty
     }
+    totalPaid += parseDecimal(orderShipping) + parseDecimal(orderSalesTax)
     return totalPaid
   }
 
@@ -694,12 +699,12 @@ export default function Orders() {
         items: o.items.map((item) => ({
           price_paid: item.price_paid ?? undefined,
           price_sold: item.price_sold ?? undefined,
-          shipping: item.shipping ?? undefined,
-          sales_tax: item.sales_tax ?? undefined,
           status: item.status,
           quantity: item.quantity ?? 1,
           description: item.description ?? undefined,
         })),
+        shipping: o.shipping ?? undefined,
+        sales_tax: o.sales_tax ?? undefined,
       }
       const created = await api.post<Order>('/orders', payload)
       navigate(`/orders/${created.id}`)
@@ -1055,7 +1060,7 @@ export default function Orders() {
                                   payment_method_id: op.payment_method_id,
                                   amount: op.amount != null ? String(op.amount) : '',
                                 }))
-                              const totalPaid = orderTotals(o.items ?? [])
+                              const totalPaid = orderTotals(o.items ?? [], o.shipping, o.sales_tax)
                               const paymentSum = rows.reduce((s, r) => s + parseDecimal(r.amount), 0)
                               const paymentMatchesTotal =
                                 rows.length > 0 && Math.round(paymentSum * 100) === Math.round(totalPaid * 100)
@@ -1211,6 +1216,58 @@ export default function Orders() {
                               )
                             })()}
                           </div>
+                          <div className="flex items-center gap-4 flex-wrap mt-2">
+                            <label className="flex items-center gap-2 text-sm text-ink-muted">
+                              <span className="w-14">Shipping</span>
+                              <input
+                                type="text"
+                                value={orderEdits[o.id]?.shipping ?? (o.shipping ?? '')}
+                                onChange={(e) =>
+                                  setOrderEdits((prev) => ({ ...prev, [o.id]: { ...prev[o.id], shipping: e.target.value } }))
+                                }
+                                onBlur={(e) => {
+                                  const v = e.target.value.trim()
+                                  if (v !== (o.shipping ?? '')) updateOrder(o.id, { shipping: v || null })
+                                  setOrderEdits((prev) => {
+                                    const next = { ...prev }
+                                    if (next[o.id]) {
+                                      delete next[o.id].shipping
+                                      if (Object.keys(next[o.id]).length === 0) delete next[o.id]
+                                    }
+                                    return next
+                                  })
+                                }}
+                                placeholder="0.00"
+                                disabled={savingOrderId === o.id}
+                                className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm font-mono bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                              />
+                            </label>
+                            <label className="flex items-center gap-2 text-sm text-ink-muted">
+                              <span className="w-14">Tax</span>
+                              <input
+                                type="text"
+                                value={orderEdits[o.id]?.sales_tax ?? (o.sales_tax ?? '')}
+                                onChange={(e) =>
+                                  setOrderEdits((prev) => ({ ...prev, [o.id]: { ...prev[o.id], sales_tax: e.target.value } }))
+                                }
+                                onBlur={(e) => {
+                                  const v = e.target.value.trim()
+                                  if (v !== (o.sales_tax ?? '')) updateOrder(o.id, { sales_tax: v || null })
+                                  setOrderEdits((prev) => {
+                                    const next = { ...prev }
+                                    if (next[o.id]) {
+                                      delete next[o.id].sales_tax
+                                      if (Object.keys(next[o.id]).length === 0) delete next[o.id]
+                                    }
+                                    return next
+                                  })
+                                }}
+                                placeholder="0.00"
+                                disabled={savingOrderId === o.id}
+                                className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm font-mono bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                              />
+                            </label>
+                          </div>
                         </div>
                         {o.items && o.items.length > 0 ? (
                           <div className="mt-4">
@@ -1232,8 +1289,6 @@ export default function Orders() {
                                     <th className="py-2 px-2 font-medium text-ink-muted">Tracking</th>
                                     <th className="py-2 pl-2 pr-2 font-medium text-ink-muted w-0 whitespace-nowrap">Cost</th>
                                     <th className="py-2 pl-0 pr-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
-                                    <th className="py-2 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Shipping</th>
-                                    <th className="py-2 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Tax</th>
                                     <th className="py-2 px-2 font-medium text-ink-muted">Status</th>
                                     <th className="w-8 py-2 px-1.5 text-right">
                                       <button
@@ -1432,38 +1487,6 @@ export default function Orders() {
                                           placeholder="0.00"
                                           disabled={savingItemId === item.id}
                                           className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
-                                        />
-                                      </td>
-                                      <td className="py-2 pl-2 pr-2 w-0 align-top">
-                                        <input
-                                          type="text"
-                                          value={itemEdits[item.id]?.shipping ?? (item.shipping ?? '')}
-                                          onChange={(e) =>
-                                            setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], shipping: e.target.value } }))
-                                          }
-                                          onBlur={() => {
-                                            const v = (itemEdits[item.id]?.shipping ?? item.shipping ?? '').trim()
-                                            if (v !== (item.shipping ?? '')) updateItem(item.id, { shipping: v || null })
-                                          }}
-                                          placeholder="0.00"
-                                          disabled={savingItemId === item.id}
-                                          className="w-16 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
-                                        />
-                                      </td>
-                                      <td className="py-2 pl-0 pr-2 w-0 align-top">
-                                        <input
-                                          type="text"
-                                          value={itemEdits[item.id]?.sales_tax ?? (item.sales_tax ?? '')}
-                                          onChange={(e) =>
-                                            setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], sales_tax: e.target.value } }))
-                                          }
-                                          onBlur={() => {
-                                            const v = (itemEdits[item.id]?.sales_tax ?? item.sales_tax ?? '').trim()
-                                            if (v !== (item.sales_tax ?? '')) updateItem(item.id, { sales_tax: v || null })
-                                          }}
-                                          placeholder="0.00"
-                                          disabled={savingItemId === item.id}
-                                          className="w-16 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
                                         />
                                       </td>
                                       <td className="py-2 px-2">

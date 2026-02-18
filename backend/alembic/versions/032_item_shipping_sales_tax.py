@@ -1,4 +1,4 @@
-"""Add shipping and sales_tax to items (per line item).
+"""Add shipping and sales_tax to orders (per order).
 
 Revision ID: 032
 Revises: 031
@@ -18,10 +18,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("items", sa.Column("shipping", sa.Numeric(12, 2), nullable=True))
-    op.add_column("items", sa.Column("sales_tax", sa.Numeric(12, 2), nullable=True))
+    op.add_column("orders", sa.Column("shipping", sa.Numeric(12, 2), nullable=True))
+    op.add_column("orders", sa.Column("sales_tax", sa.Numeric(12, 2), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("items", "sales_tax")
-    op.drop_column("items", "shipping")
+    op.drop_column("orders", "sales_tax")
+    op.drop_column("orders", "shipping")

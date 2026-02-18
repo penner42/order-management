@@ -29,6 +29,8 @@ class OrderPaymentMethodRead(OrderPaymentMethodBase, TimestampsMixin):
 class OrderBase(BaseModel):
     status: str = "active"  # active | imported
     purchase_date: datetime | None = None
+    shipping: Decimal | None = None
+    sales_tax: Decimal | None = None
     notes: str | None = None
     buying_group_id: int | None = None
 
@@ -48,6 +50,8 @@ class OrderUpdate(BaseModel):
     store_order_number: str | None = None
     status: str | None = None
     purchase_date: datetime | None = None
+    shipping: Decimal | None = None
+    sales_tax: Decimal | None = None
     notes: str | None = None
     buying_group_id: int | None = None
     payment_methods: list[OrderPaymentMethodCreate] | None = None

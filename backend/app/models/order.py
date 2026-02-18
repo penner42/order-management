@@ -18,6 +18,8 @@ class Order(Base):
     store_order_number = Column(String(255), nullable=True)  # order number from the store (e.g. Amazon order #)
     status = Column(String(20), nullable=False, default="active", server_default="active")  # active | imported
     purchase_date = Column(DateTime(timezone=True), nullable=True)  # when the order was placed (order-level)
+    shipping = Column(Numeric(12, 2), nullable=True)
+    sales_tax = Column(Numeric(12, 2), nullable=True)
     notes = Column(String(2000), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

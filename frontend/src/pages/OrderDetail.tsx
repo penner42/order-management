@@ -41,14 +41,19 @@ function parseDecimal(s: string | null | undefined): number {
   return Number.isNaN(n) ? 0 : n
 }
 
-function orderTotals(items: { price_paid?: string | null; price_sold?: string | null; shipping?: string | null; sales_tax?: string | null; quantity?: number }[]) {
+function orderTotals(
+  items: { price_paid?: string | null; price_sold?: string | null; quantity?: number }[],
+  orderShipping?: string | null,
+  orderSalesTax?: string | null
+) {
   let totalPaid = 0
   let totalSold = 0
   for (const item of items) {
     const qty = Math.max(0, item.quantity ?? 1)
-    totalPaid += parseDecimal(item.price_paid) * qty + parseDecimal(item.shipping) + parseDecimal(item.sales_tax)
+    totalPaid += parseDecimal(item.price_paid) * qty
     totalSold += parseDecimal(item.price_sold) * qty
   }
+  totalPaid += parseDecimal(orderShipping) + parseDecimal(orderSalesTax)
   return { totalPaid, totalSold }
 }
 
@@ -143,10 +148,12 @@ export default function OrderDetail() {
     store_account_id?: number | null
     store_order_number?: string | null
     purchase_date?: string | null
+    shipping?: string | null
+    sales_tax?: string | null
     notes?: string
     buying_group_id?: number | null
     payment_methods: { payment_method_id: number; amount?: string }[]
-    items: { price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus; quantity?: number; description?: string }[]
+    items: { price_paid?: string; price_sold?: string; status?: ItemStatus; quantity?: number; description?: string }[]
   }) => {
     setSaving(true)
     try {
@@ -164,6 +171,19 @@ export default function OrderDetail() {
     setSaving(true)
     try {
       const updated = await api.patch<Order>(`/orders/${order.id}`, { notes })
+      setOrder(updated)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const updateOrderShippingTax = async (patch: { shipping?: string | null; sales_tax?: string | null }) => {
+    if (!order || isNew) return
+    setSaving(true)
+    try {
+      const updated = await api.patch<Order>(`/orders/${order.id}`, patch)
       setOrder(updated)
     } catch (e) {
       console.error(e)
@@ -256,7 +276,7 @@ export default function OrderDetail() {
   // Autosave payments when valid and different from server (debounced)
   useEffect(() => {
     if (!order || isNew || saving) return
-    const { totalPaid: orderTotalPaid } = orderTotals(order.items)
+    const { totalPaid: orderTotalPaid } = orderTotals(order.items, order.shipping, order.sales_tax)
     const paymentSum = paymentRows.reduce(
       (sum, r) => sum + (parseDecimal(r.amount) || 0),
       0
@@ -491,7 +511,7 @@ export default function OrderDetail() {
         <div className="mt-4 pt-4 border-t border-brand-100">
           <h2 className="text-sm font-medium text-ink-muted mb-2">Payment</h2>
           {(() => {
-            const { totalPaid: orderTotalPaid } = orderTotals(order.items)
+            const { totalPaid: orderTotalPaid } = orderTotals(order.items, order.shipping, order.sales_tax)
             const paymentSum = paymentRows.reduce(
               (sum, r) => sum + (parseDecimal(r.amount) || 0),
               0
@@ -691,8 +711,6 @@ export default function OrderDetail() {
                 <th className="text-left py-2 px-4 text-xs font-medium text-ink-muted">Description</th>
                 <th className="text-left py-2 pl-4 pr-1 text-xs font-medium text-ink-muted w-32">Cost</th>
                 <th className="text-left py-2 pl-1 pr-4 text-xs font-medium text-ink-muted w-32">Payout</th>
-                <th className="text-left py-2 px-2 text-xs font-medium text-ink-muted w-24">Shipping</th>
-                <th className="text-left py-2 px-2 text-xs font-medium text-ink-muted w-24">Tax</th>
                 <th className="text-left py-2 px-4 text-xs font-medium text-ink-muted">Tracking</th>
                 <th className="text-left py-2 px-4 text-xs font-medium text-ink-muted">Status</th>
                 <th className="w-24 text-right pr-2">
@@ -713,7 +731,7 @@ export default function OrderDetail() {
             <tbody>
               {order.items.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-8 text-center text-ink-muted text-sm">
+                  <td colSpan={7} className="py-8 text-center text-ink-muted text-sm">
                     No items. Add one above.
                   </td>
                 </tr>
@@ -779,36 +797,6 @@ export default function OrderDetail() {
                           )
                         }
                         onBlur={(e) => updateItem(item.id, { price_sold: e.target.value || null })}
-                        placeholder="0"
-                      />
-                    </td>
-                    <td className="py-2 px-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        className="w-20 min-w-[5rem] rounded border border-brand-200 px-2 py-1 text-sm"
-                        value={item.shipping ?? ''}
-                        onChange={(e) =>
-                          setOrder((o) =>
-                            o ? { ...o, items: o.items.map((i) => (i.id === item.id ? { ...i, shipping: e.target.value } : i)) } : o
-                          )
-                        }
-                        onBlur={(e) => updateItem(item.id, { shipping: e.target.value || null })}
-                        placeholder="0"
-                      />
-                    </td>
-                    <td className="py-2 px-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        className="w-20 min-w-[5rem] rounded border border-brand-200 px-2 py-1 text-sm"
-                        value={item.sales_tax ?? ''}
-                        onChange={(e) =>
-                          setOrder((o) =>
-                            o ? { ...o, items: o.items.map((i) => (i.id === item.id ? { ...i, sales_tax: e.target.value } : i)) } : o
-                          )
-                        }
-                        onBlur={(e) => updateItem(item.id, { sales_tax: e.target.value || null })}
                         placeholder="0"
                       />
                     </td>
@@ -891,11 +879,39 @@ export default function OrderDetail() {
           )
         })()}
         {order.items.length > 0 && (() => {
-          const { totalPaid, totalSold } = orderTotals(order.items)
+          const { totalPaid, totalSold } = orderTotals(order.items, order.shipping, order.sales_tax)
           return (
             <div className="border-t border-brand-200/80 dark:border-gray-700 p-4 bg-brand-50/50 dark:bg-gray-700/30">
               <h3 className="text-sm font-medium text-ink-muted mb-2">Order summary</h3>
               <dl className="flex gap-6 flex-wrap text-sm">
+                <div>
+                  <dt className="text-ink-muted">Shipping</dt>
+                  <dd>
+                    <input
+                      type="number"
+                      step="0.01"
+                      className="w-24 rounded border border-brand-200 px-2 py-1 text-sm font-mono"
+                      value={order.shipping ?? ''}
+                      onChange={(e) => setOrder((o) => (o ? { ...o, shipping: e.target.value } : o))}
+                      onBlur={(e) => updateOrderShippingTax({ shipping: e.target.value || null })}
+                      placeholder="0"
+                    />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-ink-muted">Sales tax</dt>
+                  <dd>
+                    <input
+                      type="number"
+                      step="0.01"
+                      className="w-24 rounded border border-brand-200 px-2 py-1 text-sm font-mono"
+                      value={order.sales_tax ?? ''}
+                      onChange={(e) => setOrder((o) => (o ? { ...o, sales_tax: e.target.value } : o))}
+                      onBlur={(e) => updateOrderShippingTax({ sales_tax: e.target.value || null })}
+                      placeholder="0"
+                    />
+                  </dd>
+                </div>
                 <div>
                   <dt className="text-ink-muted">Total price paid</dt>
                   <dd className="font-mono font-medium text-ink">${totalPaid.toFixed(2)}</dd>
@@ -1033,7 +1049,7 @@ function NewOrderForm({
     notes?: string
     buying_group_id?: number | null
     payment_methods: { payment_method_id: number; amount?: string }[]
-    items: { price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus; quantity?: number; description?: string }[]
+    items: { price_paid?: string; price_sold?: string; status?: ItemStatus; quantity?: number; description?: string }[]
   }) => void
   saving: boolean
   onCancel: () => void
@@ -1046,12 +1062,14 @@ function NewOrderForm({
   const [storeAccountId, setStoreAccountId] = useState<number | null>(null)
   const [storeOrderNumber, setStoreOrderNumber] = useState('')
   const [purchaseDate, setPurchaseDate] = useState(nowDatetimeLocal())
+  const [shipping, setShipping] = useState('')
+  const [salesTax, setSalesTax] = useState('')
   const [notes, setNotes] = useState('')
   const [buyingGroupId, setBuyingGroupId] = useState<number | null>(null)
   const [selectedPayments, setSelectedPayments] = useState<{ payment_method_id: number; amount: string }[]>([
     { payment_method_id: 0, amount: '' },
   ])
-  const [items, setItems] = useState<{ price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus; quantity?: number; description?: string }[]>(() => [{}])
+  const [items, setItems] = useState<{ price_paid?: string; price_sold?: string; status?: ItemStatus; quantity?: number; description?: string }[]>(() => [{}])
 
   const handleStoreChange = (id: number) => {
     setStoreId(id)
@@ -1079,6 +1097,8 @@ function NewOrderForm({
       store_account_id: storeAccountId,
       store_order_number: storeOrderNumber.trim() || null,
       purchase_date: purchaseDate || null,
+      shipping: shipping.trim() || null,
+      sales_tax: salesTax.trim() || null,
       notes: notes || undefined,
       buying_group_id: buyingGroupId ?? null,
       payment_methods: validPayments.map(({ payment_method_id, amount }) => ({
@@ -1116,6 +1136,30 @@ function NewOrderForm({
             value={purchaseDate}
             onChange={(e) => setPurchaseDate(e.target.value)}
           />
+        </div>
+        <div className="flex gap-4 flex-wrap">
+          <div>
+            <label className="block text-sm font-medium text-ink mb-1">Shipping</label>
+            <input
+              type="number"
+              step="0.01"
+              className="w-28 rounded-lg border border-brand-200 px-3 py-2"
+              value={shipping}
+              onChange={(e) => setShipping(e.target.value)}
+              placeholder="0"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-ink mb-1">Sales tax</label>
+            <input
+              type="number"
+              step="0.01"
+              className="w-28 rounded-lg border border-brand-200 px-3 py-2"
+              value={salesTax}
+              onChange={(e) => setSalesTax(e.target.value)}
+              placeholder="0"
+            />
+          </div>
         </div>
         <div className="flex gap-4 flex-wrap">
           <div className="min-w-[200px]">
@@ -1276,26 +1320,6 @@ function NewOrderForm({
                 value={it.price_sold ?? ''}
                 onChange={(e) =>
                   setItems((prev) => prev.map((x, i) => (i === idx ? { ...x, price_sold: e.target.value } : x)))
-                }
-              />
-              <input
-                type="number"
-                step="0.01"
-                placeholder="Shipping"
-                className="w-20 rounded border border-brand-200 px-2 py-1.5"
-                value={it.shipping ?? ''}
-                onChange={(e) =>
-                  setItems((prev) => prev.map((x, i) => (i === idx ? { ...x, shipping: e.target.value } : x)))
-                }
-              />
-              <input
-                type="number"
-                step="0.01"
-                placeholder="Tax"
-                className="w-20 rounded border border-brand-200 px-2 py-1.5"
-                value={it.sales_tax ?? ''}
-                onChange={(e) =>
-                  setItems((prev) => prev.map((x, i) => (i === idx ? { ...x, sales_tax: e.target.value } : x)))
                 }
               />
               <select
