@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import admin, auth, users, buying_groups, rewards, payment_methods, payments, stores, store_accounts, orders, items, shipments
+from app.routers import admin, auth, users, buying_groups, rewards, payment_methods, payments, stores, store_accounts, orders, items, shipments, portals
 from app.admin_bootstrap import ensure_admin_user
 
 app = FastAPI(title=settings.app_name)
@@ -36,6 +36,7 @@ app.include_router(store_accounts.router, prefix="/api")
 app.include_router(orders.router, prefix="/api")
 app.include_router(items.router, prefix="/api")
 app.include_router(shipments.router, prefix="/api")
+app.include_router(portals.router, prefix="/api")
 
 
 @app.get("/")

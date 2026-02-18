@@ -9,6 +9,7 @@ from app.models.order import Order, OrderPaymentMethod
 from app.models.item import Item
 from app.models.shipment import Shipment, ShipmentItem
 from app.models.payment import Payment, PaymentLineItem
+from app.models.portal import Portal
 
 __all__ = [
     "User",
@@ -25,4 +26,5 @@ __all__ = [
     "ShipmentItem",
     "Payment",
     "PaymentLineItem",
+    "Portal",
 ]

@@ -14,6 +14,7 @@ import Admin from './pages/Admin'
 import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
 import ImportedOrders from './pages/ImportedOrders'
+import Portals from './pages/Portals'
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -145,6 +146,14 @@ function AppShell() {
                   Stores
                 </NavLink>
                 <NavLink
+                  to="/portals"
+                  className={({ isActive }) =>
+                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
+                  }
+                >
+                  Portals
+                </NavLink>
+                <NavLink
                   to="/imported-orders"
                   className={({ isActive }) =>
                     `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
@@ -189,6 +198,7 @@ function AppShell() {
           <Route path="/payments" element={<Payments />} />
           <Route path="/shipments" element={<Shipments />} />
           <Route path="/stores" element={<Stores />} />
+          <Route path="/portals" element={<Portals />} />
           <Route path="/profile" element={<Profile />} />
           {user.role === 'admin' && <Route path="/admin" element={<Admin />} />}
           <Route path="*" element={<Navigate to={user.role === 'admin' ? '/admin' : '/'} replace />} />
