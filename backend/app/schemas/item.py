@@ -9,6 +9,8 @@ from app.models.item import ItemStatus
 class ItemBase(BaseModel):
     price_paid: Decimal | None = None
     price_sold: Decimal | None = None
+    shipping: Decimal | None = None
+    sales_tax: Decimal | None = None
     status: ItemStatus = ItemStatus.PURCHASED
     quantity: int = 1
     description: str | None = None
@@ -43,6 +45,8 @@ class ItemCreateNested(ItemBase):
 class ItemUpdate(BaseModel):
     price_paid: Decimal | None = None
     price_sold: Decimal | None = None
+    shipping: Decimal | None = None
+    sales_tax: Decimal | None = None
     status: ItemStatus | None = None
     quantity: int | None = None
     description: str | None = None
@@ -84,6 +88,8 @@ class ItemBulkUpdateEntry(BaseModel):
     item_id: int
     price_paid: Decimal | None = None
     price_sold: Decimal | None = None
+    shipping: Decimal | None = None
+    sales_tax: Decimal | None = None
     status: ItemStatus | None = None
     quantity: int | None = None
     description: str | None = None

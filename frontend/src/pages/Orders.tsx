@@ -95,7 +95,7 @@ export default function Orders() {
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
   const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string }>>({})
   const [savingOrderId, setSavingOrderId] = useState<number | null>(null)
-  const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; status?: ItemStatus }>>({})
+  const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus }>>({})
   const [paymentEdits, setPaymentEdits] = useState<Record<number, { payment_method_id: number; amount: string }[]>>({})
   const [savingItemId, setSavingItemId] = useState<number | null>(null)
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
@@ -664,11 +664,11 @@ export default function Orders() {
     const n = parseFloat(String(s))
     return Number.isNaN(n) ? 0 : n
   }
-  const orderTotals = (items: { price_paid?: string | null; price_sold?: string | null; quantity?: number }[]) => {
+  const orderTotals = (items: { price_paid?: string | null; price_sold?: string | null; shipping?: string | null; sales_tax?: string | null; quantity?: number }[]) => {
     let totalPaid = 0
     for (const item of items) {
       const qty = Math.max(0, item.quantity ?? 1)
-      totalPaid += parseDecimal(item.price_paid) * qty
+      totalPaid += parseDecimal(item.price_paid) * qty + parseDecimal(item.shipping) + parseDecimal(item.sales_tax)
     }
     return totalPaid
   }
@@ -694,6 +694,8 @@ export default function Orders() {
         items: o.items.map((item) => ({
           price_paid: item.price_paid ?? undefined,
           price_sold: item.price_sold ?? undefined,
+          shipping: item.shipping ?? undefined,
+          sales_tax: item.sales_tax ?? undefined,
           status: item.status,
           quantity: item.quantity ?? 1,
           description: item.description ?? undefined,
@@ -1230,6 +1232,8 @@ export default function Orders() {
                                     <th className="py-2 px-2 font-medium text-ink-muted">Tracking</th>
                                     <th className="py-2 pl-2 pr-2 font-medium text-ink-muted w-0 whitespace-nowrap">Cost</th>
                                     <th className="py-2 pl-0 pr-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
+                                    <th className="py-2 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Shipping</th>
+                                    <th className="py-2 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Tax</th>
                                     <th className="py-2 px-2 font-medium text-ink-muted">Status</th>
                                     <th className="w-8 py-2 px-1.5 text-right">
                                       <button
@@ -1428,6 +1432,38 @@ export default function Orders() {
                                           placeholder="0.00"
                                           disabled={savingItemId === item.id}
                                           className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                        />
+                                      </td>
+                                      <td className="py-2 pl-2 pr-2 w-0 align-top">
+                                        <input
+                                          type="text"
+                                          value={itemEdits[item.id]?.shipping ?? (item.shipping ?? '')}
+                                          onChange={(e) =>
+                                            setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], shipping: e.target.value } }))
+                                          }
+                                          onBlur={() => {
+                                            const v = (itemEdits[item.id]?.shipping ?? item.shipping ?? '').trim()
+                                            if (v !== (item.shipping ?? '')) updateItem(item.id, { shipping: v || null })
+                                          }}
+                                          placeholder="0.00"
+                                          disabled={savingItemId === item.id}
+                                          className="w-16 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                        />
+                                      </td>
+                                      <td className="py-2 pl-0 pr-2 w-0 align-top">
+                                        <input
+                                          type="text"
+                                          value={itemEdits[item.id]?.sales_tax ?? (item.sales_tax ?? '')}
+                                          onChange={(e) =>
+                                            setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], sales_tax: e.target.value } }))
+                                          }
+                                          onBlur={() => {
+                                            const v = (itemEdits[item.id]?.sales_tax ?? item.sales_tax ?? '').trim()
+                                            if (v !== (item.sales_tax ?? '')) updateItem(item.id, { sales_tax: v || null })
+                                          }}
+                                          placeholder="0.00"
+                                          disabled={savingItemId === item.id}
+                                          className="w-16 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
                                         />
                                       </td>
                                       <td className="py-2 px-2">

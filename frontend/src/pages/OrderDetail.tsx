@@ -41,12 +41,12 @@ function parseDecimal(s: string | null | undefined): number {
   return Number.isNaN(n) ? 0 : n
 }
 
-function orderTotals(items: { price_paid?: string | null; price_sold?: string | null; quantity?: number }[]) {
+function orderTotals(items: { price_paid?: string | null; price_sold?: string | null; shipping?: string | null; sales_tax?: string | null; quantity?: number }[]) {
   let totalPaid = 0
   let totalSold = 0
   for (const item of items) {
     const qty = Math.max(0, item.quantity ?? 1)
-    totalPaid += parseDecimal(item.price_paid) * qty
+    totalPaid += parseDecimal(item.price_paid) * qty + parseDecimal(item.shipping) + parseDecimal(item.sales_tax)
     totalSold += parseDecimal(item.price_sold) * qty
   }
   return { totalPaid, totalSold }
@@ -146,7 +146,7 @@ export default function OrderDetail() {
     notes?: string
     buying_group_id?: number | null
     payment_methods: { payment_method_id: number; amount?: string }[]
-    items: { price_paid?: string; price_sold?: string; status?: ItemStatus; quantity?: number; description?: string }[]
+    items: { price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus; quantity?: number; description?: string }[]
   }) => {
     setSaving(true)
     try {
@@ -691,6 +691,8 @@ export default function OrderDetail() {
                 <th className="text-left py-2 px-4 text-xs font-medium text-ink-muted">Description</th>
                 <th className="text-left py-2 pl-4 pr-1 text-xs font-medium text-ink-muted w-32">Cost</th>
                 <th className="text-left py-2 pl-1 pr-4 text-xs font-medium text-ink-muted w-32">Payout</th>
+                <th className="text-left py-2 px-2 text-xs font-medium text-ink-muted w-24">Shipping</th>
+                <th className="text-left py-2 px-2 text-xs font-medium text-ink-muted w-24">Tax</th>
                 <th className="text-left py-2 px-4 text-xs font-medium text-ink-muted">Tracking</th>
                 <th className="text-left py-2 px-4 text-xs font-medium text-ink-muted">Status</th>
                 <th className="w-24 text-right pr-2">
@@ -711,7 +713,7 @@ export default function OrderDetail() {
             <tbody>
               {order.items.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-ink-muted text-sm">
+                  <td colSpan={9} className="py-8 text-center text-ink-muted text-sm">
                     No items. Add one above.
                   </td>
                 </tr>
@@ -777,6 +779,36 @@ export default function OrderDetail() {
                           )
                         }
                         onBlur={(e) => updateItem(item.id, { price_sold: e.target.value || null })}
+                        placeholder="0"
+                      />
+                    </td>
+                    <td className="py-2 px-2">
+                      <input
+                        type="number"
+                        step="0.01"
+                        className="w-20 min-w-[5rem] rounded border border-brand-200 px-2 py-1 text-sm"
+                        value={item.shipping ?? ''}
+                        onChange={(e) =>
+                          setOrder((o) =>
+                            o ? { ...o, items: o.items.map((i) => (i.id === item.id ? { ...i, shipping: e.target.value } : i)) } : o
+                          )
+                        }
+                        onBlur={(e) => updateItem(item.id, { shipping: e.target.value || null })}
+                        placeholder="0"
+                      />
+                    </td>
+                    <td className="py-2 px-2">
+                      <input
+                        type="number"
+                        step="0.01"
+                        className="w-20 min-w-[5rem] rounded border border-brand-200 px-2 py-1 text-sm"
+                        value={item.sales_tax ?? ''}
+                        onChange={(e) =>
+                          setOrder((o) =>
+                            o ? { ...o, items: o.items.map((i) => (i.id === item.id ? { ...i, sales_tax: e.target.value } : i)) } : o
+                          )
+                        }
+                        onBlur={(e) => updateItem(item.id, { sales_tax: e.target.value || null })}
                         placeholder="0"
                       />
                     </td>
@@ -1001,7 +1033,7 @@ function NewOrderForm({
     notes?: string
     buying_group_id?: number | null
     payment_methods: { payment_method_id: number; amount?: string }[]
-    items: { price_paid?: string; price_sold?: string; status?: ItemStatus; quantity?: number; description?: string }[]
+    items: { price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus; quantity?: number; description?: string }[]
   }) => void
   saving: boolean
   onCancel: () => void
@@ -1019,7 +1051,7 @@ function NewOrderForm({
   const [selectedPayments, setSelectedPayments] = useState<{ payment_method_id: number; amount: string }[]>([
     { payment_method_id: 0, amount: '' },
   ])
-  const [items, setItems] = useState<{ price_paid?: string; price_sold?: string; status?: ItemStatus; quantity?: number; description?: string }[]>(() => [{}])
+  const [items, setItems] = useState<{ price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus; quantity?: number; description?: string }[]>(() => [{}])
 
   const handleStoreChange = (id: number) => {
     setStoreId(id)
@@ -1244,6 +1276,26 @@ function NewOrderForm({
                 value={it.price_sold ?? ''}
                 onChange={(e) =>
                   setItems((prev) => prev.map((x, i) => (i === idx ? { ...x, price_sold: e.target.value } : x)))
+                }
+              />
+              <input
+                type="number"
+                step="0.01"
+                placeholder="Shipping"
+                className="w-20 rounded border border-brand-200 px-2 py-1.5"
+                value={it.shipping ?? ''}
+                onChange={(e) =>
+                  setItems((prev) => prev.map((x, i) => (i === idx ? { ...x, shipping: e.target.value } : x)))
+                }
+              />
+              <input
+                type="number"
+                step="0.01"
+                placeholder="Tax"
+                className="w-20 rounded border border-brand-200 px-2 py-1.5"
+                value={it.sales_tax ?? ''}
+                onChange={(e) =>
+                  setItems((prev) => prev.map((x, i) => (i === idx ? { ...x, sales_tax: e.target.value } : x)))
                 }
               />
               <select
