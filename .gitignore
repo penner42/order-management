@@ -24,6 +24,9 @@ htmlcov/
 .env.local
 .env.*.local
 
+# Backups (DB dumps from migrations)
+backups/
+
 # OS & misc
 .DS_Store
 Thumbs.db
