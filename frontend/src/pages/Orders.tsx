@@ -62,7 +62,29 @@ function ordersPath(
   dateTo: string
 ): string {
   const params = new URLSearchParams()
-  statuses.forEach((s) => params.append('status', s))
+  // If no status filter is selected, exclude canceled orders by default
+  // If statuses are selected, use them as-is (including canceled if selected)
+  if (statuses.size > 0) {
+    statuses.forEach((s) => params.append('status', s))
+  } else {
+    // Default: exclude canceled orders by filtering for all other statuses
+    const allStatusesExceptCanceled = [
+      'purchased',
+      'shipped',
+      'submitted',
+      'delivered',
+      'scanned',
+      'payment_requested',
+      'payment_sent',
+      'payment_received',
+      'needs_return',
+      'return_started',
+      'return_sent',
+      'return_received',
+      'return_refunded',
+    ]
+    allStatusesExceptCanceled.forEach((s) => params.append('status', s))
+  }
   buyingGroups.forEach((id) => params.append('buying_group_id', String(id)))
   if (dateFrom) params.set('date_from', dateFrom)
   if (dateTo) params.set('date_to', dateTo)
@@ -709,12 +731,12 @@ export default function Orders() {
     ['payment_requested', 'Payment requested'],
     ['payment_sent', 'Payment sent'],
     ['payment_received', 'Paid'],
-    ['canceled', 'Canceled'],
     ['needs_return', 'Needs return'],
     ['return_started', 'Return started'],
     ['return_sent', 'Return sent'],
     ['return_received', 'Return received'],
     ['return_refunded', 'Refunded'],
+    ['canceled', 'Canceled'],
   ]
 
   return (
@@ -738,17 +760,26 @@ export default function Orders() {
             </button>
             {filterStatusOpen && (
               <div className="absolute left-0 top-full mt-1 z-50 py-2 min-w-[180px] rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg max-h-64 overflow-auto">
-                {STATUS_FILTER_OPTIONS.map(([value, label]) => (
-                  <label key={value} className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={filterStatuses.has(value)}
-                      onChange={() => toggleFilterStatus(value)}
-                      className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
-                    />
-                    <span className="text-sm text-ink">{label}</span>
-                  </label>
-                ))}
+                {STATUS_FILTER_OPTIONS.map(([value, label], index) => {
+                  const isCanceled = value === 'canceled'
+                  const showSeparator = isCanceled && index > 0
+                  return (
+                    <React.Fragment key={value}>
+                      {showSeparator && (
+                        <div className="border-t border-brand-200 dark:border-gray-600 my-1" />
+                      )}
+                      <label className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={filterStatuses.has(value)}
+                          onChange={() => toggleFilterStatus(value)}
+                          className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                        />
+                        <span className="text-sm text-ink">{label}</span>
+                      </label>
+                    </React.Fragment>
+                  )
+                })}
               </div>
             )}
           </div>
