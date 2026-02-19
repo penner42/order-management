@@ -25,7 +25,7 @@ def list_orders(
     date_to: str | None = None,
 ):
     # Order-level filters: which orders to include
-    q = db.query(Order).order_by(Order.created_at.desc())
+    q = db.query(Order).order_by(Order.purchase_date.desc())
     if order_status == "imported":
         q = q.filter(Order.status == "imported")
     else:
