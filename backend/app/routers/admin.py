@@ -1,5 +1,7 @@
 """Admin API: user management and database reset (admin-only)."""
 import json
+import os
+import subprocess
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from io import BytesIO
@@ -11,9 +13,19 @@ from sqlalchemy.orm import Session
 
 from app.admin_bootstrap import ensure_admin_user
 from app.auth import hash_password, require_admin
+from app.config import settings
 from app.database import get_db
 from app.models import User
 from app.schemas.user import UserRead, UserCreate, UserUpdate
+
+
+def _backups_dir() -> str:
+    """Return the backups directory path, creating it if it does not exist."""
+    # backend/app/routers/admin.py -> 4 dirnames -> repo root
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    backups_dir = os.path.join(repo_root, "backups")
+    os.makedirs(backups_dir, exist_ok=True)
+    return backups_dir
 
 # Tables in export order (parents before children) for backup
 _BACKUP_TABLES = [
@@ -169,3 +181,37 @@ def download_backup(
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/create-backup")
+def create_pg_dump_backup(
+    _: User = Depends(require_admin),
+):
+    """Create a pg_dump backup in the backups folder (admin only)."""
+    url = settings.database_url
+    if not url or not url.strip().startswith("postgresql"):
+        raise HTTPException(status_code=400, detail="Database is not PostgreSQL; pg_dump backup not available")
+    backups_dir = _backups_dir()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"order-management-{stamp}.dump"
+    path = os.path.join(backups_dir, filename)
+    try:
+        subprocess.run(
+            ["pg_dump", "-d", url, "-Fc", "-f", path],
+            check=True,
+            capture_output=True,
+            timeout=300,
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="pg_dump not found. Install PostgreSQL client tools to create backups.",
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"pg_dump failed: {e.stderr.decode('utf-8', errors='replace') if e.stderr else str(e)}",
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=503, detail="pg_dump timed out")
+    return {"message": "Backup created", "filename": filename}

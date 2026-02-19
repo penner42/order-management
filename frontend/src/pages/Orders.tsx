@@ -74,7 +74,6 @@ export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([])
   const [groups, setGroups] = useState<BuyingGroup[]>([])
   const [loading, setLoading] = useState(true)
-  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set())
   const [selectedItemIds, setSelectedItemIds] = useState<Set<number>>(new Set())
   const [bulkActionByOrder, setBulkActionByOrder] = useState<Record<number, { action: string; tracking: string; shippedAt: string }>>({})
   const [bulkActionShippingOrderId, setBulkActionShippingOrderId] = useState<number | null>(null)
@@ -111,7 +110,6 @@ export default function Orders() {
   const filterStatusRef = useRef<HTMLDivElement>(null)
   const filterBuyingGroupRef = useRef<HTMLDivElement>(null)
   const filterDateRef = useRef<HTMLDivElement>(null)
-  const hasSetInitialExpanded = useRef(false)
   const paymentSaveTimeouts = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
   const navigate = useNavigate()
 
@@ -162,13 +160,6 @@ export default function Orders() {
       return { id: pm.id, name }
     })
   }, [paymentMethods, flatPaymentMethods])
-
-  useEffect(() => {
-    if (!loading && orders.length > 0 && !hasSetInitialExpanded.current) {
-      hasSetInitialExpanded.current = true
-      setExpandedIds(new Set(orders.map((o) => o.id)))
-    }
-  }, [loading, orders])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -340,14 +331,6 @@ export default function Orders() {
     const ids = [...new Set((o.items ?? []).map((i) => i.buying_group_id).filter((id): id is number => id != null))]
     if (ids.length === 0) return '—'
     return ids.map(getGroupName).filter((n) => n !== '—').join(', ') || '—'
-  }
-  const toggleExpanded = (id: number) => {
-    setExpandedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
   }
   const toggleItemSelect = (itemId: number, items: { id: number }[]) => {
     setSelectedItemIds((prev) => {
@@ -886,35 +869,26 @@ export default function Orders() {
         <table className="w-full">
           <thead className="bg-brand-100/50 dark:bg-gray-700/50 border-b border-brand-200/80 dark:border-gray-700">
             <tr>
-              <th className="w-10 text-left py-3 px-2" />
-              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Order</th>
-              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Store</th>
-              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Items</th>
-              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Buying group</th>
-              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Created</th>
-              <th className="w-12 text-right py-3 px-2" />
+              <th className="text-left py-2 px-3 text-sm font-medium text-ink">Order</th>
+              <th className="text-left py-2 px-3 text-sm font-medium text-ink">Store</th>
+              <th className="text-left py-2 px-3 text-sm font-medium text-ink">Items</th>
+              <th className="text-left py-2 px-3 text-sm font-medium text-ink">Buying group</th>
+              <th className="text-left py-2 px-3 text-sm font-medium text-ink">Created</th>
+              <th className="w-12 text-right py-2 px-2 text-sm font-medium text-ink"> </th>
             </tr>
           </thead>
           <tbody>
             {orders.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-12 text-center text-ink-muted">
+                <td colSpan={6} className="py-12 text-center text-ink-muted">
                   {orders.length === 0 ? 'No orders yet. Create one to get started.' : 'No orders match the current filters.'}
                 </td>
               </tr>
             ) : (
               orders.map((o) => (
                 <React.Fragment key={o.id}>
-                  <tr
-                    className="border-b border-brand-100 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-600 cursor-pointer"
-                    onClick={() => toggleExpanded(o.id)}
-                  >
-                    <td className="py-3 px-2 text-ink-muted">
-                      <span className="inline-block transition-transform" style={{ transform: expandedIds.has(o.id) ? 'rotate(90deg)' : 'none' }}>
-                        ▶
-                      </span>
-                    </td>
-                    <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
+                  <tr className="border-b border-brand-100 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-600">
+                    <td className="py-2 px-3" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-2">
                         <Link
                           to={`/orders/${o.id}`}
@@ -951,7 +925,7 @@ export default function Orders() {
                         />
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-sm" onClick={(e) => e.stopPropagation()}>
+                    <td className="py-2 px-3 text-sm" onClick={(e) => e.stopPropagation()}>
                       <div className="flex flex-wrap gap-2 items-center">
                         <div className="min-w-[140px]">
                           <SearchableCombobox<Store>
@@ -1007,8 +981,8 @@ export default function Orders() {
                         </div>
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-ink-muted">{o.items?.reduce((sum, i) => sum + (i.quantity ?? 1), 0) ?? 0} items</td>
-                    <td className="py-3 px-4 text-sm" onClick={(e) => e.stopPropagation()}>
+                    <td className="py-2 px-3 text-ink-muted">{o.items?.reduce((sum, i) => sum + (i.quantity ?? 1), 0) ?? 0} items</td>
+                    <td className="py-2 px-3 text-sm" onClick={(e) => e.stopPropagation()}>
                       <div className="min-w-[120px]">
                         <SearchableCombobox<BuyingGroup>
                           inputClassName="h-6 py-0 px-2 text-sm rounded border border-brand-200 dark:border-gray-600 w-full min-w-0 text-ink focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent disabled:opacity-60 disabled:cursor-not-allowed dark:bg-gray-700"
@@ -1029,10 +1003,10 @@ export default function Orders() {
                         />
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-sm text-ink-muted">
+                    <td className="py-2 px-3 text-sm text-ink-muted">
                       {new Date(o.created_at).toLocaleString()}
                     </td>
-                    <td className="py-3 px-2 text-right">
+                    <td className="py-2 px-2 text-right">
                       {o.items && o.items.length > 0 ? (
                         <button
                           type="button"
@@ -1048,10 +1022,9 @@ export default function Orders() {
                       ) : null}
                     </td>
                   </tr>
-                  {expandedIds.has(o.id) && (
-                    <tr className="bg-brand-50/50 dark:bg-gray-600/80 border-b border-brand-100 dark:border-gray-700" onClick={(e) => e.stopPropagation()}>
-                      <td colSpan={7} className="py-0 px-4 pb-3 pt-0">
-                        <div className="space-y-4 pt-3">
+                  <tr className="bg-brand-50/50 dark:bg-gray-600/80 border-b border-brand-100 dark:border-gray-700" onClick={(e) => e.stopPropagation()}>
+                    <td colSpan={6} className="py-0 px-3 pb-2 pt-0">
+                      <div className="space-y-2 pt-2">
                           <div>
                             {(() => {
                               const rows =
@@ -1143,7 +1116,7 @@ export default function Orders() {
                                             [o.id]: rows.map((r, i) => (i === idx ? { ...r, amount } : r)),
                                           }))
                                         }}
-                                        className="w-24 h-6 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm font-mono bg-white dark:bg-gray-700"
+                                        className="w-24 h-6 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80"
                                       />
                                       <button
                                         type="button"
@@ -1216,7 +1189,7 @@ export default function Orders() {
                               )
                             })()}
                           </div>
-                          <div className="flex items-center gap-4 flex-wrap mt-2">
+                          <div className="flex items-center gap-4 flex-wrap mt-1">
                             <label className="flex items-center gap-2 text-sm text-ink-muted">
                               <span className="w-14">Shipping</span>
                               <input
@@ -1239,7 +1212,7 @@ export default function Orders() {
                                 }}
                                 placeholder="0.00"
                                 disabled={savingOrderId === o.id}
-                                className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm font-mono bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80 focus:border-brand-500 focus:outline-none disabled:opacity-60"
                               />
                             </label>
                             <label className="flex items-center gap-2 text-sm text-ink-muted">
@@ -1264,18 +1237,18 @@ export default function Orders() {
                                 }}
                                 placeholder="0.00"
                                 disabled={savingOrderId === o.id}
-                                className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm font-mono bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80 focus:border-brand-500 focus:outline-none disabled:opacity-60"
                               />
                             </label>
                           </div>
                         </div>
                         {o.items && o.items.length > 0 ? (
-                          <div className="mt-4">
-                            <div className="rounded-lg border border-brand-200/80 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800">
+                          <div className="mt-1">
+                            <div className="line-items-section rounded-lg border-2 border-brand-400 dark:border-gray-400 overflow-hidden bg-transparent">
                               <table className="w-full text-sm">
                                 <thead>
-                                  <tr className="bg-brand-100/50 dark:bg-gray-700/50 text-left">
-                                    <th className="w-8 py-2 px-2">
+                                  <tr className="bg-transparent text-left">
+                                    <th className="w-8 py-1 px-2">
                                       <input
                                         type="checkbox"
                                         checked={o.items.every((i) => selectedItemIds.has(i.id)) && o.items.length > 0}
@@ -1284,13 +1257,13 @@ export default function Orders() {
                                         className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
                                       />
                                     </th>
-                                    <th className="py-2 px-2 font-medium text-ink-muted w-12">Qty</th>
-                                    <th className="py-2 px-2 font-medium text-ink-muted">Description</th>
-                                    <th className="py-2 px-2 font-medium text-ink-muted">Tracking</th>
-                                    <th className="py-2 pl-2 pr-2 font-medium text-ink-muted w-0 whitespace-nowrap">Cost</th>
-                                    <th className="py-2 pl-0 pr-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
-                                    <th className="py-2 px-2 font-medium text-ink-muted">Status</th>
-                                    <th className="w-8 py-2 px-1.5 text-right">
+                                    <th className="py-1 px-2 font-medium text-ink-muted w-12">Qty</th>
+                                    <th className="py-1 px-2 font-medium text-ink-muted">Description</th>
+                                    <th className="py-1 px-2 font-medium text-ink-muted">Tracking</th>
+                                    <th className="py-1 pl-2 pr-2 font-medium text-ink-muted w-0 whitespace-nowrap">Cost</th>
+                                    <th className="py-1 pl-0 pr-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
+                                    <th className="py-1 px-2 font-medium text-ink-muted">Status</th>
+                                    <th className="w-8 py-1 px-1.5 text-right">
                                       <button
                                         type="button"
                                         onClick={(e) => {
@@ -1308,65 +1281,40 @@ export default function Orders() {
                                     </th>
                                   </tr>
                                 </thead>
-                                <tbody>
-                                  {groupOrderItemsByShipment(o).map((group) => (
-                                    <React.Fragment key={group.key}>
-                                      {group.items.length > 0 && (
-                                        <tr className="border-t border-brand-100 dark:border-gray-700 bg-brand-50/50 dark:bg-gray-700/30">
-                                          <td colSpan={8} className="py-1.5 px-2 text-xs font-medium text-ink-muted">
-                                            {group.label === 'Unshipped'
-                                              ? 'Unshipped'
-                                              : (
-                                                  <>
-                                                    Shipment
-                                                    {group.trackingNumber && (
-                                                      <span className="ml-2 font-mono text-ink">
-                                                        {group.trackingNumber}
-                                                      </span>
-                                                    )}
-                                                    {(() => {
-                                                      const nextStatuses = group.items
-                                                        .map((item) => getNextStatus(item.status))
-                                                        .filter((s): s is ItemStatus => s != null)
-                                                      const lowestNext =
-                                                        nextStatuses.length > 0
-                                                          ? STATUS_PROGRESSION[
-                                                              Math.min(
-                                                                ...nextStatuses.map((s) => STATUS_PROGRESSION.indexOf(s))
-                                                              )
-                                                            ]
-                                                          : null
-                                                      const label = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
-                                                      const isSubmitted = lowestNext === 'submitted'
-                                                      return label ? (
-                                                        <button
-                                                          type="button"
-                                                          onClick={(e) => {
-                                                            e.stopPropagation()
-                                                            if (isSubmitted) {
-                                                              setSubmitShipmentModal({ group })
-                                                            } else {
-                                                              advanceShipmentToNextStatus(group)
-                                                            }
-                                                          }}
-                                                          disabled={advancingGroupKey === group.key}
-                                                          className="ml-3 px-2 py-0.5 text-xs font-medium rounded bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                                                          title={isSubmitted ? 'Mark shipment as Submitted (opens form)' : `Advance items to ${label}`}
-                                                        >
-                                                          {advancingGroupKey === group.key
-                                                            ? 'Advancing…'
-                                                            : `Mark shipment as ${label}`}
-                                                        </button>
-                                                      ) : null
-                                                    })()}
-                                                  </>
-                                                )}
-                                          </td>
-                                        </tr>
-                                      )}
-                                      {group.items.map((item) => (
-                                    <tr key={item.id} className="border-t border-brand-100 dark:border-gray-700">
-                                      <td className="py-2 px-2">
+                              </table>
+                              {(() => {
+                                const groups = groupOrderItemsByShipment(o)
+                                return groups.map((group, groupIndex) => {
+                                  const isFirst = groupIndex === 0
+                                  const isLast = groupIndex === groups.length - 1
+                                  return (
+                                <div
+                                  key={group.key}
+                                  className={`border-t-2 border-brand-400 dark:border-gray-400 overflow-hidden bg-transparent ${isFirst ? 'mt-0' : ''}`}
+                                >
+                                  <table className="w-full text-sm">
+                                    <tbody>
+                                      {group.items.map((item, itemIndex) => {
+                                        const isFirstInGroup = itemIndex === 0
+                                        const nextStatuses = group.items
+                                          .map((i) => getNextStatus(i.status))
+                                          .filter((s): s is ItemStatus => s != null)
+                                        const lowestNext =
+                                          nextStatuses.length > 0
+                                            ? STATUS_PROGRESSION[
+                                                Math.min(
+                                                  ...nextStatuses.map((s) => STATUS_PROGRESSION.indexOf(s))
+                                                )
+                                              ]
+                                            : null
+                                        const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
+                                        const isSubmitted = lowestNext === 'submitted'
+                                        return (
+                                    <tr
+                                      key={item.id}
+                                      className="bg-transparent"
+                                    >
+                                      <td className="py-1 px-2">
                                         <input
                                           type="checkbox"
                                           checked={selectedItemIds.has(item.id)}
@@ -1375,7 +1323,7 @@ export default function Orders() {
                                           className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
                                         />
                                       </td>
-                                      <td className="py-2 px-2">
+                                      <td className="py-1 px-2">
                                         <input
                                           type="number"
                                           min={1}
@@ -1390,10 +1338,10 @@ export default function Orders() {
                                             if (v != null && v !== (item.quantity ?? 1)) updateItem(item.id, { quantity: v })
                                           }}
                                           disabled={savingItemId === item.id}
-                                          className="w-12 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1 py-0 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                          className="w-12 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1 py-0 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60"
                                         />
                                       </td>
-                                      <td className="py-2 px-2">
+                                      <td className="py-1 px-2">
                                         <input
                                           type="text"
                                           value={itemEdits[item.id]?.description ?? (item.description ?? '')}
@@ -1406,11 +1354,11 @@ export default function Orders() {
                                           }}
                                           placeholder="Description"
                                           disabled={savingItemId === item.id}
-                                          className="w-full min-w-[7rem] h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                          className="w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60"
                                         />
                                       </td>
-                                      <td className="py-2 px-2">
-                                        <div className="flex items-stretch min-w-0 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 focus-within:border-brand-500 focus-within:outline-none mb-1">
+                                      <td className="py-1 px-2">
+                                        <div className="flex items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 focus-within:border-brand-500 focus-within:outline-none">
                                           <input
                                             type="text"
                                             value={trackingEdits[item.id] ?? getTracking(item.id)}
@@ -1433,7 +1381,7 @@ export default function Orders() {
                                             onClick={(e) => e.stopPropagation()}
                                             placeholder=""
                                             disabled={savingTrackingId === item.id}
-                                            className="flex-1 min-w-[6rem] h-6 border-0 rounded-l bg-white dark:bg-gray-700 px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
+                                            className="flex-1 min-w-[6rem] h-5 border-0 rounded-l !bg-brand-50/50 dark:!bg-gray-600/80 px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
                                           />
                                           {(() => {
                                             const raw = trackingEdits[item.id] ?? getTracking(item.id)
@@ -1445,7 +1393,7 @@ export default function Orders() {
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 onClick={(e) => e.stopPropagation()}
-                                                className="shrink-0 flex items-center gap-1 h-6 border-l border-brand-200 dark:border-gray-600 pl-2 pr-2 py-0 text-xs font-medium text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-gray-700/50"
+                                                className="shrink-0 flex items-center gap-1 h-5 border-l border-brand-200 dark:border-gray-600 pl-2 pr-2 py-0 text-xs font-medium text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-gray-700/50"
                                                 title={`Track via ${info.carrier}`}
                                               >
                                                 <span className="whitespace-nowrap">{info.carrier}</span>
@@ -1457,7 +1405,7 @@ export default function Orders() {
                                           })()}
                                         </div>
                                       </td>
-                                      <td className="py-2 pl-2 pr-2 w-0 align-top">
+                                      <td className="py-1 pl-2 pr-2 w-0 align-top">
                                         <input
                                           type="text"
                                           value={itemEdits[item.id]?.price_paid ?? (item.price_paid ?? '')}
@@ -1470,10 +1418,10 @@ export default function Orders() {
                                           }}
                                           placeholder="0.00"
                                           disabled={savingItemId === item.id}
-                                          className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                          className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
                                         />
                                       </td>
-                                      <td className="py-2 pl-0 pr-2 w-0 align-top">
+                                      <td className="py-1 pl-0 pr-2 w-0 align-top">
                                         <input
                                           type="text"
                                           value={itemEdits[item.id]?.price_sold ?? (item.price_sold ?? '')}
@@ -1486,10 +1434,10 @@ export default function Orders() {
                                           }}
                                           placeholder="0.00"
                                           disabled={savingItemId === item.id}
-                                          className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                          className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
                                         />
                                       </td>
-                                      <td className="py-2 px-2">
+                                      <td className="py-1 px-2">
                                         <select
                                           value={itemEdits[item.id]?.status ?? item.status}
                                           onChange={(e) => {
@@ -1498,7 +1446,7 @@ export default function Orders() {
                                             updateItem(item.id, { status: s })
                                           }}
                                           disabled={savingItemId === item.id}
-                                          className="min-w-[6.5rem] h-6 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                          className="min-w-[6.5rem] h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60"
                                         >
                                           {Object.entries(STATUS_LABELS).map(([val, lbl]) => (
                                             <option key={val} value={val}>
@@ -1507,29 +1455,53 @@ export default function Orders() {
                                           ))}
                                         </select>
                                       </td>
-                                      <td className="py-2 px-1.5 text-right w-8">
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation()
-                                            setConfirmDeleteItemId(item.id)
-                                          }}
-                                          disabled={deletingItemId === item.id}
-                                          className="p-1.5 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                                          title="Delete line item"
-                                          aria-label="Delete line item"
-                                        >
-                                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                          </svg>
-                                        </button>
+                                      <td className="py-1 px-1.5 text-right w-8">
+                                        <div className="flex items-center justify-end gap-0.5">
+                                          {isFirstInGroup && advanceLabel && (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation()
+                                                if (isSubmitted) {
+                                                  setSubmitShipmentModal({ group })
+                                                } else {
+                                                  advanceShipmentToNextStatus(group)
+                                                }
+                                              }}
+                                              disabled={advancingGroupKey === group.key}
+                                              className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                              title={isSubmitted ? 'Mark shipment as Submitted (opens form)' : `Advance to ${advanceLabel}`}
+                                              aria-label={isSubmitted ? 'Mark shipment as Submitted' : `Advance to ${advanceLabel}`}
+                                            >
+                                              {advancingGroupKey === group.key ? '…' : advanceLabel}
+                                            </button>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation()
+                                              setConfirmDeleteItemId(item.id)
+                                            }}
+                                            disabled={deletingItemId === item.id}
+                                            className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="Delete line item"
+                                            aria-label="Delete line item"
+                                          >
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                            </svg>
+                                          </button>
+                                        </div>
                                       </td>
                                     </tr>
-                                      ))}
-                                    </React.Fragment>
-                                  ))}
-                                </tbody>
-                              </table>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                                  )
+                                })
+                              })()}
                             </div>
                             {getSelectedIdsForOrder(o).length > 0 && (
                               <div className="mt-2 flex flex-wrap items-center gap-3" onClick={(e) => e.stopPropagation()}>
@@ -1547,7 +1519,7 @@ export default function Orders() {
                                       setBulkActionState(o.id, { action: v })
                                     }
                                   }}
-                                  className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none"
+                                  className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm !bg-brand-50/50 dark:!bg-gray-600/80 focus:border-brand-500 focus:outline-none"
                                 >
                                   <option value="">Choose action…</option>
                                   <option value="input_tracking">Input Tracking</option>
@@ -1560,13 +1532,13 @@ export default function Orders() {
                                       placeholder="Tracking number"
                                       value={getBulkActionState(o.id).tracking}
                                       onChange={(e) => setBulkActionState(o.id, { tracking: e.target.value })}
-                                      className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-0 text-sm w-48 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 focus:outline-none bg-white dark:bg-gray-700"
+                                      className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-0 text-sm w-48 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 focus:outline-none !bg-brand-50/50 dark:!bg-gray-600/80"
                                     />
                                     <input
                                       type="date"
                                       value={getBulkActionState(o.id).shippedAt}
                                       onChange={(e) => setBulkActionState(o.id, { shippedAt: e.target.value })}
-                                      className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none bg-white dark:bg-gray-700"
+                                      className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none !bg-brand-50/50 dark:!bg-gray-600/80"
                                     />
                                     <button
                                       type="button"
@@ -1582,11 +1554,10 @@ export default function Orders() {
                             )}
                           </div>
                         ) : (
-                          <div className="py-3 text-sm text-ink-muted">No line items.</div>
+                          <div className="py-2 text-sm text-ink-muted">No line items.</div>
                         )}
                       </td>
                     </tr>
-                  )}
                 </React.Fragment>
               ))
             )}

@@ -106,6 +106,15 @@ export default function Admin() {
     }
   }
 
+  async function handleCreateBackup() {
+    try {
+      const data = await api.post<{ message: string; filename: string }>('/admin/create-backup')
+      setAlertMessage(`Backup created: ${data.filename}`)
+    } catch (err) {
+      setAlertMessage(err instanceof Error ? err.message : 'Failed to create backup')
+    }
+  }
+
   async function handleDownloadBackup() {
     try {
       const token = getStoredToken()
@@ -262,6 +271,13 @@ export default function Admin() {
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
+            onClick={handleCreateBackup}
+            className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700"
+          >
+            Create backup
+          </button>
+          <button
+            type="button"
             onClick={handleDownloadBackup}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700"
           >
@@ -276,7 +292,7 @@ export default function Admin() {
           </button>
         </div>
         <p className="mt-2 text-sm text-ink-muted dark:text-gray-400">
-          Download a JSON backup of all data, or permanently delete all orders, shipments, stores, and other
+          Create a pg_dump backup in the backups folder, download a JSON backup of all data, or permanently delete all orders, shipments, stores, and other
           data. Admin user is recreated from environment after reset. Reset cannot be undone.
         </p>
       </section>
