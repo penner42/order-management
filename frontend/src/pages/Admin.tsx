@@ -140,6 +140,15 @@ export default function Admin() {
     }
   }
 
+  async function handleSeedDev() {
+    try {
+      const data = await api.post<{ message: string; skipped: boolean }>('/admin/seed-dev')
+      setAlertMessage(data.message)
+    } catch (err) {
+      setAlertMessage(err instanceof Error ? err.message : 'Failed to load sample data')
+    }
+  }
+
   return (
     <div className="space-y-8">
       <h1 className="text-2xl font-semibold text-brand-800 dark:text-gray-100">Admin</h1>
@@ -271,6 +280,13 @@ export default function Admin() {
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
+            onClick={handleSeedDev}
+            className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700"
+          >
+            Load sample data
+          </button>
+          <button
+            type="button"
             onClick={handleCreateBackup}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700"
           >
@@ -292,8 +308,9 @@ export default function Admin() {
           </button>
         </div>
         <p className="mt-2 text-sm text-ink-muted dark:text-gray-400">
-          Create a pg_dump backup in the backups folder, download a JSON backup of all data, or permanently delete all orders, shipments, stores, and other
-          data. Admin user is recreated from environment after reset. Reset cannot be undone.
+          Load sample orders, stores, items, and related data for development (idempotent—safe to run again). Create a pg_dump backup in the backups folder,
+          download a JSON backup of all data, or permanently delete all orders, shipments, stores, and other data. Admin user is recreated from environment
+          after reset. Reset cannot be undone.
         </p>
       </section>
 

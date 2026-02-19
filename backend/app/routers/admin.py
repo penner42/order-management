@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.admin_bootstrap import ensure_admin_user
 from app.auth import hash_password, require_admin
+from app.seed_dev import seed_dev_data
 from app.config import settings
 from app.database import get_db
 from app.models import User
@@ -155,6 +156,16 @@ def reset_database(
     db.commit()
     ensure_admin_user(db)
     return {"message": "Database reset complete"}
+
+
+@router.post("/seed-dev")
+def seed_dev(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Load sample development data (admin only). Idempotent: no-op if already loaded."""
+    result = seed_dev_data(db)
+    return {"message": result["message"], "skipped": result["skipped"]}
 
 
 @router.get("/backup")
