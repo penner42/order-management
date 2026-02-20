@@ -65,6 +65,25 @@ function getNextStatus(current: ItemStatus): ItemStatus | null {
   return STATUS_PROGRESSION[idx + 1]
 }
 
+function copyToClipboard(text: string): void {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(text).catch(console.error)
+    return
+  }
+  const el = document.createElement('textarea')
+  el.value = text
+  el.setAttribute('readonly', '')
+  el.style.position = 'absolute'
+  el.style.left = '-9999px'
+  document.body.appendChild(el)
+  el.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(el)
+  }
+}
+
 function defaultOrdersPath(): string {
   const statuses = [
     'purchased', 'shipped', 'submitted', 'delivered', 'scanned',
@@ -698,7 +717,7 @@ export default function Orders() {
       return [qty, desc, tracking, cost, payout, totalCost, totalPayout, status]
     })
     const tsv = [header.join('\t'), ...rows.map((r) => r.join('\t'))].join('\n')
-    void navigator.clipboard.writeText(tsv)
+    copyToClipboard(tsv)
   }
 
   const copyOrder = async (o: Order, e: React.MouseEvent) => {
@@ -1391,11 +1410,37 @@ export default function Orders() {
                                   setConfirmBulkDeleteItemIds(ids)
                                   setBulkActionState(o.id, { action: '' })
                                 }
+                              } else if (v === 'copy_tracking') {
+                                const ids = getSelectedIdsForOrder(o)
+                                const numbers = [...new Set(ids.map((id) => getTracking(id)).filter(Boolean))]
+                                if (numbers.length > 0) {
+                                  copyToClipboard(numbers.join('\n'))
+                                }
+                                setBulkActionState(o.id, { action: '' })
+                              } else if (v === 'copy_tracking_usabg') {
+                                const ids = getSelectedIdsForOrder(o)
+                                const selectedItems = (o.items ?? []).filter((item) => ids.includes(item.id))
+                                const byTracking = new Map<string, number>()
+                                for (const item of selectedItems) {
+                                  const tn = getTracking(item.id)?.trim()
+                                  if (!tn) continue
+                                  const qty = itemEdits[item.id]?.quantity ?? item.quantity ?? 1
+                                  const priceSold = itemEdits[item.id]?.price_sold ?? item.price_sold ?? ''
+                                  const payout = parseDecimal(priceSold) * qty
+                                  byTracking.set(tn, (byTracking.get(tn) ?? 0) + payout)
+                                }
+                                if (byTracking.size > 0) {
+                                  const lines = [...byTracking.entries()].map(([tracking, total]) => `${tracking}$${total.toFixed(2)}`)
+                                  copyToClipboard(lines.join('\n'))
+                                }
+                                setBulkActionState(o.id, { action: '' })
                               } else setBulkActionState(o.id, { action: v })
                             }}
                             className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm !bg-brand-50/50 dark:!bg-gray-600/80"
                           >
                             <option value="">Choose action…</option>
+                            <option value="copy_tracking">Copy Tracking Numbers</option>
+                            <option value="copy_tracking_usabg">Copy Tracking Numbers (USABG)</option>
                             <option value="input_tracking">Input Tracking</option>
                             <option value="mark_received">Mark as Received</option>
                             <option value="mark_scanned">Mark scanned</option>
