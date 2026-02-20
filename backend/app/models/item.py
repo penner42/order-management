@@ -39,6 +39,8 @@ class Item(Base):
     )
     quantity = Column(Integer, nullable=False, default=1)
     description = Column(String(500), nullable=True)
+    shipping = Column(Numeric(12, 2), nullable=True)
+    sales_tax = Column(Numeric(12, 2), nullable=True)
     submission_id = Column(String(255), nullable=True)
     receipt_id = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

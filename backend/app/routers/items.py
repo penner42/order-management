@@ -148,6 +148,8 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
         status=item.status,
         quantity=split_off_qty,
         description=item.description,
+        shipping=item.shipping,
+        sales_tax=item.sales_tax,
     )
     db.add(new_item)
     db.commit()

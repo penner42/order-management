@@ -95,9 +95,9 @@ export default function Orders() {
   const [stores, setStores] = useState<Store[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
-  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; shipping?: string; sales_tax?: string; purchase_date?: string }>>({})
+  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; purchase_date?: string }>>({})
   const [savingOrderId, setSavingOrderId] = useState<number | null>(null)
-  const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; status?: ItemStatus }>>({})
+  const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus }>>({})
   const [paymentEdits, setPaymentEdits] = useState<Record<number, { payment_method_id: number; amount: string }[]>>({})
   const [savingItemId, setSavingItemId] = useState<number | null>(null)
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
@@ -412,7 +412,7 @@ export default function Orders() {
       const order = orders.find((o) => o.id === orderId)
       if (!order || !paymentEdits[orderId]?.length) return
       const rows = paymentEdits[orderId]!
-      const totalPaid = orderTotals(order.items ?? [], order.shipping, order.sales_tax)
+      const totalPaid = orderTotals(order.items ?? [])
       const paymentSum = rows.reduce((s, r) => s + parseDecimal(r.amount), 0)
       const usedIds = new Set(rows.map((r) => r.payment_method_id))
       const canSave =
@@ -617,16 +617,14 @@ export default function Orders() {
     return Number.isNaN(n) ? 0 : n
   }
   const orderTotals = (
-    items: { price_paid?: string | null; price_sold?: string | null; quantity?: number }[],
-    orderShipping?: string | null,
-    orderSalesTax?: string | null
+    items: { price_paid?: string | null; quantity?: number; shipping?: string | null; sales_tax?: string | null }[]
   ) => {
     let totalPaid = 0
     for (const item of items) {
       const qty = Math.max(0, item.quantity ?? 1)
       totalPaid += parseDecimal(item.price_paid) * qty
+      totalPaid += parseDecimal(item.shipping) + parseDecimal(item.sales_tax)
     }
-    totalPaid += parseDecimal(orderShipping) + parseDecimal(orderSalesTax)
     return totalPaid
   }
 
@@ -638,7 +636,7 @@ export default function Orders() {
     const ids = getSelectedIdsForOrder(o)
     const toCopy = ids.length > 0 ? items.filter((i) => ids.includes(i.id)) : items
     if (toCopy.length === 0) return
-    const header = ['Qty', 'Description', 'Tracking', 'Cost', 'Payout', 'Status']
+    const header = ['Qty', 'Description', 'Tracking', 'Cost', 'Payout', 'Total cost', 'Total payout', 'Status']
     const rows = toCopy.map((item) => {
       const edits = itemEdits[item.id]
       const qty = edits?.quantity ?? item.quantity ?? 1
@@ -646,8 +644,10 @@ export default function Orders() {
       const tracking = trackingEdits[item.id] ?? getTracking(item.id) ?? ''
       const cost = edits?.price_paid ?? item.price_paid ?? ''
       const payout = edits?.price_sold ?? item.price_sold ?? ''
+      const totalCost = (parseDecimal(cost) * qty).toFixed(2)
+      const totalPayout = (parseDecimal(payout) * qty).toFixed(2)
       const status = STATUS_LABELS[item.status] ?? item.status
-      return [qty, desc, tracking, cost, payout, status]
+      return [qty, desc, tracking, cost, payout, totalCost, totalPayout, status]
     })
     const tsv = [header.join('\t'), ...rows.map((r) => r.join('\t'))].join('\n')
     void navigator.clipboard.writeText(tsv)
@@ -676,9 +676,9 @@ export default function Orders() {
           status: 'purchased',
           quantity: item.quantity ?? 1,
           description: item.description ?? undefined,
+          shipping: item.shipping ?? undefined,
+          sales_tax: item.sales_tax ?? undefined,
         })),
-        shipping: o.shipping ?? undefined,
-        sales_tax: o.sales_tax ?? undefined,
       })
       setOrders((prev) => [created, ...prev])
     } catch (err) {
@@ -718,7 +718,7 @@ export default function Orders() {
                 payment_method_id: op.payment_method_id,
                 amount: op.amount != null ? String(op.amount) : '',
               }))
-            const totalPaid = orderTotals(o.items ?? [], o.shipping, o.sales_tax)
+            const totalPaid = orderTotals(o.items ?? [])
             const itemCount = o.items?.length ?? 0
             const lineItemsHeight = itemCount * 32 + 40 // approx row height + header
 
@@ -1008,6 +1008,11 @@ export default function Orders() {
                             <th className="py-1 px-2 font-medium text-ink-muted">Tracking</th>
                             <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Cost</th>
                             <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
+                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Subtotal</th>
+                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Shipping</th>
+                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Sales Tax</th>
+                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Cost</th>
+                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Payout</th>
                             <th className="py-1 px-2 font-medium text-ink-muted">Status</th>
                             <th className="w-8 py-1 px-1.5 text-right">
                               <div className="flex items-center justify-end gap-0.5">
@@ -1174,6 +1179,47 @@ export default function Orders() {
                                       disabled={savingItemId === item.id}
                                       className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
                                     />
+                                  </td>
+                                  <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
+                                    ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1))).toFixed(2)}
+                                  </td>
+                                  <td className="py-1 px-2">
+                                    <input
+                                      type="text"
+                                      value={itemEdits[item.id]?.shipping ?? (item.shipping ?? '')}
+                                      onChange={(e) =>
+                                        setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], shipping: e.target.value } }))
+                                      }
+                                      onBlur={() => {
+                                        const v = (itemEdits[item.id]?.shipping ?? item.shipping ?? '').trim()
+                                        if (v !== (item.shipping ?? '')) updateItem(item.id, { shipping: v || null })
+                                      }}
+                                      placeholder="0.00"
+                                      disabled={savingItemId === item.id}
+                                      className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                    />
+                                  </td>
+                                  <td className="py-1 px-2">
+                                    <input
+                                      type="text"
+                                      value={itemEdits[item.id]?.sales_tax ?? (item.sales_tax ?? '')}
+                                      onChange={(e) =>
+                                        setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], sales_tax: e.target.value } }))
+                                      }
+                                      onBlur={() => {
+                                        const v = (itemEdits[item.id]?.sales_tax ?? item.sales_tax ?? '').trim()
+                                        if (v !== (item.sales_tax ?? '')) updateItem(item.id, { sales_tax: v || null })
+                                      }}
+                                      placeholder="0.00"
+                                      disabled={savingItemId === item.id}
+                                      className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                    />
+                                  </td>
+                                  <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
+                                    ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1)) + parseDecimal(itemEdits[item.id]?.shipping ?? item.shipping) + parseDecimal(itemEdits[item.id]?.sales_tax ?? item.sales_tax)).toFixed(2)}
+                                  </td>
+                                  <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
+                                    ${((parseDecimal(itemEdits[item.id]?.price_sold ?? item.price_sold) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1))).toFixed(2)}
                                   </td>
                                   <td className="py-1 px-2">
                                     <select

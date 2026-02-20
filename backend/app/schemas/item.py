@@ -12,6 +12,8 @@ class ItemBase(BaseModel):
     status: ItemStatus = ItemStatus.PURCHASED
     quantity: int = 1
     description: str | None = None
+    shipping: Decimal | None = None
+    sales_tax: Decimal | None = None
     submission_id: str | None = None
     receipt_id: str | None = None
     # Datetime when each status was (last) set
@@ -46,6 +48,8 @@ class ItemUpdate(BaseModel):
     status: ItemStatus | None = None
     quantity: int | None = None
     description: str | None = None
+    shipping: Decimal | None = None
+    sales_tax: Decimal | None = None
     submission_id: str | None = None
     receipt_id: str | None = None
     purchased_at: datetime | None = None
@@ -87,6 +91,8 @@ class ItemBulkUpdateEntry(BaseModel):
     status: ItemStatus | None = None
     quantity: int | None = None
     description: str | None = None
+    shipping: Decimal | None = None
+    sales_tax: Decimal | None = None
     submission_id: str | None = None
     receipt_id: str | None = None
     purchased_at: datetime | None = None
