@@ -102,7 +102,11 @@ export default function Orders2() {
   const [paymentEdits, setPaymentEdits] = useState<Record<number, { payment_method_id: number; amount: string }[]>>({})
   const [savingItemId, setSavingItemId] = useState<number | null>(null)
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
+  const [copyingItemId, setCopyingItemId] = useState<number | null>(null)
   const [confirmDeleteItemId, setConfirmDeleteItemId] = useState<number | null>(null)
+  const [confirmDeleteOrderId, setConfirmDeleteOrderId] = useState<number | null>(null)
+  const [splitModalItem, setSplitModalItem] = useState<Item | null>(null)
+  const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null)
   const [advancingGroupKey, setAdvancingGroupKey] = useState<string | null>(null)
   const [addAccountModal, setAddAccountModal] = useState<{ orderId: number; storeName: string; storeId: number } | null>(null)
   const [addAccountName, setAddAccountName] = useState('')
@@ -493,6 +497,30 @@ export default function Orders2() {
     }
   }
 
+  const copyItem = async (order: Order, item: Item) => {
+    setCopyingItemId(item.id)
+    try {
+      const newItem = await api.post<Item>('/items', {
+        order_id: order.id,
+        quantity: item.quantity ?? 1,
+        description: item.description ?? null,
+        price_paid: item.price_paid ?? null,
+        price_sold: item.price_sold ?? null,
+        status: item.status,
+      })
+      const items = order.items ?? []
+      const idx = items.findIndex((i) => i.id === item.id)
+      const nextItems = idx < 0 ? [...items, newItem] : [...items.slice(0, idx + 1), newItem, ...items.slice(idx + 1)]
+      setOrders((prev) =>
+        prev.map((o) => (o.id === order.id ? { ...o, items: nextItems } : o))
+      )
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setCopyingItemId(null)
+    }
+  }
+
   const deleteItem = async (itemId: number) => {
     setDeletingItemId(itemId)
     try {
@@ -510,6 +538,46 @@ export default function Orders2() {
       console.error(e)
     } finally {
       setDeletingItemId(null)
+    }
+  }
+
+  const splitItem = async (itemId: number, keepQuantity: number, currentQuantity: number, orderId: number) => {
+    try {
+      await api.patch<Item>(`/items/${itemId}`, { quantity: currentQuantity })
+      const { kept, split_off } = await api.post<{ kept: Item; split_off: Item }>(
+        `/items/${itemId}/split`,
+        { keep_quantity: keepQuantity }
+      )
+      setOrders((prev) =>
+        prev.map((o) => {
+          if (o.id !== orderId) return o
+          const items = (o.items ?? [])
+            .map((i) => (i.id === itemId ? kept : i))
+            .concat(split_off)
+            .sort((a, b) => a.id - b.id)
+          return { ...o, items }
+        })
+      )
+      setSplitModalItem(null)
+      setItemEdits((prev) => {
+        const next = { ...prev }; delete next[itemId]; return next
+      })
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const deleteOrder = async (orderId: number) => {
+    setDeletingOrderId(orderId)
+    try {
+      await api.delete(`/orders/${orderId}`)
+      setOrders((prev) => prev.filter((o) => o.id !== orderId))
+      setOrderEdits((prev) => { const next = { ...prev }; delete next[orderId]; return next })
+      setPaymentEdits((prev) => { const next = { ...prev }; delete next[orderId]; return next })
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setDeletingOrderId(null)
     }
   }
 
@@ -533,6 +601,28 @@ export default function Orders2() {
   }
 
   const nowIso = () => new Date().toISOString().slice(0, 19)
+
+  const copyLineItems = (o: Order) => {
+    const items = o.items ?? []
+    if (items.length === 0) return
+    const ids = getSelectedIdsForOrder(o)
+    const toCopy = ids.length > 0 ? items.filter((i) => ids.includes(i.id)) : items
+    if (toCopy.length === 0) return
+    const header = ['Qty', 'Description', 'Tracking', 'Cost', 'Payout', 'Status']
+    const rows = toCopy.map((item) => {
+      const edits = itemEdits[item.id]
+      const qty = edits?.quantity ?? item.quantity ?? 1
+      const desc = edits?.description ?? item.description ?? ''
+      const tracking = trackingEdits[item.id] ?? getTracking(item.id) ?? ''
+      const cost = edits?.price_paid ?? item.price_paid ?? ''
+      const payout = edits?.price_sold ?? item.price_sold ?? ''
+      const status = STATUS_LABELS[item.status] ?? item.status
+      return [qty, desc, tracking, cost, payout, status]
+    })
+    const tsv = [header.join('\t'), ...rows.map((r) => r.join('\t'))].join('\n')
+    void navigator.clipboard.writeText(tsv)
+  }
+
   const copyOrder = async (o: Order, e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
@@ -917,6 +1007,18 @@ export default function Orders2() {
                                     </svg>
                                   </button>
                                 )}
+                                <button
+                                  type="button"
+                                  title="Delete order"
+                                  onClick={() => setConfirmDeleteOrderId(o.id)}
+                                  disabled={deletingOrderId === o.id}
+                                  className="p-1.5 rounded text-red-600 hover:text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40 transition disabled:opacity-50"
+                                  aria-label="Delete order"
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
                               </div>
                             </th>
                           </tr>
@@ -1079,6 +1181,33 @@ export default function Orders2() {
                                           {advancingGroupKey === group.key ? '…' : advanceLabel}
                                         </button>
                                       )}
+                                      {(item.quantity ?? 1) >= 2 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => setSplitModalItem(item)}
+                                          className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition"
+                                          title="Split for separate shipping"
+                                          aria-label="Split for separate shipping"
+                                        >
+                                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}>
+                                            <circle cx="6" cy="7" r="3" />
+                                            <circle cx="6" cy="17" r="3" />
+                                            <path d="M8.6 8.6l10.4 10.4M8.6 15.4l10.4 -10.4" />
+                                          </svg>
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => copyItem(o, item)}
+                                        disabled={copyingItemId === item.id}
+                                        className="p-1 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 disabled:opacity-50"
+                                        title="Copy line item"
+                                        aria-label="Copy line item"
+                                      >
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                        </svg>
+                                      </button>
                                       <button
                                         type="button"
                                         onClick={() => setConfirmDeleteItemId(item.id)}
@@ -1168,6 +1297,19 @@ export default function Orders2() {
         }}
         onCancel={() => setConfirmDeleteItemId(null)}
       />
+      <ConfirmDialog
+        open={confirmDeleteOrderId !== null}
+        message="Delete this order and all its line items? This cannot be undone."
+        confirmLabel="Delete order"
+        danger
+        onConfirm={() => {
+          if (confirmDeleteOrderId !== null) {
+            deleteOrder(confirmDeleteOrderId)
+            setConfirmDeleteOrderId(null)
+          }
+        }}
+        onCancel={() => setConfirmDeleteOrderId(null)}
+      />
       {bulkStatusModal && (
         <BulkStatusModal
           order={bulkStatusModal.order}
@@ -1182,6 +1324,15 @@ export default function Orders2() {
           onApply={(submissionId) => applySubmitShipment(submitShipmentModal.group, submissionId)}
           onClose={() => setSubmitShipmentModal(null)}
           applying={advancingGroupKey === submitShipmentModal.group.key}
+        />
+      )}
+      {splitModalItem && (
+        <SplitItemModal
+          item={splitModalItem}
+          onConfirm={(keepQuantity) =>
+            splitItem(splitModalItem.id, keepQuantity, splitModalItem.quantity ?? 1, splitModalItem.order_id)
+          }
+          onClose={() => setSplitModalItem(null)}
         />
       )}
       {addAccountModal && (
@@ -1260,7 +1411,8 @@ export default function Orders2() {
         store_id: stores[0].id,
         purchase_date: nowIso(),
       })
-      setOrders((prev) => [newOrder, ...prev])
+      const newItem = await api.post<Item>('/items', { order_id: newOrder.id, status: 'purchased' })
+      setOrders((prev) => [{ ...newOrder, items: [newItem] }, ...prev])
     } catch (err) {
       console.error(err)
     } finally {
@@ -1393,6 +1545,66 @@ function SubmitShipmentModal({
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >
             {applying ? 'Applying…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SplitItemModal({
+  item,
+  onConfirm,
+  onClose,
+}: {
+  item: Item
+  onConfirm: (keepQuantity: number) => void
+  onClose: () => void
+}) {
+  const qty = item.quantity ?? 1
+  const [keepQuantity, setKeepQuantity] = useState(1)
+  const splitOff = Math.max(0, qty - keepQuantity)
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-md w-full mx-4 border border-brand-200/80 dark:border-gray-700"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-lg font-medium text-ink mb-2">Split for separate shipping</h3>
+        <p className="text-sm text-ink-muted mb-4">
+          Split {qty}× {item.description || 'Item'} into two lines so they can ship with different tracking numbers.
+        </p>
+        <div className="flex gap-4 items-center mb-6">
+          <label className="flex items-center gap-2">
+            <span className="text-sm text-ink-muted">Keep</span>
+            <input
+              type="number"
+              min={1}
+              max={Math.max(1, qty - 1)}
+              value={keepQuantity}
+              onChange={(e) => setKeepQuantity(Math.max(1, Math.min(qty - 1, parseInt(e.target.value, 10) || 1)))}
+              className="w-16 rounded border border-brand-200 dark:border-gray-600 px-2 py-1.5 text-sm bg-white dark:bg-gray-700"
+            />
+            <span className="text-sm text-ink-muted">here</span>
+          </label>
+          <span className="text-ink-muted">→</span>
+          <span className="text-sm text-ink-muted">Split off {splitOff} as new line</span>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm text-ink hover:bg-brand-50 dark:hover:bg-gray-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirm(keepQuantity)}
+            disabled={splitOff < 1}
+            className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
+          >
+            Split
           </button>
         </div>
       </div>
