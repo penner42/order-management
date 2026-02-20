@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from app.auth import get_current_user
 from app.database import get_db
@@ -40,7 +40,12 @@ def list_payments(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    q = db.query(Payment)
+    q = (
+        db.query(Payment)
+        .options(
+            joinedload(Payment.line_items).joinedload(PaymentLineItem.item),
+        )
+    )
     if buying_group_id is not None:
         q = q.filter(Payment.buying_group_id == buying_group_id)
     return q.order_by(Payment.created_at.desc()).all()

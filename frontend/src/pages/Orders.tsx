@@ -1119,6 +1119,10 @@ export default function Orders() {
                               const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
                               const isSubmitted = lowestNext === 'submitted'
                               const isScanned = lowestNext === 'scanned'
+                              const hideAdvanceButton =
+                                lowestNext === 'payment_requested' ||
+                                lowestNext === 'payment_sent' ||
+                                lowestNext === 'payment_received'
                               const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
                               const trackingInfo = trackingRaw ? getTrackingInfo(trackingRaw) : null
                               return (
@@ -1300,7 +1304,7 @@ export default function Orders() {
                                         >
                                           Scanned
                                         </button>
-                                      ) : isFirstInGroup && advanceLabel ? (
+                                      ) : isFirstInGroup && advanceLabel && !hideAdvanceButton ? (
                                         <button
                                           type="button"
                                           onClick={() => {

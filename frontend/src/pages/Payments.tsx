@@ -342,6 +342,7 @@ export default function Payments() {
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Buying group</th>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Payment ID</th>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Items</th>
+              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Amount</th>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Created</th>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Actions</th>
             </tr>
@@ -349,7 +350,7 @@ export default function Payments() {
           <tbody>
             {payments.length === 0 ? (
               <tr>
-                <td colSpan={5} className="py-12 text-center text-ink-muted">
+                <td colSpan={6} className="py-12 text-center text-ink-muted">
                   No payments yet.
                 </td>
               </tr>
@@ -359,6 +360,16 @@ export default function Payments() {
                   <td className="py-3 px-4 text-sm">{p.buying_group?.name ?? '—'}</td>
                   <td className="py-3 px-4 text-sm font-mono">{p.payment_id ?? '—'}</td>
                   <td className="py-3 px-4 text-sm">{p.line_items?.length ?? 0}</td>
+                  <td className="py-3 px-4 text-sm">
+                    {formatMoney(
+                      (p.line_items ?? []).reduce(
+                        (sum, li) =>
+                          sum +
+                          parseDecimal(li.item?.price_sold) * (li.item?.quantity ?? 1),
+                        0
+                      )
+                    )}
+                  </td>
                   <td className="py-3 px-4 text-sm text-ink-muted">
                     {p.created_at ? new Date(p.created_at).toLocaleString() : '—'}
                   </td>
