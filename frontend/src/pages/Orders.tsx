@@ -918,7 +918,7 @@ export default function Orders() {
             ) : (
               orders.map((o) => (
                 <React.Fragment key={o.id}>
-                  <tr className="border-b border-brand-100 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-600">
+                  <tr className="bg-brand-50/50 dark:bg-gray-600/80 border-l-2 border-r-2 border-t-2 border-brand-400 dark:border-gray-400 first:rounded-t-lg">
                     <td className="py-2 px-3" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-2">
                         <Link
@@ -1053,7 +1053,7 @@ export default function Orders() {
                       ) : null}
                     </td>
                   </tr>
-                  <tr className="bg-brand-50/50 dark:bg-gray-600/80 border-b border-brand-100 dark:border-gray-700" onClick={(e) => e.stopPropagation()}>
+                  <tr className="bg-brand-50/50 dark:bg-gray-600/80 border-l-2 border-r-2 border-b-2 border-brand-400 dark:border-gray-400 rounded-b-lg" onClick={(e) => e.stopPropagation()}>
                     <td colSpan={6} className="py-0 px-3 pb-2 pt-0">
                       <div className="space-y-2 pt-2">
                           <div>
@@ -1321,7 +1321,7 @@ export default function Orders() {
                                   return (
                                 <div
                                   key={group.key}
-                                  className={`border-t-2 border-brand-400 dark:border-gray-400 overflow-hidden bg-transparent ${isFirst ? 'mt-0' : ''}`}
+                                  className={`overflow-hidden bg-transparent ${isFirst ? 'mt-0' : ''}`}
                                 >
                                   <table className="w-full text-sm">
                                     <tbody>

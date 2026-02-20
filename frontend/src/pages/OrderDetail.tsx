@@ -401,7 +401,7 @@ export default function OrderDetail() {
         <h1 className="text-2xl font-semibold text-ink">Order</h1>
       </div>
 
-      <section className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm p-6">
+      <section className="bg-brand-50 dark:bg-gray-700/50 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm p-6">
         <h2 className="text-sm font-medium text-ink-muted mb-2">Order number (from store)</h2>
         <input
           type="text"
@@ -737,7 +737,7 @@ export default function OrderDetail() {
                 </tr>
               ) : (
                 order.items.map((item) => (
-                  <tr key={item.id} className="border-b border-brand-100 last:border-0">
+                  <tr key={item.id} className="">
                     <td className="py-2 px-4">
                       <input
                         type="number"

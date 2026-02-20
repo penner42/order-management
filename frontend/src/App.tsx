@@ -186,7 +186,7 @@ function AppShell() {
           </div>
         </div>
       </header>
-      <main className="flex-1 max-w-[1920px] w-full mx-auto px-4 py-8">
+      <main className="flex-1 w-full mx-auto px-12 py-8">
         <Routes>
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
           <Route path="/orders/:orderId" element={<OrderDetail />} />
