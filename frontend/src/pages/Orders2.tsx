@@ -108,6 +108,7 @@ export default function Orders2() {
   const [addAccountName, setAddAccountName] = useState('')
   const [addingAccount, setAddingAccount] = useState(false)
   const [pendingAccountSelection, setPendingAccountSelection] = useState<{ orderId: number; storeId: number; accountId: number } | null>(null)
+  const [creatingOrder, setCreatingOrder] = useState(false)
   const paymentSaveTimeouts = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
   const storeDropdownRefs = useRef<Record<number, { setOpen: (open: boolean) => void; selectItem: (item: any) => void }>>({})
   const navigate = useNavigate()
@@ -573,12 +574,13 @@ export default function Orders2() {
           <h1 className="text-xl font-semibold text-ink dark:text-gray-100">Orders (Option 2)</h1>
           <Link to="/" className="text-sm text-brand-600 dark:text-brand-400 hover:underline">Back to Orders</Link>
         </div>
-        <Link
-          to="/orders/new"
-          className="px-4 py-2 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition shrink-0"
+        <button
+          onClick={handleCreateNewOrder}
+          disabled={creatingOrder}
+          className="px-4 py-2 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition shrink-0 disabled:opacity-60"
         >
-          New order
-        </Link>
+          {creatingOrder ? 'Creating…' : 'New order'}
+        </button>
       </div>
 
       <div className="space-y-4">
@@ -1307,6 +1309,25 @@ export default function Orders2() {
       console.error(err)
     } finally {
       setAddingAccount(false)
+    }
+  }
+
+  async function handleCreateNewOrder() {
+    if (stores.length === 0) {
+      console.error('No stores available to create an order')
+      return
+    }
+    setCreatingOrder(true)
+    try {
+      const newOrder = await api.post<Order>('/orders', {
+        store_id: stores[0].id,
+        purchase_date: nowIso(),
+      })
+      setOrders((prev) => [newOrder, ...prev])
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setCreatingOrder(false)
     }
   }
 }

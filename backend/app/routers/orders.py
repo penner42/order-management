@@ -32,8 +32,21 @@ def list_orders(
         # Default: exclude imported orders from main list
         q = q.filter(Order.status != "imported")
     if status:
-        # Only orders that have at least one item with one of these statuses
-        q = q.join(Item).filter(Item.status.in_(status)).distinct()
+        # Orders that have at least one item with one of these statuses, or orders with no items (always show empty orders).
+        # Build ID sets with separate queries so the main q never joins Item (otherwise orders with no items would be excluded).
+        base = db.query(Order)
+        if order_status == "imported":
+            base = base.filter(Order.status == "imported")
+        else:
+            base = base.filter(Order.status != "imported")
+        ids_with_matching_items = base.join(Item).filter(Item.status.in_(status)).distinct().with_entities(Order.id)
+        ids_with_no_items = base.outerjoin(Item).filter(Item.id.is_(None)).with_entities(Order.id)
+        order_ids = ids_with_matching_items.union(ids_with_no_items).subquery()
+        q = db.query(Order).filter(Order.id.in_(order_ids)).order_by(Order.purchase_date.desc())
+        if order_status == "imported":
+            q = q.filter(Order.status == "imported")
+        else:
+            q = q.filter(Order.status != "imported")
     if buying_group_id:
         q = q.filter(Order.buying_group_id.in_(buying_group_id))
     if date_from:
