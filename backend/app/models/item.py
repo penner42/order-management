@@ -47,10 +47,9 @@ class Item(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # Datetime when each status was (last) set; not populated automatically yet
+    # shipped_at / delivered_at live on Shipment
     purchased_at = Column(DateTime(timezone=True), nullable=True)
-    shipped_at = Column(DateTime(timezone=True), nullable=True)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
-    delivered_at = Column(DateTime(timezone=True), nullable=True)
     scanned_at = Column(DateTime(timezone=True), nullable=True)
     payment_requested_at = Column(DateTime(timezone=True), nullable=True)
     payment_sent_at = Column(DateTime(timezone=True), nullable=True)

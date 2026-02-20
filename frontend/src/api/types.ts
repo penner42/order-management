@@ -103,9 +103,7 @@ export interface Item {
   created_at: string
   updated_at?: string
   purchased_at: string | null
-  shipped_at: string | null
   submitted_at: string | null
-  delivered_at: string | null
   scanned_at: string | null
   payment_requested_at: string | null
   payment_sent_at: string | null
@@ -153,6 +151,7 @@ export interface Shipment {
   user_id: number | null
   tracking_number: string | null
   shipped_at: string | null
+  delivered_at: string | null
   notes: string | null
   created_at: string
   shipment_items: ShipmentItem[]

@@ -1,10 +1,12 @@
 """Items API (order line items)."""
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Item, User, Payment, PaymentLineItem
+from app.models import Item, Shipment, ShipmentItem, User, Payment, PaymentLineItem
 from app.models.item import ItemStatus
 from app.schemas.item import (
     ItemBulkDeleteRequest,
@@ -18,9 +20,9 @@ from app.schemas.item import (
 )
 from app.utils.dates import to_date_only
 
-# Item status date fields: date-only (time doesn't matter)
+# Item status date fields: date-only (shipped_at/delivered_at live on Shipment)
 _ITEM_DATE_FIELDS = frozenset({
-    "purchased_at", "shipped_at", "submitted_at", "delivered_at", "scanned_at",
+    "purchased_at", "submitted_at", "scanned_at",
     "payment_requested_at", "payment_sent_at", "payment_received_at",
     "canceled_at", "needs_return_at", "return_started_at",
     "return_sent_at", "return_received_at", "return_refunded_at",
@@ -85,7 +87,7 @@ def bulk_update_items(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Update multiple items in a single request."""
+    """Update multiple items in a single request. delivered_at in entry is applied to the item's shipment when status=delivered."""
     updated: list[Item] = []
     for entry in data.updates:
         item = db.query(Item).filter(Item.id == entry.item_id).first()
@@ -93,10 +95,21 @@ def bulk_update_items(
             raise HTTPException(status_code=404, detail=f"Item {entry.item_id} not found")
         payload = entry.model_dump(exclude_unset=True, exclude={"item_id"})
         for k, v in payload.items():
+            if k == "delivered_at":
+                continue  # applied to shipment below when status=delivered
             if k in _ITEM_DATE_FIELDS:
                 setattr(item, k, to_date_only(v) if v is not None else None)
             else:
                 setattr(item, k, v)
+        if getattr(entry, "status", None) == ItemStatus.DELIVERED:
+            si = db.query(ShipmentItem).filter(ShipmentItem.item_id == item.id).first()
+            if si:
+                shipment = db.query(Shipment).filter(Shipment.id == si.shipment_id).first()
+                if shipment:
+                    shipment.delivered_at = (
+                        to_date_only(entry.delivered_at) if entry.delivered_at is not None
+                        else to_date_only(datetime.now(timezone.utc))
+                    )
         updated.append(item)
     for item in updated:
         _remove_item_from_payment_if_earlier_status(item, db)
@@ -176,6 +189,12 @@ def update_item(item_id: int, data: ItemUpdate, db: Session = Depends(get_db), _
             setattr(item, k, to_date_only(v) if v is not None else None)
         else:
             setattr(item, k, v)
+    if item.status == ItemStatus.DELIVERED:
+        si = db.query(ShipmentItem).filter(ShipmentItem.item_id == item.id).first()
+        if si:
+            shipment = db.query(Shipment).filter(Shipment.id == si.shipment_id).first()
+            if shipment:
+                shipment.delivered_at = to_date_only(datetime.now(timezone.utc))
     _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     db.refresh(item)

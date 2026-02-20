@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { api } from '../api/client'
-import type { Order } from '../api/types'
+import type { Order, Shipment } from '../api/types'
 
 function escapeCsv(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return ''
@@ -10,7 +10,19 @@ function escapeCsv(value: string | number | null | undefined): string {
   return s
 }
 
-function buildOrdersCsv(orders: Order[]): string {
+function buildItemIdToShipmentDates(shipments: Shipment[]): Record<number, { shipped_at: string | null; delivered_at: string | null }> {
+  const map: Record<number, { shipped_at: string | null; delivered_at: string | null }> = {}
+  for (const s of shipments) {
+    const entry = { shipped_at: s.shipped_at ?? null, delivered_at: s.delivered_at ?? null }
+    for (const si of s.shipment_items ?? []) {
+      map[si.item_id] = entry
+    }
+  }
+  return map
+}
+
+function buildOrdersCsv(orders: Order[], shipments: Shipment[]): string {
+  const itemIdToShipmentDates = buildItemIdToShipmentDates(shipments)
   const headers = [
     'order_store_name',
     'order_store_account_name',
@@ -83,9 +95,9 @@ function buildOrdersCsv(orders: Order[]): string {
         escapeCsv(item.created_at),
         escapeCsv(item.updated_at),
         escapeCsv(item.purchased_at),
-        escapeCsv(item.shipped_at),
+        escapeCsv(itemIdToShipmentDates[item.id]?.shipped_at ?? null),
         escapeCsv(item.submitted_at),
-        escapeCsv(item.delivered_at),
+        escapeCsv(itemIdToShipmentDates[item.id]?.delivered_at ?? null),
         escapeCsv(item.scanned_at),
         escapeCsv(item.payment_requested_at),
         escapeCsv(item.payment_sent_at),
@@ -157,8 +169,11 @@ export default function Profile() {
     setCsvError(null)
     setDownloadingCsv(true)
     try {
-      const orders = await api.get<Order[]>('/users/me/orders')
-      const csv = buildOrdersCsv(orders)
+      const [orders, shipments] = await Promise.all([
+        api.get<Order[]>('/users/me/orders'),
+        api.get<Shipment[]>('/shipments'),
+      ])
+      const csv = buildOrdersCsv(orders, shipments)
       const filename = `orders-${new Date().toISOString().slice(0, 10)}.csv`
       downloadCsv(csv, filename)
     } catch (err) {

@@ -1,0 +1,19 @@
+---
+description: "Orders" refers to Orders.tsx (list page) unless OrderDetail is specified
+alwaysApply: true
+---
+
+# "Orders" Means the Orders List Page
+
+When the user talks about **orders** (e.g. "fix the orders page", "add a column to orders", "orders table"), assume they mean:
+
+- **Orders.tsx** (the orders list/overview page)
+
+**Not** OrderDetail.tsx (the single-order detail page) unless they explicitly say "order detail", "order detail page", or "OrderDetail".
+
+## Examples
+
+- "Sort orders by date" → work in **Orders.tsx**
+- "Add a filter to orders" → work in **Orders.tsx**
+- "Fix the orders table" → work in **Orders.tsx**
+- "Change the order detail header" → work in **OrderDetail.tsx** (explicit)

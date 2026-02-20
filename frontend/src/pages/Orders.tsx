@@ -50,10 +50,9 @@ const STATUS_PROGRESSION: ItemStatus[] = [
   'payment_received',
 ]
 
+// shipped_at / delivered_at live on Shipment
 const STATUS_TO_DATE_FIELD: Record<string, keyof Item> = {
-  shipped: 'shipped_at',
   submitted: 'submitted_at',
-  delivered: 'delivered_at',
   scanned: 'scanned_at',
   payment_requested: 'payment_requested_at',
   payment_sent: 'payment_sent_at',
@@ -85,6 +84,11 @@ export default function Orders() {
   const [bulkActionByOrder, setBulkActionByOrder] = useState<Record<number, { action: string; tracking: string; shippedAt: string }>>({})
   const [bulkActionShippingOrderId, setBulkActionShippingOrderId] = useState<number | null>(null)
   const [bulkStatusModal, setBulkStatusModal] = useState<{ order: Order; itemIds: number[] } | null>(null)
+  const [bulkScanModal, setBulkScanModal] = useState<{ order: Order; itemIds: number[] } | null>(null)
+  const [scanSingleItemModal, setScanSingleItemModal] = useState<Item | null>(null)
+  const [scanReceiptModal, setScanReceiptModal] = useState<{
+    group: { key: string; label: string; trackingNumber: string | null; items: Item[] }
+  } | null>(null)
   const [submitShipmentModal, setSubmitShipmentModal] = useState<{
     group: { key: string; label: string; trackingNumber: string | null; items: Item[] }
   } | null>(null)
@@ -359,6 +363,29 @@ export default function Orders() {
     }
   }
 
+  const applyScanShipment = async (group: { key: string; items: Item[] }, receiptIds: Record<number, string>) => {
+    const now = new Date().toISOString().slice(0, 19)
+    const toUpdate = group.items.filter((item) => getNextStatus(item.status) === 'scanned')
+    if (toUpdate.length === 0) return
+    setAdvancingGroupKey(group.key)
+    try {
+      const res = await api.post<{ items: Item[] }>('/items/bulk-update', {
+        updates: toUpdate.map((item) => ({
+          item_id: item.id,
+          status: 'scanned',
+          scanned_at: now,
+          receipt_id: (receiptIds[item.id] ?? '').trim() || null,
+        })),
+      })
+      mergeUpdatedItemsIntoOrders(res.items)
+      setScanReceiptModal(null)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setAdvancingGroupKey(null)
+    }
+  }
+
   const applyBulkReceived = async (itemIds: number[], receiptIds: Record<number, string>) => {
     const now = new Date().toISOString().slice(0, 19)
     try {
@@ -375,6 +402,27 @@ export default function Orders() {
         const next = new Set(prev); itemIds.forEach((id) => next.delete(id)); return next
       })
       setBulkStatusModal(null)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const applyBulkScanned = async (itemIds: number[], receiptIds: Record<number, string>) => {
+    const now = new Date().toISOString().slice(0, 19)
+    try {
+      const res = await api.post<{ items: Item[] }>('/items/bulk-update', {
+        updates: itemIds.map((itemId) => ({
+          item_id: itemId,
+          status: 'scanned',
+          scanned_at: now,
+          receipt_id: (receiptIds[itemId] ?? '').trim() || null,
+        })),
+      })
+      mergeUpdatedItemsIntoOrders(res.items)
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev); itemIds.forEach((id) => next.delete(id)); return next
+      })
+      setBulkScanModal(null)
     } catch (e) {
       console.error(e)
     }
@@ -1070,6 +1118,7 @@ export default function Orders() {
                                   : null
                               const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
                               const isSubmitted = lowestNext === 'submitted'
+                              const isScanned = lowestNext === 'scanned'
                               const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
                               const trackingInfo = trackingRaw ? getTrackingInfo(trackingRaw) : null
                               return (
@@ -1241,21 +1290,32 @@ export default function Orders() {
                                   </td>
                                   <td className="py-1 px-1.5 text-right w-8">
                                     <div className="flex items-center justify-end gap-0.5">
-                                      {isFirstInGroup && advanceLabel && (
+                                      {getNextStatus(item.status) === 'scanned' ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => setScanSingleItemModal(item)}
+                                          className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700"
+                                          title="Mark as Scanned"
+                                          aria-label="Mark as Scanned"
+                                        >
+                                          Scanned
+                                        </button>
+                                      ) : isFirstInGroup && advanceLabel ? (
                                         <button
                                           type="button"
                                           onClick={() => {
                                             if (isSubmitted) setSubmitShipmentModal({ group })
+                                            else if (isScanned) setScanReceiptModal({ group })
                                             else advanceShipmentToNextStatus(group)
                                           }}
                                           disabled={advancingGroupKey === group.key}
                                           className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
-                                          title={isSubmitted ? 'Mark as Submitted' : `Advance to ${advanceLabel}`}
-                                          aria-label={isSubmitted ? 'Mark as Submitted' : `Advance to ${advanceLabel}`}
+                                          title={isSubmitted ? 'Mark as Submitted' : isScanned ? 'Mark as Scanned' : `Advance to ${advanceLabel}`}
+                                          aria-label={isSubmitted ? 'Mark as Submitted' : isScanned ? 'Mark as Scanned' : `Advance to ${advanceLabel}`}
                                         >
                                           {advancingGroupKey === group.key ? '…' : advanceLabel}
                                         </button>
-                                      )}
+                                      ) : null}
                                       {(item.quantity ?? 1) >= 2 && (
                                         <button
                                           type="button"
@@ -1315,6 +1375,12 @@ export default function Orders() {
                                   setBulkStatusModal({ order: o, itemIds: ids })
                                   setBulkActionState(o.id, { action: '' })
                                 }
+                              } else if (v === 'mark_scanned') {
+                                const ids = getSelectedIdsForOrder(o)
+                                if (ids.length > 0) {
+                                  setBulkScanModal({ order: o, itemIds: ids })
+                                  setBulkActionState(o.id, { action: '' })
+                                }
                               } else if (v === 'delete_items') {
                                 const ids = getSelectedIdsForOrder(o)
                                 if (ids.length > 0) {
@@ -1328,6 +1394,7 @@ export default function Orders() {
                             <option value="">Choose action…</option>
                             <option value="input_tracking">Input Tracking</option>
                             <option value="mark_received">Mark as Received</option>
+                            <option value="mark_scanned">Mark scanned</option>
                             <option disabled>────────────</option>
                             <option value="delete_items">Delete items</option>
                           </select>
@@ -1411,6 +1478,37 @@ export default function Orders() {
           itemIds={bulkStatusModal.itemIds}
           onApply={(receiptIds) => applyBulkReceived(bulkStatusModal.itemIds, receiptIds)}
           onClose={() => setBulkStatusModal(null)}
+        />
+      )}
+      {bulkScanModal && (
+        <BulkScanModal
+          order={bulkScanModal.order}
+          itemIds={bulkScanModal.itemIds}
+          onApply={(receiptIds) => applyBulkScanned(Object.keys(receiptIds).map(Number), receiptIds)}
+          onClose={() => setBulkScanModal(null)}
+        />
+      )}
+      {scanSingleItemModal && (
+        <ScanSingleItemModal
+          item={scanSingleItemModal}
+          onApply={async (receiptId) => {
+            const now = new Date().toISOString().slice(0, 19)
+            await updateItem(scanSingleItemModal.id, {
+              status: 'scanned',
+              scanned_at: now,
+              receipt_id: receiptId.trim() || null,
+            })
+            setScanSingleItemModal(null)
+          }}
+          onClose={() => setScanSingleItemModal(null)}
+        />
+      )}
+      {scanReceiptModal && (
+        <ScanReceiptModal
+          group={scanReceiptModal.group}
+          onApply={(receiptIds) => applyScanShipment(scanReceiptModal.group, receiptIds)}
+          onClose={() => setScanReceiptModal(null)}
+          applying={advancingGroupKey === scanReceiptModal.group.key}
         />
       )}
       {submitShipmentModal && (
@@ -1516,6 +1614,157 @@ export default function Orders() {
   }
 }
 
+function ScanSingleItemModal({
+  item,
+  onApply,
+  onClose,
+}: {
+  item: Item
+  onApply: (receiptId: string) => Promise<void>
+  onClose: () => void
+}) {
+  const [receiptId, setReceiptId] = useState(item.receipt_id ?? '')
+  const [applying, setApplying] = useState(false)
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-md w-full mx-4 border border-brand-200/80 dark:border-gray-700"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-lg font-medium text-ink mb-2">Mark as Scanned</h3>
+        <p className="text-sm text-ink-muted mb-2">{item.description || 'Item'}</p>
+        <label className="block text-sm font-medium text-ink mb-2">Receipt ID (optional)</label>
+        <input
+          type="text"
+          value={receiptId}
+          onChange={(e) => setReceiptId(e.target.value)}
+          placeholder="Receipt ID"
+          className="w-full h-10 rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-2 text-sm bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 mb-6"
+        />
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm text-ink hover:bg-brand-50 dark:hover:bg-gray-700">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              setApplying(true)
+              try {
+                await onApply(receiptId)
+              } finally {
+                setApplying(false)
+              }
+            }}
+            disabled={applying}
+            className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
+          >
+            {applying ? 'Applying…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BulkScanModal({
+  order,
+  itemIds,
+  onApply,
+  onClose,
+}: {
+  order: Order
+  itemIds: number[]
+  onApply: (receiptIds: Record<number, string>) => Promise<void>
+  onClose: () => void
+}) {
+  const items = (order.items ?? []).filter((i) => itemIds.includes(i.id) && getNextStatus(i.status) === 'scanned')
+  const [receiptIds, setReceiptIds] = useState<Record<number, string>>(() =>
+    items.reduce<Record<number, string>>((acc, i) => {
+      acc[i.id] = i.receipt_id ?? ''
+      return acc
+    }, {})
+  )
+  const [applying, setApplying] = useState(false)
+  if (items.length === 0) {
+    return (
+      <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+        <div
+          className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-md w-full mx-4 border border-brand-200/80 dark:border-gray-700"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 className="text-lg font-medium text-ink mb-2">Mark scanned</h3>
+          <p className="text-sm text-ink-muted mb-4">None of the selected items can be marked scanned (they must be in Delivered status).</p>
+          <div className="flex justify-end">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm text-ink hover:bg-brand-50 dark:hover:bg-gray-700">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-2xl w-full mx-4 border border-brand-200/80 dark:border-gray-700 max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-lg font-medium text-ink mb-4">
+          Mark {items.length} item{items.length !== 1 ? 's' : ''} as Scanned
+        </h3>
+        <div className="overflow-auto flex-1 min-h-0">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left border-b border-brand-200 dark:border-gray-600">
+                <th className="py-2 px-2 font-medium text-ink-muted w-12">Qty</th>
+                <th className="py-2 px-2 font-medium text-ink-muted">Description</th>
+                <th className="py-2 px-2 font-medium text-ink-muted min-w-[10rem]">Receipt ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.id} className="border-b border-brand-100 dark:border-gray-700 last:border-0">
+                  <td className="py-2 px-2">{item.quantity ?? 1}</td>
+                  <td className="py-2 px-2 text-ink">{item.description || '—'}</td>
+                  <td className="py-2 px-2">
+                    <input
+                      type="text"
+                      value={receiptIds[item.id] ?? ''}
+                      onChange={(e) => setReceiptIds((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                      placeholder="Receipt ID (optional)"
+                      className="w-full min-w-[10rem] h-8 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="flex justify-end gap-2 mt-4 pt-4 border-t border-brand-200 dark:border-gray-600">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm text-ink hover:bg-brand-50 dark:hover:bg-gray-700">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              setApplying(true)
+              try {
+                await onApply(receiptIds)
+              } finally {
+                setApplying(false)
+              }
+            }}
+            disabled={applying}
+            className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
+          >
+            {applying ? 'Applying…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function BulkStatusModal({
   order,
   itemIds,
@@ -1586,6 +1835,81 @@ function BulkStatusModal({
                 setApplying(false)
               }
             }}
+            disabled={applying}
+            className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
+          >
+            {applying ? 'Applying…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ScanReceiptModal({
+  group,
+  onApply,
+  onClose,
+  applying,
+}: {
+  group: { key: string; label: string; trackingNumber: string | null; items: Item[] }
+  onApply: (receiptIds: Record<number, string>) => Promise<void>
+  onClose: () => void
+  applying: boolean
+}) {
+  const toUpdate = group.items.filter((item) => getNextStatus(item.status) === 'scanned')
+  const [receiptIds, setReceiptIds] = useState<Record<number, string>>(() =>
+    toUpdate.reduce<Record<number, string>>((acc, i) => {
+      acc[i.id] = i.receipt_id ?? ''
+      return acc
+    }, {})
+  )
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-2xl w-full mx-4 border border-brand-200/80 dark:border-gray-700 max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-lg font-medium text-ink mb-2">Mark as Scanned</h3>
+        <p className="text-sm text-ink-muted mb-4">
+          {toUpdate.length} item{toUpdate.length !== 1 ? 's' : ''} in this shipment
+          {group.trackingNumber && <span className="ml-1 font-mono text-ink">({group.trackingNumber})</span>}
+        </p>
+        <div className="overflow-auto flex-1 min-h-0">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left border-b border-brand-200 dark:border-gray-600">
+                <th className="py-2 px-2 font-medium text-ink-muted w-12">Qty</th>
+                <th className="py-2 px-2 font-medium text-ink-muted">Description</th>
+                <th className="py-2 px-2 font-medium text-ink-muted min-w-[10rem]">Receipt ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {toUpdate.map((item) => (
+                <tr key={item.id} className="border-b border-brand-100 dark:border-gray-700 last:border-0">
+                  <td className="py-2 px-2">{item.quantity ?? 1}</td>
+                  <td className="py-2 px-2 text-ink">{item.description || '—'}</td>
+                  <td className="py-2 px-2">
+                    <input
+                      type="text"
+                      value={receiptIds[item.id] ?? ''}
+                      onChange={(e) => setReceiptIds((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                      placeholder="Receipt ID (optional)"
+                      className="w-full h-8 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="flex justify-end gap-2 mt-4 pt-4 border-t border-brand-200 dark:border-gray-600">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm text-ink hover:bg-brand-50 dark:hover:bg-gray-700">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={async () => await onApply(receiptIds)}
             disabled={applying}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >

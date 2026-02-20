@@ -16,11 +16,9 @@ class ItemBase(BaseModel):
     sales_tax: Decimal | None = None
     submission_id: str | None = None
     receipt_id: str | None = None
-    # Datetime when each status was (last) set
+    # Datetime when each status was (last) set (shipped_at/delivered_at on Shipment)
     purchased_at: datetime | None = None
-    shipped_at: datetime | None = None
     submitted_at: datetime | None = None
-    delivered_at: datetime | None = None
     scanned_at: datetime | None = None
     payment_requested_at: datetime | None = None
     payment_sent_at: datetime | None = None
@@ -53,9 +51,7 @@ class ItemUpdate(BaseModel):
     submission_id: str | None = None
     receipt_id: str | None = None
     purchased_at: datetime | None = None
-    shipped_at: datetime | None = None
     submitted_at: datetime | None = None
-    delivered_at: datetime | None = None
     scanned_at: datetime | None = None
     payment_requested_at: datetime | None = None
     payment_sent_at: datetime | None = None
@@ -84,7 +80,7 @@ class ItemSplitRequest(BaseModel):
 
 
 class ItemBulkUpdateEntry(BaseModel):
-    """Single item update in a bulk request."""
+    """Single item update in a bulk request. delivered_at applies to the item's shipment when status=delivered."""
     item_id: int
     price_paid: Decimal | None = None
     price_sold: Decimal | None = None
@@ -96,9 +92,8 @@ class ItemBulkUpdateEntry(BaseModel):
     submission_id: str | None = None
     receipt_id: str | None = None
     purchased_at: datetime | None = None
-    shipped_at: datetime | None = None
     submitted_at: datetime | None = None
-    delivered_at: datetime | None = None
+    delivered_at: datetime | None = None  # applied to shipment when status=delivered
     scanned_at: datetime | None = None
     payment_requested_at: datetime | None = None
     payment_sent_at: datetime | None = None

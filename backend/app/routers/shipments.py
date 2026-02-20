@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -18,7 +18,12 @@ router = APIRouter(prefix="/shipments", tags=["shipments"])
 
 @router.get("", response_model=list[ShipmentRead])
 def list_shipments(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return db.query(Shipment).order_by(Shipment.created_at.desc()).all()
+    return (
+        db.query(Shipment)
+        .options(joinedload(Shipment.shipment_items).joinedload(ShipmentItem.item))
+        .order_by(Shipment.created_at.desc())
+        .all()
+    )
 
 
 @router.post("", response_model=ShipmentRead)
@@ -84,7 +89,12 @@ def create_shipment(data: ShipmentCreate, db: Session = Depends(get_db), current
 
 @router.get("/{shipment_id}", response_model=ShipmentRead)
 def get_shipment(shipment_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
+    shipment = (
+        db.query(Shipment)
+        .options(joinedload(Shipment.shipment_items).joinedload(ShipmentItem.item))
+        .filter(Shipment.id == shipment_id)
+        .first()
+    )
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
     return shipment
@@ -96,7 +106,7 @@ def update_shipment(shipment_id: int, data: ShipmentUpdate, db: Session = Depend
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
     for k, v in data.model_dump(exclude_unset=True).items():
-        if k == "shipped_at":
+        if k in ("shipped_at", "delivered_at"):
             setattr(shipment, k, to_date_only(v) if v is not None else None)
         elif k == "item_ids":
             # Replace shipment items; each item can only be in one shipment
