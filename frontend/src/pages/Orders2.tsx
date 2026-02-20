@@ -96,7 +96,7 @@ export default function Orders2() {
   const [stores, setStores] = useState<Store[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
-  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; shipping?: string; sales_tax?: string }>>({})
+  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; shipping?: string; sales_tax?: string; purchase_date?: string }>>({})
   const [savingOrderId, setSavingOrderId] = useState<number | null>(null)
   const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; status?: ItemStatus }>>({})
   const [paymentEdits, setPaymentEdits] = useState<Record<number, { payment_method_id: number; amount: string }[]>>({})
@@ -543,21 +543,24 @@ export default function Orders2() {
         store_id: o.store_id,
         store_account_id: o.store_account_id ?? null,
         store_order_number: null,
-        purchase_date: o.purchase_date ?? nowIso(),
+        purchase_date: nowIso(),
         notes: o.notes ?? undefined,
         buying_group_id: o.buying_group_id ?? null,
-        payment_methods: (o.order_payments ?? []).map((op) => ({ payment_method_id: op.payment_method_id, amount: op.amount ?? undefined })),
+        payment_methods: (o.order_payments ?? []).map((op) => ({
+          payment_method_id: op.payment_method_id,
+          amount: op.amount ?? undefined,
+        })),
         items: o.items.map((item) => ({
           price_paid: item.price_paid ?? undefined,
           price_sold: item.price_sold ?? undefined,
-          status: item.status,
+          status: 'purchased',
           quantity: item.quantity ?? 1,
           description: item.description ?? undefined,
         })),
         shipping: o.shipping ?? undefined,
         sales_tax: o.sales_tax ?? undefined,
       })
-      navigate(`/orders/${created.id}`)
+      setOrders((prev) => [created, ...prev])
     } catch (err) {
       console.error(err)
     } finally {
@@ -619,7 +622,7 @@ export default function Orders2() {
                   className="w-[400px] shrink-0 flex flex-col gap-2 p-3 border-r-2 border-brand-400 dark:border-gray-400 bg-white/80 dark:bg-gray-700/80 overflow-hidden"
                   style={{ minHeight: lineItemsHeight }}
                 >
-                  <div className="flex items-center gap-1.5">
+                  <div>
                     <input
                       type="text"
                       value={orderEdits[o.id]?.store_order_number ?? (o.store_order_number ?? '')}
@@ -640,10 +643,11 @@ export default function Orders2() {
                       }}
                       placeholder="Order #"
                       disabled={savingOrderId === o.id}
-                      className="w-24 h-6 rounded border border-transparent bg-transparent px-1 py-0 text-sm font-medium text-brand-700 dark:text-brand-400 focus:border-brand-300 focus:bg-white dark:focus:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-brand-500 disabled:opacity-60"
+                      className="w-full min-w-0 h-6 rounded border border-transparent bg-transparent px-1 py-0 text-sm font-medium text-brand-700 dark:text-brand-400 focus:border-brand-300 focus:bg-white dark:focus:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-brand-500 disabled:opacity-60"
                     />
-                    <div className="min-w-0 flex-1">
-                      <SearchableCombobox<{ id: number; name: string; type: 'store' | 'account'; storeId?: number; accountId?: number }>
+                  </div>
+                  <div className="min-w-0">
+                    <SearchableCombobox<{ id: number; name: string; type: 'store' | 'account'; storeId?: number; accountId?: number }>
                         onControlRef={(api) => {
                           storeDropdownRefs.current[o.id] = api
                         }}
@@ -738,9 +742,9 @@ export default function Orders2() {
                         }}
                         placeholder="Store or account…"
                       />
-                    </div>
                   </div>
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                    <div className="min-w-0 flex-1">
                     <SearchableCombobox<BuyingGroup>
                       inputClassName="h-6 py-0 px-2 text-sm rounded border border-brand-200 dark:border-gray-600 w-full min-w-0 text-ink focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent disabled:opacity-60 dark:bg-gray-700"
                       options={groups}
@@ -756,9 +760,39 @@ export default function Orders2() {
                       allowEmpty
                       disabled={savingOrderId === o.id}
                     />
-                  </div>
-                  <div className="text-xs text-ink-muted">
-                    Purchase: {o.purchase_date ? new Date(o.purchase_date).toLocaleDateString() : '—'}
+                    </div>
+                    <label className="flex items-center gap-1 text-xs text-ink-muted shrink-0">
+                      Purchase
+                      <input
+                        type="date"
+                        value={
+                          orderEdits[o.id]?.purchase_date ??
+                          (o.purchase_date ? o.purchase_date.slice(0, 10) : '')
+                        }
+                        onChange={(e) =>
+                          setOrderEdits((prev) => ({
+                            ...prev,
+                            [o.id]: { ...prev[o.id], purchase_date: e.target.value || '' },
+                          }))
+                        }
+                        onBlur={(e) => {
+                          const v = e.target.value.trim() || null
+                          const current = o.purchase_date ? o.purchase_date.slice(0, 10) : null
+                          if (v !== current)
+                            updateOrder(o.id, { purchase_date: v ? `${v}T00:00:00.000Z` : null })
+                          setOrderEdits((prev) => {
+                            const next = { ...prev }
+                            if (next[o.id]) {
+                              delete next[o.id].purchase_date
+                              if (Object.keys(next[o.id]).length === 0) delete next[o.id]
+                            }
+                            return next
+                          })
+                        }}
+                        disabled={savingOrderId === o.id}
+                        className="h-6 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80 disabled:opacity-60"
+                      />
+                    </label>
                   </div>
                   <div className="space-y-1">
                     <p className="text-xs font-medium text-ink-muted">
@@ -921,20 +955,6 @@ export default function Orders2() {
                       />
                     </label>
                   </div>
-                  {o.items && o.items.length > 0 && (
-                    <button
-                      type="button"
-                      title="Copy order"
-                      onClick={(e) => copyOrder(o, e)}
-                      disabled={copyingId === o.id}
-                      className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-gray-600 dark:hover:text-brand-400 transition disabled:opacity-50 self-start"
-                      aria-label="Copy order"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                    </button>
-                  )}
                 </div>
 
                 {/* Right: line items table */}
@@ -970,17 +990,33 @@ export default function Orders2() {
                             <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
                             <th className="py-1 px-2 font-medium text-ink-muted">Status</th>
                             <th className="w-8 py-1 px-1.5 text-right">
-                              <button
-                                type="button"
-                                onClick={() => addItem(o)}
-                                className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600"
-                                title="Add line item"
-                                aria-label="Add line item"
-                              >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                                </svg>
-                              </button>
+                              <div className="flex items-center justify-end gap-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => addItem(o)}
+                                  className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600"
+                                  title="Add line item"
+                                  aria-label="Add line item"
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                  </svg>
+                                </button>
+                                {o.items && o.items.length > 0 && (
+                                  <button
+                                    type="button"
+                                    title="Copy order"
+                                    onClick={(e) => copyOrder(o, e)}
+                                    disabled={copyingId === o.id}
+                                    className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition disabled:opacity-50"
+                                    aria-label="Copy order"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                    </svg>
+                                  </button>
+                                )}
+                              </div>
                             </th>
                           </tr>
                         </thead>
