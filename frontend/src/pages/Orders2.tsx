@@ -104,6 +104,7 @@ export default function Orders2() {
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
   const [copyingItemId, setCopyingItemId] = useState<number | null>(null)
   const [confirmDeleteItemId, setConfirmDeleteItemId] = useState<number | null>(null)
+  const [confirmBulkDeleteItemIds, setConfirmBulkDeleteItemIds] = useState<number[] | null>(null)
   const [confirmDeleteOrderId, setConfirmDeleteOrderId] = useState<number | null>(null)
   const [splitModalItem, setSplitModalItem] = useState<Item | null>(null)
   const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null)
@@ -538,6 +539,37 @@ export default function Orders2() {
       console.error(e)
     } finally {
       setDeletingItemId(null)
+    }
+  }
+
+  const deleteItems = async (itemIds: number[]) => {
+    if (itemIds.length === 0) return
+    try {
+      await api.post('/items/bulk-delete', { item_ids: itemIds })
+      const [ordersData, shipmentsData] = await Promise.all([
+        api.get<Order[]>(defaultOrdersPath()),
+        api.get<Shipment[]>('/shipments'),
+      ])
+      setOrders(ordersData)
+      setShipments(shipmentsData)
+      const idSet = new Set(itemIds)
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev)
+        idSet.forEach((id) => next.delete(id))
+        return next
+      })
+      setItemEdits((prev) => {
+        const next = { ...prev }
+        idSet.forEach((id) => delete next[id])
+        return next
+      })
+      setTrackingEdits((prev) => {
+        const next = { ...prev }
+        idSet.forEach((id) => delete next[id])
+        return next
+      })
+    } catch (e) {
+      console.error(e)
     }
   }
 
@@ -1240,6 +1272,12 @@ export default function Orders2() {
                                   setBulkStatusModal({ order: o, itemIds: ids })
                                   setBulkActionState(o.id, { action: '' })
                                 }
+                              } else if (v === 'delete_items') {
+                                const ids = getSelectedIdsForOrder(o)
+                                if (ids.length > 0) {
+                                  setConfirmBulkDeleteItemIds(ids)
+                                  setBulkActionState(o.id, { action: '' })
+                                }
                               } else setBulkActionState(o.id, { action: v })
                             }}
                             className="h-6 rounded-lg border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm !bg-brand-50/50 dark:!bg-gray-600/80"
@@ -1247,6 +1285,8 @@ export default function Orders2() {
                             <option value="">Choose action…</option>
                             <option value="input_tracking">Input Tracking</option>
                             <option value="mark_received">Mark as Received</option>
+                            <option disabled>────────────</option>
+                            <option value="delete_items">Delete items</option>
                           </select>
                           {getBulkActionState(o.id).action === 'input_tracking' && (
                             <>
@@ -1296,6 +1336,18 @@ export default function Orders2() {
           }
         }}
         onCancel={() => setConfirmDeleteItemId(null)}
+      />
+      <ConfirmDialog
+        open={confirmBulkDeleteItemIds !== null && confirmBulkDeleteItemIds.length > 0}
+        message={`Delete ${confirmBulkDeleteItemIds?.length ?? 0} selected items? This cannot be undone.`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={() => {
+          const ids = confirmBulkDeleteItemIds ?? []
+          setConfirmBulkDeleteItemIds(null)
+          deleteItems(ids)
+        }}
+        onCancel={() => setConfirmBulkDeleteItemIds(null)}
       />
       <ConfirmDialog
         open={confirmDeleteOrderId !== null}

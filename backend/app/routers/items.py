@@ -7,6 +7,7 @@ from app.database import get_db
 from app.models import Item, User, Payment, PaymentLineItem
 from app.models.item import ItemStatus
 from app.schemas.item import (
+    ItemBulkDeleteRequest,
     ItemBulkUpdateRequest,
     ItemBulkUpdateResponse,
     ItemCreate,
@@ -103,6 +104,26 @@ def bulk_update_items(
     for item in updated:
         db.refresh(item)
     return ItemBulkUpdateResponse(items=updated)
+
+
+@router.post("/bulk-delete", status_code=204)
+def bulk_delete_items(
+    data: ItemBulkDeleteRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Delete multiple items in a single request."""
+    if not data.item_ids:
+        return None
+    items = db.query(Item).filter(Item.id.in_(data.item_ids)).all()
+    found_ids = {item.id for item in items}
+    missing = set(data.item_ids) - found_ids
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Items not found: {sorted(missing)}")
+    for item in items:
+        db.delete(item)
+    db.commit()
+    return None
 
 
 @router.post("/{item_id}/split", response_model=ItemSplitResponse)

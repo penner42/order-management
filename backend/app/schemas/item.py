@@ -109,6 +109,10 @@ class ItemBulkUpdateRequest(BaseModel):
     updates: list[ItemBulkUpdateEntry]
 
 
+class ItemBulkDeleteRequest(BaseModel):
+    item_ids: list[int]
+
+
 class ItemBulkUpdateResponse(BaseModel):
     items: list[ItemRead]
 

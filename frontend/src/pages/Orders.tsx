@@ -121,6 +121,7 @@ export default function Orders() {
   const [savingItemId, setSavingItemId] = useState<number | null>(null)
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
   const [confirmDeleteItemId, setConfirmDeleteItemId] = useState<number | null>(null)
+  const [confirmBulkDeleteItemIds, setConfirmBulkDeleteItemIds] = useState<number[] | null>(null)
   const [advancingGroupKey, setAdvancingGroupKey] = useState<string | null>(null)
   const [filterStatuses, setFilterStatuses] = useState<Set<string>>(new Set())
   const [filterBuyingGroups, setFilterBuyingGroups] = useState<Set<number>>(new Set())
@@ -661,6 +662,37 @@ export default function Orders() {
       console.error(e)
     } finally {
       setDeletingItemId(null)
+    }
+  }
+
+  const deleteItems = async (itemIds: number[]) => {
+    if (itemIds.length === 0) return
+    try {
+      await api.post('/items/bulk-delete', { item_ids: itemIds })
+      const [ordersData, shipmentsData] = await Promise.all([
+        api.get<Order[]>(ordersPath(filterStatuses, filterBuyingGroups, filterDateFrom, filterDateTo)),
+        api.get<Shipment[]>('/shipments'),
+      ])
+      setOrders(ordersData)
+      setShipments(shipmentsData)
+      const idSet = new Set(itemIds)
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev)
+        idSet.forEach((id) => next.delete(id))
+        return next
+      })
+      setItemEdits((prev) => {
+        const next = { ...prev }
+        idSet.forEach((id) => delete next[id])
+        return next
+      })
+      setTrackingEdits((prev) => {
+        const next = { ...prev }
+        idSet.forEach((id) => delete next[id])
+        return next
+      })
+    } catch (e) {
+      console.error(e)
     }
   }
 
@@ -1546,6 +1578,12 @@ export default function Orders() {
                                         setBulkStatusModal({ order: o, itemIds: ids })
                                         setBulkActionState(o.id, { action: '' })
                                       }
+                                    } else if (v === 'delete_items') {
+                                      const ids = getSelectedIdsForOrder(o)
+                                      if (ids.length > 0) {
+                                        setConfirmBulkDeleteItemIds(ids)
+                                        setBulkActionState(o.id, { action: '' })
+                                      }
                                     } else {
                                       setBulkActionState(o.id, { action: v })
                                     }
@@ -1555,6 +1593,8 @@ export default function Orders() {
                                   <option value="">Choose action…</option>
                                   <option value="input_tracking">Input Tracking</option>
                                   <option value="mark_received">Mark as Received</option>
+                                  <option disabled>────────────</option>
+                                  <option value="delete_items">Delete items</option>
                                 </select>
                                 {getBulkActionState(o.id).action === 'input_tracking' && (
                                   <>
@@ -1607,6 +1647,18 @@ export default function Orders() {
           }
         }}
         onCancel={() => setConfirmDeleteItemId(null)}
+      />
+      <ConfirmDialog
+        open={confirmBulkDeleteItemIds !== null && confirmBulkDeleteItemIds.length > 0}
+        message={`Delete ${confirmBulkDeleteItemIds?.length ?? 0} selected items? This cannot be undone.`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={() => {
+          const ids = confirmBulkDeleteItemIds ?? []
+          setConfirmBulkDeleteItemIds(null)
+          deleteItems(ids)
+        }}
+        onCancel={() => setConfirmBulkDeleteItemIds(null)}
       />
       {bulkStatusModal && (
         <BulkStatusModal
