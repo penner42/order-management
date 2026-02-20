@@ -104,7 +104,12 @@ export default function Orders2() {
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
   const [confirmDeleteItemId, setConfirmDeleteItemId] = useState<number | null>(null)
   const [advancingGroupKey, setAdvancingGroupKey] = useState<string | null>(null)
+  const [addAccountModal, setAddAccountModal] = useState<{ orderId: number; storeName: string; storeId: number } | null>(null)
+  const [addAccountName, setAddAccountName] = useState('')
+  const [addingAccount, setAddingAccount] = useState(false)
+  const [pendingAccountSelection, setPendingAccountSelection] = useState<{ orderId: number; storeId: number; accountId: number } | null>(null)
   const paymentSaveTimeouts = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
+  const storeDropdownRefs = useRef<Record<number, { setOpen: (open: boolean) => void; selectItem: (item: any) => void }>>({})
   const navigate = useNavigate()
 
   const loadAccountsForStore = (storeId: number) =>
@@ -140,6 +145,24 @@ export default function Orders2() {
       .catch(console.error)
       .finally(() => setLoading(false))
   }, [])
+
+  useEffect(() => {
+    if (pendingAccountSelection) {
+      const ref = storeDropdownRefs.current[pendingAccountSelection.orderId]
+      if (ref) {
+        const newAccountOption = {
+          id: pendingAccountSelection.accountId,
+          name: `${stores.find((s) => s.id === pendingAccountSelection.storeId)?.name ?? ''} (${(accountsByStore[pendingAccountSelection.storeId] ?? []).find((a) => a.id === pendingAccountSelection.accountId)?.name ?? ''})`,
+          type: 'account' as const,
+          storeId: pendingAccountSelection.storeId,
+          accountId: pendingAccountSelection.accountId,
+        }
+        ref.selectItem(newAccountOption)
+        ref.setOpen(true)
+        setPendingAccountSelection(null)
+      }
+    }
+  }, [pendingAccountSelection, stores, accountsByStore])
 
   const flatPaymentMethods = useMemo(
     () => paymentMethods.flatMap((pm) => [pm, ...(pm.sub_methods ?? [])]),
@@ -619,6 +642,9 @@ export default function Orders2() {
                     />
                     <div className="min-w-0 flex-1">
                       <SearchableCombobox<{ id: number; name: string; type: 'store' | 'account'; storeId?: number; accountId?: number }>
+                        onControlRef={(api) => {
+                          storeDropdownRefs.current[o.id] = api
+                        }}
                         inputClassName="h-6 py-0 px-2 text-sm rounded border border-brand-200 dark:border-gray-600 w-full min-w-0 text-ink focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent disabled:opacity-60 dark:bg-gray-700"
                         options={(() => {
                           const result: { id: number; name: string; type: 'store' | 'account'; storeId?: number; accountId?: number }[] = []
@@ -684,32 +710,28 @@ export default function Orders2() {
                         }}
                         renderOption={(opt) => {
                           if (opt.type === 'account') {
-                            return opt.name
+                            return <span className="pl-4">{opt.name}</span>
                           }
-                          const hasAccounts = (accountsByStore[opt.storeId!] ?? []).length > 0
                           return (
-                            <div className="flex items-center justify-between gap-2 w-full">
-                              <span>{opt.name}</span>
-                              {!hasAccounts && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    const accountName = prompt('Account name:')
-                                    if (accountName?.trim()) {
-                                      api.post<StoreAccount>(`/stores/${opt.storeId}/accounts`, { name: accountName.trim() })
-                                        .then((a) => {
-                                          setAccountsByStore((prev) => ({ ...prev, [opt.storeId!]: [...(prev[opt.storeId!] ?? []), a] }))
-                                        })
-                                        .catch(console.error)
-                                    }
-                                  }}
-                                  className="text-xs text-brand-600 dark:text-brand-400 hover:underline whitespace-nowrap shrink-0"
-                                >
-                                  + account
-                                </button>
-                              )}
-                            </div>
+                            <span className="flex items-center w-full">
+                              <span className="flex-1">{opt.name}</span>
+                              <button
+                                type="button"
+                                onMouseDown={(e) => {
+                                  e.stopPropagation()
+                                  e.preventDefault()
+                                  setAddAccountModal({ orderId: o.id, storeName: opt.name, storeId: opt.storeId! })
+                                  setAddAccountName('')
+                                }}
+                                className="p-0.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600"
+                                aria-label={`Add account to ${opt.name}`}
+                                title={`Add account to ${opt.name}`}
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                </svg>
+                              </button>
+                            </span>
                           )
                         }}
                         placeholder="Store or account…"
@@ -1223,8 +1245,70 @@ export default function Orders2() {
           applying={advancingGroupKey === submitShipmentModal.group.key}
         />
       )}
+      {addAccountModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setAddAccountModal(null)}>
+          <div
+            className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-sm w-full mx-4 border border-brand-200/80 dark:border-gray-700"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-medium text-ink mb-4">Add Account</h3>
+            <p className="text-sm text-ink-muted mb-4">
+              Add a new account for <span className="font-medium text-ink">{addAccountModal.storeName}</span>
+            </p>
+            <input
+              type="text"
+              value={addAccountName}
+              onChange={(e) => setAddAccountName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && addAccountName.trim() && !addingAccount) {
+                  handleAddAccount()
+                }
+              }}
+              placeholder="Account name"
+              autoFocus
+              className="w-full h-10 rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-2 text-sm bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 mb-6"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setAddAccountModal(null)}
+                className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm text-ink hover:bg-brand-50 dark:hover:bg-gray-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleAddAccount}
+                disabled={!addAccountName.trim() || addingAccount}
+                className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
+              >
+                {addingAccount ? 'Adding…' : 'Add'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
+
+  async function handleAddAccount() {
+    if (!addAccountName.trim() || !addAccountModal) return
+    setAddingAccount(true)
+    try {
+      const a = await api.post<StoreAccount>(`/stores/${addAccountModal.storeId}/accounts`, { name: addAccountName.trim() })
+      setAccountsByStore((prev) => ({
+        ...prev,
+        [addAccountModal.storeId]: [...(prev[addAccountModal.storeId] ?? []), a],
+      }))
+      setPendingAccountSelection({ orderId: addAccountModal.orderId, storeId: addAccountModal.storeId, accountId: a.id })
+      setAddAccountModal(null)
+      setAddAccountName('')
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setAddingAccount(false)
+    }
+  }
 }
 
 function BulkStatusModal({

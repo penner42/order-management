@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 export interface SearchableOption {
@@ -17,6 +17,8 @@ interface SearchableComboboxProps<T extends SearchableOption> {
   allowEmpty?: boolean
   disabled?: boolean
   inputClassName?: string
+  renderOption?: (option: T) => ReactNode
+  onControlRef?: (api: { setOpen: (open: boolean) => void; selectItem: (item: T) => void }) => void
 }
 
 export function SearchableCombobox<T extends SearchableOption>({
@@ -30,6 +32,8 @@ export function SearchableCombobox<T extends SearchableOption>({
   allowEmpty = false,
   disabled = false,
   inputClassName,
+  renderOption,
+  onControlRef,
 }: SearchableComboboxProps<T>) {
   const [query, setQuery] = useState('')
   const [isOpen, setIsOpen] = useState(false)
@@ -41,7 +45,8 @@ export function SearchableCombobox<T extends SearchableOption>({
 
   const displayValue = value?.name ?? ''
   const q = query.trim().toLowerCase()
-  const filtered = q
+  const isSearching = query !== displayValue
+  const filtered = isSearching
     ? options.filter((o) => o.name.toLowerCase().includes(q))
     : options
   const exactMatch = options.find(
@@ -130,6 +135,20 @@ export function SearchableCombobox<T extends SearchableOption>({
     }
   }
 
+
+  useEffect(() => {
+    if (onControlRef) {
+      onControlRef({
+        setOpen: (open: boolean) => setIsOpen(open),
+        selectItem: (item: T) => {
+          onChange(item)
+          setQuery(item.name)
+          setIsOpen(false)
+        },
+      })
+    }
+  }, [onControlRef, onChange])
+
   return (
     <div ref={containerRef} className="relative">
       {label && (
@@ -154,7 +173,19 @@ export function SearchableCombobox<T extends SearchableOption>({
         dropdownPosition &&
         createPortal(
           <ul
-            ref={dropdownRef}
+            ref={(el) => {
+              dropdownRef.current = el
+              if (el && isOpen && value?.id) {
+                const selectedIndex = filtered.findIndex((opt) => opt.id === value.id)
+                if (selectedIndex >= 0) {
+                  const firstItem = el.querySelector('li')
+                  const actualItemHeight = firstItem ? firstItem.getBoundingClientRect().height : 24
+                  const maxVisibleItems = Math.floor(el.clientHeight / actualItemHeight)
+                  const scrollTop = Math.max(0, (selectedIndex - Math.floor(maxVisibleItems / 2)) * actualItemHeight)
+                  el.scrollTop = scrollTop
+                }
+              }
+            }}
             className="fixed z-[100] max-h-48 overflow-auto rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg py-0.5"
             role="listbox"
             style={{
@@ -187,7 +218,7 @@ export function SearchableCombobox<T extends SearchableOption>({
                   handleSelect(opt)
                 }}
               >
-                {opt.name}
+                {renderOption ? renderOption(opt) : opt.name}
               </li>
             ))}
             {showAddOption && (
