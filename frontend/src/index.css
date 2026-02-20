@@ -36,6 +36,15 @@ body {
   .dark select option {
     @apply bg-gray-800 text-gray-100;
   }
+  /* Hide spinner arrows on number inputs */
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
 }
 
 /* Line items: inputs/selects match section background (override base layer) */
