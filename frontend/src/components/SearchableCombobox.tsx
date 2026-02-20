@@ -79,8 +79,19 @@ export function SearchableCombobox<T extends SearchableOption>({
         setIsOpen(false)
       }
     }
+    const handleFocusIn = (e: FocusEvent) => {
+      const target = e.target as Node
+      const inContainer = containerRef.current?.contains(target)
+      if (!inContainer) {
+        setIsOpen(false)
+      }
+    }
     document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
+    document.addEventListener('focusin', handleFocusIn)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('focusin', handleFocusIn)
+    }
   }, [])
 
   const handleSelect = (item: T | null) => {
@@ -144,7 +155,7 @@ export function SearchableCombobox<T extends SearchableOption>({
         createPortal(
           <ul
             ref={dropdownRef}
-            className="fixed z-[100] max-h-48 overflow-auto rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg py-1"
+            className="fixed z-[100] max-h-48 overflow-auto rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg py-0.5"
             role="listbox"
             style={{
               top: dropdownPosition.top,
@@ -155,7 +166,7 @@ export function SearchableCombobox<T extends SearchableOption>({
             {allowEmpty && (
               <li
                 role="option"
-                className="px-3 py-2 cursor-pointer hover:bg-brand-100 dark:hover:bg-gray-700 text-ink-muted"
+                className="px-3 py-0.5 cursor-pointer hover:bg-brand-100 dark:hover:bg-gray-700 text-ink-muted text-sm"
                 onMouseDown={(e) => {
                   e.preventDefault()
                   handleSelect(null)
@@ -168,7 +179,7 @@ export function SearchableCombobox<T extends SearchableOption>({
               <li
                 key={opt.id}
                 role="option"
-                className={`px-3 py-2 cursor-pointer hover:bg-brand-100 dark:hover:bg-gray-700 ${
+                className={`px-3 py-0.5 cursor-pointer hover:bg-brand-100 dark:hover:bg-gray-700 text-sm ${
                   value?.id === opt.id ? 'bg-brand-50 dark:bg-gray-700' : ''
                 }`}
                 onMouseDown={(e) => {
@@ -182,7 +193,7 @@ export function SearchableCombobox<T extends SearchableOption>({
             {showAddOption && (
               <li
                 role="option"
-                className="px-3 py-2 cursor-pointer hover:bg-brand-100 dark:hover:bg-gray-700 text-brand-600 border-t border-brand-100 dark:border-gray-600"
+                className="px-3 py-0.5 cursor-pointer hover:bg-brand-100 dark:hover:bg-gray-700 text-brand-600 border-t border-brand-100 dark:border-gray-600 text-sm"
                 onMouseDown={(e) => {
                   e.preventDefault()
                   handleAddNew()
@@ -192,7 +203,7 @@ export function SearchableCombobox<T extends SearchableOption>({
               </li>
             )}
             {filtered.length === 0 && !showAddOption && q && (
-              <li className="px-3 py-2 text-ink-muted text-sm">No matches</li>
+              <li className="px-3 py-0.5 text-ink-muted text-sm">No matches</li>
             )}
           </ul>,
           document.body

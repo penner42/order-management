@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Orders from './pages/Orders'
+import Orders2 from './pages/Orders2'
+import Orders3 from './pages/Orders3'
 import OrderDetail from './pages/OrderDetail'
 import BuyingGroups from './pages/BuyingGroups'
 import Rewards from './pages/Rewards'
@@ -98,6 +100,22 @@ function AppShell() {
                   Orders
                 </NavLink>
                 <NavLink
+                  to="/orders2"
+                  className={({ isActive }) =>
+                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
+                  }
+                >
+                  Orders2
+                </NavLink>
+                <NavLink
+                  to="/orders3"
+                  className={({ isActive }) =>
+                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
+                  }
+                >
+                  Orders3
+                </NavLink>
+                <NavLink
                   to="/buying-groups"
                   className={({ isActive }) =>
                     `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
@@ -189,6 +207,8 @@ function AppShell() {
       <main className="flex-1 w-full mx-auto px-12 py-8">
         <Routes>
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
+          <Route path="/orders2" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders2 />} />
+          <Route path="/orders3" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders3 />} />
           <Route path="/orders/:orderId" element={<OrderDetail />} />
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/imported-orders" element={<ImportedOrders />} />
