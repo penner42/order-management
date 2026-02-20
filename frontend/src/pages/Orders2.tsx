@@ -600,14 +600,6 @@ export default function Orders2() {
                 amount: op.amount != null ? String(op.amount) : '',
               }))
             const totalPaid = orderTotals(o.items ?? [], o.shipping, o.sales_tax)
-            const paymentSum = paymentRows.reduce((s, r) => s + parseDecimal(r.amount), 0)
-            const paymentMatchesTotal =
-              paymentRows.length > 0 && Math.round(paymentSum * 100) === Math.round(totalPaid * 100)
-            const usedIds = new Set(paymentRows.map((r) => r.payment_method_id))
-            const firstUnused = flatPaymentMethods.find((pm) => !usedIds.has(pm.id)) ?? flatPaymentMethods[0]
-            const amountRemaining = Math.max(0, totalPaid - paymentSum)
-            const addPaymentDisabled =
-              savingOrderId === o.id || paymentSum >= totalPaid || flatPaymentMethods.length === 0
             const itemCount = o.items?.length ?? 0
             const lineItemsHeight = itemCount * 32 + 40 // approx row height + header
 
@@ -622,7 +614,8 @@ export default function Orders2() {
                   className="w-[400px] shrink-0 flex flex-col gap-2 p-3 border-r-2 border-brand-400 dark:border-gray-400 bg-white/80 dark:bg-gray-700/80 overflow-hidden"
                   style={{ minHeight: lineItemsHeight }}
                 >
-                  <div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <label className="text-xs text-ink-muted shrink-0 w-14">Order #</label>
                     <input
                       type="text"
                       value={orderEdits[o.id]?.store_order_number ?? (o.store_order_number ?? '')}
@@ -641,12 +634,45 @@ export default function Orders2() {
                           return next
                         })
                       }}
-                      placeholder="Order #"
                       disabled={savingOrderId === o.id}
-                      className="w-full min-w-0 h-6 rounded border border-transparent bg-transparent px-1 py-0 text-sm font-medium text-brand-700 dark:text-brand-400 focus:border-brand-300 focus:bg-white dark:focus:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-brand-500 disabled:opacity-60"
+                      className="flex-1 min-w-0 h-6 rounded border border-brand-200 dark:border-gray-600 bg-transparent px-1.5 py-0 text-sm font-medium text-brand-700 dark:text-brand-400 focus:border-brand-300 focus:bg-white dark:focus:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-brand-500 disabled:opacity-60"
                     />
                   </div>
-                  <div className="min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <label className="text-xs text-ink-muted shrink-0 w-14">Date</label>
+                    <input
+                      type="datetime-local"
+                      value={
+                        orderEdits[o.id]?.purchase_date ??
+                        (o.purchase_date ? o.purchase_date.slice(0, 16) : '')
+                      }
+                      onChange={(e) =>
+                        setOrderEdits((prev) => ({
+                          ...prev,
+                          [o.id]: { ...prev[o.id], purchase_date: e.target.value || '' },
+                        }))
+                      }
+                      onBlur={(e) => {
+                        const v = e.target.value.trim() || null
+                        const current = o.purchase_date ? o.purchase_date.slice(0, 16) : null
+                        if (v !== current)
+                          updateOrder(o.id, { purchase_date: v ? new Date(v).toISOString() : null })
+                        setOrderEdits((prev) => {
+                          const next = { ...prev }
+                          if (next[o.id]) {
+                            delete next[o.id].purchase_date
+                            if (Object.keys(next[o.id]).length === 0) delete next[o.id]
+                          }
+                          return next
+                        })
+                      }}
+                      disabled={savingOrderId === o.id}
+                      className="flex-1 min-w-0 h-6 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80 disabled:opacity-60"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <label className="text-xs text-ink-muted shrink-0 w-14">Store</label>
+                    <div className="min-w-0 flex-1">
                     <SearchableCombobox<{ id: number; name: string; type: 'store' | 'account'; storeId?: number; accountId?: number }>
                         onControlRef={(api) => {
                           storeDropdownRefs.current[o.id] = api
@@ -742,8 +768,10 @@ export default function Orders2() {
                         }}
                         placeholder="Store or account…"
                       />
+                    </div>
                   </div>
-                  <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <label className="text-xs text-ink-muted shrink-0 w-14">Group</label>
                     <div className="min-w-0 flex-1">
                     <SearchableCombobox<BuyingGroup>
                       inputClassName="h-6 py-0 px-2 text-sm rounded border border-brand-200 dark:border-gray-600 w-full min-w-0 text-ink focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent disabled:opacity-60 dark:bg-gray-700"
@@ -761,50 +789,11 @@ export default function Orders2() {
                       disabled={savingOrderId === o.id}
                     />
                     </div>
-                    <label className="flex items-center gap-1 text-xs text-ink-muted shrink-0">
-                      Purchase
-                      <input
-                        type="date"
-                        value={
-                          orderEdits[o.id]?.purchase_date ??
-                          (o.purchase_date ? o.purchase_date.slice(0, 10) : '')
-                        }
-                        onChange={(e) =>
-                          setOrderEdits((prev) => ({
-                            ...prev,
-                            [o.id]: { ...prev[o.id], purchase_date: e.target.value || '' },
-                          }))
-                        }
-                        onBlur={(e) => {
-                          const v = e.target.value.trim() || null
-                          const current = o.purchase_date ? o.purchase_date.slice(0, 10) : null
-                          if (v !== current)
-                            updateOrder(o.id, { purchase_date: v ? `${v}T00:00:00.000Z` : null })
-                          setOrderEdits((prev) => {
-                            const next = { ...prev }
-                            if (next[o.id]) {
-                              delete next[o.id].purchase_date
-                              if (Object.keys(next[o.id]).length === 0) delete next[o.id]
-                            }
-                            return next
-                          })
-                        }}
-                        disabled={savingOrderId === o.id}
-                        className="h-6 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80 disabled:opacity-60"
-                      />
-                    </label>
                   </div>
                   <div className="space-y-1">
-                    <p className="text-xs font-medium text-ink-muted">
-                      Total: <span className="font-mono text-ink">${totalPaid.toFixed(2)}</span>
-                      {paymentRows.length > 0 && (
-                        <>
-                          {' — '}
-                          <span className="font-mono">${paymentSum.toFixed(2)}</span>
-                          {!paymentMatchesTotal && <span className="text-amber-600 ml-1">(match total)</span>}
-                        </>
-                      )}
-                    </p>
+                    {paymentRows.length > 0 && (
+                      <p className="text-xs text-ink-muted font-medium">Payment</p>
+                    )}
                     {paymentRows.map((row, idx) => (
                       <div key={idx} className="flex items-center gap-1 flex-wrap">
                         <div className="min-w-0 flex-1">
@@ -866,94 +855,6 @@ export default function Orders2() {
                         </button>
                       </div>
                     ))}
-                    {paymentRows.length === 0 && (
-                      <button
-                        type="button"
-                        disabled={addPaymentDisabled}
-                        onClick={() =>
-                          setPaymentEdits((prev) => ({
-                            ...prev,
-                            [o.id]: [
-                              {
-                                payment_method_id: firstUnused?.id ?? 0,
-                                amount: amountRemaining > 0 ? amountRemaining.toFixed(2) : '',
-                              },
-                            ],
-                          }))
-                        }
-                        className="text-xs text-brand-600 dark:text-brand-400 hover:underline disabled:opacity-50"
-                      >
-                        Add payment
-                      </button>
-                    )}
-                    {paymentRows.length > 0 && (
-                      <button
-                        type="button"
-                        disabled={addPaymentDisabled}
-                        onClick={() =>
-                          setPaymentEdits((prev) => ({
-                            ...prev,
-                            [o.id]: [
-                              ...paymentRows,
-                              { payment_method_id: firstUnused?.id ?? 0, amount: amountRemaining > 0 ? amountRemaining.toFixed(2) : '' },
-                            ],
-                          }))
-                        }
-                        className="text-xs text-brand-600 dark:text-brand-400 hover:underline disabled:opacity-50"
-                      >
-                        + payment
-                      </button>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <label className="flex items-center gap-1 text-xs text-ink-muted">
-                      Ship <input
-                        type="text"
-                        value={orderEdits[o.id]?.shipping ?? (o.shipping ?? '')}
-                        onChange={(e) =>
-                          setOrderEdits((prev) => ({ ...prev, [o.id]: { ...prev[o.id], shipping: e.target.value } }))
-                        }
-                        onBlur={(e) => {
-                          const v = e.target.value.trim()
-                          if (v !== (o.shipping ?? '')) updateOrder(o.id, { shipping: v || null })
-                          setOrderEdits((prev) => {
-                            const next = { ...prev }
-                            if (next[o.id]) {
-                              delete next[o.id].shipping
-                              if (Object.keys(next[o.id]).length === 0) delete next[o.id]
-                            }
-                            return next
-                          })
-                        }}
-                        placeholder="0"
-                        disabled={savingOrderId === o.id}
-                        className="w-14 h-5 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-xs font-mono !bg-brand-50/50 dark:!bg-gray-600/80"
-                      />
-                    </label>
-                    <label className="flex items-center gap-1 text-xs text-ink-muted">
-                      Tax <input
-                        type="text"
-                        value={orderEdits[o.id]?.sales_tax ?? (o.sales_tax ?? '')}
-                        onChange={(e) =>
-                          setOrderEdits((prev) => ({ ...prev, [o.id]: { ...prev[o.id], sales_tax: e.target.value } }))
-                        }
-                        onBlur={(e) => {
-                          const v = e.target.value.trim()
-                          if (v !== (o.sales_tax ?? '')) updateOrder(o.id, { sales_tax: v || null })
-                          setOrderEdits((prev) => {
-                            const next = { ...prev }
-                            if (next[o.id]) {
-                              delete next[o.id].sales_tax
-                              if (Object.keys(next[o.id]).length === 0) delete next[o.id]
-                            }
-                            return next
-                          })
-                        }}
-                        placeholder="0"
-                        disabled={savingOrderId === o.id}
-                        className="w-14 h-5 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-xs font-mono !bg-brand-50/50 dark:!bg-gray-600/80"
-                      />
-                    </label>
                   </div>
                 </div>
 
