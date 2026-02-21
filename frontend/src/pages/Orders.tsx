@@ -59,6 +59,60 @@ const STATUS_TO_DATE_FIELD: Record<string, keyof Item> = {
   payment_received: 'payment_received_at',
 }
 
+// Row background by status for at-a-glance color coding (light + dark)
+function getStatusRowClass(status: string): string {
+  switch (status) {
+    case 'purchased':
+      return 'bg-gray-100/80 dark:bg-gray-700/50'
+    case 'shipped':
+    case 'submitted':
+    case 'delivered':
+      return 'bg-yellow-100/80 dark:bg-yellow-600/30'
+    case 'scanned':
+    case 'payment_requested':
+    case 'payment_sent':
+      return 'bg-indigo-100/80 dark:bg-indigo-900/35'
+    case 'payment_received':
+      return 'bg-emerald-100/80 dark:bg-emerald-900/30'
+    case 'canceled':
+    case 'needs_return':
+    case 'return_started':
+    case 'return_sent':
+    case 'return_received':
+    case 'return_refunded':
+      return 'bg-slate-100/70 dark:bg-slate-800/40'
+    default:
+      return 'bg-gray-100/80 dark:bg-gray-700/50'
+  }
+}
+
+// Input/select background to match row status color (slightly more opaque for readability)
+function getStatusInputClass(status: string): string {
+  switch (status) {
+    case 'purchased':
+      return 'bg-gray-50/90 dark:bg-gray-700/60'
+    case 'shipped':
+    case 'submitted':
+    case 'delivered':
+      return 'bg-yellow-100/90 dark:bg-yellow-600/40'
+    case 'scanned':
+    case 'payment_requested':
+    case 'payment_sent':
+      return 'bg-indigo-50/90 dark:bg-indigo-900/45'
+    case 'payment_received':
+      return 'bg-emerald-50/90 dark:bg-emerald-900/40'
+    case 'canceled':
+    case 'needs_return':
+    case 'return_started':
+    case 'return_sent':
+    case 'return_received':
+    case 'return_refunded':
+      return 'bg-slate-50/90 dark:bg-slate-800/50'
+    default:
+      return 'bg-gray-50/90 dark:bg-gray-700/60'
+  }
+}
+
 function getNextStatus(current: ItemStatus): ItemStatus | null {
   const idx = STATUS_PROGRESSION.indexOf(current)
   if (idx < 0 || idx >= STATUS_PROGRESSION.length - 1) return null
@@ -772,6 +826,29 @@ export default function Orders() {
         </button>
       </div>
 
+      <div className="flex items-center gap-4 flex-wrap text-sm text-ink-muted" aria-label="Status colors">
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded shrink-0 bg-gray-100/80 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600" aria-hidden />
+          Purchased
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded shrink-0 bg-yellow-100/80 dark:bg-yellow-600/30 border border-yellow-300 dark:border-yellow-500" aria-hidden />
+          Shipped
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded shrink-0 bg-indigo-100/80 dark:bg-indigo-900/35 border border-indigo-300 dark:border-indigo-600" aria-hidden />
+          Scanned / Payment pending
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded shrink-0 bg-emerald-100/80 dark:bg-emerald-900/30 border border-emerald-300 dark:border-emerald-700" aria-hidden />
+          Paid
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded shrink-0 bg-slate-100/70 dark:bg-slate-800/40 border border-slate-300 dark:border-slate-600" aria-hidden />
+          Return / Cancel
+        </span>
+      </div>
+
       <div className="space-y-4">
         {orders.length === 0 ? (
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 py-12 text-center text-ink-muted">
@@ -1145,7 +1222,7 @@ export default function Orders() {
                               const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
                               const trackingInfo = trackingRaw ? getTrackingInfo(trackingRaw) : null
                               return (
-                                <tr key={item.id} className="bg-transparent">
+                                <tr key={item.id} className={getStatusRowClass(item.status)}>
                                   <td className="py-1 px-2">
                                     <input
                                       type="checkbox"
@@ -1169,7 +1246,7 @@ export default function Orders() {
                                         if (v != null && v !== (item.quantity ?? 1)) updateItem(item.id, { quantity: v })
                                       }}
                                       disabled={savingItemId === item.id}
-                                      className="w-12 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1 py-0 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                      className={`w-12 h-5 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2">
@@ -1185,11 +1262,11 @@ export default function Orders() {
                                       }}
                                       placeholder="Description"
                                       disabled={savingItemId === item.id}
-                                      className="w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                      className={`w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2">
-                                    <div className="flex items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 focus-within:border-brand-500">
+                                    <div className={`flex items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500 ${getStatusInputClass(item.status)}`}>
                                       <input
                                         type="text"
                                         value={trackingRaw}
@@ -1202,7 +1279,7 @@ export default function Orders() {
                                         }}
                                         placeholder=""
                                         disabled={savingTrackingId === item.id}
-                                        className="flex-1 min-w-[5rem] h-5 border-0 rounded-l !bg-brand-50/50 dark:!bg-gray-600/80 px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
+                                        className={`flex-1 min-w-[5rem] h-5 border-0 rounded-l px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
                                       />
                                       {trackingInfo && (
                                         <a
@@ -1233,7 +1310,7 @@ export default function Orders() {
                                       }}
                                       placeholder="0.00"
                                       disabled={savingItemId === item.id}
-                                      className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2">
@@ -1249,7 +1326,7 @@ export default function Orders() {
                                       }}
                                       placeholder="0.00"
                                       disabled={savingItemId === item.id}
-                                      className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
@@ -1268,7 +1345,7 @@ export default function Orders() {
                                       }}
                                       placeholder="0.00"
                                       disabled={savingItemId === item.id}
-                                      className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2">
@@ -1284,7 +1361,7 @@ export default function Orders() {
                                       }}
                                       placeholder="0.00"
                                       disabled={savingItemId === item.id}
-                                      className="w-20 h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
@@ -1302,7 +1379,7 @@ export default function Orders() {
                                         updateItem(item.id, { status: s })
                                       }}
                                       disabled={savingItemId === item.id}
-                                      className="min-w-[6.5rem] h-5 rounded border border-brand-200 dark:border-gray-600 !bg-brand-50/50 dark:!bg-gray-600/80 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60"
+                                      className={`min-w-[6.5rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
                                     >
                                       {Object.entries(STATUS_LABELS).map(([val, lbl]) => (
                                         <option key={val} value={val}>
