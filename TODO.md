@@ -6,3 +6,8 @@
 - [ ] **Eager loading for orders list**: Use `joinedload` (or `selectinload`) in `list_orders` for `Order.store`, `Order.store_account`, `Order.buying_group`, `Order.items`, `Order.order_payments` (and `OrderPaymentMethod.payment_method`) so serializing to `OrderRead` doesn’t trigger N+1.
 - [ ] **Indexes**: Add indexes on `orders(status)`, `orders(purchase_date)`, and `orders(buying_group_id)` (and composite if we often filter by status + date).
 - [ ] **Frontend**: Request and render orders in pages (or virtualize the list) instead of loading the full list in one shot.
+
+## Tracking
+- [ ] UPS API
+- [ ] Fedex API
+- [ ] Lasership: https://webtrack.ontrac.com/PackageServices/tracking/XXXXXXX
