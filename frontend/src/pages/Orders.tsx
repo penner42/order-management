@@ -533,27 +533,28 @@ export default function Orders() {
       const order = orders.find((o) => o.id === orderId)
       if (!order || !paymentEdits[orderId]?.length) return
       const rows = paymentEdits[orderId]!
+      const validRows = rows.filter((r) => r.payment_method_id !== 0)
       const totalPaid = orderTotals(order.items ?? [])
-      const paymentSum = rows.reduce((s, r) => s + parseDecimal(r.amount), 0)
-      const usedIds = new Set(rows.map((r) => r.payment_method_id))
+      const paymentSum = validRows.reduce((s, r) => s + parseDecimal(r.amount), 0)
+      const usedIds = new Set(validRows.map((r) => r.payment_method_id))
       const canSave =
-        rows.length > 0 &&
+        validRows.length > 0 &&
         Math.abs(paymentSum - totalPaid) < 0.01 &&
-        usedIds.size === rows.length
+        usedIds.size === validRows.length
       if (!canSave) return
       const serverRows = (order.order_payments ?? []).map((op) => ({
         payment_method_id: op.payment_method_id,
         amount: op.amount != null ? String(op.amount) : '',
       }))
       const hasChanges =
-        rows.length !== serverRows.length ||
-        rows.some((r, i) => serverRows[i]?.payment_method_id !== r.payment_method_id || (serverRows[i]?.amount ?? '') !== (r.amount ?? ''))
+        validRows.length !== serverRows.length ||
+        validRows.some((r, i) => serverRows[i]?.payment_method_id !== r.payment_method_id || (serverRows[i]?.amount ?? '') !== (r.amount ?? ''))
       if (!hasChanges) return
       const t = paymentSaveTimeouts.current[orderId]
       if (t) clearTimeout(t)
       paymentSaveTimeouts.current[orderId] = setTimeout(() => {
         delete paymentSaveTimeouts.current[orderId]
-        updateOrderPayments(orderId, rows.map((r) => ({ payment_method_id: r.payment_method_id, amount: r.amount }))).then(() => {
+        updateOrderPayments(orderId, validRows.map((r) => ({ payment_method_id: r.payment_method_id, amount: r.amount }))).then(() => {
           setPaymentEdits((prev) => { const next = { ...prev }; delete next[orderId]; return next })
         })
       }, 600)
@@ -1054,70 +1055,105 @@ export default function Orders() {
                     </div>
                   </div>
                   <div className="space-y-1">
-                    {paymentRows.length > 0 && (
-                      <p className="text-xs text-ink-muted font-medium">Payment</p>
-                    )}
-                    {paymentRows.map((row, idx) => (
-                      <div key={idx} className="flex items-center gap-1 flex-wrap">
-                        <div className="min-w-0 flex-1">
-                          <SearchableCombobox<{ id: number; name: string }>
-                            inputClassName="h-6 py-0 px-2 text-sm rounded border border-brand-200 dark:border-gray-600 w-full min-w-0 text-ink focus:outline-none focus:ring-2 focus:ring-brand-500 dark:bg-gray-700"
-                            options={paymentMethodOptions}
-                            value={row.payment_method_id ? paymentMethodOptions.find((opt) => opt.id === row.payment_method_id) ?? null : null}
-                            onChange={(opt) =>
+                    {(() => {
+                      const displayPaymentRows =
+                        paymentRows.length > 0 ? paymentRows : [{ payment_method_id: 0, amount: '' }]
+                      const paymentSum = displayPaymentRows.reduce((s, r) => s + (parseDecimal(r.amount) || 0), 0)
+                      const amountRemaining = Math.max(0, totalPaid - paymentSum)
+                      const orderTotalReached = paymentSum >= totalPaid - 1e-9
+                      return displayPaymentRows.map((row, idx) => (
+                        <div key={idx} className="flex items-center gap-1 flex-nowrap">
+                          <span className={idx === 0 ? 'text-xs font-medium text-ink-muted shrink-0 w-14' : 'w-14 shrink-0'}>
+                            {idx === 0 ? 'Payment' : null}
+                          </span>
+                          <div className="min-w-0 flex-1 max-w-[11rem]">
+                            <SearchableCombobox<{ id: number; name: string }>
+                              inputClassName="h-6 py-0 px-2 text-sm rounded border border-brand-200 dark:border-gray-600 w-full min-w-0 text-ink focus:outline-none focus:ring-2 focus:ring-brand-500 dark:bg-gray-700"
+                              options={paymentMethodOptions}
+                              value={row.payment_method_id ? paymentMethodOptions.find((opt) => opt.id === row.payment_method_id) ?? null : null}
+                              onChange={(opt) =>
+                                setPaymentEdits((prev) => ({
+                                  ...prev,
+                                  [o.id]: displayPaymentRows.map((r, i) => (i === idx ? { ...r, payment_method_id: opt?.id ?? 0 } : r)),
+                                }))
+                              }
+                              onCreate={async (label) => {
+                                const pm = await api.post<PaymentMethod>('/payment-methods', { label })
+                                setPaymentMethods((prev) => [...prev, pm].sort((a, b) => a.label.localeCompare(b.label)))
+                                setPaymentEdits((prev) => ({
+                                  ...prev,
+                                  [o.id]: displayPaymentRows.map((r, i) => (i === idx ? { ...r, payment_method_id: pm.id } : r)),
+                                }))
+                                return { id: pm.id, name: pm.label }
+                              }}
+                              placeholder="Payment…"
+                            />
+                          </div>
+                          <input
+                            type="text"
+                            placeholder="Amt"
+                            value={row.amount}
+                            onChange={(e) => {
+                              const raw = e.target.value
+                              const otherSum = displayPaymentRows.reduce((s, r, i) => (i === idx ? s : s + parseDecimal(r.amount)), 0)
+                              const maxAmount = Math.max(0, totalPaid - otherSum)
+                              const num = parseDecimal(raw)
+                              const amount =
+                                raw.trim() === '' || String(raw) === '.' || Number.isNaN(parseFloat(raw))
+                                  ? raw
+                                  : num > maxAmount
+                                    ? maxAmount.toFixed(2)
+                                    : raw
                               setPaymentEdits((prev) => ({
                                 ...prev,
-                                [o.id]: paymentRows.map((r, i) => (i === idx ? { ...r, payment_method_id: opt?.id ?? 0 } : r)),
+                                [o.id]: displayPaymentRows.map((r, i) => (i === idx ? { ...r, amount } : r)),
+                              }))
+                            }}
+                            className="w-20 h-6 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80 shrink-0"
+                          />
+                          {idx === displayPaymentRows.length - 1 ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPaymentEdits((prev) => ({
+                                  ...prev,
+                                  [o.id]: [
+                                    ...displayPaymentRows,
+                                    {
+                                      payment_method_id: 0,
+                                      amount: amountRemaining > 0 ? amountRemaining.toFixed(2) : '',
+                                    },
+                                  ],
+                                }))
+                              }}
+                              disabled={savingOrderId === o.id || orderTotalReached}
+                              className="p-0.5 rounded text-ink-muted hover:text-ink hover:bg-brand-100 dark:hover:bg-gray-600 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                              aria-label="Add payment method"
+                              title={orderTotalReached ? 'Order total already reached' : 'Add payment method'}
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                              </svg>
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPaymentEdits((prev) => ({
+                                ...prev,
+                                [o.id]: displayPaymentRows.filter((_, i) => i !== idx),
                               }))
                             }
-                            onCreate={async (label) => {
-                              const pm = await api.post<PaymentMethod>('/payment-methods', { label })
-                              setPaymentMethods((prev) => [...prev, pm].sort((a, b) => a.label.localeCompare(b.label)))
-                              setPaymentEdits((prev) => ({
-                                ...prev,
-                                [o.id]: paymentRows.map((r, i) => (i === idx ? { ...r, payment_method_id: pm.id } : r)),
-                              }))
-                              return { id: pm.id, name: pm.label }
-                            }}
-                            placeholder="Payment…"
-                          />
+                            className="p-0.5 rounded text-ink-muted hover:text-ink hover:bg-brand-100 dark:hover:bg-gray-600 shrink-0"
+                            aria-label="Remove payment"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
                         </div>
-                        <input
-                          type="text"
-                          placeholder="Amt"
-                          value={row.amount}
-                          onChange={(e) => {
-                            const raw = e.target.value
-                            const otherSum = paymentRows.reduce((s, r, i) => (i === idx ? s : s + parseDecimal(r.amount)), 0)
-                            const maxAmount = Math.max(0, totalPaid - otherSum)
-                            const num = parseDecimal(raw)
-                            const amount =
-                              raw.trim() === '' || String(raw) === '.' || Number.isNaN(parseFloat(raw))
-                                ? raw
-                                : num > maxAmount
-                                  ? maxAmount.toFixed(2)
-                                  : raw
-                            setPaymentEdits((prev) => ({
-                              ...prev,
-                              [o.id]: paymentRows.map((r, i) => (i === idx ? { ...r, amount } : r)),
-                            }))
-                          }}
-                          className="w-16 h-6 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80"
-                        />
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setPaymentEdits((prev) => ({ ...prev, [o.id]: paymentRows.filter((_, i) => i !== idx) }))
-                          }
-                          className="p-0.5 rounded text-ink-muted hover:text-ink hover:bg-brand-100 dark:hover:bg-gray-600"
-                          aria-label="Remove payment"
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      </div>
-                    ))}
+                      ))
+                    })()}
                   </div>
                 </div>
 
