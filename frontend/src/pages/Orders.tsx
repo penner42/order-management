@@ -744,8 +744,7 @@ export default function Orders() {
     let totalPaid = 0
     for (const item of items) {
       const qty = Math.max(0, item.quantity ?? 1)
-      totalPaid += parseDecimal(item.price_paid) * qty
-      totalPaid += parseDecimal(item.shipping) + parseDecimal(item.sales_tax)
+      totalPaid += (parseDecimal(item.price_paid) + parseDecimal(item.shipping) + parseDecimal(item.sales_tax)) * qty
     }
     return totalPaid
   }
@@ -1401,7 +1400,7 @@ export default function Orders() {
                                     />
                                   </td>
                                   <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
-                                    ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1)) + parseDecimal(itemEdits[item.id]?.shipping ?? item.shipping) + parseDecimal(itemEdits[item.id]?.sales_tax ?? item.sales_tax)).toFixed(2)}
+                                    ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) + parseDecimal(itemEdits[item.id]?.shipping ?? item.shipping) + parseDecimal(itemEdits[item.id]?.sales_tax ?? item.sales_tax)) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1)).toFixed(2)}
                                   </td>
                                   <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
                                     ${((parseDecimal(itemEdits[item.id]?.price_sold ?? item.price_sold) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1))).toFixed(2)}
