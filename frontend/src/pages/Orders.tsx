@@ -20,6 +20,18 @@ import type {
 } from '../api/types'
 import { getTrackingInfo } from '../utils/tracking'
 
+/** Format UTC ISO date string for datetime-local input in the user's local timezone. */
+function toLocalDatetimeLocal(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  const h = String(d.getHours()).padStart(2, '0')
+  const min = String(d.getMinutes()).padStart(2, '0')
+  return `${y}-${m}-${day}T${h}:${min}`
+}
+
 const STATUS_LABELS: Record<string, string> = {
   purchased: 'Purchased',
   shipped: 'Shipped',
@@ -907,7 +919,7 @@ export default function Orders() {
                       type="datetime-local"
                       value={
                         orderEdits[o.id]?.purchase_date ??
-                        (o.purchase_date ? o.purchase_date.slice(0, 16) : '')
+                        toLocalDatetimeLocal(o.purchase_date ?? null)
                       }
                       onChange={(e) =>
                         setOrderEdits((prev) => ({
@@ -917,8 +929,8 @@ export default function Orders() {
                       }
                       onBlur={(e) => {
                         const v = e.target.value.trim() || null
-                        const current = o.purchase_date ? o.purchase_date.slice(0, 16) : null
-                        if (v !== current)
+                        const current = toLocalDatetimeLocal(o.purchase_date ?? null)
+                        if ((v ?? '') !== current)
                           updateOrder(o.id, { purchase_date: v ? new Date(v).toISOString() : null })
                         setOrderEdits((prev) => {
                           const next = { ...prev }
