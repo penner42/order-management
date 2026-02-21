@@ -86,30 +86,30 @@ function getStatusRowClass(status: string): string {
   }
 }
 
-// Input/select background to match row status color (slightly more opaque for readability)
+// Input/select background to match row status color (light: slightly more opaque for readability; dark: same as row)
 function getStatusInputClass(status: string): string {
   switch (status) {
     case 'purchased':
-      return 'bg-gray-50/90 dark:bg-gray-700/60'
+      return 'bg-gray-50/90 dark:bg-gray-700/50'
     case 'shipped':
     case 'submitted':
     case 'delivered':
-      return 'bg-yellow-100/90 dark:bg-yellow-600/40'
+      return 'bg-yellow-100/90 dark:bg-yellow-600/30'
     case 'scanned':
     case 'payment_requested':
     case 'payment_sent':
-      return 'bg-indigo-50/90 dark:bg-indigo-900/45'
+      return 'bg-indigo-50/90 dark:bg-indigo-900/35'
     case 'payment_received':
-      return 'bg-emerald-50/90 dark:bg-emerald-900/40'
+      return 'bg-emerald-50/90 dark:bg-emerald-900/30'
     case 'canceled':
     case 'needs_return':
     case 'return_started':
     case 'return_sent':
     case 'return_received':
     case 'return_refunded':
-      return 'bg-slate-50/90 dark:bg-slate-800/50'
+      return 'bg-slate-50/90 dark:bg-slate-800/40'
     default:
-      return 'bg-gray-50/90 dark:bg-gray-700/60'
+      return 'bg-gray-50/90 dark:bg-gray-700/50'
   }
 }
 
@@ -1135,7 +1135,7 @@ export default function Orders() {
                       </button>
                     </div>
                   ) : (
-                    <div className="rounded-lg border-2 border-brand-400 dark:border-gray-400 overflow-hidden">
+                    <div className="line-items-section rounded-lg border-2 border-brand-400 dark:border-gray-400 overflow-hidden">
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="bg-brand-100/50 dark:bg-gray-700/50 text-left">
@@ -1266,7 +1266,7 @@ export default function Orders() {
                                     />
                                   </td>
                                   <td className="py-1 px-2">
-                                    <div className={`flex items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500 ${getStatusInputClass(item.status)}`}>
+                                    <div className="flex items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500">
                                       <input
                                         type="text"
                                         value={trackingRaw}
@@ -1279,7 +1279,7 @@ export default function Orders() {
                                         }}
                                         placeholder=""
                                         disabled={savingTrackingId === item.id}
-                                        className={`flex-1 min-w-[5rem] h-5 border-0 rounded-l px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
+                                        className="flex-1 min-w-[5rem] h-5 border-0 rounded-l px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
                                       />
                                       {trackingInfo && (
                                         <a
