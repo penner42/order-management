@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Orders from './pages/Orders'
-import OrderDetail from './pages/OrderDetail'
 import BuyingGroups from './pages/BuyingGroups'
 import Rewards from './pages/Rewards'
 import PaymentMethods from './pages/PaymentMethods'
@@ -189,7 +188,6 @@ function AppShell() {
       <main className="flex-1 w-full mx-auto px-12 py-8">
         <Routes>
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
-          <Route path="/orders/:orderId" element={<OrderDetail />} />
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/imported-orders" element={<ImportedOrders />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />

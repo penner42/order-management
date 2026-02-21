@@ -46,13 +46,12 @@ export default function ImportedOrders() {
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Store</th>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Items</th>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Created</th>
-              <th className="w-12 text-right py-3 px-2" />
             </tr>
           </thead>
           <tbody>
             {orders.length === 0 ? (
               <tr>
-                <td colSpan={5} className="py-12 text-center text-ink-muted">
+                <td colSpan={4} className="py-12 text-center text-ink-muted">
                   No imported orders yet.
                 </td>
               </tr>
@@ -73,17 +72,6 @@ export default function ImportedOrders() {
                   </td>
                   <td className="py-3 px-4 text-sm text-ink-muted">
                     {new Date(o.created_at).toLocaleString()}
-                  </td>
-                  <td className="py-3 px-2 text-right">
-                    <Link
-                      to={`/orders/${o.id}`}
-                      aria-label="View order"
-                      className="inline-flex p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-gray-600 dark:hover:text-brand-400 transition"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                      </svg>
-                    </Link>
                   </td>
                 </tr>
               ))
