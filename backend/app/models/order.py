@@ -1,5 +1,5 @@
 """Order and order-payment junction models."""
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Numeric
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Numeric, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -9,6 +9,12 @@ class Order(Base):
     """Order - can have multiple items and multiple payment methods."""
 
     __tablename__ = "orders"
+    __table_args__ = (
+        Index("ix_orders_status", "status"),
+        Index("ix_orders_purchase_date", "purchase_date"),
+        Index("ix_orders_buying_group_id", "buying_group_id"),
+        Index("ix_orders_status_purchase_date", "status", "purchase_date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
