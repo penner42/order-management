@@ -19,12 +19,12 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
+    # ports:
+    #   - "8000:8000"
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/order_management
-      ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: admin
+      ADMIN_USERNAME: ${ADMIN_USERNAME}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
