@@ -2,16 +2,31 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import User, Order, Item, OrderPaymentMethod
+from app.models import (
+    User,
+    Order,
+    Item,
+    OrderPaymentMethod,
+    Store,
+    BuyingGroup,
+    PaymentMethod,
+    Shipment,
+    ShipmentItem,
+)
 from app.models.user import get_default_app_user_id
 from app.schemas.order import OrderRead, OrderCreate, OrderUpdate, OrderPaymentMethodCreate
 from app.schemas.item import ItemCreateNested
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+def _like_escape(s: str) -> str:
+    """Escape % and _ for safe use in LIKE."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 @router.get("", response_model=list[OrderRead])
@@ -21,8 +36,10 @@ def list_orders(
     order_status: str | None = Query(default=None, alias="order_status"),  # when "imported", only imported; else exclude imported
     status: list[str] = Query(default=[], alias="status"),
     buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
+    store_id: list[int] = Query(default=[], alias="store_id"),
     date_from: str | None = None,
     date_to: str | None = None,
+    search: str | None = Query(default=None, alias="q"),
 ):
     # Order-level filters: which orders to include
     q = db.query(Order).order_by(Order.purchase_date.desc())
@@ -49,6 +66,8 @@ def list_orders(
             q = q.filter(Order.status != "imported")
     if buying_group_id:
         q = q.filter(Order.buying_group_id.in_(buying_group_id))
+    if store_id:
+        q = q.filter(Order.store_id.in_(store_id))
     if date_from:
         try:
             d = date.fromisoformat(date_from)
@@ -61,15 +80,86 @@ def list_orders(
             q = q.filter(func.date(Order.purchase_date) <= d)
         except ValueError:
             pass
+    search_order_level_ids = None
+    search_item_match_pairs = None
+    if search and search.strip():
+        term = f"%{_like_escape(search.strip())}%"
+        escape = "\\"
+        base_order = db.query(Order)
+        if order_status == "imported":
+            base_order = base_order.filter(Order.status == "imported")
+        else:
+            base_order = base_order.filter(Order.status != "imported")
+        # Order-level matches: show whole order
+        by_order_number = base_order.filter(Order.store_order_number.isnot(None)).filter(func.lower(Order.store_order_number).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_store = base_order.join(Store).filter(func.lower(Store.name).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_buying_group = base_order.join(BuyingGroup).filter(BuyingGroup.name.isnot(None)).filter(func.lower(BuyingGroup.name).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_payment_label = base_order.join(OrderPaymentMethod).join(PaymentMethod).filter(func.lower(PaymentMethod.label).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_dollars = base_order.filter(
+            or_(
+                cast(Order.shipping, String).like(term, escape=escape),
+                cast(Order.sales_tax, String).like(term, escape=escape),
+            )
+        ).with_entities(Order.id).distinct()
+        by_payment_amount = base_order.join(OrderPaymentMethod).filter(cast(OrderPaymentMethod.amount, String).like(term, escape=escape)).with_entities(Order.id).distinct()
+        order_level_ids_subq = by_order_number.union(by_store, by_buying_group, by_payment_label, by_dollars, by_payment_amount)
+        search_order_level_ids = set(row[0] for row in order_level_ids_subq.all())
+
+        # Item-level matches: (order_id, item_id) for filtering items when order is not in order_level
+        by_item_desc_pairs = base_order.join(Item).filter(Item.description.isnot(None)).filter(func.lower(Item.description).like(func.lower(term), escape=escape)).with_entities(Order.id, Item.id).distinct()
+        by_item_dollars_pairs = base_order.join(Item).filter(
+            or_(
+                cast(Item.price_paid, String).like(term, escape=escape),
+                cast(Item.price_sold, String).like(term, escape=escape),
+                cast(Item.shipping, String).like(term, escape=escape),
+                cast(Item.sales_tax, String).like(term, escape=escape),
+            )
+        ).with_entities(Order.id, Item.id).distinct()
+        # Tracking number is per-shipment: show only items in the matching shipment(s)
+        by_tracking_pairs = (
+            base_order.join(Item)
+            .join(ShipmentItem)
+            .join(Shipment)
+            .filter(Shipment.tracking_number.isnot(None))
+            .filter(func.lower(Shipment.tracking_number).like(func.lower(term), escape=escape))
+            .with_entities(Order.id, Item.id)
+            .distinct()
+        )
+        search_item_match_pairs = set(
+            by_item_desc_pairs.union(by_item_dollars_pairs).union(by_tracking_pairs).all()
+        )
+
+        # Orders to include: matched at order level OR at item/tracking level
+        by_item_desc = base_order.join(Item).filter(Item.description.isnot(None)).filter(func.lower(Item.description).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_item_dollars = base_order.join(Item).filter(
+            or_(
+                cast(Item.price_paid, String).like(term, escape=escape),
+                cast(Item.price_sold, String).like(term, escape=escape),
+                cast(Item.shipping, String).like(term, escape=escape),
+                cast(Item.sales_tax, String).like(term, escape=escape),
+            )
+        ).with_entities(Order.id).distinct()
+        by_tracking = base_order.join(Item).join(ShipmentItem).join(Shipment).filter(Shipment.tracking_number.isnot(None)).filter(func.lower(Shipment.tracking_number).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        search_ids = order_level_ids_subq.union(by_item_desc, by_item_dollars, by_tracking).subquery()
+        q = q.filter(Order.id.in_(search_ids))
     orders = q.all()
-    # Line-item filter: within each order, only include items matching status (keeps order grouping)
-    if status:
-        status_set = set(status)
+
+    # Build response: apply status filter and, when search is item-level-only, show only matching items
+    status_set = set(status) if status else None
+    if status_set is not None or search_order_level_ids is not None:
         result = []
         for o in orders:
             read = OrderRead.model_validate(o)
-            filtered_items = [i for i in read.items if i.status in status_set]
-            result.append(read.model_copy(update={"items": filtered_items}))
+            items = read.items
+            if status_set is not None:
+                items = [i for i in items if i.status in status_set]
+            if search_order_level_ids is not None:
+                if o.id in search_order_level_ids:
+                    pass  # whole order: items already filtered by status if any
+                else:
+                    # matched only by item: show only items that matched search
+                    items = [i for i in items if (o.id, i.id) in search_item_match_pairs]
+            result.append(read.model_copy(update={"items": items}))
         return result
     return orders
 

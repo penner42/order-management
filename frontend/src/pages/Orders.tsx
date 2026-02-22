@@ -150,14 +150,46 @@ function copyToClipboard(text: string): void {
   }
 }
 
-function defaultOrdersPath(): string {
-  const statuses = [
-    'purchased', 'shipped', 'submitted', 'delivered', 'scanned',
-    'payment_requested', 'payment_sent', 'payment_received',
-    'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
-  ]
+const DEFAULT_STATUSES: ItemStatus[] = [
+  'purchased', 'shipped', 'submitted', 'delivered', 'scanned',
+  'payment_requested', 'payment_sent', 'payment_received',
+  'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
+]
+
+const STATUS_FILTER_OPTIONS: [string, string][] = [
+  ['purchased', 'Purchased'],
+  ['shipped', 'Shipped'],
+  ['submitted', 'Submitted'],
+  ['delivered', 'Delivered'],
+  ['scanned', 'Scanned'],
+  ['payment_requested', 'Payment requested'],
+  ['payment_sent', 'Payment sent'],
+  ['payment_received', 'Paid'],
+  ['canceled', 'Canceled'],
+  ['needs_return', 'Needs return'],
+  ['return_started', 'Return started'],
+  ['return_sent', 'Return sent'],
+  ['return_received', 'Return received'],
+  ['return_refunded', 'Refunded'],
+]
+
+function buildOrdersPath(opts: {
+  filterStatuses: Set<string>
+  filterBuyingGroups: Set<number>
+  filterStores: Set<number>
+  filterDateFrom: string
+  filterDateTo: string
+  searchText: string
+}): string {
   const params = new URLSearchParams()
+  const statuses =
+    opts.filterStatuses.size > 0 ? [...opts.filterStatuses] : DEFAULT_STATUSES
   statuses.forEach((s) => params.append('status', s))
+  opts.filterBuyingGroups.forEach((id) => params.append('buying_group_id', String(id)))
+  opts.filterStores.forEach((id) => params.append('store_id', String(id)))
+  if (opts.filterDateFrom) params.set('date_from', opts.filterDateFrom)
+  if (opts.filterDateTo) params.set('date_to', opts.filterDateTo)
+  if (opts.searchText.trim()) params.set('q', opts.searchText.trim())
   return `/orders?${params.toString()}`
 }
 
@@ -202,8 +234,174 @@ export default function Orders() {
   const [addingAccount, setAddingAccount] = useState(false)
   const [pendingAccountSelection, setPendingAccountSelection] = useState<{ orderId: number; storeId: number; accountId: number } | null>(null)
   const [creatingOrder, setCreatingOrder] = useState(false)
+  const [filterStatuses, setFilterStatuses] = useState<Set<string>>(new Set())
+  const [filterBuyingGroups, setFilterBuyingGroups] = useState<Set<number>>(new Set())
+  const [filterStores, setFilterStores] = useState<Set<number>>(new Set())
+  const [filterDateFrom, setFilterDateFrom] = useState('')
+  const [filterDateTo, setFilterDateTo] = useState('')
+  const [filterStatusOpen, setFilterStatusOpen] = useState(false)
+  const [filterBuyingGroupOpen, setFilterBuyingGroupOpen] = useState(false)
+  const [filterStoreOpen, setFilterStoreOpen] = useState(false)
+  const [filterDateOpen, setFilterDateOpen] = useState(false)
+  const [searchText, setSearchText] = useState('')
+  const [searchDebounced, setSearchDebounced] = useState('')
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const restoreSearchFocusRef = useRef<{ start: number; end: number } | null>(null)
+  const filterStatusRef = useRef<HTMLDivElement>(null)
+  const filterBuyingGroupRef = useRef<HTMLDivElement>(null)
+  const filterStoreRef = useRef<HTMLDivElement>(null)
+  const filterDateRef = useRef<HTMLDivElement>(null)
   const paymentSaveTimeouts = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
   const storeDropdownRefs = useRef<Record<number, { setOpen: (open: boolean) => void; selectItem: (item: any) => void }>>({})
+
+  useEffect(() => {
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+    searchTimeoutRef.current = setTimeout(() => {
+      setSearchDebounced(searchText)
+      searchTimeoutRef.current = null
+    }, 300)
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+    }
+  }, [searchText])
+
+  const ordersPath = useMemo(
+    () =>
+      buildOrdersPath({
+        filterStatuses,
+        filterBuyingGroups,
+        filterStores,
+        filterDateFrom,
+        filterDateTo,
+        searchText: searchDebounced,
+      }),
+    [filterStatuses, filterBuyingGroups, filterStores, filterDateFrom, filterDateTo, searchDebounced]
+  )
+
+  const toYyyyMmDd = (d: Date) => d.toISOString().slice(0, 10)
+  const applyDatePreset = (preset: 'today' | 'week' | 'past7' | 'past30' | 'month' | 'year' | 'lastYear') => {
+    const now = new Date()
+    const today = toYyyyMmDd(now)
+    switch (preset) {
+      case 'today':
+        setFilterDateFrom(today)
+        setFilterDateTo(today)
+        break
+      case 'week': {
+        const day = now.getDay()
+        const start = new Date(now)
+        start.setDate(now.getDate() - (day === 0 ? 6 : day - 1))
+        setFilterDateFrom(toYyyyMmDd(start))
+        setFilterDateTo(today)
+        break
+      }
+      case 'past7': {
+        const d = new Date(now)
+        d.setDate(d.getDate() - 6)
+        setFilterDateFrom(toYyyyMmDd(d))
+        setFilterDateTo(today)
+        break
+      }
+      case 'past30': {
+        const d = new Date(now)
+        d.setDate(d.getDate() - 29)
+        setFilterDateFrom(toYyyyMmDd(d))
+        setFilterDateTo(today)
+        break
+      }
+      case 'month':
+        setFilterDateFrom(toYyyyMmDd(new Date(now.getFullYear(), now.getMonth(), 1)))
+        setFilterDateTo(today)
+        break
+      case 'year':
+        setFilterDateFrom(`${now.getFullYear()}-01-01`)
+        setFilterDateTo(today)
+        break
+      case 'lastYear': {
+        const y = now.getFullYear() - 1
+        setFilterDateFrom(`${y}-01-01`)
+        setFilterDateTo(`${y}-12-31`)
+        break
+      }
+    }
+    setFilterDateOpen(false)
+  }
+
+  const dateRangeLabel =
+    !filterDateFrom && !filterDateTo
+      ? 'Date range'
+      : filterDateFrom && filterDateTo
+        ? `${filterDateFrom} – ${filterDateTo}`
+        : filterDateFrom
+          ? `${filterDateFrom} –`
+          : `– ${filterDateTo}`
+
+  const toggleFilterStatus = (status: string) => {
+    setFilterStatuses((prev) => {
+      const next = new Set(prev)
+      if (next.has(status)) next.delete(status)
+      else next.add(status)
+      return next
+    })
+  }
+  const toggleFilterBuyingGroup = (id: number) => {
+    setFilterBuyingGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const toggleFilterStore = (id: number) => {
+    setFilterStores((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const hasActiveFilters =
+    filterStatuses.size > 0 ||
+    filterBuyingGroups.size > 0 ||
+    filterStores.size > 0 ||
+    !!filterDateFrom ||
+    !!filterDateTo ||
+    !!searchText.trim()
+
+  const resetFilters = () => {
+    setFilterStatuses(new Set())
+    setFilterBuyingGroups(new Set())
+    setFilterStores(new Set())
+    setFilterDateFrom('')
+    setFilterDateTo('')
+    setSearchText('')
+    setSearchDebounced('')
+    setFilterStatusOpen(false)
+    setFilterBuyingGroupOpen(false)
+    setFilterStoreOpen(false)
+    setFilterDateOpen(false)
+  }
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (
+        filterStatusRef.current?.contains(target) ||
+        filterBuyingGroupRef.current?.contains(target) ||
+        filterStoreRef.current?.contains(target) ||
+        filterDateRef.current?.contains(target)
+      )
+        return
+      setFilterStatusOpen(false)
+      setFilterBuyingGroupOpen(false)
+      setFilterStoreOpen(false)
+      setFilterDateOpen(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
 
   const loadAccountsForStore = (storeId: number) =>
     api.get<StoreAccount[]>(`/stores/${storeId}/accounts`).then((list) => {
@@ -211,16 +409,13 @@ export default function Orders() {
     })
 
   useEffect(() => {
-    setLoading(true)
     Promise.all([
-      api.get<Order[]>(defaultOrdersPath()),
       api.get<BuyingGroup[]>('/buying-groups'),
       api.get<Shipment[]>('/shipments'),
       api.get<Store[]>('/stores'),
       api.get<PaymentMethod[]>('/payment-methods'),
     ])
-      .then(async ([ordersData, groupsData, shipmentsData, storesData, pmData]) => {
-        setOrders(ordersData)
+      .then(async ([groupsData, shipmentsData, storesData, pmData]) => {
         setGroups(groupsData)
         setShipments(shipmentsData)
         setStores(storesData)
@@ -236,8 +431,35 @@ export default function Orders() {
         setAccountsByStore(allAccountsByStore)
       })
       .catch(console.error)
-      .finally(() => setLoading(false))
   }, [])
+
+  useEffect(() => {
+    const el = searchInputRef.current
+    const hadFocus = el && document.activeElement === el
+    const start = el?.selectionStart ?? null
+    const end = el?.selectionEnd ?? null
+    if (hadFocus && start != null && end != null) {
+      restoreSearchFocusRef.current = { start, end }
+    }
+    setLoading(true)
+    api
+      .get<Order[]>(ordersPath)
+      .then(setOrders)
+      .catch(console.error)
+      .finally(() => setLoading(false))
+  }, [ordersPath])
+
+  useEffect(() => {
+    if (!loading && restoreSearchFocusRef.current) {
+      const { start, end } = restoreSearchFocusRef.current
+      restoreSearchFocusRef.current = null
+      const input = searchInputRef.current
+      if (input) {
+        input.focus()
+        input.setSelectionRange(start, end)
+      }
+    }
+  }, [loading])
 
   useEffect(() => {
     if (pendingAccountSelection) {
@@ -339,7 +561,7 @@ export default function Orders() {
         await removeItemFromShipment(shipment, itemId)
       }
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>(defaultOrdersPath()),
+        api.get<Order[]>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
       setOrders(ordersData)
@@ -393,7 +615,7 @@ export default function Orders() {
         shipped_at: state.shippedAt ? `${state.shippedAt}T00:00:00.000Z` : undefined,
       })
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>(defaultOrdersPath()),
+        api.get<Order[]>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
       setOrders(ordersData)
@@ -659,7 +881,7 @@ export default function Orders() {
     try {
       await api.delete(`/items/${itemId}`)
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>(defaultOrdersPath()),
+        api.get<Order[]>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
       setOrders(ordersData)
@@ -679,7 +901,7 @@ export default function Orders() {
     try {
       await api.post('/items/bulk-delete', { item_ids: itemIds })
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>(defaultOrdersPath()),
+        api.get<Order[]>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
       setOrders(ordersData)
@@ -826,8 +1048,214 @@ export default function Orders() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-3">
-          <h1 className="text-xl font-semibold text-ink dark:text-gray-100">Orders</h1>
+        <h1 className="text-xl font-semibold text-ink dark:text-gray-100 shrink-0">Orders</h1>
+        <div className="flex-1 flex justify-center items-center min-w-0">
+          <div className="flex items-center gap-3 flex-wrap justify-center">
+        <div ref={filterStatusRef} className="relative w-[110px] shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setFilterBuyingGroupOpen(false)
+              setFilterStoreOpen(false)
+              setFilterDateOpen(false)
+              setFilterStatusOpen((v) => !v)
+            }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition w-full justify-between ${
+              filterStatuses.size > 0
+                ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                : 'border-brand-200 dark:border-gray-600 text-ink dark:text-gray-200 hover:bg-brand-50/50 dark:hover:bg-gray-700'
+            }`}
+            aria-label="Filter by status"
+            aria-expanded={filterStatusOpen}
+          >
+            <span className="truncate">Status{filterStatuses.size > 0 ? ` (${filterStatuses.size})` : ''}</span>
+            <span className="inline-block transition-transform shrink-0" style={{ transform: filterStatusOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
+          </button>
+          {filterStatusOpen && (
+            <div className="absolute left-0 top-full mt-1 z-50 py-2 min-w-[180px] rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg max-h-64 overflow-auto">
+              {STATUS_FILTER_OPTIONS.map(([value, label]) => (
+                <label key={value} className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={filterStatuses.has(value)}
+                    onChange={() => toggleFilterStatus(value)}
+                    className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                  />
+                  <span className="text-sm text-ink dark:text-gray-200">{label}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+        <div ref={filterBuyingGroupRef} className="relative w-[145px] shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setFilterStatusOpen(false)
+              setFilterStoreOpen(false)
+              setFilterDateOpen(false)
+              setFilterBuyingGroupOpen((v) => !v)
+            }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition w-full justify-between ${
+              filterBuyingGroups.size > 0
+                ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                : 'border-brand-200 dark:border-gray-600 text-ink dark:text-gray-200 hover:bg-brand-50/50 dark:hover:bg-gray-700'
+            }`}
+            aria-label="Filter by buying group"
+            aria-expanded={filterBuyingGroupOpen}
+          >
+            <span className="truncate">Buying group{filterBuyingGroups.size > 0 ? ` (${filterBuyingGroups.size})` : ''}</span>
+            <span className="inline-block transition-transform shrink-0" style={{ transform: filterBuyingGroupOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
+          </button>
+          {filterBuyingGroupOpen && (
+            <div className="absolute left-0 top-full mt-1 z-50 py-2 min-w-[180px] rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg max-h-64 overflow-auto">
+              {groups.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-ink-muted">No buying groups</div>
+              ) : (
+                groups.map((g) => (
+                  <label key={g.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={filterBuyingGroups.has(g.id)}
+                      onChange={() => toggleFilterBuyingGroup(g.id)}
+                      className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                    />
+                    <span className="text-sm text-ink dark:text-gray-200">{g.name}</span>
+                  </label>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+        <div ref={filterStoreRef} className="relative w-[120px] shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setFilterStatusOpen(false)
+              setFilterBuyingGroupOpen(false)
+              setFilterDateOpen(false)
+              setFilterStoreOpen((v) => !v)
+            }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition w-full justify-between ${
+              filterStores.size > 0
+                ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                : 'border-brand-200 dark:border-gray-600 text-ink dark:text-gray-200 hover:bg-brand-50/50 dark:hover:bg-gray-700'
+            }`}
+            aria-label="Filter by store"
+            aria-expanded={filterStoreOpen}
+          >
+            <span className="truncate">Store{filterStores.size > 0 ? ` (${filterStores.size})` : ''}</span>
+            <span className="inline-block transition-transform shrink-0" style={{ transform: filterStoreOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
+          </button>
+          {filterStoreOpen && (
+            <div className="absolute left-0 top-full mt-1 z-50 py-2 min-w-[180px] rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg max-h-64 overflow-auto">
+              {stores.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-ink-muted">No stores</div>
+              ) : (
+                stores.map((s) => (
+                  <label key={s.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={filterStores.has(s.id)}
+                      onChange={() => toggleFilterStore(s.id)}
+                      className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                    />
+                    <span className="text-sm text-ink dark:text-gray-200">{s.name}</span>
+                  </label>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+        <div ref={filterDateRef} className="relative w-[240px] shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setFilterStatusOpen(false)
+              setFilterBuyingGroupOpen(false)
+              setFilterStoreOpen(false)
+              setFilterDateOpen((v) => !v)
+            }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition w-full justify-between ${
+              filterDateFrom || filterDateTo
+                ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                : 'border-brand-200 dark:border-gray-600 text-ink dark:text-gray-200 hover:bg-brand-50/50 dark:hover:bg-gray-700'
+            }`}
+            aria-label="Filter by date range"
+            aria-expanded={filterDateOpen}
+          >
+            <span className="truncate">{dateRangeLabel}</span>
+            <span className="inline-block transition-transform shrink-0" style={{ transform: filterDateOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
+          </button>
+          {filterDateOpen && (
+            <div className="absolute left-0 top-full mt-1 z-50 py-2 min-w-[260px] rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg">
+              <div className="px-3 pb-2 mb-2 border-b border-brand-100 dark:border-gray-600">
+                <div className="text-xs font-medium text-ink-muted dark:text-gray-400 mb-2">Presets</div>
+                <div className="flex flex-wrap gap-1">
+                  {(['today', 'week', 'past7', 'past30', 'month', 'year', 'lastYear'] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => applyDatePreset(p)}
+                      className="px-2 py-1 rounded text-xs font-medium text-ink dark:text-gray-200 hover:bg-brand-100 dark:hover:bg-gray-700 transition"
+                    >
+                      {p === 'today' && 'Today'}
+                      {p === 'week' && 'This Week'}
+                      {p === 'past7' && 'Past 7 Days'}
+                      {p === 'past30' && 'Past 30 Days'}
+                      {p === 'month' && 'This Month'}
+                      {p === 'year' && 'This Year'}
+                      {p === 'lastYear' && 'Last Year'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="px-3 space-y-2">
+                <div className="text-xs font-medium text-ink-muted dark:text-gray-400 mb-1">Custom range</div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={filterDateFrom}
+                    onChange={(e) => setFilterDateFrom(e.target.value)}
+                    className="flex-1 px-2 py-1.5 rounded border border-brand-200 dark:border-gray-600 text-sm text-ink dark:text-gray-200 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent min-w-0"
+                    title="From date"
+                  />
+                  <span className="text-ink-muted text-xs">–</span>
+                  <input
+                    type="date"
+                    value={filterDateTo}
+                    onChange={(e) => setFilterDateTo(e.target.value)}
+                    className="flex-1 px-2 py-1.5 rounded border border-brand-200 dark:border-gray-600 text-sm text-ink dark:text-gray-200 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent min-w-0"
+                    title="To date"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        <input
+          ref={searchInputRef}
+          type="search"
+          placeholder="Search order #, item, store, amount…"
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+          className="h-8 w-[220px] shrink-0 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 text-sm px-2 placeholder:text-ink-muted focus:outline-none focus:ring-1 focus:ring-brand-500"
+          aria-label="Search orders"
+        />
+        <button
+          type="button"
+          onClick={resetFilters}
+          disabled={!hasActiveFilters}
+          className={`px-3 py-1.5 rounded-lg border text-sm transition shrink-0 ${
+            hasActiveFilters
+              ? 'border-brand-200 dark:border-gray-600 text-ink dark:text-gray-200 hover:bg-brand-50 dark:hover:bg-gray-700'
+              : 'border-brand-200 dark:border-gray-600 text-ink-muted dark:text-gray-500 opacity-60 cursor-not-allowed'
+          }`}
+        >
+          Reset Filters
+        </button>
+          </div>
         </div>
         <button
           onClick={handleCreateNewOrder}
