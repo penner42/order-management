@@ -1052,12 +1052,14 @@ export default function Orders() {
       >
         <div className="flex items-center gap-2 shrink-0">
           <h1 className="text-xl font-semibold text-ink dark:text-gray-100">Orders</h1>
-          {loading && (
-            <span
-              className="inline-block w-4 h-4 border-2 border-brand-200 border-t-brand-600 dark:border-gray-600 dark:border-t-brand-400 rounded-full animate-spin"
-              aria-label="Loading"
-            />
-          )}
+          <span className="inline-flex w-4 h-4 items-center justify-center" aria-hidden={!loading}>
+            {loading && (
+              <span
+                className="inline-block w-4 h-4 border-2 border-brand-200 border-t-brand-600 dark:border-gray-600 dark:border-t-brand-400 rounded-full animate-spin"
+                aria-label="Loading"
+              />
+            )}
+          </span>
         </div>
         <div className="flex-1 flex justify-center items-center min-w-0">
           <div className="flex items-center gap-3 flex-wrap justify-center">
