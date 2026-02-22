@@ -1884,11 +1884,11 @@ export default function Orders() {
                                           {advancingGroupKey === group.key ? '…' : advanceLabel}
                                         </button>
                                       ) : null}
-                                      {(item.quantity ?? 1) >= 2 && (
+                                      {(item.quantity ?? 1) >= 2 ? (
                                         <button
                                           type="button"
                                           onClick={() => setSplitModalItem(item)}
-                                          className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition"
+                                          className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition shrink-0"
                                           title="Split for separate shipping"
                                           aria-label="Split for separate shipping"
                                         >
@@ -1898,6 +1898,8 @@ export default function Orders() {
                                             <path d="M8.6 8.6l10.4 10.4M8.6 15.4l10.4 -10.4" />
                                           </svg>
                                         </button>
+                                      ) : (
+                                        <span className="inline-block w-6 h-6 shrink-0" aria-hidden />
                                       )}
                                       <button
                                         type="button"
