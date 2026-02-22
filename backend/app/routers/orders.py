@@ -3,7 +3,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import (
@@ -148,6 +148,15 @@ def list_orders(
         by_tracking = base_order.join(Item).join(ShipmentItem).join(Shipment).filter(Shipment.tracking_number.isnot(None)).filter(func.lower(Shipment.tracking_number).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
         search_ids = order_level_ids_subq.union(by_item_desc, by_item_dollars, by_tracking).subquery()
         q = q.filter(Order.id.in_(search_ids))
+    # Eager load relationships to avoid N+1 when building OrderRead (store, store_account, buying_group,
+    # items, order_payments + payment_method). Use selectinload for one-to-many to avoid cartesian product.
+    q = q.options(
+        joinedload(Order.store),
+        joinedload(Order.store_account),
+        joinedload(Order.buying_group),
+        selectinload(Order.items),
+        selectinload(Order.order_payments).joinedload(OrderPaymentMethod.payment_method),
+    )
     orders = q.all()
 
     # Build response: apply status filter and, when search is item-level-only, show only matching items
