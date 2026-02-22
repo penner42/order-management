@@ -1043,12 +1043,22 @@ export default function Orders() {
     }
   }
 
-  if (loading) return <div className="text-ink-muted">Loading orders…</div>
-
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4 flex-wrap">
-        <h1 className="text-xl font-semibold text-ink dark:text-gray-100 shrink-0">Orders</h1>
+      <div
+        className={`flex items-center justify-between gap-4 flex-wrap transition-opacity duration-200 ${
+          loading ? 'opacity-50 pointer-events-none' : ''
+        }`}
+      >
+        <div className="flex items-center gap-2 shrink-0">
+          <h1 className="text-xl font-semibold text-ink dark:text-gray-100">Orders</h1>
+          {loading && (
+            <span
+              className="inline-block w-4 h-4 border-2 border-brand-200 border-t-brand-600 dark:border-gray-600 dark:border-t-brand-400 rounded-full animate-spin"
+              aria-label="Loading"
+            />
+          )}
+        </div>
         <div className="flex-1 flex justify-center items-center min-w-0">
           <div className="flex items-center gap-3 flex-wrap justify-center">
         <div ref={filterStatusRef} className="relative w-[110px] shrink-0">
@@ -1266,7 +1276,11 @@ export default function Orders() {
         </button>
       </div>
 
-      <div className="space-y-4">
+      <div
+        className={`space-y-4 transition-opacity duration-200 ${
+          loading ? 'opacity-50 pointer-events-none' : ''
+        }`}
+      >
         {orders.length === 0 ? (
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 py-12 text-center text-ink-muted">
             No orders yet. Create one to get started.
