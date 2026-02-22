@@ -37,6 +37,7 @@ def list_orders(
     status: list[str] = Query(default=[], alias="status"),
     buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
     store_id: list[int] = Query(default=[], alias="store_id"),
+    store_account_id: list[int] = Query(default=[], alias="store_account_id"),
     date_from: str | None = None,
     date_to: str | None = None,
     search: str | None = Query(default=None, alias="q"),
@@ -66,8 +67,13 @@ def list_orders(
             q = q.filter(Order.status != "imported")
     if buying_group_id:
         q = q.filter(Order.buying_group_id.in_(buying_group_id))
-    if store_id:
-        q = q.filter(Order.store_id.in_(store_id))
+    if store_id or store_account_id:
+        clauses = []
+        if store_id:
+            clauses.append(Order.store_id.in_(store_id))
+        if store_account_id:
+            clauses.append(Order.store_account_id.in_(store_account_id))
+        q = q.filter(or_(*clauses))
     if date_from:
         try:
             d = date.fromisoformat(date_from)

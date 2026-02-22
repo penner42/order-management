@@ -177,6 +177,7 @@ function buildOrdersPath(opts: {
   filterStatuses: Set<string>
   filterBuyingGroups: Set<number>
   filterStores: Set<number>
+  filterStoreAccounts: Set<number>
   filterDateFrom: string
   filterDateTo: string
   searchText: string
@@ -187,6 +188,7 @@ function buildOrdersPath(opts: {
   statuses.forEach((s) => params.append('status', s))
   opts.filterBuyingGroups.forEach((id) => params.append('buying_group_id', String(id)))
   opts.filterStores.forEach((id) => params.append('store_id', String(id)))
+  opts.filterStoreAccounts.forEach((id) => params.append('store_account_id', String(id)))
   if (opts.filterDateFrom) params.set('date_from', opts.filterDateFrom)
   if (opts.filterDateTo) params.set('date_to', opts.filterDateTo)
   if (opts.searchText.trim()) params.set('q', opts.searchText.trim())
@@ -237,6 +239,7 @@ export default function Orders() {
   const [filterStatuses, setFilterStatuses] = useState<Set<string>>(new Set())
   const [filterBuyingGroups, setFilterBuyingGroups] = useState<Set<number>>(new Set())
   const [filterStores, setFilterStores] = useState<Set<number>>(new Set())
+  const [filterStoreAccounts, setFilterStoreAccounts] = useState<Set<number>>(new Set())
   const [filterDateFrom, setFilterDateFrom] = useState('')
   const [filterDateTo, setFilterDateTo] = useState('')
   const [filterStatusOpen, setFilterStatusOpen] = useState(false)
@@ -272,11 +275,12 @@ export default function Orders() {
         filterStatuses,
         filterBuyingGroups,
         filterStores,
+        filterStoreAccounts,
         filterDateFrom,
         filterDateTo,
         searchText: searchDebounced,
       }),
-    [filterStatuses, filterBuyingGroups, filterStores, filterDateFrom, filterDateTo, searchDebounced]
+    [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced]
   )
 
   const toYyyyMmDd = (d: Date) => d.toISOString().slice(0, 10)
@@ -354,18 +358,75 @@ export default function Orders() {
     })
   }
   const toggleFilterStore = (id: number) => {
-    setFilterStores((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+    if (filterStores.has(id)) {
+      const accountIds = (accountsByStore[id] ?? []).map((a) => a.id)
+      setFilterStoreAccounts((prev) => {
+        const next = new Set(prev)
+        accountIds.forEach((aid) => next.delete(aid))
+        return next
+      })
+      setFilterStores((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+    } else {
+      setFilterStores((prev) => {
+        const next = new Set(prev)
+        next.add(id)
+        return next
+      })
+    }
+  }
+  const toggleFilterStoreAccount = (accountId: number, storeId: number) => {
+    const storeAccounts = accountsByStore[storeId] ?? []
+    const storeIsSelected = filterStores.has(storeId)
+    const accountCurrentlyChecked = filterStoreAccounts.has(accountId) || storeIsSelected
+    if (accountCurrentlyChecked) {
+      if (storeIsSelected) {
+        setFilterStores((prev) => {
+          const next = new Set(prev)
+          next.delete(storeId)
+          return next
+        })
+        setFilterStoreAccounts((prev) => {
+          const next = new Set(prev)
+          storeAccounts.forEach((a) => {
+            if (a.id !== accountId) next.add(a.id)
+          })
+          return next
+        })
+      } else {
+        setFilterStoreAccounts((prev) => {
+          const next = new Set(prev)
+          next.delete(accountId)
+          return next
+        })
+      }
+    } else {
+      setFilterStoreAccounts((prev) => {
+        const next = new Set(prev)
+        next.add(accountId)
+        const allSubaccountsSelected =
+          storeAccounts.length > 0 && storeAccounts.every((a) => next.has(a.id))
+        if (allSubaccountsSelected) {
+          setFilterStores((prevStores) => {
+            const nextStores = new Set(prevStores)
+            nextStores.add(storeId)
+            return nextStores
+          })
+          storeAccounts.forEach((a) => next.delete(a.id))
+        }
+        return next
+      })
+    }
   }
 
   const hasActiveFilters =
     filterStatuses.size > 0 ||
     filterBuyingGroups.size > 0 ||
     filterStores.size > 0 ||
+    filterStoreAccounts.size > 0 ||
     !!filterDateFrom ||
     !!filterDateTo ||
     !!searchText.trim()
@@ -374,6 +435,7 @@ export default function Orders() {
     setFilterStatuses(new Set())
     setFilterBuyingGroups(new Set())
     setFilterStores(new Set())
+    setFilterStoreAccounts(new Set())
     setFilterDateFrom('')
     setFilterDateTo('')
     setSearchText('')
@@ -1149,14 +1211,14 @@ export default function Orders() {
               setFilterStoreOpen((v) => !v)
             }}
             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition w-full justify-between ${
-              filterStores.size > 0
+              filterStores.size > 0 || filterStoreAccounts.size > 0
                 ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
                 : 'border-brand-200 dark:border-gray-600 text-ink dark:text-gray-200 hover:bg-brand-50/50 dark:hover:bg-gray-700'
             }`}
             aria-label="Filter by store"
             aria-expanded={filterStoreOpen}
           >
-            <span className="truncate">Store{filterStores.size > 0 ? ` (${filterStores.size})` : ''}</span>
+            <span className="truncate">Store{filterStores.size > 0 || filterStoreAccounts.size > 0 ? ` (${filterStores.size + filterStoreAccounts.size})` : ''}</span>
             <span className="inline-block transition-transform shrink-0" style={{ transform: filterStoreOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
           </button>
           {filterStoreOpen && (
@@ -1164,17 +1226,42 @@ export default function Orders() {
               {stores.length === 0 ? (
                 <div className="px-3 py-2 text-sm text-ink-muted">No stores</div>
               ) : (
-                stores.map((s) => (
-                  <label key={s.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={filterStores.has(s.id)}
-                      onChange={() => toggleFilterStore(s.id)}
-                      className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
-                    />
-                    <span className="text-sm text-ink dark:text-gray-200">{s.name}</span>
-                  </label>
-                ))
+                stores.map((s) => {
+                  const storeAccounts = accountsByStore[s.id] ?? []
+                  const storeChecked = filterStores.has(s.id)
+                  const someAccountsSelected = storeAccounts.some((a) => filterStoreAccounts.has(a.id))
+                  const storeIndeterminate = !storeChecked && someAccountsSelected
+                  return (
+                    <div key={s.id}>
+                      <label className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
+                        <input
+                          ref={(el) => {
+                            if (el) el.indeterminate = storeIndeterminate
+                          }}
+                          type="checkbox"
+                          checked={storeChecked}
+                          onChange={() => toggleFilterStore(s.id)}
+                          className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                        />
+                        <span className="text-sm text-ink dark:text-gray-200">{s.name}</span>
+                      </label>
+                      {storeAccounts.map((a) => (
+                        <label
+                          key={a.id}
+                          className="flex items-center gap-2 pl-8 pr-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={filterStoreAccounts.has(a.id) || storeChecked}
+                            onChange={() => toggleFilterStoreAccount(a.id, s.id)}
+                            className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                          />
+                          <span className="text-sm text-ink dark:text-gray-200">{a.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )
+                })
               )}
             </div>
           )}
