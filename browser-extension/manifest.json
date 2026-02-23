@@ -12,6 +12,11 @@
       "matches": ["https://www.walmart.com/orders*"],
       "js": ["stores/walmart/orders.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.costco.com/myaccount/*"],
+      "js": ["stores/costco/orders.js"],
+      "run_at": "document_idle"
     }
   ]
 }
