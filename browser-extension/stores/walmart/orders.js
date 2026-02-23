@@ -2,7 +2,7 @@
  * Order Manager Browser Integration - Walmart Orders
  * All data is read from the __NEXT_DATA__ script JSON (no DOM parsing).
  * - Order detail page (orders/XXXX/...): order and line items from props.pageProps.initialData.data.order
- * - Orders list page (orders): order numbers from __NEXT_DATA__ when present
+ * - Orders list page (orders): order numbers and tracking numbers (orders[].groups[].shipment.trackingNumber) from __NEXT_DATA__ and fetch interceptor; injected into list and appended to track-package button.
  */
 (function () {
   "use strict";
@@ -118,6 +118,27 @@
     return numbers;
   }
 
+  function extractTrackingNumbersFromDataObj(dataObj) {
+    if (!dataObj) return [];
+    const orders = dataObj.purchaseHistory?.orders;
+    if (!orders || !Array.isArray(orders)) return [];
+    const byIndex = [];
+    for (const o of orders) {
+      const groups = o.groups;
+      const tracking = [];
+      if (Array.isArray(groups)) {
+        for (const g of groups) {
+          const tn = g.shipment?.trackingNumber;
+          if (tn != null && String(tn).trim()) {
+            tracking.push(String(tn).trim());
+          }
+        }
+      }
+      byIndex.push(tracking);
+    }
+    return byIndex;
+  }
+
   function getOrderNumbersFromNextData() {
     const data = getNextData();
     const initialData = data?.props?.pageProps?.phRedesignInitialData;
@@ -125,9 +146,16 @@
     return extractOrderNumbersFromDataObj(dataObj);
   }
 
+  function getTrackingNumbersFromNextData() {
+    const data = getNextData();
+    const initialData = data?.props?.pageProps?.phRedesignInitialData;
+    const dataObj = initialData?.data;
+    return extractTrackingNumbersFromDataObj(dataObj);
+  }
+
   const ORDER_LABEL_MARKER = "data-order-manager-labeled";
 
-  function injectOrderNumbersWithArray(orderNumbers) {
+  function injectOrderNumbersWithArray(orderNumbers, trackingNumbersByIndex) {
     if (!orderNumbers || orderNumbers.length === 0) return false;
     let injected = 0;
     for (let X = 0; X < orderNumbers.length; X++) {
@@ -144,6 +172,26 @@
       span.className = "w_yTSq dark-gray w_0aYG w_TErl";
       span.textContent = `Order number ${Y}`;
       header.insertBefore(span, header.firstChild);
+      const trackingForOrder = Array.isArray(trackingNumbersByIndex) && trackingNumbersByIndex[X];
+      const trackingList = Array.isArray(trackingForOrder)
+        ? trackingForOrder.filter(Boolean)
+        : [];
+      const orderCard = orderEl.parentElement || orderEl;
+      for (let g = 0; g < trackingList.length; g++) {
+        const tn = trackingList[g];
+        if (!tn) continue;
+        const groupEl = orderCard.querySelector(
+          `div[data-testid="orderGroup-${g}"]`
+        );
+        if (!groupEl) continue;
+        const captionId = "caption-" + orderNumbers[X] + "-Delivery";
+        const captionEl = groupEl.querySelector(
+          "[id='" + captionId.replace(/'/g, "\\'") + "']"
+        );
+        if (captionEl) {
+          captionEl.textContent = (captionEl.textContent || "").trim() + " " + tn;
+        }
+      }
       header.setAttribute(ORDER_LABEL_MARKER, "1");
       injected++;
     }
@@ -152,12 +200,13 @@
 
   function injectOrderNumbersIntoPage() {
     const orderNumbers = getOrderNumbersFromNextData();
-    return injectOrderNumbersWithArray(orderNumbers);
+    const trackingNumbersByIndex = getTrackingNumbersFromNextData();
+    return injectOrderNumbersWithArray(orderNumbers, trackingNumbersByIndex);
   }
 
-  function scheduleInjectFromPayload(orderNumbers) {
+  function scheduleInjectFromPayload(orderNumbers, trackingNumbersByIndex) {
     const tryInject = (attempt) => {
-      if (injectOrderNumbersWithArray(orderNumbers)) return;
+      if (injectOrderNumbersWithArray(orderNumbers, trackingNumbersByIndex)) return;
       if (attempt < 15) setTimeout(() => tryInject(attempt + 1), 300);
     };
     setTimeout(() => tryInject(0), 100);
@@ -210,8 +259,9 @@
             body?.props?.pageProps?.phRedesignInitialData?.data ??
             body;
           const orderNumbers = extractOrderNumbersFromDataObj(dataObj);
+          const trackingNumbersByIndex = extractTrackingNumbersFromDataObj(dataObj);
           if (orderNumbers.length > 0) {
-            scheduleInjectFromPayload(orderNumbers);
+            scheduleInjectFromPayload(orderNumbers, trackingNumbersByIndex);
           }
         } catch {
           // ignore
