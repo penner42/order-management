@@ -1,7 +1,8 @@
 /**
  * Order Manager Browser Integration - Walmart Orders
- * - Order detail page (orders/XXXX/...): order and line items from __NEXT_DATA__ (props.pageProps.initialData.data.order)
- * - Orders list page (orders): order numbers from buttons with data-automation-id="view-order-details-link-XX" (XX = order number)
+ * All data is read from the __NEXT_DATA__ script JSON (no DOM parsing).
+ * - Order detail page (orders/XXXX/...): order and line items from props.pageProps.initialData.data.order
+ * - Orders list page (orders): order numbers from __NEXT_DATA__ when present
  */
 (function () {
   "use strict";
@@ -105,17 +106,19 @@
     };
   }
 
-  const VIEW_ORDER_DETAILS_PREFIX = "view-order-details-link-";
+  function getOrderNumbersFromNextData() {
+    const data = getNextData();
+    const initialData = data?.props?.pageProps?.phRedesignInitialData;
+    const dataObj = initialData?.data;
+    if (!dataObj) return [];
 
-  function getOrderNumbersFromButtons() {
-    const selector = `[data-automation-id^="${VIEW_ORDER_DETAILS_PREFIX}"]`;
-    const buttons = document.querySelectorAll(selector);
+    const orders = dataObj.purchaseHistory?.orders
+
+    if (!orders || !Array.isArray(orders)) return [];
     const numbers = new Set();
-    for (const el of buttons) {
-      const id = el.getAttribute("data-automation-id");
-      if (!id || !id.startsWith(VIEW_ORDER_DETAILS_PREFIX)) continue;
-      const orderNumber = id.slice(VIEW_ORDER_DETAILS_PREFIX.length).trim();
-      if (orderNumber) numbers.add(orderNumber);
+    for (const o of orders) {
+      const id = o.id;
+      if (id != null) numbers.add(String(id));
     }
     return Array.from(numbers).sort();
   }
@@ -131,10 +134,10 @@
       return true;
     }
     if (request.action === "getOrderNumbers") {
-      const orderNumbers = getOrderNumbersFromButtons();
+      const orderNumbers = getOrderNumbersFromNextData();
       const message =
         orderNumbers.length === 0
-          ? "Order Manager: No order numbers found (look for view-order-details-link buttons on this page)."
+          ? "Order Manager: No order numbers found in __NEXT_DATA__ on this page."
           : `Order Manager found ${orderNumbers.length} order(s):\n\n` +
             orderNumbers.join("\n");
       alert(message);
