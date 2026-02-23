@@ -24,6 +24,5 @@ A browser extension that integrates order data from store order pages. Works in 
 ## Usage
 
 1. Visit [https://www.walmart.com/orders](https://www.walmart.com/orders) (while logged in)
-2. Click the extension icon in your browser toolbar
-3. In the popup, click **Get Order Numbers**
-4. A browser alert shows the list of order numbers
+2. Order numbers are injected into each order card on the page automatically
+3. For order details, open an order and use the popup: **Get Order Details** → **Send to Order Manager**

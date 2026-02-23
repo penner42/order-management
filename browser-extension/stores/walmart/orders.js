@@ -115,12 +115,58 @@
     const orders = dataObj.purchaseHistory?.orders
 
     if (!orders || !Array.isArray(orders)) return [];
-    const numbers = new Set();
+    const numbers = new Array();
     for (const o of orders) {
-      const id = o.id;
-      if (id != null) numbers.add(String(id));
+      const id = String(o.id);
+      if (id != null && !numbers.includes(id)) numbers.push(id);
     }
-    return Array.from(numbers).sort();
+    return numbers; //Array.from(numbers).sort();
+  }
+
+  const ORDER_LABEL_MARKER = "data-order-manager-labeled";
+
+  function injectOrderNumbersIntoPage() {
+    const orderNumbers = getOrderNumbersFromNextData();
+    if (orderNumbers.length === 0) return false;
+    let injected = 0;
+    for (let X = 0; X < orderNumbers.length; X++) {
+      const orderEl = document.querySelector(
+        `div[data-testid="order-${X}"]`
+      );
+      if (!orderEl) continue;
+      const header = orderEl.querySelector(
+        'div.pa3.ph4-m.flex.items-center.justify-between.bg-nearer-white'
+      );
+      if (!header || header.hasAttribute(ORDER_LABEL_MARKER)) continue;
+      const Y = orderNumbers[X];
+      const span = document.createElement("span");
+      span.className = "w_yTSq dark-gray w_0aYG w_TErl";
+      span.textContent = `Order number ${Y}`;
+      header.insertBefore(span, header.firstChild);
+      header.setAttribute(ORDER_LABEL_MARKER, "1");
+      injected++;
+    }
+    return injected > 0;
+  }
+
+  function runWhenOrdersPageReady() {
+    if (injectOrderNumbersIntoPage()) return;
+    let attempts = 0;
+    const maxAttempts = 20;
+    const interval = setInterval(() => {
+      attempts++;
+      if (injectOrderNumbersIntoPage() || attempts >= maxAttempts) {
+        clearInterval(interval);
+      }
+    }, 500);
+  }
+
+  if (/^\/orders(\/|$)/.test(window.location.pathname || "")) {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", runWhenOrdersPageReady);
+    } else {
+      runWhenOrdersPageReady();
+    }
   }
 
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
@@ -131,17 +177,6 @@
       } else {
         sendResponse({ details });
       }
-      return true;
-    }
-    if (request.action === "getOrderNumbers") {
-      const orderNumbers = getOrderNumbersFromNextData();
-      const message =
-        orderNumbers.length === 0
-          ? "Order Manager: No order numbers found in __NEXT_DATA__ on this page."
-          : `Order Manager found ${orderNumbers.length} order(s):\n\n` +
-            orderNumbers.join("\n");
-      alert(message);
-      sendResponse({ orderNumbers });
       return true;
     }
     return false;
