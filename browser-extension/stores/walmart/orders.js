@@ -106,28 +106,29 @@
     };
   }
 
-  function getOrderNumbersFromNextData() {
-    const data = getNextData();
-    const initialData = data?.props?.pageProps?.phRedesignInitialData;
-    const dataObj = initialData?.data;
+  function extractOrderNumbersFromDataObj(dataObj) {
     if (!dataObj) return [];
-
-    const orders = dataObj.purchaseHistory?.orders
-
+    const orders = dataObj.purchaseHistory?.orders;
     if (!orders || !Array.isArray(orders)) return [];
-    const numbers = new Array();
+    const numbers = [];
     for (const o of orders) {
       const id = String(o.id);
       if (id != null && !numbers.includes(id)) numbers.push(id);
     }
-    return numbers; //Array.from(numbers).sort();
+    return numbers;
+  }
+
+  function getOrderNumbersFromNextData() {
+    const data = getNextData();
+    const initialData = data?.props?.pageProps?.phRedesignInitialData;
+    const dataObj = initialData?.data;
+    return extractOrderNumbersFromDataObj(dataObj);
   }
 
   const ORDER_LABEL_MARKER = "data-order-manager-labeled";
 
-  function injectOrderNumbersIntoPage() {
-    const orderNumbers = getOrderNumbersFromNextData();
-    if (orderNumbers.length === 0) return false;
+  function injectOrderNumbersWithArray(orderNumbers) {
+    if (!orderNumbers || orderNumbers.length === 0) return false;
     let injected = 0;
     for (let X = 0; X < orderNumbers.length; X++) {
       const orderEl = document.querySelector(
@@ -149,6 +150,19 @@
     return injected > 0;
   }
 
+  function injectOrderNumbersIntoPage() {
+    const orderNumbers = getOrderNumbersFromNextData();
+    return injectOrderNumbersWithArray(orderNumbers);
+  }
+
+  function scheduleInjectFromPayload(orderNumbers) {
+    const tryInject = (attempt) => {
+      if (injectOrderNumbersWithArray(orderNumbers)) return;
+      if (attempt < 15) setTimeout(() => tryInject(attempt + 1), 300);
+    };
+    setTimeout(() => tryInject(0), 100);
+  }
+
   function runWhenOrdersPageReady() {
     if (injectOrderNumbersIntoPage()) return;
     let attempts = 0;
@@ -161,12 +175,50 @@
     }, 500);
   }
 
+  function isOrdersPageFetch(urlString) {
+    if (!urlString || typeof urlString !== "string") return false;
+    try {
+      const u = new URL(urlString, window.location.origin);
+      return /\/orchestra\/cph\/graphql\/PurchaseHistory/.test(u.pathname);
+    } catch {
+      return false;
+    }
+  }
+
   if (/^\/orders(\/|$)/.test(window.location.pathname || "")) {
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", runWhenOrdersPageReady);
     } else {
       runWhenOrdersPageReady();
     }
+
+    const originalFetch = window.fetch;
+    window.fetch = function fetchInterceptor(...args) {
+      const requestUrl =
+        typeof args[0] === "string" ? args[0] : args[0]?.url;
+      const isOrdersPagination = isOrdersPageFetch(requestUrl);
+
+      return originalFetch.apply(this, args).then(async (response) => {
+        if (!isOrdersPagination) return response;
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) return response;
+        try {
+          const clone = response.clone();
+          const body = await clone.json();
+          const dataObj =
+            body?.data ??
+            body?.props?.pageProps?.phRedesignInitialData?.data ??
+            body;
+          const orderNumbers = extractOrderNumbersFromDataObj(dataObj);
+          if (orderNumbers.length > 0) {
+            scheduleInjectFromPayload(orderNumbers);
+          }
+        } catch {
+          // ignore
+        }
+        return response;
+      });
+    };
   }
 
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
