@@ -19,6 +19,7 @@ import type {
   ItemStatus,
 } from '../api/types'
 import { getTrackingInfo } from '../utils/tracking'
+import type { TrackingInfo } from '../utils/tracking'
 
 /** Format UTC ISO date string for datetime-local input in the user's local timezone. */
 function toLocalDatetimeLocal(iso: string | null | undefined): string {
@@ -266,6 +267,7 @@ export default function Orders() {
   const filterDateRef = useRef<HTMLDivElement>(null)
   const paymentSaveTimeouts = useRef<Record<number, ReturnType<typeof setTimeout>>>({})
   const storeDropdownRefs = useRef<Record<number, { setOpen: (open: boolean) => void; selectItem: (item: any) => void }>>({})
+  const [trackingInfoByItemId, setTrackingInfoByItemId] = useState<Record<number, TrackingInfo | null>>({})
 
   useEffect(() => {
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
@@ -574,6 +576,35 @@ export default function Orders() {
     [shipments]
   )
   const getTracking = (itemId: number) => itemIdToTracking[itemId] ?? ''
+
+  useEffect(() => {
+    const fetchTrackingInfos = async () => {
+      const next: Record<number, TrackingInfo | null> = {}
+      const requests: Promise<void>[] = []
+
+      for (const order of orders) {
+        for (const item of order.items ?? []) {
+          const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
+          const tn = (trackingRaw || '').trim()
+          if (!tn) {
+            next[item.id] = null
+            continue
+          }
+          requests.push(
+            (async () => {
+              const info = await getTrackingInfo(tn)
+              next[item.id] = info
+            })()
+          )
+        }
+      }
+
+      await Promise.all(requests)
+      setTrackingInfoByItemId(next)
+    }
+
+    void fetchTrackingInfos()
+  }, [orders, shipments, trackingEdits])
 
   const getShipmentForItem = (itemId: number) =>
     shipments.find((s) => s.shipment_items?.some((si) => si.item_id === itemId))
@@ -1786,7 +1817,7 @@ export default function Orders() {
                                 lowestNext === 'payment_sent' ||
                                 lowestNext === 'payment_received'
                               const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
-                              const trackingInfo = trackingRaw ? getTrackingInfo(trackingRaw) : null
+                              const trackingInfo = trackingInfoByItemId[item.id] ?? null
                               return (
                                 <tr key={item.id} className={getStatusRowClass(item.status)}>
                                   <td className="py-1 px-2">

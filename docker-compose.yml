@@ -42,6 +42,26 @@ services:
         - action: rebuild
           path: ./backend/Dockerfile
 
+  package-tracking:
+    build:
+      context: ./package-tracking
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./package-tracking
+          target: /app
+          ignore:
+            - __pycache__
+            - "*.pyc"
+            - .git
+        - action: rebuild
+          path: ./package-tracking/requirements.txt
+        - action: rebuild
+          path: ./package-tracking/Dockerfile
+
   frontend:
     build:
       context: ./frontend
@@ -50,6 +70,8 @@ services:
       - "5173:5173"
     environment:
       API_PROXY_TARGET: http://backend:8000
+      VITE_PACKAGE_TRACKING_API_BASE: /tracking
+      PACKAGE_TRACKING_PROXY_TARGET: http://package-tracking:8080
     depends_on:
       - backend
     develop:

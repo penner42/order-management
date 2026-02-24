@@ -5,6 +5,8 @@ import type { IncomingMessage } from 'node:http'
 
 const apiProxyTarget = process.env.API_PROXY_TARGET ?? 'http://127.0.0.1:8000'
 const backendOrigin = new URL(apiProxyTarget).origin
+const trackingProxyTarget =
+  process.env.PACKAGE_TRACKING_PROXY_TARGET ?? 'http://127.0.0.1:8080'
 
 export default defineConfig({
   plugins: [react()],
@@ -31,6 +33,11 @@ export default defineConfig({
             proxyRes.headers['location'] = location.replace(backendOrigin, publicOrigin)
           })
         },
+      },
+      '/tracking': {
+        target: trackingProxyTarget,
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/tracking/, ''),
       },
     },
   },
