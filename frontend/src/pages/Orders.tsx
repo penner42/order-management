@@ -293,9 +293,9 @@ export default function Orders() {
         setFilterDateTo(today)
         break
       case 'week': {
-        const day = now.getDay()
+        const day = now.getDay() // 0 = Sunday, 1 = Monday, …
         const start = new Date(now)
-        start.setDate(now.getDate() - (day === 0 ? 6 : day - 1))
+        start.setDate(now.getDate() - day) // week starts on Sunday
         setFilterDateFrom(toYyyyMmDd(start))
         setFilterDateTo(today)
         break
