@@ -191,6 +191,15 @@ function buildOrdersPath(opts: {
   opts.filterStoreAccounts.forEach((id) => params.append('store_account_id', String(id)))
   if (opts.filterDateFrom) params.set('date_from', opts.filterDateFrom)
   if (opts.filterDateTo) params.set('date_to', opts.filterDateTo)
+  // Send UTC bounds so backend compares correctly to UTC purchase_date
+  if (opts.filterDateFrom) {
+    const start = new Date(opts.filterDateFrom + 'T00:00:00')
+    params.set('date_from_utc', start.toISOString())
+  }
+  if (opts.filterDateTo) {
+    const end = new Date(opts.filterDateTo + 'T23:59:59.999')
+    params.set('date_to_utc', end.toISOString())
+  }
   if (opts.searchText.trim()) params.set('q', opts.searchText.trim())
   return `/orders?${params.toString()}`
 }
@@ -283,10 +292,12 @@ export default function Orders() {
     [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced]
   )
 
-  const toYyyyMmDd = (d: Date) => d.toISOString().slice(0, 10)
+  /** Format date as YYYY-MM-DD in local time (for display and date inputs). */
+  const toYyyyMmDdLocal = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   const applyDatePreset = (preset: 'today' | 'week' | 'past7' | 'past30' | 'month' | 'year' | 'lastYear') => {
     const now = new Date()
-    const today = toYyyyMmDd(now)
+    const today = toYyyyMmDdLocal(now)
     switch (preset) {
       case 'today':
         setFilterDateFrom(today)
@@ -296,26 +307,26 @@ export default function Orders() {
         const day = now.getDay() // 0 = Sunday, 1 = Monday, …
         const start = new Date(now)
         start.setDate(now.getDate() - day) // week starts on Sunday
-        setFilterDateFrom(toYyyyMmDd(start))
+        setFilterDateFrom(toYyyyMmDdLocal(start))
         setFilterDateTo(today)
         break
       }
       case 'past7': {
         const d = new Date(now)
         d.setDate(d.getDate() - 6)
-        setFilterDateFrom(toYyyyMmDd(d))
+        setFilterDateFrom(toYyyyMmDdLocal(d))
         setFilterDateTo(today)
         break
       }
       case 'past30': {
         const d = new Date(now)
         d.setDate(d.getDate() - 29)
-        setFilterDateFrom(toYyyyMmDd(d))
+        setFilterDateFrom(toYyyyMmDdLocal(d))
         setFilterDateTo(today)
         break
       }
       case 'month':
-        setFilterDateFrom(toYyyyMmDd(new Date(now.getFullYear(), now.getMonth(), 1)))
+        setFilterDateFrom(toYyyyMmDdLocal(new Date(now.getFullYear(), now.getMonth(), 1)))
         setFilterDateTo(today)
         break
       case 'year':

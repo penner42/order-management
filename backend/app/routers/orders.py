@@ -1,5 +1,5 @@
 """Orders API."""
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func, or_
@@ -40,6 +40,8 @@ def list_orders(
     store_account_id: list[int] = Query(default=[], alias="store_account_id"),
     date_from: str | None = None,
     date_to: str | None = None,
+    date_from_utc: str | None = None,
+    date_to_utc: str | None = None,
     search: str | None = Query(default=None, alias="q"),
 ):
     # Order-level filters: which orders to include
@@ -74,18 +76,34 @@ def list_orders(
         if store_account_id:
             clauses.append(Order.store_account_id.in_(store_account_id))
         q = q.filter(or_(*clauses))
-    if date_from:
+    # Prefer UTC range (from frontend local-date selection) for correct comparison with DB UTC timestamps
+    if date_from_utc is not None or date_to_utc is not None:
         try:
-            d = date.fromisoformat(date_from)
-            q = q.filter(func.date(Order.purchase_date) >= d)
-        except ValueError:
+            if date_from_utc:
+                dt_from = datetime.fromisoformat(date_from_utc.replace("Z", "+00:00"))
+                if dt_from.tzinfo is None:
+                    dt_from = dt_from.replace(tzinfo=timezone.utc)
+                q = q.filter(Order.purchase_date >= dt_from)
+            if date_to_utc:
+                dt_to = datetime.fromisoformat(date_to_utc.replace("Z", "+00:00"))
+                if dt_to.tzinfo is None:
+                    dt_to = dt_to.replace(tzinfo=timezone.utc)
+                q = q.filter(Order.purchase_date <= dt_to)
+        except (ValueError, TypeError):
             pass
-    if date_to:
-        try:
-            d = date.fromisoformat(date_to)
-            q = q.filter(func.date(Order.purchase_date) <= d)
-        except ValueError:
-            pass
+    else:
+        if date_from:
+            try:
+                d = date.fromisoformat(date_from)
+                q = q.filter(func.date(Order.purchase_date) >= d)
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                d = date.fromisoformat(date_to)
+                q = q.filter(func.date(Order.purchase_date) <= d)
+            except ValueError:
+                pass
     search_order_level_ids = None
     search_item_match_pairs = None
     if search and search.strip():
