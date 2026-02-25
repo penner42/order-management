@@ -11,9 +11,6 @@ class ItemStatus(str, enum.Enum):
     SHIPPED = "shipped"
     SUBMITTED = "submitted"
     SCANNED = "scanned"
-    PAYMENT_REQUESTED = "payment_requested"
-    PAYMENT_SENT = "payment_sent"
-    PAYMENT_RECEIVED = "payment_received"
     CANCELED = "canceled"
     NEEDS_RETURN = "needs_return"
     RETURN_STARTED = "return_started"
@@ -46,13 +43,10 @@ class Item(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # Datetime when each status was (last) set; not populated automatically yet
-    # shipped_at / delivered_at live on Shipment
+    # shipped_at / delivered_at live on Shipment; payment dates live on Payment
     purchased_at = Column(DateTime(timezone=True), nullable=True)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
     scanned_at = Column(DateTime(timezone=True), nullable=True)
-    payment_requested_at = Column(DateTime(timezone=True), nullable=True)
-    payment_sent_at = Column(DateTime(timezone=True), nullable=True)
-    payment_received_at = Column(DateTime(timezone=True), nullable=True)
     canceled_at = Column(DateTime(timezone=True), nullable=True)
     needs_return_at = Column(DateTime(timezone=True), nullable=True)
     return_started_at = Column(DateTime(timezone=True), nullable=True)
@@ -63,3 +57,25 @@ class Item(Base):
     order = relationship("Order", back_populates="items")
     shipment_items = relationship("ShipmentItem", back_populates="item", cascade="all, delete-orphan")
     payment_line_items = relationship("PaymentLineItem", back_populates="item", cascade="all, delete-orphan")
+
+    # Payment dates (from Payment when item is on a payment); used for API response only
+    @property
+    def payment_requested_at(self):
+        pli = self.payment_line_items[0] if self.payment_line_items else None
+        return pli.payment.payment_requested_at if pli and pli.payment else None
+
+    @property
+    def payment_sent_at(self):
+        pli = self.payment_line_items[0] if self.payment_line_items else None
+        return pli.payment.payment_sent_at if pli and pli.payment else None
+
+    @property
+    def payment_received_at(self):
+        pli = self.payment_line_items[0] if self.payment_line_items else None
+        return pli.payment.payment_received_at if pli and pli.payment else None
+
+    @property
+    def payment_id(self):
+        """Payment id when item is on a payment; for API clients to PATCH payment."""
+        pli = self.payment_line_items[0] if self.payment_line_items else None
+        return pli.payment_id if pli else None

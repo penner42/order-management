@@ -3,15 +3,15 @@ export type ItemStatus =
   | 'shipped'
   | 'submitted'
   | 'scanned'
-  | 'payment_requested'
-  | 'payment_sent'
-  | 'payment_received'
   | 'canceled'
   | 'needs_return'
   | 'return_started'
   | 'return_sent'
   | 'return_received'
   | 'return_refunded'
+
+/** Effective status for display: item status or payment status when item is on a payment. */
+export type EffectiveItemStatus = ItemStatus | 'payment_requested' | 'payment_sent' | 'payment_received'
 
 export type UserRole = 'admin' | 'user'
 
@@ -104,6 +104,8 @@ export interface Item {
   purchased_at: string | null
   submitted_at: string | null
   scanned_at: string | null
+  /** Set when item is on a payment (from Payment). */
+  payment_id: number | null
   payment_requested_at: string | null
   payment_sent_at: string | null
   payment_received_at: string | null
@@ -167,6 +169,9 @@ export interface Payment {
   id: number
   buying_group_id: number
   payment_id: string | null
+  payment_requested_at: string | null
+  payment_sent_at: string | null
+  payment_received_at: string | null
   created_at: string
   updated_at?: string | null
   buying_group?: BuyingGroup | null

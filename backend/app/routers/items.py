@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload, joinedload
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -20,10 +20,9 @@ from app.schemas.item import (
 )
 from app.utils.dates import to_date_only
 
-# Item status date fields: date-only (shipped_at/delivered_at live on Shipment)
+# Item status date fields: date-only (shipped_at/delivered_at live on Shipment; payment dates on Payment)
 _ITEM_DATE_FIELDS = frozenset({
     "purchased_at", "submitted_at", "scanned_at",
-    "payment_requested_at", "payment_sent_at", "payment_received_at",
     "canceled_at", "needs_return_at", "return_started_at",
     "return_sent_at", "return_received_at", "return_refunded_at",
 })
@@ -58,7 +57,9 @@ router = APIRouter(prefix="/items", tags=["items"])
 
 @router.get("", response_model=list[ItemRead])
 def list_items(order_id: int | None = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    q = db.query(Item)
+    q = db.query(Item).options(
+        selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment),
+    )
     if order_id is not None:
         q = q.filter(Item.order_id == order_id)
     return q.order_by(Item.id).all()
@@ -171,7 +172,12 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
 
 @router.get("/{item_id}", response_model=ItemRead)
 def get_item(item_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    item = db.query(Item).filter(Item.id == item_id).first()
+    item = (
+        db.query(Item)
+        .filter(Item.id == item_id)
+        .options(selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment))
+        .first()
+    )
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     return item

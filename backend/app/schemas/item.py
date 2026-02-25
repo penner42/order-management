@@ -16,13 +16,10 @@ class ItemBase(BaseModel):
     sales_tax: Decimal | None = None
     submission_id: str | None = None
     receipt_id: str | None = None
-    # Datetime when each status was (last) set (shipped_at/delivered_at on Shipment)
+    # Datetime when each status was (last) set (shipped_at/delivered_at on Shipment; payment dates on Payment)
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
     scanned_at: datetime | None = None
-    payment_requested_at: datetime | None = None
-    payment_sent_at: datetime | None = None
-    payment_received_at: datetime | None = None
     canceled_at: datetime | None = None
     needs_return_at: datetime | None = None
     return_started_at: datetime | None = None
@@ -53,9 +50,6 @@ class ItemUpdate(BaseModel):
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
     scanned_at: datetime | None = None
-    payment_requested_at: datetime | None = None
-    payment_sent_at: datetime | None = None
-    payment_received_at: datetime | None = None
     canceled_at: datetime | None = None
     needs_return_at: datetime | None = None
     return_started_at: datetime | None = None
@@ -67,6 +61,11 @@ class ItemUpdate(BaseModel):
 class ItemRead(ItemBase, TimestampsMixin):
     id: int
     order_id: int
+    # From Payment when item is on a payment (read-only); payment_id for PATCH payment
+    payment_id: int | None = None
+    payment_requested_at: datetime | None = None
+    payment_sent_at: datetime | None = None
+    payment_received_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -95,9 +94,6 @@ class ItemBulkUpdateEntry(BaseModel):
     submitted_at: datetime | None = None
     delivered_at: datetime | None = None  # applied to shipment
     scanned_at: datetime | None = None
-    payment_requested_at: datetime | None = None
-    payment_sent_at: datetime | None = None
-    payment_received_at: datetime | None = None
     canceled_at: datetime | None = None
     needs_return_at: datetime | None = None
     return_started_at: datetime | None = None

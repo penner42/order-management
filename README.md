@@ -64,7 +64,7 @@ Open http://localhost:5173 and log in with the admin credentials.
 - **Users** – Admin and app users; auth via JWT. `user_id` is set on orders, stores, buying groups, payment methods, etc.
 - **Stores & store accounts** – Orders belong to a store and optionally a store account (e.g. per Amazon account).
 - **Orders** – Notes, purchase date, store order number (e.g. from retailer), **status**: `active` (default) or `imported` (excluded from main list). Multiple **items** and multiple **payment methods** (with optional amount per method).
-- **Items** – Purchase/sell price, **buying group**, **status**: `purchased` → `shipped` → `submitted` → `delivered` → `scanned` → `payment_requested` → `payment_sent` → `payment_received`; plus `canceled`, `needs_return`, `return_started`, `return_sent`, `return_received`, `return_refunded`. Optional `submission_id`, `receipt_id`, and status timestamps.
+- **Items** – Purchase/sell price, **buying group**, **status**: `purchased` → `shipped` → `submitted` → `scanned`; plus `canceled`, `needs_return`, `return_started`, `return_sent`, `return_received`, `return_refunded`. Optional `submission_id`, `receipt_id`, and status timestamps. Payment state (`payment_requested` → `payment_sent` → `payment_received`) is on **Payments** via `payment_requested_at`, `payment_sent_at`, `payment_received_at`.
 - **Payment methods** – Type: `credit_card`, `paypal` (optional PayPal card reference), or `other`; label (e.g. "Visa ****1234").
 - **Payments** – Track payments with **line items** linking to items (e.g. mark items as payment requested / received).
 - **Rewards** – User-defined rewards (e.g. store reward programs).

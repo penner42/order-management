@@ -6,13 +6,18 @@ from app.database import Base
 
 
 class Payment(Base):
-    """Payment - linked to a single buying group; can include multiple line items (items from that group)."""
+    """Payment - linked to a single buying group; can include multiple line items (items from that group).
+    Status is derived from which of payment_requested_at, payment_sent_at, payment_received_at are set (requested -> sent -> received).
+    """
 
     __tablename__ = "payments"
 
     id = Column(Integer, primary_key=True, index=True)
     buying_group_id = Column(Integer, ForeignKey("buying_groups.id", ondelete="RESTRICT"), nullable=False)
     payment_id = Column(String(255), nullable=True)  # External reference; not unique
+    payment_requested_at = Column(DateTime(timezone=True), nullable=False)
+    payment_sent_at = Column(DateTime(timezone=True), nullable=True)
+    payment_received_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

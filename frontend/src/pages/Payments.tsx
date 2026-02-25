@@ -12,6 +12,13 @@ function formatMoney(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+function toYyyyMmDd(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 export default function Payments() {
   const [payments, setPayments] = useState<Payment[]>([])
   const [buyingGroups, setBuyingGroups] = useState<BuyingGroup[]>([])
@@ -39,6 +46,13 @@ export default function Payments() {
 
   const [deleteConfirmPayment, setDeleteConfirmPayment] = useState<Payment | null>(null)
   const [deleting, setDeleting] = useState(false)
+
+  const [markSentModal, setMarkSentModal] = useState<Payment | null>(null)
+  const [markSentDate, setMarkSentDate] = useState('')
+  const [markReceivedModal, setMarkReceivedModal] = useState<Payment | null>(null)
+  const [markReceivedDate, setMarkReceivedDate] = useState('')
+  const [markDateSaving, setMarkDateSaving] = useState(false)
+  const [modalAnchor, setModalAnchor] = useState<{ x: number; y: number } | null>(null)
 
   const itemIdToTracking = useMemo(() => {
     const acc: Record<number, string> = {}
@@ -300,6 +314,44 @@ export default function Payments() {
     }
   }
 
+  const saveMarkSent = async () => {
+    if (!markSentModal || !markSentDate.trim()) return
+    setMarkDateSaving(true)
+    try {
+      await api.patch(`/payments/${markSentModal.id}`, {
+        payment_sent_at: `${markSentDate.trim()}T12:00:00.000Z`,
+      })
+      const params = filterGroupId === '' ? '' : `?buying_group_id=${filterGroupId}`
+      const list = await api.get<Payment[]>(`/payments${params}`)
+      setPayments(list)
+      setMarkSentModal(null)
+      setModalAnchor(null)
+    } catch (e: unknown) {
+      console.error(e)
+    } finally {
+      setMarkDateSaving(false)
+    }
+  }
+
+  const saveMarkReceived = async () => {
+    if (!markReceivedModal || !markReceivedDate.trim()) return
+    setMarkDateSaving(true)
+    try {
+      await api.patch(`/payments/${markReceivedModal.id}`, {
+        payment_received_at: `${markReceivedDate.trim()}T12:00:00.000Z`,
+      })
+      const params = filterGroupId === '' ? '' : `?buying_group_id=${filterGroupId}`
+      const list = await api.get<Payment[]>(`/payments${params}`)
+      setPayments(list)
+      setMarkReceivedModal(null)
+      setModalAnchor(null)
+    } catch (e: unknown) {
+      console.error(e)
+    } finally {
+      setMarkDateSaving(false)
+    }
+  }
+
   if (loading) return <div className="text-ink-muted">Loading payments…</div>
 
   return (
@@ -335,22 +387,24 @@ export default function Payments() {
           Add payment
         </button>
       </div>
-      <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
-        <table className="w-full">
+      <div className="w-fit min-w-[600px] max-w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
+        <table className="min-w-0">
           <thead className="bg-brand-100/50 dark:bg-gray-700/50 border-b border-brand-200/80 dark:border-gray-700">
             <tr>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Buying group</th>
-              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Payment ID</th>
+              <th className="text-left py-3 px-4 text-sm font-medium text-ink min-w-[8rem]">Payment ID</th>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Items</th>
-              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Amount</th>
-              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Created</th>
+              <th className="text-left py-3 px-4 text-sm font-medium text-ink min-w-[5rem]">Amount</th>
+              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Requested</th>
+              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Sent</th>
+              <th className="text-left py-3 px-4 text-sm font-medium text-ink">Received</th>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Actions</th>
             </tr>
           </thead>
           <tbody>
             {payments.length === 0 ? (
               <tr>
-                <td colSpan={6} className="py-12 text-center text-ink-muted">
+                <td colSpan={8} className="py-12 text-center text-ink-muted">
                   No payments yet.
                 </td>
               </tr>
@@ -358,9 +412,9 @@ export default function Payments() {
               payments.map((p) => (
                 <tr key={p.id} className="border-b border-brand-100 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-700/30">
                   <td className="py-3 px-4 text-sm">{p.buying_group?.name ?? '—'}</td>
-                  <td className="py-3 px-4 text-sm font-mono">{p.payment_id ?? '—'}</td>
+                  <td className="py-3 px-4 text-sm font-mono min-w-[8rem]">{p.payment_id ?? '—'}</td>
                   <td className="py-3 px-4 text-sm">{p.line_items?.length ?? 0}</td>
-                  <td className="py-3 px-4 text-sm">
+                  <td className="py-3 px-4 text-sm min-w-[5rem]">
                     {formatMoney(
                       (p.line_items ?? []).reduce(
                         (sum, li) =>
@@ -371,7 +425,49 @@ export default function Payments() {
                     )}
                   </td>
                   <td className="py-3 px-4 text-sm text-ink-muted">
-                    {p.created_at ? new Date(p.created_at).toLocaleString() : '—'}
+                    {p.payment_requested_at ? new Date(p.payment_requested_at).toLocaleDateString() : '—'}
+                  </td>
+                  <td className="py-3 px-4 text-sm text-ink-muted">
+                    {p.payment_sent_at ? (
+                      new Date(p.payment_sent_at).toLocaleDateString()
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                          setModalAnchor({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
+                          setMarkSentModal(p)
+                          setMarkSentDate(toYyyyMmDd(new Date()))
+                        }}
+                        className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700"
+                        title="Mark Sent"
+                        aria-label="Mark Sent"
+                      >
+                        Mark Sent
+                      </button>
+                    )}
+                  </td>
+                  <td className="py-3 px-4 text-sm text-ink-muted">
+                    {p.payment_received_at ? (
+                      new Date(p.payment_received_at).toLocaleDateString()
+                    ) : p.payment_sent_at ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                          setModalAnchor({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
+                          setMarkReceivedModal(p)
+                          setMarkReceivedDate(toYyyyMmDd(new Date()))
+                        }}
+                        className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700"
+                        title="Mark Received"
+                        aria-label="Mark Received"
+                      >
+                        Mark Received
+                      </button>
+                    ) : (
+                      '—'
+                    )}
                   </td>
                   <td className="py-3 px-4">
                     <div className="flex items-center gap-1">
@@ -772,6 +868,122 @@ export default function Payments() {
                 className="rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium"
               >
                 {deleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {markSentModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50"
+          onClick={() => !markDateSaving && (setMarkSentModal(null), setModalAnchor(null))}
+        >
+          <div
+            className="absolute bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-xl p-6 max-w-sm w-full m-4"
+            style={
+              modalAnchor
+                ? { left: modalAnchor.x, top: modalAnchor.y, transform: 'translate(-50%, -50%)' }
+                : { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
+            }
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-ink mb-2">Mark Sent</h2>
+            <p className="text-sm text-ink-muted mb-1">
+              Payment for {markSentModal.buying_group?.name ?? ''} — set the date sent.
+            </p>
+            <p className="text-sm text-ink-muted mb-4">
+              {markSentModal.payment_id ?? '—'} · {formatMoney(
+                (markSentModal.line_items ?? []).reduce(
+                  (sum, li) =>
+                    sum + parseDecimal(li.item?.price_sold) * (li.item?.quantity ?? 1),
+                  0
+                )
+              )}
+            </p>
+            <label htmlFor="mark-sent-date" className="block text-sm font-medium text-ink mb-1">
+              Date
+            </label>
+            <input
+              id="mark-sent-date"
+              type="date"
+              value={markSentDate}
+              onChange={(e) => setMarkSentDate(e.target.value)}
+              className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-ink mb-6"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => !markDateSaving && (setMarkSentModal(null), setModalAnchor(null))}
+                className="rounded-lg border border-brand-200 dark:border-gray-600 px-4 py-2 text-sm text-ink"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveMarkSent}
+                disabled={markDateSaving || !markSentDate.trim()}
+                className="rounded-lg bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium"
+              >
+                {markDateSaving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {markReceivedModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50"
+          onClick={() => !markDateSaving && (setMarkReceivedModal(null), setModalAnchor(null))}
+        >
+          <div
+            className="absolute bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-xl p-6 max-w-sm w-full m-4"
+            style={
+              modalAnchor
+                ? { left: modalAnchor.x, top: modalAnchor.y, transform: 'translate(-50%, -50%)' }
+                : { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
+            }
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-ink mb-2">Mark Received</h2>
+            <p className="text-sm text-ink-muted mb-1">
+              Payment for {markReceivedModal.buying_group?.name ?? ''} — set the date received.
+            </p>
+            <p className="text-sm text-ink-muted mb-4">
+              {markReceivedModal.payment_id ?? '—'} · {formatMoney(
+                (markReceivedModal.line_items ?? []).reduce(
+                  (sum, li) =>
+                    sum + parseDecimal(li.item?.price_sold) * (li.item?.quantity ?? 1),
+                  0
+                )
+              )}
+            </p>
+            <label htmlFor="mark-received-date" className="block text-sm font-medium text-ink mb-1">
+              Date
+            </label>
+            <input
+              id="mark-received-date"
+              type="date"
+              value={markReceivedDate}
+              onChange={(e) => setMarkReceivedDate(e.target.value)}
+              className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-ink mb-6"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => !markDateSaving && (setMarkReceivedModal(null), setModalAnchor(null))}
+                className="rounded-lg border border-brand-200 dark:border-gray-600 px-4 py-2 text-sm text-ink"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveMarkReceived}
+                disabled={markDateSaving || !markReceivedDate.trim()}
+                className="rounded-lg bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium"
+              >
+                {markDateSaving ? 'Saving…' : 'Save'}
               </button>
             </div>
           </div>

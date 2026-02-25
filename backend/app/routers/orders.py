@@ -11,6 +11,8 @@ from app.models import (
     Order,
     Item,
     OrderPaymentMethod,
+    Payment,
+    PaymentLineItem,
     Store,
     BuyingGroup,
     PaymentMethod,
@@ -27,6 +29,17 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 def _like_escape(s: str) -> str:
     """Escape % and _ for safe use in LIKE."""
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _effective_item_status(item: Item) -> str:
+    """Item status for display/filter: payment dates (from Payment) override when item is on a payment."""
+    if item.payment_received_at is not None:
+        return "payment_received"
+    if item.payment_sent_at is not None:
+        return "payment_sent"
+    if item.payment_requested_at is not None:
+        return "payment_requested"
+    return item.status.value
 
 
 @router.get("", response_model=list[OrderRead])
@@ -52,14 +65,36 @@ def list_orders(
         # Default: exclude imported orders from main list
         q = q.filter(Order.status != "imported")
     if status:
-        # Orders that have at least one item with one of these statuses, or orders with no items (always show empty orders).
-        # Build ID sets with separate queries so the main q never joins Item (otherwise orders with no items would be excluded).
+        # Orders that have at least one item with one of these statuses (item or payment), or orders with no items.
         base = db.query(Order)
         if order_status == "imported":
             base = base.filter(Order.status == "imported")
         else:
             base = base.filter(Order.status != "imported")
-        ids_with_matching_items = base.join(Item).filter(Item.status.in_(status)).distinct().with_entities(Order.id)
+        item_statuses = [s for s in status if s not in ("payment_requested", "payment_sent", "payment_received")]
+        payment_statuses = [s for s in status if s in ("payment_requested", "payment_sent", "payment_received")]
+        queries = []
+        if item_statuses:
+            queries.append(base.join(Item).filter(Item.status.in_(item_statuses)).distinct().with_entities(Order.id))
+        if payment_statuses:
+            # Orders that have an item on a payment with the given payment state (requested/sent/received)
+            payment_filters = []
+            if "payment_requested" in payment_statuses:
+                payment_filters.append(Payment.payment_requested_at.isnot(None))
+            if "payment_sent" in payment_statuses:
+                payment_filters.append(Payment.payment_sent_at.isnot(None))
+            if "payment_received" in payment_statuses:
+                payment_filters.append(Payment.payment_received_at.isnot(None))
+            if payment_filters:
+                queries.append(
+                    base.join(Item)
+                    .join(PaymentLineItem, PaymentLineItem.item_id == Item.id)
+                    .join(Payment, Payment.id == PaymentLineItem.payment_id)
+                    .filter(or_(*payment_filters))
+                    .distinct()
+                    .with_entities(Order.id)
+                )
+        ids_with_matching_items = queries[0] if len(queries) == 1 else queries[0].union(*queries[1:])
         ids_with_no_items = base.outerjoin(Item).filter(Item.id.is_(None)).with_entities(Order.id)
         order_ids = ids_with_matching_items.union(ids_with_no_items).subquery()
         q = db.query(Order).filter(Order.id.in_(order_ids)).order_by(Order.purchase_date.desc())
@@ -167,12 +202,12 @@ def list_orders(
         search_ids = order_level_ids_subq.union(by_item_desc, by_item_dollars, by_tracking).subquery()
         q = q.filter(Order.id.in_(search_ids))
     # Eager load relationships to avoid N+1 when building OrderRead (store, store_account, buying_group,
-    # items, order_payments + payment_method). Use selectinload for one-to-many to avoid cartesian product.
+    # items + payment dates from Payment, order_payments + payment_method). Use selectinload for one-to-many to avoid cartesian product.
     q = q.options(
         joinedload(Order.store),
         joinedload(Order.store_account),
         joinedload(Order.buying_group),
-        selectinload(Order.items),
+        selectinload(Order.items).selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment),
         selectinload(Order.order_payments).joinedload(OrderPaymentMethod.payment_method),
     )
     orders = q.all()
@@ -185,7 +220,8 @@ def list_orders(
             read = OrderRead.model_validate(o)
             items = read.items
             if status_set is not None:
-                items = [i for i in items if i.status in status_set]
+                # Match by effective status (item status or payment status when on a payment)
+                items = [read.items[i] for i in range(len(read.items)) if _effective_item_status(o.items[i]) in status_set]
             if search_order_level_ids is not None:
                 if o.id in search_order_level_ids:
                     pass  # whole order: items already filtered by status if any
@@ -241,7 +277,14 @@ def create_order(data: OrderCreate, db: Session = Depends(get_db), current_user:
 
 @router.get("/{order_id}", response_model=OrderRead)
 def get_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    order = db.query(Order).filter(Order.id == order_id).first()
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .options(
+            selectinload(Order.items).selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment),
+        )
+        .first()
+    )
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return order

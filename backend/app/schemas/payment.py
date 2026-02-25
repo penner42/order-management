@@ -1,4 +1,6 @@
 """Payment schemas."""
+from datetime import datetime
+
 from app.schemas.common import TimestampsMixin
 from app.schemas.buying_group import BuyingGroupRead
 from app.schemas.item import ItemRead
@@ -8,14 +10,24 @@ from pydantic import BaseModel, ConfigDict
 class PaymentBase(BaseModel):
     buying_group_id: int
     payment_id: str | None = None
+    payment_requested_at: datetime  # Required on payment; backfilled from created_at if missing
+    payment_sent_at: datetime | None = None
+    payment_received_at: datetime | None = None
 
 
-class PaymentCreate(PaymentBase):
-    pass
+class PaymentCreate(BaseModel):
+    buying_group_id: int
+    payment_id: str | None = None
+    payment_requested_at: datetime | None = None  # Defaults to now() if not provided
+    payment_sent_at: datetime | None = None
+    payment_received_at: datetime | None = None
 
 
 class PaymentUpdate(BaseModel):
     payment_id: str | None = None
+    payment_requested_at: datetime | None = None
+    payment_sent_at: datetime | None = None
+    payment_received_at: datetime | None = None
 
 
 class PaymentLineItemBase(BaseModel):

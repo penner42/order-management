@@ -104,8 +104,8 @@ export default function Shipments() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-ink mb-8">Shipments</h1>
-      <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
-        <table className="w-full">
+      <div className="w-fit min-w-[600px] max-w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
+        <table className="min-w-0">
           <thead className="bg-brand-100/50 dark:bg-gray-700/50 border-b border-brand-200/80 dark:border-gray-700">
             <tr>
               <th className="text-left py-3 px-4 text-sm font-medium text-ink">Shipment</th>

@@ -195,7 +195,7 @@ export default function PaymentMethods() {
           </div>
         </form>
       )}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-visible">
+      <div className="w-fit min-w-[600px] max-w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-visible">
         <ul className="divide-y divide-brand-100 dark:divide-gray-700 overflow-hidden rounded-b-xl">
           {methods.length === 0 ? (
             <li className="py-8 text-center text-ink-muted">No payment methods yet. Add one to use on orders.</li>

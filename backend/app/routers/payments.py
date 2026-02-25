@@ -7,7 +7,6 @@ from sqlalchemy.exc import IntegrityError
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import User, Payment, PaymentLineItem, Item
-from app.models.item import ItemStatus
 from app.schemas.payment import (
     PaymentRead,
     PaymentCreate,
@@ -53,7 +52,10 @@ def list_payments(
 
 @router.post("", response_model=PaymentRead)
 def create_payment(data: PaymentCreate, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    payment = Payment(**data.model_dump())
+    payload = data.model_dump()
+    if payload.get("payment_requested_at") is None:
+        payload["payment_requested_at"] = datetime.now(timezone.utc)
+    payment = Payment(**payload)
     db.add(payment)
     db.commit()
     db.refresh(payment)
@@ -119,8 +121,8 @@ def add_payment_line_item(
         )
     line_item = PaymentLineItem(payment_id=payment_id, item_id=data.item_id)
     db.add(line_item)
-    item.status = ItemStatus.PAYMENT_REQUESTED
-    item.payment_requested_at = datetime.now(timezone.utc)
+    if payment.payment_requested_at is None:
+        payment.payment_requested_at = datetime.now(timezone.utc)
     try:
         db.commit()
         db.refresh(line_item)

@@ -173,7 +173,7 @@ def seed_dev_data(db: Session) -> dict:
         order_id=order1.id,
         price_paid=Decimal("59.99"),
         price_sold=Decimal("72.00"),
-        status=ItemStatus.PAYMENT_RECEIVED,
+        status=ItemStatus.SCANNED,
         quantity=1,
         description="Tablet stand",
     )
@@ -234,7 +234,13 @@ def seed_dev_data(db: Session) -> dict:
     db.add(ShipmentItem(shipment_id=ship2.id, item_id=item3_1.id))
 
     # 7. Payments and payment line items (buying group payments for items)
-    pay1 = Payment(buying_group_id=bg_family.id, payment_id="PAY-FAM-001")
+    pay1 = Payment(
+        buying_group_id=bg_family.id,
+        payment_id="PAY-FAM-001",
+        payment_requested_at=datetime(2025, 1, 20, 12, 0, 0, tzinfo=timezone.utc),
+        payment_sent_at=datetime(2025, 1, 22, 9, 0, 0, tzinfo=timezone.utc),
+        payment_received_at=datetime(2025, 1, 24, 14, 0, 0, tzinfo=timezone.utc),
+    )
     db.add(pay1)
     db.flush()
     db.add(PaymentLineItem(payment_id=pay1.id, item_id=item1_1.id))

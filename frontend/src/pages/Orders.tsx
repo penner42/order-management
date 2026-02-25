@@ -17,6 +17,7 @@ import type {
   PaymentMethodNested,
   Item,
   ItemStatus,
+  EffectiveItemStatus,
 } from '../api/types'
 import { getTrackingInfo } from '../utils/tracking'
 import type { TrackingInfo } from '../utils/tracking'
@@ -49,7 +50,7 @@ const STATUS_LABELS: Record<string, string> = {
   return_refunded: 'Refunded',
 }
 
-const STATUS_PROGRESSION: ItemStatus[] = [
+const STATUS_PROGRESSION: EffectiveItemStatus[] = [
   'shipped',
   'submitted',
   'scanned',
@@ -58,13 +59,17 @@ const STATUS_PROGRESSION: ItemStatus[] = [
   'payment_received',
 ]
 
-// shipped_at / delivered_at live on Shipment
+// shipped_at / delivered_at live on Shipment; payment dates live on Payment
 const STATUS_TO_DATE_FIELD: Record<string, keyof Item> = {
   submitted: 'submitted_at',
   scanned: 'scanned_at',
-  payment_requested: 'payment_requested_at',
-  payment_sent: 'payment_sent_at',
-  payment_received: 'payment_received_at',
+}
+
+function getEffectiveItemStatus(item: Item): EffectiveItemStatus {
+  if (item.payment_received_at) return 'payment_received'
+  if (item.payment_sent_at) return 'payment_sent'
+  if (item.payment_requested_at) return 'payment_requested'
+  return item.status
 }
 
 // Row background by status for at-a-glance color coding (light + dark)
@@ -119,7 +124,7 @@ function getStatusInputClass(status: string): string {
   }
 }
 
-function getNextStatus(current: ItemStatus): ItemStatus | null {
+function getNextStatus(current: EffectiveItemStatus): EffectiveItemStatus | null {
   const idx = STATUS_PROGRESSION.indexOf(current)
   if (idx < 0 || idx >= STATUS_PROGRESSION.length - 1) return null
   return STATUS_PROGRESSION[idx + 1]
@@ -144,9 +149,15 @@ function copyToClipboard(text: string): void {
   }
 }
 
-const DEFAULT_STATUSES: ItemStatus[] = [
+const DEFAULT_STATUSES: EffectiveItemStatus[] = [
   'purchased', 'shipped', 'submitted', 'scanned',
   'payment_requested', 'payment_sent', 'payment_received',
+  'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
+]
+
+/** Item-only statuses (for status dropdown; payment status is on Payment). */
+const ITEM_STATUSES_FOR_EDIT: ItemStatus[] = [
+  'purchased', 'shipped', 'submitted', 'scanned', 'canceled',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
 ]
 
@@ -745,7 +756,7 @@ export default function Orders() {
 
   const applySubmitShipment = async (group: { key: string; items: Item[] }, submissionId: string) => {
     const now = new Date().toISOString().slice(0, 19)
-    const toUpdate = group.items.filter((item) => getNextStatus(item.status) === 'submitted')
+    const toUpdate = group.items.filter((item) => getNextStatus(getEffectiveItemStatus(item)) === 'submitted')
     if (toUpdate.length === 0) return
     setAdvancingGroupKey(group.key)
     try {
@@ -768,7 +779,7 @@ export default function Orders() {
 
   const applyScanShipment = async (group: { key: string; items: Item[] }, receiptIds: Record<number, string>) => {
     const now = new Date().toISOString().slice(0, 19)
-    const toUpdate = group.items.filter((item) => getNextStatus(item.status) === 'scanned')
+    const toUpdate = group.items.filter((item) => getNextStatus(getEffectiveItemStatus(item)) === 'scanned')
     if (toUpdate.length === 0) return
     setAdvancingGroupKey(group.key)
     try {
@@ -917,18 +928,27 @@ export default function Orders() {
   }
 
   const advanceShipmentToNextStatus = async (group: { key: string; items: Item[] }) => {
-    const toUpdate = group.items.filter((item) => getNextStatus(item.status) != null)
+    const toUpdate = group.items.filter((item) => getNextStatus(getEffectiveItemStatus(item)) != null)
     if (toUpdate.length === 0) return
     setAdvancingGroupKey(group.key)
-    const now = new Date().toISOString().slice(0, 19)
+    const now = new Date().toISOString()
     try {
-      for (const item of toUpdate) {
-        const next = getNextStatus(item.status)
-        if (next) {
-          const dateField = STATUS_TO_DATE_FIELD[next]
-          const payload: Partial<Item> = { status: next }
-          if (dateField) (payload as any)[dateField] = now
-          await updateItem(item.id, payload)
+      const next = getNextStatus(getEffectiveItemStatus(toUpdate[0]))
+      if (next === 'payment_sent' || next === 'payment_received') {
+        const paymentId = toUpdate[0].payment_id
+        if (!paymentId) return
+        await api.patch(`/payments/${paymentId}`, next === 'payment_sent' ? { payment_sent_at: now } : { payment_received_at: now })
+        const ordersData = await api.get<Order[]>(ordersPath)
+        setOrders(ordersData)
+      } else {
+        for (const item of toUpdate) {
+          const n = getNextStatus(getEffectiveItemStatus(item))
+          if (n && n !== 'payment_sent' && n !== 'payment_received') {
+            const dateField = STATUS_TO_DATE_FIELD[n]
+            const payload: Partial<Item> = { status: n }
+            if (dateField) (payload as any)[dateField] = now.slice(0, 19)
+            await updateItem(item.id, payload)
+          }
         }
       }
     } finally {
@@ -1793,9 +1813,10 @@ export default function Orders() {
                           {groupOrderItemsByShipment(o).map((group) =>
                             group.items.map((item, itemIndex) => {
                               const isFirstInGroup = itemIndex === 0
+                              const effectiveStatus = getEffectiveItemStatus(item)
                               const nextStatuses = group.items
-                                .map((i) => getNextStatus(i.status))
-                                .filter((s): s is ItemStatus => s != null)
+                                .map((i) => getNextStatus(getEffectiveItemStatus(i)))
+                                .filter((s): s is EffectiveItemStatus => s != null)
                               const lowestNext =
                                 nextStatuses.length > 0
                                   ? STATUS_PROGRESSION[Math.min(...nextStatuses.map((s) => STATUS_PROGRESSION.indexOf(s)))]
@@ -1803,14 +1824,11 @@ export default function Orders() {
                               const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
                               const isSubmitted = lowestNext === 'submitted'
                               const isScanned = lowestNext === 'scanned'
-                              const hideAdvanceButton =
-                                lowestNext === 'payment_requested' ||
-                                lowestNext === 'payment_sent' ||
-                                lowestNext === 'payment_received'
+                              const hideAdvanceButton = lowestNext === 'payment_requested'
                               const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
                               const trackingInfo = trackingInfoByItemId[item.id] ?? null
                               return (
-                                <tr key={item.id} className={getStatusRowClass(item.status)}>
+                                <tr key={item.id} className={getStatusRowClass(effectiveStatus)}>
                                   <td className="py-1 px-2">
                                     <input
                                       type="checkbox"
@@ -1834,7 +1852,7 @@ export default function Orders() {
                                         if (v != null && v !== (item.quantity ?? 1)) updateItem(item.id, { quantity: v })
                                       }}
                                       disabled={savingItemId === item.id}
-                                      className={`w-12 h-5 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
+                                      className={`w-12 h-5 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2">
@@ -1850,7 +1868,7 @@ export default function Orders() {
                                       }}
                                       placeholder="Description"
                                       disabled={savingItemId === item.id}
-                                      className={`w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
+                                      className={`w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2">
@@ -1898,7 +1916,7 @@ export default function Orders() {
                                       }}
                                       placeholder="0.00"
                                       disabled={savingItemId === item.id}
-                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
+                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2">
@@ -1914,7 +1932,7 @@ export default function Orders() {
                                       }}
                                       placeholder="0.00"
                                       disabled={savingItemId === item.id}
-                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
+                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
@@ -1933,7 +1951,7 @@ export default function Orders() {
                                       }}
                                       placeholder="0.00"
                                       disabled={savingItemId === item.id}
-                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
+                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2">
@@ -1949,7 +1967,7 @@ export default function Orders() {
                                       }}
                                       placeholder="0.00"
                                       disabled={savingItemId === item.id}
-                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
+                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                     />
                                   </td>
                                   <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
@@ -1967,18 +1985,18 @@ export default function Orders() {
                                         updateItem(item.id, { status: s })
                                       }}
                                       disabled={savingItemId === item.id}
-                                      className={`min-w-[6.5rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(item.status)}`}
+                                      className={`min-w-[6.5rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                     >
-                                      {Object.entries(STATUS_LABELS).map(([val, lbl]) => (
+                                      {ITEM_STATUSES_FOR_EDIT.map((val) => (
                                         <option key={val} value={val}>
-                                          {lbl}
+                                          {STATUS_LABELS[val]}
                                         </option>
                                       ))}
                                     </select>
                                   </td>
                                   <td className="py-1 px-1.5 text-right w-8">
                                     <div className="flex items-center justify-end gap-0.5">
-                                      {getNextStatus(item.status) === 'scanned' ? (
+                                      {getNextStatus(effectiveStatus) === 'scanned' ? (
                                         <button
                                           type="button"
                                           onClick={() => setScanSingleItemModal(item)}
@@ -2393,7 +2411,7 @@ function BulkScanModal({
   onApply: (receiptIds: Record<number, string>) => Promise<void>
   onClose: () => void
 }) {
-  const items = (order.items ?? []).filter((i) => itemIds.includes(i.id) && getNextStatus(i.status) === 'scanned')
+  const items = (order.items ?? []).filter((i) => itemIds.includes(i.id) && getNextStatus(getEffectiveItemStatus(i)) === 'scanned')
   const [receiptIds, setReceiptIds] = useState<Record<number, string>>(() =>
     items.reduce<Record<number, string>>((acc, i) => {
       acc[i.id] = i.receipt_id ?? ''
@@ -2573,7 +2591,7 @@ function ScanReceiptModal({
   onClose: () => void
   applying: boolean
 }) {
-  const toUpdate = group.items.filter((item) => getNextStatus(item.status) === 'scanned')
+  const toUpdate = group.items.filter((item) => getNextStatus(getEffectiveItemStatus(item)) === 'scanned')
   const [receiptIds, setReceiptIds] = useState<Record<number, string>>(() =>
     toUpdate.reduce<Record<number, string>>((acc, i) => {
       acc[i.id] = i.receipt_id ?? ''
