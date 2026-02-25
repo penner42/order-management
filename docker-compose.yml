@@ -48,6 +48,9 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
+    environment:
+      UPS_CLIENT: ${UPS_CLIENT:-}
+      UPS_SECRET: ${UPS_SECRET:-}
     develop:
       watch:
         - action: sync+restart

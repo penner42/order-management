@@ -3,6 +3,7 @@ import { api, getStoredToken } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { AlertDialog } from '../components/AlertDialog'
 import type { User, UserRole } from '../api/types'
+import { testUpsCredentials } from '../utils/tracking'
 
 const ROLES: { value: UserRole; label: string }[] = [
   { value: 'user', label: 'User' },
@@ -18,6 +19,7 @@ export default function Admin() {
   const [formRole, setFormRole] = useState<UserRole>('user')
   const [showResetConfirm, setShowResetConfirm] = useState(false)
   const [alertMessage, setAlertMessage] = useState<string | null>(null)
+  const [upsTesting, setUpsTesting] = useState(false)
 
   async function loadUsers() {
     try {
@@ -146,6 +148,18 @@ export default function Admin() {
       setAlertMessage(data.message)
     } catch (err) {
       setAlertMessage(err instanceof Error ? err.message : 'Failed to load sample data')
+    }
+  }
+
+  async function handleTestUpsCredentials() {
+    setUpsTesting(true)
+    try {
+      const result = await testUpsCredentials()
+      setAlertMessage(result.detail)
+    } catch (err) {
+      setAlertMessage(err instanceof Error ? err.message : 'Failed to test UPS credentials')
+    } finally {
+      setUpsTesting(false)
     }
   }
 
@@ -311,6 +325,24 @@ export default function Admin() {
           Load sample orders, stores, items, and related data for development (idempotent—safe to run again). Create a pg_dump backup in the backups folder,
           download a JSON backup of all data, or permanently delete all orders, shipments, stores, and other data. Admin user is recreated from environment
           after reset. Reset cannot be undone.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-medium text-ink dark:text-gray-200 mb-4">Integrations</h2>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={handleTestUpsCredentials}
+            disabled={upsTesting}
+            className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {upsTesting ? 'Testing UPS…' : 'Test UPS credentials'}
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-ink-muted dark:text-gray-400">
+          Verify that UPS OAuth client credentials (UPS_CLIENT, UPS_SECRET) are configured correctly by calling the package-tracking service and reporting
+          any errors from UPS.
         </p>
       </section>
 

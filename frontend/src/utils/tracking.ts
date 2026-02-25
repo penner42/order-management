@@ -36,3 +36,51 @@ export async function getTrackingInfo(trackingNumber: string): Promise<TrackingI
     return null
   }
 }
+
+interface UpsTestResult {
+  ok: boolean
+  detail: string
+}
+
+export async function testUpsCredentials(): Promise<UpsTestResult> {
+  try {
+    const res = await fetch(`${PACKAGE_TRACKING_API_BASE}/ups-token`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    })
+
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({ detail: res.statusText }))) as {
+        detail?: string
+      }
+      return {
+        ok: false,
+        detail: err.detail || 'UPS credentials test failed.',
+      }
+    }
+
+    const data = (await res.json().catch(() => null)) as {
+      access_token?: string
+      token_type?: string
+    } | null
+
+    if (!data || !data.access_token) {
+      return {
+        ok: false,
+        detail: 'UPS credentials test failed: response was missing an access token.',
+      }
+    }
+
+    return {
+      ok: true,
+      detail: 'UPS credentials are valid (UPS OAuth token retrieved successfully).',
+    }
+  } catch {
+    return {
+      ok: false,
+      detail: 'UPS credentials test failed. Check network logs and UPS_CLIENT/UPS_SECRET values.',
+    }
+  }
+}

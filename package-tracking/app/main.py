@@ -1,5 +1,22 @@
+import base64
+import os
+import threading
+import time
+
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+# UPS OAuth: production https://onlinetools.ups.com/security/v1/oauth/token
+# Sandbox: https://wwwcie.ups.com/security/v1/oauth/token
+UPS_OAUTH_URL = os.environ.get(
+    "UPS_OAUTH_URL", "https://onlinetools.ups.com/security/v1/oauth/token"
+)
+
+# Cache token until this many seconds before expiry (avoid using an expired token)
+_UPS_TOKEN_BUFFER_SEC = 60
+_ups_token_cache: tuple[str, float] | None = None
+_ups_token_lock = threading.Lock()
 
 
 class LinkRequest(BaseModel):
@@ -130,6 +147,54 @@ def _tracking_url(carrier: str, tn: str) -> str:
     raise ValueError(f"Unsupported carrier: {carrier}")
 
 
+def get_ups_token() -> str:
+    """
+    Obtain a UPS OAuth 2.0 access token using client credentials (UPS_CLIENT, UPS_SECRET).
+    Token is cached and reused until near expiry. Use the returned token as Bearer for UPS API calls.
+    """
+    global _ups_token_cache
+    now = time.monotonic()
+    with _ups_token_lock:
+        if _ups_token_cache is not None:
+            token, expires_at = _ups_token_cache
+            if expires_at > now + _UPS_TOKEN_BUFFER_SEC:
+                return token
+
+    client_id = os.environ.get("UPS_CLIENT", "").strip()
+    client_secret = os.environ.get("UPS_SECRET", "").strip()
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="UPS credentials not configured (UPS_CLIENT, UPS_SECRET)",
+        )
+    basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {basic}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-merchant-id": client_id,
+    }
+    data = "grant_type=client_credentials"
+    with httpx.Client() as client:
+        resp = client.post(UPS_OAUTH_URL, headers=headers, content=data, timeout=15.0)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"UPS OAuth failed: {resp.status_code} {resp.text}",
+        )
+    body = resp.json()
+    access_token = body.get("access_token")
+    if not access_token:
+        raise HTTPException(
+            status_code=502,
+            detail="UPS OAuth response missing access_token",
+        )
+    expires_in = int(body.get("expires_in", 3600))
+    expires_at = now + expires_in
+    with _ups_token_lock:
+        _ups_token_cache = (access_token, expires_at)
+    return access_token
+
+
 def detect_carrier_and_link(tracking_number: str) -> LinkResponse:
     t = _normalize(tracking_number)
     if not t:
@@ -156,6 +221,13 @@ def detect_carrier_and_link(tracking_number: str) -> LinkResponse:
 @app.post("/link", response_model=LinkResponse)
 def link(body: LinkRequest) -> LinkResponse:
     return detect_carrier_and_link(body.tracking_number)
+
+
+@app.get("/ups-token")
+def ups_token() -> dict:
+    """Return a UPS OAuth access token for use in subsequent UPS API requests (e.g. tracking)."""
+    token = get_ups_token()
+    return {"access_token": token, "token_type": "Bearer"}
 
 
 @app.get("/track")
