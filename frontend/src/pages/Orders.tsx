@@ -1723,10 +1723,10 @@ export default function Orders() {
                       </button>
                     </div>
                   ) : (
-                    <div className="line-items-section rounded-lg border-2 border-brand-400 dark:border-gray-400 overflow-hidden">
+                    <div className="line-items-section rounded-lg overflow-hidden">
                       <table className="w-full text-sm">
                         <thead>
-                          <tr className="bg-brand-100/50 dark:bg-gray-700/50 text-left">
+                          <tr className="bg-brand-100/50 dark:bg-gray-700/50 text-left border-b border-brand-200 dark:border-gray-600">
                             <th className="w-8 py-1 px-2">
                               <input
                                 type="checkbox"
