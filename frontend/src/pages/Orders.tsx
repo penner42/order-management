@@ -42,15 +42,12 @@ const STATUS_LABELS: Record<string, string> = {
   payment_requested: 'Payment requested',
   payment_sent: 'Payment sent',
   payment_received: 'Paid',
-  paid: 'Paid',
   canceled: 'Canceled',
   needs_return: 'Needs return',
   return_started: 'Return started',
   return_sent: 'Return sent',
   return_received: 'Return received',
   return_refunded: 'Refunded',
-  returned: 'Returned',
-  refunded: 'Refunded',
 }
 
 const STATUS_PROGRESSION: ItemStatus[] = [
