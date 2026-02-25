@@ -80,7 +80,7 @@ class ItemSplitRequest(BaseModel):
 
 
 class ItemBulkUpdateEntry(BaseModel):
-    """Single item update in a bulk request. delivered_at applies to the item's shipment when status=delivered."""
+    """Single item update in a bulk request. delivered_at applies to the item's shipment."""
     item_id: int
     price_paid: Decimal | None = None
     price_sold: Decimal | None = None
@@ -93,7 +93,7 @@ class ItemBulkUpdateEntry(BaseModel):
     receipt_id: str | None = None
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
-    delivered_at: datetime | None = None  # applied to shipment when status=delivered
+    delivered_at: datetime | None = None  # applied to shipment
     scanned_at: datetime | None = None
     payment_requested_at: datetime | None = None
     payment_sent_at: datetime | None = None

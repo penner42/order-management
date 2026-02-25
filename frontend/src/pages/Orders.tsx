@@ -37,7 +37,6 @@ const STATUS_LABELS: Record<string, string> = {
   purchased: 'Purchased',
   shipped: 'Shipped',
   submitted: 'Submitted',
-  delivered: 'Delivered',
   scanned: 'Scanned',
   payment_requested: 'Payment requested',
   payment_sent: 'Payment sent',
@@ -53,7 +52,6 @@ const STATUS_LABELS: Record<string, string> = {
 const STATUS_PROGRESSION: ItemStatus[] = [
   'shipped',
   'submitted',
-  'delivered',
   'scanned',
   'payment_requested',
   'payment_sent',
@@ -76,7 +74,6 @@ function getStatusRowClass(status: string): string {
       return 'bg-gray-100/80 dark:bg-gray-700/50'
     case 'shipped':
     case 'submitted':
-    case 'delivered':
       return 'bg-yellow-100/80 dark:bg-yellow-600/30'
     case 'scanned':
     case 'payment_requested':
@@ -103,7 +100,6 @@ function getStatusInputClass(status: string): string {
       return 'bg-gray-50/90 dark:bg-gray-700/50'
     case 'shipped':
     case 'submitted':
-    case 'delivered':
       return 'bg-yellow-100/90 dark:bg-yellow-600/30'
     case 'scanned':
     case 'payment_requested':
@@ -149,7 +145,7 @@ function copyToClipboard(text: string): void {
 }
 
 const DEFAULT_STATUSES: ItemStatus[] = [
-  'purchased', 'shipped', 'submitted', 'delivered', 'scanned',
+  'purchased', 'shipped', 'submitted', 'scanned',
   'payment_requested', 'payment_sent', 'payment_received',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
 ]
@@ -158,7 +154,6 @@ const STATUS_FILTER_OPTIONS: [string, string][] = [
   ['purchased', 'Purchased'],
   ['shipped', 'Shipped'],
   ['submitted', 'Submitted'],
-  ['delivered', 'Delivered'],
   ['scanned', 'Scanned'],
   ['payment_requested', 'Payment requested'],
   ['payment_sent', 'Payment sent'],
@@ -800,7 +795,6 @@ export default function Orders() {
       const res = await api.post<{ items: Item[] }>('/items/bulk-update', {
         updates: itemIds.map((itemId) => ({
           item_id: itemId,
-          status: 'delivered',
           delivered_at: now,
           receipt_id: (receiptIds[itemId] ?? '').trim() || null,
         })),
@@ -923,7 +917,7 @@ export default function Orders() {
   }
 
   const advanceShipmentToNextStatus = async (group: { key: string; items: Item[] }) => {
-    const toUpdate = group.items.filter((item) => getNextStatus(item.status))
+    const toUpdate = group.items.filter((item) => getNextStatus(item.status) != null)
     if (toUpdate.length === 0) return
     setAdvancingGroupKey(group.key)
     const now = new Date().toISOString().slice(0, 19)
@@ -933,7 +927,7 @@ export default function Orders() {
         if (next) {
           const dateField = STATUS_TO_DATE_FIELD[next]
           const payload: Partial<Item> = { status: next }
-          if (dateField) payload[dateField] = now
+          if (dateField) (payload as any)[dateField] = now
           await updateItem(item.id, payload)
         }
       }
@@ -1875,7 +1869,7 @@ export default function Orders() {
                                         disabled={savingTrackingId === item.id}
                                         className="flex-1 min-w-[5rem] h-5 border-0 rounded-l px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
                                       />
-                                      {trackingInfo && (
+                                      {trackingInfo && trackingInfo.url && (
                                         <a
                                           href={trackingInfo.url}
                                           target="_blank"

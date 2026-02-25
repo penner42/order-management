@@ -29,13 +29,14 @@ _ITEM_DATE_FIELDS = frozenset({
 })
 
 # Statuses that are "earlier" than payment_requested; moving item to these removes it from its payment
-_STATUSES_BEFORE_PAYMENT_REQUESTED = frozenset({
-    ItemStatus.PURCHASED,
-    ItemStatus.SHIPPED,
-    ItemStatus.SUBMITTED,
-    ItemStatus.DELIVERED,
-    ItemStatus.SCANNED,
-})
+_STATUSES_BEFORE_PAYMENT_REQUESTED = frozenset(
+    {
+        ItemStatus.PURCHASED,
+        ItemStatus.SHIPPED,
+        ItemStatus.SUBMITTED,
+        ItemStatus.SCANNED,
+    }
+)
 
 
 def _remove_item_from_payment_if_earlier_status(item: Item, db: Session) -> None:
@@ -87,7 +88,7 @@ def bulk_update_items(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Update multiple items in a single request. delivered_at in entry is applied to the item's shipment when status=delivered."""
+    """Update multiple items in a single request. delivered_at in entry is applied to the item's shipment."""
     updated: list[Item] = []
     for entry in data.updates:
         item = db.query(Item).filter(Item.id == entry.item_id).first()
@@ -96,20 +97,17 @@ def bulk_update_items(
         payload = entry.model_dump(exclude_unset=True, exclude={"item_id"})
         for k, v in payload.items():
             if k == "delivered_at":
-                continue  # applied to shipment below when status=delivered
+                continue  # applied to shipment below
             if k in _ITEM_DATE_FIELDS:
                 setattr(item, k, to_date_only(v) if v is not None else None)
             else:
                 setattr(item, k, v)
-        if getattr(entry, "status", None) == ItemStatus.DELIVERED:
+        if getattr(entry, "delivered_at", None) is not None:
             si = db.query(ShipmentItem).filter(ShipmentItem.item_id == item.id).first()
             if si:
                 shipment = db.query(Shipment).filter(Shipment.id == si.shipment_id).first()
                 if shipment:
-                    shipment.delivered_at = (
-                        to_date_only(entry.delivered_at) if entry.delivered_at is not None
-                        else to_date_only(datetime.now(timezone.utc))
-                    )
+                    shipment.delivered_at = to_date_only(entry.delivered_at)
         updated.append(item)
     for item in updated:
         _remove_item_from_payment_if_earlier_status(item, db)
@@ -189,12 +187,6 @@ def update_item(item_id: int, data: ItemUpdate, db: Session = Depends(get_db), _
             setattr(item, k, to_date_only(v) if v is not None else None)
         else:
             setattr(item, k, v)
-    if item.status == ItemStatus.DELIVERED:
-        si = db.query(ShipmentItem).filter(ShipmentItem.item_id == item.id).first()
-        if si:
-            shipment = db.query(Shipment).filter(Shipment.id == si.shipment_id).first()
-            if shipment:
-                shipment.delivered_at = to_date_only(datetime.now(timezone.utc))
     _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     db.refresh(item)

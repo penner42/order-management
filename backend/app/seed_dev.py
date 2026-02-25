@@ -165,7 +165,7 @@ def seed_dev_data(db: Session) -> dict:
         order_id=order1.id,
         price_paid=Decimal("29.99"),
         price_sold=Decimal("35.00"),
-        status=ItemStatus.DELIVERED,
+        status=ItemStatus.SCANNED,
         quantity=1,
         description="Wireless earbuds",
     )
@@ -189,7 +189,7 @@ def seed_dev_data(db: Session) -> dict:
         order_id=order3.id,
         price_paid=Decimal("45.00"),
         price_sold=Decimal("50.00"),
-        status=ItemStatus.DELIVERED,
+        status=ItemStatus.SCANNED,
         quantity=2,
         description="Office supplies pack",
     )

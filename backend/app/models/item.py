@@ -10,7 +10,6 @@ class ItemStatus(str, enum.Enum):
     PURCHASED = "purchased"
     SHIPPED = "shipped"
     SUBMITTED = "submitted"
-    DELIVERED = "delivered"
     SCANNED = "scanned"
     PAYMENT_REQUESTED = "payment_requested"
     PAYMENT_SENT = "payment_sent"

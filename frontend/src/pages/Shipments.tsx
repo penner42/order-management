@@ -6,7 +6,6 @@ const STATUS_LABELS: Record<string, string> = {
   purchased: 'Purchased',
   shipped: 'Shipped',
   submitted: 'Submitted',
-  delivered: 'Delivered',
   scanned: 'Scanned',
   payment_requested: 'Payment requested',
   payment_sent: 'Payment sent',
@@ -19,8 +18,8 @@ const STATUS_LABELS: Record<string, string> = {
   return_refunded: 'Refunded',
 }
 
-function canMarkScanned(status: string): boolean {
-  return status === 'delivered'
+function canMarkScanned(shipment: Shipment): boolean {
+  return shipment.delivered_at != null
 }
 
 function MarkScannedModal({
@@ -159,7 +158,7 @@ export default function Shipments() {
                                   <td className="py-2 px-2 text-ink">{item.description || '—'}</td>
                                   <td className="py-2 px-2 text-ink-muted">{STATUS_LABELS[item.status] ?? item.status}</td>
                                   <td className="py-2 px-2">
-                                    {canMarkScanned(item.status) && (
+                                    {canMarkScanned(s) && (
                                       <button
                                         type="button"
                                         onClick={() => setScanItemModal(item)}

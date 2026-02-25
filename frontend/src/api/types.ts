@@ -2,7 +2,6 @@ export type ItemStatus =
   | 'purchased'
   | 'shipped'
   | 'submitted'
-  | 'delivered'
   | 'scanned'
   | 'payment_requested'
   | 'payment_sent'
