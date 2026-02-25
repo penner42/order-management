@@ -2,6 +2,7 @@ import base64
 import os
 import threading
 import time
+import uuid
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -230,10 +231,93 @@ def ups_token() -> dict:
     return {"access_token": token, "token_type": "Bearer"}
 
 
-@app.get("/track")
-def track_stub() -> dict:
-    # Stub endpoint for future detailed tracking integration
-    raise HTTPException(status_code=501, detail="Tracking endpoint not implemented yet")
+# UPS Track API: production https://onlinetools.ups.com/api/track/v1/details/{trackingNumber}
+# Sandbox: https://wwwcie.ups.com/api/track/v1/details/{trackingNumber}
+UPS_TRACK_BASE = os.environ.get(
+    "UPS_TRACK_BASE", "https://onlinetools.ups.com/api/track/v1"
+)
+
+
+class TrackResponse(BaseModel):
+    status: str  # "Delivered" | "InTransit" | "Unknown"
+    delivered_at: str | None  # ISO8601 or None
+
+
+def _parse_ups_track_response(data: dict) -> TrackResponse:
+    """Parse UPS Track API response for delivery status and optional delivered_at."""
+    try:
+        tr = data.get("trackResponse") or data
+        shipment = (tr.get("shipment") or [{}])
+        if isinstance(shipment, list):
+            shipment = shipment[0] if shipment else {}
+        package = (shipment.get("package") or [{}])
+        if isinstance(package, list):
+            package = package[0] if package else {}
+        activities = package.get("activity") or []
+        if not isinstance(activities, list):
+            activities = [activities] if activities else []
+        delivered_at: str | None = None
+        
+        for act in activities:
+            status = act.get("status") or {}
+            if isinstance(status, dict):
+                stype = (status.get("type") or "").strip().upper()
+                desc = (status.get("description") or "").strip()
+            else:
+                stype = str(status).strip().upper()
+                desc = ""
+            if stype == "D" or "delivered" in desc.lower():
+                date_str = act.get("date")
+                time_str = act.get("time") or ""
+                if date_str:
+                    if time_str:
+                        delivered_at = f"{date_str}T{time_str}:00"
+                    else:
+                        delivered_at = f"{date_str}T00:00:00"
+                break
+        if delivered_at:
+            return TrackResponse(status="Delivered", delivered_at=delivered_at)
+        if activities:
+            return TrackResponse(status="InTransit", delivered_at=None)
+        return TrackResponse(status="Unknown", delivered_at=None)
+    except Exception:
+        return TrackResponse(status="Unknown", delivered_at=None)
+
+
+def fetch_ups_track(tracking_number: str) -> TrackResponse:
+    """Call UPS Track API and return status + optional delivered_at. Raises HTTPException on API/auth errors."""
+    t = _normalize(tracking_number)
+    if not t:
+        raise HTTPException(status_code=400, detail="Missing or invalid tracking number")
+    if not _is_ups(t):
+        raise HTTPException(status_code=501, detail="Unsupported carrier for tracking (UPS only)")
+    token = get_ups_token()
+    url = f"{UPS_TRACK_BASE}/details/{t}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "transactionSrc": "order-management-api",
+        "transId": str(uuid.uuid4())
+    }
+    with httpx.Client() as client:
+        resp = client.get(url, headers=headers, timeout=15.0)
+    if resp.status_code == 404:
+        return TrackResponse(status="Unknown", delivered_at=None)
+    if resp.status_code == 429:
+        raise HTTPException(status_code=429, detail="UPS rate limit exceeded")
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"UPS Track API error: {resp.status_code} {resp.text[:200]}",
+        )
+    data = resp.json()
+    return _parse_ups_track_response(data)
+
+
+@app.get("/track", response_model=TrackResponse)
+def track(tracking_number: str) -> TrackResponse:
+    """Return tracking status (Delivered / InTransit / Unknown) and optional delivered_at. UPS only."""
+    return fetch_ups_track(tracking_number)
 
 
 @app.get("/")
