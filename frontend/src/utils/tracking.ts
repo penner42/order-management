@@ -12,9 +12,11 @@ const PACKAGE_TRACKING_API_BASE =
   (typeof importMetaEnv !== 'undefined' && importMetaEnv.VITE_PACKAGE_TRACKING_API_BASE) ||
   '/tracking'
 
-export async function getTrackingInfo(trackingNumber: string): Promise<TrackingInfo | null> {
-  const t = (trackingNumber || '').trim()
-  if (!t) return null
+export async function getTrackingInfoBulk(
+  trackingNumbers: string[]
+): Promise<(TrackingInfo | null)[]> {
+  const trimmed = trackingNumbers.map((t) => (t || '').trim()).filter(Boolean)
+  if (trimmed.length === 0) return []
 
   try {
     const res = await fetch(`${PACKAGE_TRACKING_API_BASE}/link`, {
@@ -22,19 +24,28 @@ export async function getTrackingInfo(trackingNumber: string): Promise<TrackingI
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ tracking_number: t }),
+      body: JSON.stringify({ tracking_numbers: trimmed }),
     })
 
     if (!res.ok) {
-      return null
+      return trimmed.map(() => null)
     }
 
-    const data = (await res.json()) as { carrier: string | null; url: string | null }
-    if (!data.carrier || !data.url) return null
-    return { carrier: data.carrier, url: data.url }
+    const data = (await res.json()) as { results: Array<{ carrier: string | null; url: string | null }> }
+    const results = data.results ?? []
+    return results.map((r) =>
+      r && r.carrier && r.url ? { carrier: r.carrier, url: r.url } : null
+    )
   } catch {
-    return null
+    return trimmed.map(() => null)
   }
+}
+
+export async function getTrackingInfo(trackingNumber: string): Promise<TrackingInfo | null> {
+  const t = (trackingNumber || '').trim()
+  if (!t) return null
+  const [result] = await getTrackingInfoBulk([t])
+  return result ?? null
 }
 
 interface UpsTestResult {

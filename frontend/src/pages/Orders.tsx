@@ -19,7 +19,7 @@ import type {
   ItemStatus,
   EffectiveItemStatus,
 } from '../api/types'
-import { getTrackingInfo } from '../utils/tracking'
+import { getTrackingInfoBulk } from '../utils/tracking'
 import type { TrackingInfo } from '../utils/tracking'
 
 /** Format UTC ISO date string for datetime-local input in the user's local timezone. */
@@ -583,7 +583,7 @@ export default function Orders() {
   useEffect(() => {
     const fetchTrackingInfos = async () => {
       const next: Record<number, TrackingInfo | null> = {}
-      const requests: Promise<void>[] = []
+      const orderedPairs: { itemId: number; tn: string }[] = []
 
       for (const order of orders) {
         for (const item of order.items ?? []) {
@@ -593,16 +593,23 @@ export default function Orders() {
             next[item.id] = null
             continue
           }
-          requests.push(
-            (async () => {
-              const info = await getTrackingInfo(tn)
-              next[item.id] = info
-            })()
-          )
+          orderedPairs.push({ itemId: item.id, tn })
         }
       }
 
-      await Promise.all(requests)
+      if (orderedPairs.length === 0) {
+        setTrackingInfoByItemId(next)
+        return
+      }
+
+      const uniqueTNs = [...new Set(orderedPairs.map((p) => p.tn))]
+      const results = await getTrackingInfoBulk(uniqueTNs)
+      const tnToInfo = new Map<string, TrackingInfo | null>()
+      uniqueTNs.forEach((tn, i) => tnToInfo.set(tn, results[i] ?? null))
+
+      for (const { itemId, tn } of orderedPairs) {
+        next[itemId] = tnToInfo.get(tn) ?? null
+      }
       setTrackingInfoByItemId(next)
     }
 

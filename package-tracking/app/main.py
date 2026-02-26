@@ -21,12 +21,16 @@ _ups_token_lock = threading.Lock()
 
 
 class LinkRequest(BaseModel):
-    tracking_number: str
+    tracking_numbers: list[str]
+
+
+class LinkResult(BaseModel):
+    carrier: str | None
+    url: str | None
 
 
 class LinkResponse(BaseModel):
-    carrier: str | None
-    url: str | None
+    results: list[LinkResult]
 
 
 app = FastAPI(title="Package Tracking API")
@@ -196,10 +200,10 @@ def get_ups_token() -> str:
     return access_token
 
 
-def detect_carrier_and_link(tracking_number: str) -> LinkResponse:
+def detect_carrier_and_link(tracking_number: str) -> LinkResult:
     t = _normalize(tracking_number)
     if not t:
-        return LinkResponse(carrier=None, url=None)
+        return LinkResult(carrier=None, url=None)
 
     if _is_ups(t):
         carrier = "UPS"
@@ -214,14 +218,15 @@ def detect_carrier_and_link(tracking_number: str) -> LinkResponse:
     elif _is_fedex(t):
         carrier = "FedEx"
     else:
-        return LinkResponse(carrier=None, url=None)
+        return LinkResult(carrier=None, url=None)
 
-    return LinkResponse(carrier=carrier, url=_tracking_url(carrier, t))
+    return LinkResult(carrier=carrier, url=_tracking_url(carrier, t))
 
 
 @app.post("/link", response_model=LinkResponse)
 def link(body: LinkRequest) -> LinkResponse:
-    return detect_carrier_and_link(body.tracking_number)
+    results = [detect_carrier_and_link(tn) for tn in body.tracking_numbers]
+    return LinkResponse(results=results)
 
 
 @app.get("/ups-token")
