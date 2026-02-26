@@ -91,6 +91,28 @@
       color: #555;
       font-style: italic;
     }
+    #usabgResults {
+      font-size: 12px;
+      line-height: 1.4;
+      max-height: 240px;
+      overflow-y: auto;
+      background: #f5f5f5;
+      padding: 8px;
+      border-radius: 4px;
+      margin-top: 8px;
+      white-space: pre;
+    }
+    #usabgSection {
+      margin-top: 16px;
+      border-top: 1px solid #eee;
+      padding-top: 12px;
+    }
+    #usabgSectionTitle {
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #333;
+    }
   </style>
 </head>
 <body>
@@ -101,6 +123,13 @@
     Send to Order Manager
   </button>
   <div id="results" style="margin-top: 12px; display: none;"></div>
+  <div id="usabgSection" style="display: none;">
+    <div id="usabgSectionTitle">USABG Buyer POs (app.usabuying.group only)</div>
+    <button id="usabgLoadPos" style="margin-top: 4px;">
+      Load Buyer POs
+    </button>
+    <pre id="usabgResults" style="display: none;"></pre>
+  </div>
   <script src="popup.js"></script>
 </body>
 </html>

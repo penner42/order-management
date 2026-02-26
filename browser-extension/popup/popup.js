@@ -1,6 +1,9 @@
 /** Order details from the content script (getOrderDetails). Stored after a successful fetch so "Send to Order Manager" can use it. */
 let lastOrderDetails = null;
 
+const USABG_API_URL =
+  "https://api.usabuying.group/buyers/pos?limit=20&start=0";
+
 document
   .getElementById("getOrderDetails")
   .addEventListener("click", async () => {
@@ -116,3 +119,66 @@ function parsePrice(s) {
   const n = parseFloat(String(s).replace(/[^0-9.-]/g, ""));
   return Number.isNaN(n) ? 0 : n;
 }
+
+(function setupUsabgSection() {
+  const section = document.getElementById("usabgSection");
+  const btn = document.getElementById("usabgLoadPos");
+  const resultsEl = document.getElementById("usabgResults");
+
+  if (!section || !btn || !resultsEl || !chrome.tabs) return;
+
+  chrome.tabs.query(
+    {
+      active: true,
+      currentWindow: true,
+    },
+    (tabs) => {
+      const tab = tabs && tabs[0];
+      const url = tab && tab.url ? String(tab.url) : "";
+      const onUsabg =
+        url.startsWith("https://app.usabuying.group/") ||
+        url.startsWith("https://app.usabuying.group");
+
+      section.style.display = onUsabg ? "block" : "none";
+      if (!onUsabg) {
+        resultsEl.style.display = "none";
+        return;
+      }
+
+      btn.addEventListener("click", async () => {
+        resultsEl.style.display = "block";
+        resultsEl.textContent = "Loading buyer POs…";
+
+        try {
+          const storageData = await new Promise((resolve) => {
+            chrome.storage.local.get("usabgBearerToken", resolve);
+          });
+          const token = storageData && storageData.usabgBearerToken;
+          if (!token) {
+            resultsEl.textContent =
+              "No USABG token found. Visit a page that calls api.usabuying.group first.";
+            return;
+          }
+
+          const response = await fetch(USABG_API_URL, {
+            headers: {
+              Authorization: "Bearer " + token,
+            },
+          });
+
+          if (!response.ok) {
+            resultsEl.textContent =
+              "Request failed: " + response.status + " " + response.statusText;
+            return;
+          }
+
+          const data = await response.json();
+          resultsEl.textContent = JSON.stringify(data, null, 2);
+        } catch (e) {
+          resultsEl.textContent =
+            "Error loading buyer POs. Check the console for details.";
+        }
+      });
+    }
+  );
+})();
