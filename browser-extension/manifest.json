@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Integrate order data from store order pages into Order Manager. Supports Walmart (more stores coming).",
   "permissions": ["activeTab", "storage"],
-  "host_permissions": ["https://api.usabuying.group/*"],
+  "host_permissions": ["https://api.usabuying.group/*", "https://api.prod.buyinggroup.com/*"],
   "action": {
     "default_popup": "popup/popup.html"
   },
@@ -29,6 +29,23 @@
     {
       "matches": ["https://*.usabuying.group/*"],
       "js": ["buying_groups/usabg/bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://buyinggroup.com/*",
+        "https://*.buyinggroup.com/*"
+      ],
+      "js": ["buying_groups/bg/auth.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://buyinggroup.com/*",
+        "https://*.buyinggroup.com/*"
+      ],
+      "js": ["buying_groups/bg/bridge.js"],
       "run_at": "document_start"
     }
   ]

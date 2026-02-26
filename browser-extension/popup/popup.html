@@ -102,16 +102,29 @@
       margin-top: 8px;
       white-space: pre;
     }
-    #usabgSection {
+    #usabgSection,
+    #bgSection {
       margin-top: 16px;
       border-top: 1px solid #eee;
       padding-top: 12px;
     }
-    #usabgSectionTitle {
+    #usabgSectionTitle,
+    #bgSectionTitle {
       font-size: 12px;
       font-weight: 600;
       margin-bottom: 6px;
       color: #333;
+    }
+    #bgResults {
+      font-size: 12px;
+      line-height: 1.4;
+      max-height: 240px;
+      overflow-y: auto;
+      background: #f5f5f5;
+      padding: 8px;
+      border-radius: 4px;
+      margin-top: 8px;
+      white-space: pre;
     }
   </style>
 </head>
@@ -129,6 +142,13 @@
       Load Buyer POs
     </button>
     <pre id="usabgResults" style="display: none;"></pre>
+  </div>
+  <div id="bgSection" style="display: none;">
+    <div id="bgSectionTitle">BG Orders (buyinggroup.com only)</div>
+    <button id="bgLoadOrders" style="margin-top: 4px;">
+      Load Orders
+    </button>
+    <pre id="bgResults" style="display: none;"></pre>
   </div>
   <script src="popup.js"></script>
 </body>
