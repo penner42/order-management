@@ -4,7 +4,7 @@ A browser extension that integrates order data from store order pages. Works in 
 
 ## Stores
 
-- **Walmart** – Reads order numbers from [walmart.com/orders](https://www.walmart.com/orders)
+- Store order pages supported via content scripts (e.g. Costco orders)
 
 ## Installation (Unpacked)
 
@@ -23,6 +23,6 @@ A browser extension that integrates order data from store order pages. Works in 
 
 ## Usage
 
-1. Visit [https://www.walmart.com/orders](https://www.walmart.com/orders) (while logged in)
-2. Order numbers are injected into each order card on the page automatically
+1. Visit a supported store's orders page (while logged in)
+2. Order numbers (and related metadata when available) are injected into each order card automatically
 3. For order details, open an order and use the popup: **Get Order Details** → **Send to Order Manager**
