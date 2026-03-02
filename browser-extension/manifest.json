@@ -6,13 +6,19 @@
   "permissions": ["activeTab", "storage"],
   "host_permissions": ["https://api.usabuying.group/*", "https://api.prod.buyinggroup.com/*"],
   "action": {
-    "default_popup": "popup/popup.html"
+  "default_popup": "popup/popup.html"
   },
   "content_scripts": [
     {
       "matches": ["https://www.costco.com/myaccount/*"],
       "js": ["stores/costco/orders.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.walmart.com/*"],
+      "js": ["stores/walmart/orders.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
     },
     {
       "matches": ["https://*.usabuying.group/*"],
