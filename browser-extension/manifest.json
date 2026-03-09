@@ -21,6 +21,11 @@
       "world": "MAIN"
     },
     {
+      "matches": ["https://www.walmart.com/*"],
+      "js": ["stores/walmart/bridge.js"],
+      "run_at": "document_start"
+    },
+    {
       "matches": ["https://*.usabuying.group/*"],
       "js": ["buying_groups/usabg/auth.js"],
       "run_at": "document_start",

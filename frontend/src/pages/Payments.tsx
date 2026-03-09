@@ -113,12 +113,33 @@ export default function Payments() {
     for (const li of editPayment.line_items ?? []) {
       const item = li.item
       if (item) {
-        const qty = item.quantity || 1
+        const qty = item.quantity ?? 1
         sum += parseDecimal(item.price_sold) * qty
       }
     }
     return sum
   }, [editPayment])
+
+  const paymentAmount = (p: Payment) =>
+    (p.line_items ?? []).reduce(
+      (sum, li) => sum + parseDecimal(li.item?.price_sold) * (li.item?.quantity ?? 1),
+      0
+    )
+
+  const totals = useMemo(() => {
+    let amount = 0
+    let requested = 0
+    let sent = 0
+    let received = 0
+    for (const p of payments) {
+      const amt = paymentAmount(p)
+      amount += amt
+      if (p.payment_requested_at) requested += amt
+      if (p.payment_sent_at) sent += amt
+      if (p.payment_received_at) received += amt
+    }
+    return { amount, requested, sent, received }
+  }, [payments])
 
   useEffect(() => {
     const params = filterGroupId === '' ? '' : `?buying_group_id=${filterGroupId}`
@@ -415,14 +436,7 @@ export default function Payments() {
                   <td className="py-3 px-4 text-sm font-mono min-w-[8rem]">{p.payment_id ?? '—'}</td>
                   <td className="py-3 px-4 text-sm">{p.line_items?.length ?? 0}</td>
                   <td className="py-3 px-4 text-sm min-w-[5rem]">
-                    {formatMoney(
-                      (p.line_items ?? []).reduce(
-                        (sum, li) =>
-                          sum +
-                          parseDecimal(li.item?.price_sold) * (li.item?.quantity ?? 1),
-                        0
-                      )
-                    )}
+                    {formatMoney(paymentAmount(p))}
                   </td>
                   <td className="py-3 px-4 text-sm text-ink-muted">
                     {p.payment_requested_at ? new Date(p.payment_requested_at).toLocaleDateString() : '—'}
@@ -501,6 +515,28 @@ export default function Payments() {
               ))
             )}
           </tbody>
+          {payments.length > 0 && (
+            <tfoot className="bg-brand-50/50 dark:bg-gray-700/30 border-t-2 border-brand-200/80 dark:border-gray-700">
+              <tr>
+                <td className="py-3 px-4 text-sm font-medium text-ink" colSpan={3}>
+                  Total
+                </td>
+                <td className="py-3 px-4 text-sm font-medium text-ink min-w-[5rem]">
+                  {formatMoney(totals.amount)}
+                </td>
+                <td className="py-3 px-4 text-sm font-medium text-ink-muted">
+                  {formatMoney(totals.requested)}
+                </td>
+                <td className="py-3 px-4 text-sm font-medium text-ink-muted">
+                  {formatMoney(totals.sent)}
+                </td>
+                <td className="py-3 px-4 text-sm font-medium text-ink-muted">
+                  {formatMoney(totals.received)}
+                </td>
+                <td className="py-3 px-4" />
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
 

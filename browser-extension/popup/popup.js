@@ -1,113 +1,81 @@
 /** Order details from the content script (getOrderDetails). Stored after a successful fetch so "Send to Order Manager" can use it. */
 let lastOrderDetails = null;
 
+const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
+
+function isWalmartOrderDetailUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "www.walmart.com") return false;
+    const path = u.pathname || "";
+    return path.startsWith("/orders/") || path.includes("/order-details");
+  } catch {
+    return false;
+  }
+}
+
+/** Render saved order payload as raw JSON in #results. */
+function renderOrderDetails(payload, resultsEl) {
+  if (!resultsEl) return;
+  const json = JSON.stringify(payload, null, 2);
+  resultsEl.innerHTML =
+    '<pre style="white-space:pre-wrap;margin:0;font-size:12px;">' +
+    escapeHtml(json) +
+    "</pre>";
+}
+
+(function setupWalmartOrderSection() {
+  const section = document.getElementById("walmartOrderSection");
+  const getOrderDetailsBtn = document.getElementById("getOrderDetails");
+  const sendToAppBtn = document.getElementById("sendToApp");
+  const resultsEl = document.getElementById("results");
+
+  if (!section || !getOrderDetailsBtn || !resultsEl || !chrome.tabs) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0];
+    const url = tab && tab.url ? String(tab.url) : "";
+    const onWalmartOrderPage = isWalmartOrderDetailUrl(url);
+
+    if (!onWalmartOrderPage) {
+      section.style.display = "none";
+      return;
+    }
+
+    chrome.storage.local.get(WALMART_ORDER_DETAIL_STORAGE_KEY, (storage) => {
+      const stored = storage && storage[WALMART_ORDER_DETAIL_STORAGE_KEY];
+      const hasStoredData =
+        stored &&
+        stored.payload &&
+        stored.url &&
+        stored.url === url;
+
+      section.style.display = hasStoredData ? "block" : "none";
+      if (!hasStoredData) return;
+
+      getOrderDetailsBtn.addEventListener("click", () => {
+        chrome.storage.local.get(WALMART_ORDER_DETAIL_STORAGE_KEY, (s) => {
+          const current = s && s[WALMART_ORDER_DETAIL_STORAGE_KEY];
+          if (!current || current.url !== url || !current.payload) {
+            resultsEl.style.display = "block";
+            resultsEl.innerHTML = '<span class="error">No saved order data for this page.</span>';
+            return;
+          }
+          lastOrderDetails = current.payload;
+          resultsEl.style.display = "block";
+          renderOrderDetails(current.payload, resultsEl);
+          if (sendToAppBtn) sendToAppBtn.style.display = "block";
+        });
+      });
+    });
+  });
+})();
+
 const USABG_API_URL =
   "https://api.usabuying.group/buyers/pos?limit=20&start=0";
 const BG_ORDERS_URL = "https://api.prod.buyinggroup.com/v1/receipt/get_analytics";
 const BG_TOKEN_URL = "https://api.prod.buyinggroup.com/";
-
-document
-  .getElementById("getOrderDetails")
-  .addEventListener("click", async () => {
-    const resultsEl = document.getElementById("results");
-    const sendBtn = document.getElementById("sendToApp");
-    resultsEl.style.display = "block";
-    sendBtn.style.display = "none";
-    lastOrderDetails = null;
-    try {
-      const [tab] = await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      });
-      if (!tab?.id) {
-        resultsEl.innerHTML = `<span class="error">No active tab.</span>`;
-        return;
-      }
-      resultsEl.innerHTML = `<span class="loading">Hard refreshing page…</span>`;
-      await hardRefreshTab(tab.id);
-      resultsEl.innerHTML = `<span class="loading">Extracting order details…</span>`;
-      const response = await chrome.tabs.sendMessage(tab.id, {
-        action: "getOrderDetails",
-      });
-      if (response.error) {
-        resultsEl.innerHTML = `<span class="error">Not on an order detail page (orders/XXXX/...).</span>`;
-      } else if (response.details) {
-        lastOrderDetails = response.details;
-        sendBtn.style.display = "block";
-        const {
-          orderNumber,
-          items,
-          address,
-          paymentMethod,
-          account,
-          orderDate,
-        } = response.details;
-        let html = `<div class="order-number">Order ${orderNumber}</div>`;
-        if (orderDate) {
-          html += `<div class="order-date">${escapeHtml(orderDate)}</div>`;
-        }
-        if (account) {
-          html += `<div class="account">${escapeHtml(account)}</div>`;
-        }
-        if (address) {
-          html += `<div class="address">${escapeHtml(address)}</div>`;
-        }
-        if (paymentMethod) {
-          html += `<div class="payment">${escapeHtml(paymentMethod)}</div>`;
-        }
-        if (items.length === 0) {
-          html += "<div>No items found.</div>";
-        } else {
-          let orderTotal = 0;
-          items.forEach(({ name, price, quantity, trackingNumber }) => {
-            const qty = Math.max(0, quantity ?? 1);
-            const unitCost = parsePrice(price);
-            const lineTotal = unitCost * qty;
-            orderTotal += lineTotal;
-            let meta = `Unit ${escapeHtml(price)} × ${qty} = $${lineTotal.toFixed(2)}`;
-            if (trackingNumber) meta += ` · ${escapeHtml(trackingNumber)}`;
-            html += `<div class="item"><div class="item-name">${escapeHtml(name)}</div><div class="item-meta">${meta}</div></div>`;
-          });
-          html += `<div class="order-total">Order total (calculated): $${orderTotal.toFixed(2)}</div>`;
-        }
-        resultsEl.innerHTML = html;
-      }
-    } catch {
-      resultsEl.innerHTML = `<span class="error">Open a Walmart order detail page (orders/XXXX/...) first, then try again.</span>`;
-    }
-  });
-
-document.getElementById("sendToApp").addEventListener("click", () => {
-  if (!lastOrderDetails) return;
-  const baseUrl = "http://localhost:5173";
-  try {
-    const json = JSON.stringify(lastOrderDetails);
-    const encoded = btoa(unescape(encodeURIComponent(json)));
-    const url = `${baseUrl}/import-preview#${encoded}`;
-    chrome.tabs.create({ url });
-  } catch (e) {
-    alert("Order Manager: Could not encode order data. Try again.");
-  }
-});
-
-function hardRefreshTab(tabId) {
-  return new Promise((resolve) => {
-    const timeoutMs = 60000;
-    const timeout = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
-    }, timeoutMs);
-    function listener(updatedTabId, changeInfo) {
-      if (updatedTabId === tabId && changeInfo.status === "complete") {
-        clearTimeout(timeout);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    }
-    chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.reload(tabId, { bypassCache: true });
-  });
-}
 
 function escapeHtml(text) {
   const div = document.createElement("div");
