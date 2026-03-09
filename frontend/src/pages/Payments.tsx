@@ -518,11 +518,8 @@ export default function Payments() {
           {payments.length > 0 && (
             <tfoot className="bg-brand-50/50 dark:bg-gray-700/30 border-t-2 border-brand-200/80 dark:border-gray-700">
               <tr>
-                <td className="py-3 px-4 text-sm font-medium text-ink" colSpan={3}>
+                <td className="py-3 px-4 text-sm font-medium text-ink" colSpan={4}>
                   Total
-                </td>
-                <td className="py-3 px-4 text-sm font-medium text-ink min-w-[5rem]">
-                  {formatMoney(totals.amount)}
                 </td>
                 <td className="py-3 px-4 text-sm font-medium text-ink-muted">
                   {formatMoney(totals.requested)}
