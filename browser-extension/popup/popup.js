@@ -515,14 +515,13 @@ function renderOrderDetails(payload, resultsEl) {
                     })
                     .then((data) => {
                       resultsEl.innerHTML =
-                        '<span>Sent to Order Manager for review.</span>' +
-                        (data
-                          ? "<pre>" +
-                            escapeHtml(
-                              JSON.stringify(data, null, 2)
-                            ) +
-                            "</pre>"
-                          : "");
+                        '<span>Sent to Order Manager for review.</span>';
+                      if (data && data.id) {
+                        let detailUrl = baseUrl;
+                        if (detailUrl.endsWith('/')) detailUrl = detailUrl.slice(0, -1);
+                        detailUrl += '/store-imports/' + data.id;
+                        chrome.tabs.create({ url: detailUrl });
+                      }
                     })
                     .catch((err) => {
                       resultsEl.innerHTML =

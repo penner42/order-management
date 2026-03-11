@@ -61,11 +61,10 @@ def create_store_order_import(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create a pending store order import from a normalized external payload."""
+    """Create or overwrite a store order import from a normalized external payload."""
     external_order_id, external_order_url = _parse_external_order_fields(data)
-    normalized_payload: dict[str, Any] = data.model_dump(mode="python")
+    normalized_payload: dict[str, Any] = data.model_dump(mode="json")
 
-    # Try to find an existing order by store_order_number; link if found
     linked_order: Order | None = (
         db.query(Order)
         .filter(Order.store_order_number == external_order_id)
@@ -74,17 +73,39 @@ def create_store_order_import(
 
     diff_json = _build_diff_placeholder(normalized_payload)
 
-    import_record = StoreOrderImport(
-        store=data.store,
-        external_order_id=external_order_id,
-        external_order_url=external_order_url,
-        status="pending",
-        linked_order_id=linked_order.id if linked_order else None,
-        raw_payload_json=data.rawPayload or {},
-        normalized_payload_json=normalized_payload,
-        diff_json=diff_json,
+    # Upsert: overwrite any existing import for this (store, external_order_id)
+    import_record = (
+        db.query(StoreOrderImport)
+        .filter(
+            StoreOrderImport.store == data.store,
+            StoreOrderImport.external_order_id == external_order_id,
+        )
+        .first()
     )
-    db.add(import_record)
+
+    if import_record:
+        import_record.external_order_url = external_order_url
+        import_record.status = "pending"
+        import_record.linked_order_id = linked_order.id if linked_order else None
+        import_record.raw_payload_json = data.rawPayload or {}
+        import_record.normalized_payload_json = normalized_payload
+        import_record.diff_json = diff_json
+        import_record.applied_at = None
+        import_record.discarded_at = None
+        import_record.applied_by_user_id = None
+    else:
+        import_record = StoreOrderImport(
+            store=data.store,
+            external_order_id=external_order_id,
+            external_order_url=external_order_url,
+            status="pending",
+            linked_order_id=linked_order.id if linked_order else None,
+            raw_payload_json=data.rawPayload or {},
+            normalized_payload_json=normalized_payload,
+            diff_json=diff_json,
+        )
+        db.add(import_record)
+
     db.commit()
     db.refresh(import_record)
     return import_record

@@ -59,18 +59,13 @@ def list_orders(
 ):
     # Order-level filters: which orders to include
     q = db.query(Order).order_by(Order.purchase_date.desc())
-    if order_status == "imported":
-        q = q.filter(Order.status == "imported")
-    else:
-        # Default: exclude imported orders from main list
-        q = q.filter(Order.status != "imported")
+    if order_status:
+        q = q.filter(Order.status == order_status)
     if status:
         # Orders that have at least one item with one of these statuses (item or payment), or orders with no items.
         base = db.query(Order)
-        if order_status == "imported":
-            base = base.filter(Order.status == "imported")
-        else:
-            base = base.filter(Order.status != "imported")
+        if order_status:
+            base = base.filter(Order.status == order_status)
         item_statuses = [s for s in status if s not in ("payment_requested", "payment_sent", "payment_received")]
         payment_statuses = [s for s in status if s in ("payment_requested", "payment_sent", "payment_received")]
         queries = []
@@ -98,10 +93,8 @@ def list_orders(
         ids_with_no_items = base.outerjoin(Item).filter(Item.id.is_(None)).with_entities(Order.id)
         order_ids = ids_with_matching_items.union(ids_with_no_items).subquery()
         q = db.query(Order).filter(Order.id.in_(order_ids)).order_by(Order.purchase_date.desc())
-        if order_status == "imported":
-            q = q.filter(Order.status == "imported")
-        else:
-            q = q.filter(Order.status != "imported")
+        if order_status:
+            q = q.filter(Order.status == order_status)
     if buying_group_id:
         q = q.filter(Order.buying_group_id.in_(buying_group_id))
     if store_id or store_account_id:
@@ -145,10 +138,8 @@ def list_orders(
         term = f"%{_like_escape(search.strip())}%"
         escape = "\\"
         base_order = db.query(Order)
-        if order_status == "imported":
-            base_order = base_order.filter(Order.status == "imported")
-        else:
-            base_order = base_order.filter(Order.status != "imported")
+        if order_status:
+            base_order = base_order.filter(Order.status == order_status)
         # Order-level matches: show whole order
         by_order_number = base_order.filter(Order.store_order_number.isnot(None)).filter(func.lower(Order.store_order_number).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
         by_store = base_order.join(Store).filter(func.lower(Store.name).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()

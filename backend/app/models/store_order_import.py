@@ -1,5 +1,5 @@
 """Store order import model - normalized payloads from external stores (e.g. Walmart)."""
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Index
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -11,10 +11,10 @@ class StoreOrderImport(Base):
 
     __tablename__ = "store_order_imports"
     __table_args__ = (
-        Index(
-            "ix_store_order_imports_store_external_order_id",
+        UniqueConstraint(
             "store",
             "external_order_id",
+            name="uq_store_order_imports_store_external_order_id",
         ),
     )
 
