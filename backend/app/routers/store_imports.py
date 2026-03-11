@@ -43,12 +43,173 @@ def _parse_external_order_fields(payload: StoreOrderImportCreate) -> tuple[str, 
     return external_order_id, external_order_url
 
 
-def _build_diff_placeholder(normalized: dict[str, Any]) -> dict[str, Any]:
-    """Placeholder diff; can be extended later with real comparisons."""
+def _build_order_diff(
+    db: Session, linked_order: Order | None, normalized: dict[str, Any]
+) -> dict[str, Any]:
+    """Build a structured diff between an existing order and the incoming import."""
+    if not linked_order:
+        return {"is_existing_order": False}
+
+    existing_items = db.query(Item).filter(Item.order_id == linked_order.id).all()
+
+    existing_shipment_ids: set[int] = set()
+    for item in existing_items:
+        for si in item.shipment_items:
+            existing_shipment_ids.add(si.shipment_id)
+    existing_shipments = (
+        db.query(Shipment).filter(Shipment.id.in_(existing_shipment_ids)).all()
+        if existing_shipment_ids
+        else []
+    )
+
+    # --- Item comparison (aggregate by description since items may be split per shipment) ---
+    existing_by_desc: dict[str, dict[str, Any]] = {}
+    for item in existing_items:
+        desc = (item.description or "").strip()
+        if desc not in existing_by_desc:
+            existing_by_desc[desc] = {
+                "total_quantity": 0,
+                "price_paid": float(item.price_paid) if item.price_paid is not None else None,
+                "statuses": set(),
+            }
+        existing_by_desc[desc]["total_quantity"] += item.quantity
+        if item.status:
+            existing_by_desc[desc]["statuses"].add(
+                item.status.value if hasattr(item.status, "value") else str(item.status)
+            )
+
+    incoming_items = normalized.get("items") or []
+    matched_items: list[dict[str, Any]] = []
+    added_items: list[dict[str, Any]] = []
+
+    for inc_item in incoming_items:
+        name = (inc_item.get("name") or "").strip()
+        pricing = inc_item.get("pricing") or {}
+        quantities = inc_item.get("quantities") or {}
+        inc_qty = quantities.get("ordered") or 1
+        inc_price = pricing.get("unitPrice")
+
+        if name in existing_by_desc:
+            existing = existing_by_desc.pop(name)
+            changes: list[str] = []
+            if existing["price_paid"] != inc_price:
+                changes.append("price")
+            if existing["total_quantity"] != inc_qty:
+                changes.append("quantity")
+            matched_items.append({
+                "name": name,
+                "current": {
+                    "quantity": existing["total_quantity"],
+                    "price_paid": existing["price_paid"],
+                    "statuses": sorted(existing["statuses"]),
+                },
+                "incoming": {
+                    "quantity": inc_qty,
+                    "unit_price": inc_price,
+                },
+                "changes": changes,
+            })
+        else:
+            added_items.append({
+                "name": name,
+                "quantity": inc_qty,
+                "unit_price": inc_price,
+            })
+
+    unmatched_existing = [
+        {
+            "description": desc,
+            "quantity": data["total_quantity"],
+            "price_paid": data["price_paid"],
+            "statuses": sorted(data["statuses"]),
+        }
+        for desc, data in existing_by_desc.items()
+    ]
+
+    # --- Shipment comparison (match by tracking number) ---
+    existing_shipments_by_tracking: dict[str, Shipment] = {}
+    for s in existing_shipments:
+        if s.tracking_number:
+            existing_shipments_by_tracking[s.tracking_number] = s
+
+    incoming_shipments = normalized.get("shipments") or []
+    matched_shipments: list[dict[str, Any]] = []
+    added_shipments: list[dict[str, Any]] = []
+    used_existing_tracking: set[str] = set()
+
+    for inc_ship in incoming_shipments:
+        tracking = inc_ship.get("trackingNumber")
+        delivery = inc_ship.get("deliveryDate")
+        status_info = inc_ship.get("status") or {}
+        status_msg = status_info.get("message")
+
+        if tracking and tracking in existing_shipments_by_tracking:
+            existing_s = existing_shipments_by_tracking[tracking]
+            used_existing_tracking.add(tracking)
+            ship_changes: list[str] = []
+            existing_delivered = (
+                existing_s.delivered_at.isoformat() if existing_s.delivered_at else None
+            )
+            if existing_delivered != delivery:
+                ship_changes.append("delivery_date")
+            matched_shipments.append({
+                "tracking_number": tracking,
+                "current": {"delivered_at": existing_delivered},
+                "incoming": {"delivery_date": delivery, "status_message": status_msg},
+                "changes": ship_changes,
+            })
+        else:
+            added_shipments.append({
+                "tracking_number": tracking,
+                "delivery_date": delivery,
+                "status_message": status_msg,
+            })
+
+    unmatched_existing_shipments = [
+        {
+            "tracking_number": tracking,
+            "delivered_at": s.delivered_at.isoformat() if s.delivered_at else None,
+        }
+        for tracking, s in existing_shipments_by_tracking.items()
+        if tracking not in used_existing_tracking
+    ]
+
+    # --- Order-level comparison ---
+    order_changes: dict[str, Any] = {}
+    incoming_ext = normalized.get("externalOrder") or {}
+    incoming_date = incoming_ext.get("orderDate")
+    existing_date_str = (
+        linked_order.purchase_date.isoformat() if linked_order.purchase_date else None
+    )
+    if existing_date_str != incoming_date:
+        order_changes["purchase_date"] = {
+            "current": existing_date_str,
+            "incoming": incoming_date,
+        }
+
+    has_changes = bool(
+        order_changes
+        or any(m["changes"] for m in matched_items)
+        or added_items
+        or unmatched_existing
+        or any(m["changes"] for m in matched_shipments)
+        or added_shipments
+    )
+
     return {
-        "summary": "diff not implemented - this is a placeholder structure",
-        "external_order_id": normalized.get("externalOrder", {}).get("id"),
-        "store": normalized.get("store"),
+        "is_existing_order": True,
+        "has_changes": has_changes,
+        "order": order_changes,
+        "items": {
+            "matched": matched_items,
+            "added": added_items,
+            "unmatched_existing": unmatched_existing,
+        },
+        "shipments": {
+            "matched": matched_shipments,
+            "added": added_shipments,
+            "unmatched_existing": unmatched_existing_shipments,
+        },
     }
 
 
@@ -71,7 +232,7 @@ def create_store_order_import(
         .first()
     )
 
-    diff_json = _build_diff_placeholder(normalized_payload)
+    diff_json = _build_order_diff(db, linked_order, normalized_payload)
 
     # Upsert: overwrite any existing import for this (store, external_order_id)
     import_record = (
@@ -210,10 +371,24 @@ def _apply_items_and_shipments_for_import(
     import_record: StoreOrderImport,
     order: Order,
 ) -> None:
-    """Create items and shipments for an import, splitting items per shipment slice."""
+    """Create items and shipments for an import, skipping duplicates for existing orders."""
     normalized: dict[str, Any] = import_record.normalized_payload_json or {}
     items = normalized.get("items") or []
     shipments = normalized.get("shipments") or []
+
+    # Build sets of existing data so we can skip duplicates
+    existing_items = db.query(Item).filter(Item.order_id == order.id).all()
+    existing_desc_set: set[str] = {(ei.description or "").strip() for ei in existing_items}
+
+    existing_shipment_ids: set[int] = set()
+    for ei in existing_items:
+        for si in ei.shipment_items:
+            existing_shipment_ids.add(si.shipment_id)
+    existing_tracking_set: set[str] = set()
+    if existing_shipment_ids:
+        for s in db.query(Shipment).filter(Shipment.id.in_(existing_shipment_ids)):
+            if s.tracking_number:
+                existing_tracking_set.add(s.tracking_number)
 
     # Index shipments by shipmentId for quick lookup
     shipments_by_id: dict[str, dict[str, Any]] = {}
@@ -230,6 +405,9 @@ def _apply_items_and_shipments_for_import(
         if shipment_id in shipments_created:
             return shipments_created[shipment_id]
         src = shipments_by_id.get(shipment_id) or {}
+        tracking = src.get("trackingNumber")
+        if tracking and tracking in existing_tracking_set:
+            return None
         delivered_at: datetime | None = None
         delivery_raw = src.get("deliveryDate")
         if isinstance(delivery_raw, str) and delivery_raw.strip():
@@ -241,7 +419,7 @@ def _apply_items_and_shipments_for_import(
                 delivered_at = None
         shipment = Shipment(
             user_id=order.user_id,
-            tracking_number=src.get("trackingNumber"),
+            tracking_number=tracking,
             shipped_at=None,
             delivered_at=delivered_at,
             notes=f"Imported from store '{import_record.store}'.",
@@ -249,10 +427,16 @@ def _apply_items_and_shipments_for_import(
         db.add(shipment)
         db.flush()
         shipments_created[shipment_id] = shipment
+        if tracking:
+            existing_tracking_set.add(tracking)
         return shipment
 
     for item_data in items:
-        name = item_data.get("name") or ""
+        name = (item_data.get("name") or "").strip()
+
+        if name in existing_desc_set:
+            continue
+
         pricing = item_data.get("pricing") or {}
         unit_price = pricing.get("unitPrice")
         status = ItemStatus.PURCHASED
@@ -271,6 +455,7 @@ def _apply_items_and_shipments_for_import(
                 sales_tax=None,
             )
             db.add(item)
+            existing_desc_set.add(name)
             continue
 
         for slice_data in shipments_slices:
@@ -298,6 +483,7 @@ def _apply_items_and_shipments_for_import(
                         item_id=item.id,
                     )
                 )
+        existing_desc_set.add(name)
 
 
 @router.post(

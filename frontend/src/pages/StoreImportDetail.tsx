@@ -51,6 +51,51 @@ interface NormalizedPayload {
   totals?: { itemCount?: number | null; subtotal?: number | null }
 }
 
+interface OrderDiff {
+  is_existing_order: boolean
+  has_changes?: boolean
+  order?: Record<string, { current: string | null; incoming: string | null }>
+  items?: {
+    matched: Array<{
+      name: string
+      current: { quantity: number; price_paid: number | null; statuses: string[] }
+      incoming: { quantity: number; unit_price: number | null }
+      changes: string[]
+    }>
+    added: Array<{ name: string; quantity: number; unit_price: number | null }>
+    unmatched_existing: Array<{
+      description: string
+      quantity: number
+      price_paid: number | null
+      statuses: string[]
+    }>
+  }
+  shipments?: {
+    matched: Array<{
+      tracking_number: string
+      current: { delivered_at: string | null }
+      incoming: { delivery_date: string | null; status_message: string | null }
+      changes: string[]
+    }>
+    added: Array<{
+      tracking_number: string
+      delivery_date: string | null
+      status_message: string | null
+    }>
+    unmatched_existing: Array<{
+      tracking_number: string
+      delivered_at: string | null
+    }>
+  }
+}
+
+interface ItemDiffInfo {
+  status: 'new' | 'unchanged' | 'changed'
+  changes: string[]
+  currentQuantity?: number
+  currentPrice?: number | null
+}
+
 function fmtMoney(v: number | null | undefined): string {
   if (v == null) return '—'
   return `$${v.toFixed(2)}`
@@ -157,6 +202,39 @@ export default function StoreImportDetail() {
   const address = p?.shippingAddress
   const isPending = record.status === 'pending'
 
+  const diff = record.diff_json as OrderDiff | null
+  const isExistingOrder = diff?.is_existing_order === true
+
+  const itemDiffMap = new Map<string, ItemDiffInfo>()
+  if (isExistingOrder && diff?.items) {
+    for (const m of diff.items.matched) {
+      itemDiffMap.set(m.name, {
+        status: m.changes.length > 0 ? 'changed' : 'unchanged',
+        changes: m.changes,
+        currentQuantity: m.current.quantity,
+        currentPrice: m.current.price_paid,
+      })
+    }
+    for (const a of diff.items.added) {
+      itemDiffMap.set(a.name, { status: 'new', changes: [] })
+    }
+  }
+
+  const shipmentDiffMap = new Map<string, { status: 'new' | 'unchanged' | 'changed'; changes: string[] }>()
+  if (isExistingOrder && diff?.shipments) {
+    for (const m of diff.shipments.matched) {
+      shipmentDiffMap.set(m.tracking_number, {
+        status: m.changes.length > 0 ? 'changed' : 'unchanged',
+        changes: m.changes,
+      })
+    }
+    for (const a of diff.shipments.added) {
+      if (a.tracking_number) {
+        shipmentDiffMap.set(a.tracking_number, { status: 'new', changes: [] })
+      }
+    }
+  }
+
   return (
     <div className="max-w-7xl">
       <div className="flex items-center justify-between gap-4 mb-6">
@@ -165,7 +243,9 @@ export default function StoreImportDetail() {
             Store import — {record.store} #{record.external_order_id}
           </h1>
           <p className="text-sm text-ink-muted dark:text-gray-400 mt-1">
-            Review this store order before importing.
+            {isExistingOrder
+              ? 'This order already exists — review the changes below.'
+              : 'Review this store order before importing.'}
           </p>
         </div>
         <Link
@@ -178,6 +258,60 @@ export default function StoreImportDetail() {
 
       {error && (
         <p className="mb-3 text-sm text-red-600 dark:text-red-400">{error}</p>
+      )}
+
+      {isExistingOrder && (
+        <div className={`mb-6 rounded-lg border px-4 py-3 ${
+          diff?.has_changes
+            ? 'border-amber-300 bg-amber-50 dark:border-amber-700/50 dark:bg-amber-950/30'
+            : 'border-emerald-300 bg-emerald-50 dark:border-emerald-700/50 dark:bg-emerald-950/30'
+        }`}>
+          <div className="flex items-start gap-2.5">
+            <svg className={`w-5 h-5 mt-0.5 shrink-0 ${
+              diff?.has_changes ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'
+            }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div>
+              <p className={`text-sm font-medium ${
+                diff?.has_changes ? 'text-amber-800 dark:text-amber-200' : 'text-emerald-800 dark:text-emerald-200'
+              }`}>
+                {diff?.has_changes
+                  ? 'Differences detected between this import and the existing order.'
+                  : 'No differences — this import matches the existing order.'}
+              </p>
+              {diff?.has_changes && (
+                <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                  {(diff.items?.matched.filter(m => m.changes.length > 0).length ?? 0) > 0 && (
+                    <span className="text-amber-700 dark:text-amber-300">
+                      {diff.items!.matched.filter(m => m.changes.length > 0).length} item(s) changed
+                    </span>
+                  )}
+                  {(diff.items?.added.length ?? 0) > 0 && (
+                    <span className="text-emerald-700 dark:text-emerald-300">
+                      {diff.items!.added.length} new item(s)
+                    </span>
+                  )}
+                  {(diff.items?.unmatched_existing.length ?? 0) > 0 && (
+                    <span className="text-gray-500 dark:text-gray-400">
+                      {diff.items!.unmatched_existing.length} existing item(s) not in import
+                    </span>
+                  )}
+                  {(diff.shipments?.added.length ?? 0) > 0 && (
+                    <span className="text-emerald-700 dark:text-emerald-300">
+                      {diff.shipments!.added.length} new shipment(s)
+                    </span>
+                  )}
+                  {(diff.shipments?.matched.filter(m => m.changes.length > 0).length ?? 0) > 0 && (
+                    <span className="text-amber-700 dark:text-amber-300">
+                      {diff.shipments!.matched.filter(m => m.changes.length > 0).length} shipment(s) updated
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Order strip — same layout as Orders page */}
@@ -269,7 +403,7 @@ export default function StoreImportDetail() {
                   disabled={applying || discarding}
                   className="inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-md bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  {applying ? 'Applying…' : 'Import order'}
+                  {applying ? 'Applying…' : isExistingOrder ? 'Update order' : 'Import order'}
                 </button>
                 <button
                   type="button"
@@ -315,13 +449,24 @@ export default function StoreImportDetail() {
                   const trackingUrl = firstShipment?.trackingUrl ?? null
                   const shipmentStatus = firstShipment?.status?.message ?? firstShipment?.status?.rawStatusType ?? null
                   const deliveryDate = firstShipment?.deliveryDate
+                  const diffInfo = isExistingOrder ? itemDiffMap.get((item.name || '').trim()) : undefined
 
                   return (
                     <tr
                       key={item.logicalItemId ?? idx}
-                      className={idx % 2 === 0 ? 'bg-white/60 dark:bg-gray-800/40' : 'bg-brand-50/30 dark:bg-gray-700/30'}
+                      className={`${idx % 2 === 0 ? 'bg-white/60 dark:bg-gray-800/40' : 'bg-brand-50/30 dark:bg-gray-700/30'}${
+                        diffInfo?.status === 'new' ? ' border-l-[3px] border-l-emerald-400 dark:border-l-emerald-500' :
+                        diffInfo?.status === 'changed' ? ' border-l-[3px] border-l-amber-400 dark:border-l-amber-500' : ''
+                      }`}
                     >
-                      <td className="py-1.5 px-2 text-center font-mono text-sm">{qty}</td>
+                      <td className="py-1.5 px-2 text-center font-mono text-sm">
+                        {qty}
+                        {diffInfo?.changes.includes('quantity') && (
+                          <span className="block text-[10px] text-amber-600 dark:text-amber-400">
+                            was {diffInfo.currentQuantity}
+                          </span>
+                        )}
+                      </td>
                       <td className="py-1.5 px-2">
                         <div className="flex items-center gap-2 min-w-0">
                           {item.imageUrl && (
@@ -334,6 +479,11 @@ export default function StoreImportDetail() {
                           <div className="min-w-0">
                             <span className="block text-sm text-ink dark:text-gray-200 truncate max-w-[20rem]">
                               {item.name || '(unnamed item)'}
+                              {diffInfo?.status === 'new' && (
+                                <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400">
+                                  New
+                                </span>
+                              )}
                             </span>
                             {item.variants && item.variants.length > 0 && (
                               <span className="block text-xs text-ink-muted dark:text-gray-400 truncate">
@@ -367,6 +517,11 @@ export default function StoreImportDetail() {
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
                         {fmtMoney(item.pricing?.unitPrice)}
+                        {diffInfo?.changes.includes('price') && (
+                          <span className="block text-[10px] text-amber-600 dark:text-amber-400">
+                            was {fmtMoney(diffInfo.currentPrice)}
+                          </span>
+                        )}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
                         {fmtMoney(item.pricing?.linePrice)}
@@ -408,6 +563,23 @@ export default function StoreImportDetail() {
         </div>
       </div>
 
+      {isExistingOrder && diff?.items?.unmatched_existing && diff.items.unmatched_existing.length > 0 && (
+        <div className="mb-6 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 px-4 py-3">
+          <h3 className="text-xs font-semibold text-ink-muted dark:text-gray-400 uppercase tracking-wide mb-2">
+            Existing items not in this import
+          </h3>
+          <div className="space-y-1">
+            {diff.items.unmatched_existing.map((ei, idx) => (
+              <div key={idx} className="flex items-center gap-4 text-sm text-ink-muted dark:text-gray-400">
+                <span className="truncate max-w-[20rem]">{ei.description || '(unnamed)'}</span>
+                <span className="font-mono text-xs">qty {ei.quantity}</span>
+                <span className="font-mono text-xs">{fmtMoney(ei.price_paid)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Shipments summary */}
       {shipments.length > 0 && (
         <div className="mb-6">
@@ -415,11 +587,29 @@ export default function StoreImportDetail() {
             Shipments ({shipments.length})
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {shipments.map((s, idx) => (
+            {shipments.map((s, idx) => {
+              const shipDiff = s.trackingNumber ? shipmentDiffMap.get(s.trackingNumber) : undefined
+              return (
               <div
                 key={s.shipmentId ?? idx}
-                className="bg-white dark:bg-gray-800 rounded-lg border border-brand-200/80 dark:border-gray-700 p-3 text-sm space-y-1"
+                className={`bg-white dark:bg-gray-800 rounded-lg border p-3 text-sm space-y-1 ${
+                  shipDiff?.status === 'new'
+                    ? 'border-emerald-300 dark:border-emerald-600/50'
+                    : shipDiff?.status === 'changed'
+                      ? 'border-amber-300 dark:border-amber-600/50'
+                      : 'border-brand-200/80 dark:border-gray-700'
+                }`}
               >
+                {shipDiff?.status === 'new' && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400">
+                    New
+                  </span>
+                )}
+                {shipDiff?.status === 'changed' && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+                    Updated
+                  </span>
+                )}
                 {s.trackingNumber && (
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-ink-muted shrink-0">Tracking:</span>
@@ -457,7 +647,8 @@ export default function StoreImportDetail() {
                   </div>
                 )}
               </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
