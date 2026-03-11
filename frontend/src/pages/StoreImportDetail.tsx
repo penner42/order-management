@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
-import type { StoreOrderImport } from '../api/types'
+import type { BuyingGroup, Store, StoreAccount, StoreOrderImport } from '../api/types'
 
 interface NormalizedItem {
   logicalItemId?: string | null
@@ -14,6 +14,7 @@ interface NormalizedItem {
   pricing?: {
     unitPrice?: number | null
     linePrice?: number | null
+    lineTotal?: number | null
     strikethroughPrice?: number | null
   }
   status?: { rawStatusCode?: string | null; normalizedStatus?: string | null }
@@ -122,14 +123,42 @@ export default function StoreImportDetail() {
   const [error, setError] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
   const [discarding, setDiscarding] = useState(false)
+  const [stores, setStores] = useState<Store[]>([])
+  const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
+  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
+  const [accountAutoMatched, setAccountAutoMatched] = useState(false)
+  const [buyingGroups, setBuyingGroups] = useState<BuyingGroup[]>([])
+  const [selectedBuyingGroupId, setSelectedBuyingGroupId] = useState<number | null>(null)
+  const [itemPayouts, setItemPayouts] = useState<string[]>([])
 
   useEffect(() => {
     if (!id) return
     setLoading(true)
     setError(null)
-    api
-      .get<StoreOrderImport>(`/integrations/stores/imports/${id}`)
-      .then(setRecord)
+    Promise.all([
+      api.get<StoreOrderImport>(`/integrations/stores/imports/${id}`),
+      api.get<Store[]>('/stores'),
+      api.get<BuyingGroup[]>('/buying-groups'),
+    ])
+      .then(async ([importRecord, storesList, groups]) => {
+        setRecord(importRecord)
+        setStores(storesList)
+        setBuyingGroups(groups)
+        const byStore: Record<number, StoreAccount[]> = {}
+        await Promise.all(
+          storesList.map((s) =>
+            api.get<StoreAccount[]>(`/stores/${s.id}/accounts`).then((list) => {
+              byStore[s.id] = list
+            })
+          )
+        )
+        setAccountsByStore(byStore)
+        const items = (importRecord.normalized_payload_json as NormalizedPayload | null)?.items ?? []
+        setItemPayouts((prev) => {
+          if (prev.length !== items.length) return items.map(() => '')
+          return prev
+        })
+      })
       .catch((err: unknown) => {
         console.error(err)
         setError(err instanceof Error ? err.message : String(err))
@@ -137,12 +166,65 @@ export default function StoreImportDetail() {
       .finally(() => setLoading(false))
   }, [id])
 
+  const matchedStore = useMemo(() => {
+    if (!record) return null
+    const storeName = record.store.trim().toLowerCase()
+    return stores.find((s) => s.name.toLowerCase() === storeName) ?? null
+  }, [record, stores])
+
+  const storeAccounts = useMemo(() => {
+    if (!matchedStore) return []
+    return accountsByStore[matchedStore.id] ?? []
+  }, [matchedStore, accountsByStore])
+
+  useEffect(() => {
+    if (!record || storeAccounts.length === 0) return
+    const payload = record.normalized_payload_json as NormalizedPayload | null
+    const email = payload?.customer?.email?.trim().toLowerCase()
+    if (!email) return
+    const match = storeAccounts.find((a) => a.name.trim().toLowerCase() === email)
+    if (match) {
+      setSelectedAccountId(match.id)
+      setAccountAutoMatched(true)
+    }
+  }, [record, storeAccounts])
+
+  // Default buying group when delivery address name contains a buying group name
+  useEffect(() => {
+    if (!record || buyingGroups.length === 0) return
+    const payload = record.normalized_payload_json as NormalizedPayload | null
+    const addressName = payload?.shippingAddress?.fullName?.trim()
+    if (!addressName) return
+    const addressNameLower = addressName.toLowerCase()
+    const matching = buyingGroups.filter((g) => {
+      const groupName = g.name.trim()
+      if (!groupName) return false
+      return addressNameLower.includes(groupName.toLowerCase())
+    })
+    if (matching.length === 0) return
+    // Prefer longest match so "Smith Family" wins over "Smith"
+    const best = matching.reduce((a, b) =>
+      (a.name.length >= b.name.length ? a : b)
+    )
+    setSelectedBuyingGroupId(best.id)
+  }, [record, buyingGroups])
+
   async function handleApply() {
     if (!record || applying || discarding) return
     setApplying(true)
     setError(null)
     try {
-      await api.post(`/integrations/stores/imports/${record.id}/apply`, {})
+      const payouts: (number | null)[] = itemPayouts.map((s) => {
+        const t = s.trim()
+        if (!t) return null
+        const n = Number(t)
+        return Number.isFinite(n) ? n : null
+      })
+      await api.post(`/integrations/stores/imports/${record.id}/apply`, {
+        store_account_id: selectedAccountId,
+        buying_group_id: selectedBuyingGroupId,
+        item_payouts: payouts,
+      })
       navigate('/store-imports')
     } catch (err) {
       console.error(err)
@@ -169,7 +251,7 @@ export default function StoreImportDetail() {
 
   if (loading) {
     return (
-      <div className="max-w-7xl">
+      <div>
         <p className="text-ink-muted dark:text-gray-400">Loading…</p>
       </div>
     )
@@ -177,7 +259,7 @@ export default function StoreImportDetail() {
 
   if (!record) {
     return (
-      <div className="max-w-7xl">
+      <div>
         <h1 className="text-xl font-semibold text-ink dark:text-gray-100 mb-2">
           Store import
         </h1>
@@ -236,7 +318,7 @@ export default function StoreImportDetail() {
   }
 
   return (
-    <div className="max-w-7xl">
+    <div>
       <div className="flex items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-xl font-semibold text-ink dark:text-gray-100">
@@ -330,6 +412,50 @@ export default function StoreImportDetail() {
               {record.store}
             </span>
           </div>
+          {isPending && storeAccounts.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-ink-muted shrink-0 w-16">Account</span>
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={selectedAccountId ?? ''}
+                  onChange={(e) => {
+                    setSelectedAccountId(e.target.value ? Number(e.target.value) : null)
+                    setAccountAutoMatched(false)
+                  }}
+                  className="text-sm rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 text-ink dark:text-gray-200"
+                >
+                  <option value="">None</option>
+                  {storeAccounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+                {accountAutoMatched && selectedAccountId != null && (
+                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium whitespace-nowrap">
+                    matched by email
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+          {isPending && buyingGroups.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-ink-muted shrink-0 w-16">Buying group</span>
+              <select
+                value={selectedBuyingGroupId ?? ''}
+                onChange={(e) => setSelectedBuyingGroupId(e.target.value ? Number(e.target.value) : null)}
+                className="text-sm rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 text-ink dark:text-gray-200"
+              >
+                <option value="">None</option>
+                {buyingGroups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <span className="text-xs text-ink-muted shrink-0 w-16">Date</span>
             <span className="text-sm font-mono text-ink dark:text-gray-200">
@@ -426,21 +552,36 @@ export default function StoreImportDetail() {
                 <th className="py-1.5 px-2 font-medium text-ink-muted w-12">Qty</th>
                 <th className="py-1.5 px-2 font-medium text-ink-muted">Description</th>
                 <th className="py-1.5 px-2 font-medium text-ink-muted">Tracking</th>
-                <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Unit Price</th>
-                <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Line Price</th>
+                <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Unit cost</th>
+                <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Line total</th>
+                {isPending && (
+                  <>
+                    <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Unit Payout</th>
+                    <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Payout</th>
+                  </>
+                )}
                 <th className="py-1.5 px-2 font-medium text-ink-muted">Shipment status</th>
               </tr>
             </thead>
             <tbody>
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-4 px-2 text-center text-ink-muted dark:text-gray-400">
+                  <td colSpan={isPending ? 8 : 6} className="py-4 px-2 text-center text-ink-muted dark:text-gray-400">
                     No items in this order.
                   </td>
                 </tr>
               ) : (
                 items.map((item, idx) => {
                   const qty = item.quantities?.ordered ?? 1
+                  const unitCost = item.pricing?.unitPrice ?? null
+                  const lineTotal =
+                    item.pricing?.lineTotal ??
+                    item.pricing?.linePrice ??
+                    (unitCost != null ? unitCost * qty : null)
+                  const unitPayoutRaw = itemPayouts[idx]?.trim()
+                  const unitPayoutNum = unitPayoutRaw ? Number(unitPayoutRaw) : NaN
+                  const unitPayoutValid = Number.isFinite(unitPayoutNum)
+                  const lineTotalPayout = unitPayoutValid ? unitPayoutNum * qty : null
                   const shipSlices = item.shipments ?? []
                   const firstShipment = shipSlices[0]
                     ? shipmentsById.get(shipSlices[0].shipmentId ?? '')
@@ -516,7 +657,7 @@ export default function StoreImportDetail() {
                         )}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
-                        {fmtMoney(item.pricing?.unitPrice)}
+                        {fmtMoney(unitCost)}
                         {diffInfo?.changes.includes('price') && (
                           <span className="block text-[10px] text-amber-600 dark:text-amber-400">
                             was {fmtMoney(diffInfo.currentPrice)}
@@ -524,8 +665,33 @@ export default function StoreImportDetail() {
                         )}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
-                        {fmtMoney(item.pricing?.linePrice)}
+                        {fmtMoney(lineTotal)}
                       </td>
+                      {isPending && (
+                        <>
+                          <td className="py-1.5 px-2">
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              placeholder="—"
+                              value={itemPayouts[idx] ?? ''}
+                              onChange={(e) => {
+                                setItemPayouts((prev) => {
+                                  const next = [...prev]
+                                  while (next.length <= idx) next.push('')
+                                  next[idx] = e.target.value
+                                  return next
+                                })
+                              }}
+                              className="w-20 text-right text-sm font-mono rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 text-ink dark:text-gray-200 tabular-nums"
+                              aria-label={`Unit payout for ${(item.name || '').slice(0, 30)}`}
+                            />
+                          </td>
+                          <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
+                            {lineTotalPayout != null ? fmtMoney(lineTotalPayout) : '—'}
+                          </td>
+                        </>
+                      )}
                       <td className="py-1.5 px-2">
                         {shipmentStatus && (
                           <span className="text-xs text-ink-muted dark:text-gray-400">
@@ -546,15 +712,28 @@ export default function StoreImportDetail() {
                 })
               )}
             </tbody>
-            {items.length > 0 && p?.totals?.subtotal != null && (
+            {items.length > 0 && (p?.totals?.subtotal != null || (isPending && items.length > 0)) && (
               <tfoot>
                 <tr className="border-t border-brand-200 dark:border-gray-600 bg-brand-100/30 dark:bg-gray-700/40">
-                  <td className="py-1.5 px-2 text-right font-medium text-ink-muted" colSpan={4}>
+                  <td className="py-1.5 px-2 text-right font-medium text-ink-muted" colSpan={isPending ? 5 : 4}>
                     Subtotal
                   </td>
+                  {isPending && <td />}
                   <td className="py-1.5 px-2 text-right font-mono text-sm font-semibold tabular-nums">
-                    {fmtMoney(p.totals.subtotal)}
+                    {p?.totals?.subtotal != null ? fmtMoney(p.totals.subtotal) : '—'}
                   </td>
+                  {isPending && (
+                    <td className="py-1.5 px-2 text-right font-mono text-sm font-semibold tabular-nums">
+                      {fmtMoney(
+                        items.reduce((sum, item, i) => {
+                          const u = itemPayouts[i]?.trim()
+                          const n = u ? Number(u) : NaN
+                          const qty = item.quantities?.ordered ?? 1
+                          return sum + (Number.isFinite(n) ? n * qty : 0)
+                        }, 0)
+                      )}
+                    </td>
+                  )}
                   <td />
                 </tr>
               </tfoot>

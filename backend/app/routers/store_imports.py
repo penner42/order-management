@@ -7,9 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Order, Store, StoreOrderImport, User, Shipment, ShipmentItem, Item
+from app.models import BuyingGroup, Order, Store, StoreAccount, StoreOrderImport, User, Shipment, ShipmentItem, Item
 from app.models.item import ItemStatus
 from app.schemas.store_import import (
+    StoreOrderImportApplyBody,
     StoreOrderImportApplyResponse,
     StoreOrderImportCreate,
     StoreOrderImportListResponse,
@@ -319,7 +320,10 @@ def _ensure_walmart_store_for_import(
 
 
 def _create_or_link_order_for_import(
-    db: Session, import_record: StoreOrderImport, current_user: User
+    db: Session,
+    import_record: StoreOrderImport,
+    current_user: User,
+    store_account_id: int | None = None,
 ) -> Order:
     """Ensure an Order exists for this import; create one when needed."""
     if import_record.linked_order_id:
@@ -351,7 +355,7 @@ def _create_or_link_order_for_import(
     order = Order(
         user_id=current_user.id,
         store_id=store.id,
-        store_account_id=None,
+        store_account_id=store_account_id,
         buying_group_id=None,
         store_order_number=import_record.external_order_id,
         status="imported",
@@ -370,10 +374,12 @@ def _apply_items_and_shipments_for_import(
     db: Session,
     import_record: StoreOrderImport,
     order: Order,
+    item_payouts: list[float | None] | None = None,
 ) -> None:
     """Create items and shipments for an import, skipping duplicates for existing orders."""
     normalized: dict[str, Any] = import_record.normalized_payload_json or {}
     items = normalized.get("items") or []
+    payouts = item_payouts or []
     shipments = normalized.get("shipments") or []
 
     # Build sets of existing data so we can skip duplicates
@@ -431,11 +437,13 @@ def _apply_items_and_shipments_for_import(
             existing_tracking_set.add(tracking)
         return shipment
 
-    for item_data in items:
+    for item_index, item_data in enumerate(items):
         name = (item_data.get("name") or "").strip()
 
         if name in existing_desc_set:
             continue
+
+        payout = payouts[item_index] if item_index < len(payouts) else None
 
         pricing = item_data.get("pricing") or {}
         unit_price = pricing.get("unitPrice")
@@ -447,7 +455,7 @@ def _apply_items_and_shipments_for_import(
             item = Item(
                 order_id=order.id,
                 price_paid=unit_price,
-                price_sold=None,
+                price_sold=payout,
                 status=status,
                 quantity=quantity,
                 description=name,
@@ -464,7 +472,7 @@ def _apply_items_and_shipments_for_import(
             item = Item(
                 order_id=order.id,
                 price_paid=unit_price,
-                price_sold=None,
+                price_sold=payout,
                 status=status,
                 quantity=quantity,
                 description=name,
@@ -492,6 +500,7 @@ def _apply_items_and_shipments_for_import(
 )
 def apply_store_order_import(
     import_id: int,
+    body: StoreOrderImportApplyBody | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -509,8 +518,23 @@ def apply_store_order_import(
             detail=f"Import status must be 'pending' to apply (got '{import_record.status}').",
         )
 
-    order = _create_or_link_order_for_import(db, import_record, current_user)
-    _apply_items_and_shipments_for_import(db, import_record, order)
+    store_account_id: int | None = body.store_account_id if body else None
+    if store_account_id is not None:
+        account = db.query(StoreAccount).filter(StoreAccount.id == store_account_id).first()
+        if not account:
+            raise HTTPException(status_code=400, detail="Store account not found")
+
+    buying_group_id: int | None = body.buying_group_id if body else None
+    if buying_group_id is not None:
+        group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()
+        if not group:
+            raise HTTPException(status_code=400, detail="Buying group not found")
+
+    order = _create_or_link_order_for_import(db, import_record, current_user, store_account_id)
+    if buying_group_id is not None:
+        order.buying_group_id = buying_group_id
+    item_payouts = body.item_payouts if body else None
+    _apply_items_and_shipments_for_import(db, import_record, order, item_payouts)
 
     import_record.status = "applied"
     import_record.applied_at = datetime.now(timezone.utc)

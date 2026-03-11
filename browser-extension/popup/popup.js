@@ -246,15 +246,44 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
     const g = groups[gi] || {};
     const shipment = g.shipment || {};
     const shipmentId = shipment.id || null;
-    const groupItems = Array.isArray(g.items) ? g.items : [];
+    // Prefer detailed items from categories (have itemPrice/unitPrice); fall back to group.items
+    let groupItems = [];
+    if (Array.isArray(g.categories) && g.categories.length > 0) {
+      for (let ci = 0; ci < g.categories.length; ci++) {
+        const catItems = g.categories[ci] && Array.isArray(g.categories[ci].items) ? g.categories[ci].items : [];
+        groupItems = groupItems.concat(catItems);
+      }
+    }
+    if (groupItems.length === 0 && Array.isArray(g.items)) {
+      groupItems = g.items;
+    }
 
     for (let ii = 0; ii < groupItems.length; ii++) {
       const item = groupItems[ii] || {};
       const productInfo = item.productInfo || {};
       const priceInfo = item.priceInfo || {};
       const itemPrice = priceInfo.itemPrice || {};
+      const unitPriceObj = priceInfo.unitPrice || {};
       const linePrice = priceInfo.linePrice || {};
       const strikethroughPrice = priceInfo.strikethroughPrice || {};
+      const qty = typeof item.quantity === "number" ? item.quantity : 1;
+      const linePriceVal = typeof linePrice.value === "number" ? linePrice.value : null;
+      // Unit price: itemPrice (per-ea), unitPrice, or derived from linePrice / quantity
+      let unitPriceVal =
+        typeof itemPrice.value === "number"
+          ? itemPrice.value
+          : typeof unitPriceObj.value === "number"
+            ? unitPriceObj.value
+            : null;
+      if (unitPriceVal == null && linePriceVal != null && qty > 0) {
+        unitPriceVal = linePriceVal / qty;
+      }
+      const lineTotal =
+        linePriceVal != null
+          ? linePriceVal
+          : unitPriceVal != null
+            ? unitPriceVal * qty
+            : null;
 
       const variants = Array.isArray(item.selectedVariants)
         ? item.selectedVariants.map(function (v) {
@@ -282,10 +311,9 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
             typeof item.quantity === "number" ? item.quantity : null,
         },
         pricing: {
-          unitPrice:
-            typeof itemPrice.value === "number" ? itemPrice.value : null,
-          linePrice:
-            typeof linePrice.value === "number" ? linePrice.value : null,
+          unitPrice: unitPriceVal,
+          linePrice: linePriceVal,
+          lineTotal: typeof lineTotal === "number" ? lineTotal : null,
           strikethroughPrice:
             typeof strikethroughPrice.value === "number"
               ? strikethroughPrice.value

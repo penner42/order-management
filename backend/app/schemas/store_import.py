@@ -54,6 +54,14 @@ class StoreOrderImportListResponse(BaseModel):
     imports: list[StoreOrderImportRead]
 
 
+class StoreOrderImportApplyBody(BaseModel):
+    """Optional body when applying an import."""
+
+    store_account_id: int | None = None
+    buying_group_id: int | None = None
+    item_payouts: list[float | None] | None = None
+
+
 class StoreOrderImportApplyResponse(BaseModel):
     """Response when an import has been applied."""
 
