@@ -1,0 +1,24 @@
+---
+description: Browser extension must support both Firefox and Chrome
+globs: browser-extension/**
+alwaysApply: false
+---
+
+# Cross-Browser Extension Compatibility
+
+Always assume the browser extension runs in **both Firefox and Chrome**.
+
+## Manifest
+
+- Use both `background.scripts` (Firefox) and `background.service_worker` (Chrome) in `manifest.json`.
+- `"world": "MAIN"` in content scripts is Chrome-only; Firefox ignores or errors on it. Use messaging between an isolated-world content script and a MAIN-world injected script when page-context access is needed in Firefox.
+
+## APIs
+
+- Use the `chrome.*` namespace (Firefox supports it via polyfill/compat in MV3).
+- Avoid Chrome-only APIs without checking availability first (e.g. `chrome.offscreen`, `chrome.sidePanel`).
+- `chrome.scripting.executeScript` works in both, but parameter shapes can differ — test both.
+
+## Testing Reminder
+
+When adding or changing extension features, call out any Firefox/Chrome behavioral differences in your response.

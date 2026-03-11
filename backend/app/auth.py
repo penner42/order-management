@@ -1,7 +1,7 @@
 """Authentication: password hashing and JWT."""
 from datetime import datetime, timezone, timedelta
 from hashlib import sha256
-from typing import Annotated
+from typing import Annotated, Any
 
 import bcrypt
 from fastapi import Depends, HTTPException, status
@@ -29,13 +29,18 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(_prehash(plain), hashed.encode("utf-8"))
 
 
-def create_access_token(sub: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
-    return jwt.encode(
-        {"sub": sub, "exp": expire},
-        settings.secret_key,
-        algorithm=settings.algorithm,
+def create_access_token(sub: str, extra_claims: dict[str, Any] | None = None) -> str:
+    """Create a signed JWT for the given subject.
+
+    extra_claims can be used to distinguish extension tokens from regular UI tokens.
+    """
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.access_token_expire_minutes
     )
+    payload: dict[str, Any] = {"sub": sub, "exp": expire}
+    if extra_claims:
+        payload.update(extra_claims)
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
 def decode_token(token: str) -> str | None:

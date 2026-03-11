@@ -46,3 +46,19 @@ class MeResponse(BaseModel):
 @router.get("/me", response_model=MeResponse)
 def me(user: User = Depends(get_current_user)):
     return MeResponse(username=user.username, role=user.role, id=user.id)
+
+
+class ExtensionTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+@router.post("/extension-token", response_model=ExtensionTokenResponse)
+def create_extension_token(current_user: User = Depends(get_current_user)) -> ExtensionTokenResponse:
+    """Issue a separate JWT for the browser extension, while the user is logged in.
+
+    The token uses the same subject (username) but includes an `ext` claim so it
+    is distinct from the UI access token.
+    """
+    token = create_access_token(current_user.username, extra_claims={"ext": True})
+    return ExtensionTokenResponse(access_token=token)

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 
@@ -10,6 +10,8 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false)
   const { login } = useAuth()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const redirect = searchParams.get('redirect') || '/'
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -18,7 +20,7 @@ export default function Login() {
     try {
       const res = await api.post<{ access_token: string }>('/auth/login', { username, password })
       await login(res.access_token)
-      navigate('/', { replace: true })
+      navigate(redirect, { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
     } finally {

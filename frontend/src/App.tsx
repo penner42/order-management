@@ -14,6 +14,9 @@ import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
 import ImportedOrders from './pages/ImportedOrders'
 import Portals from './pages/Portals'
+import StoreImports from './pages/StoreImports'
+import StoreImportDetail from './pages/StoreImportDetail'
+import ExtensionAuth from './pages/ExtensionAuth'
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -46,12 +49,14 @@ function DarkToggle() {
 function AppShell() {
   const { user, loading, logout } = useAuth()
   const location = useLocation()
-  const isLogin = location.pathname === '/login'
+  const isPublic =
+    location.pathname === '/login' || location.pathname === '/extension-auth'
 
-  if (isLogin) {
+  if (isPublic) {
     return (
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/extension-auth" element={<ExtensionAuth />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     )
@@ -160,6 +165,18 @@ function AppShell() {
                 >
                   Imported Orders
                 </NavLink>
+                <NavLink
+                  to="/store-imports"
+                  className={({ isActive }) =>
+                    `px-3 py-2 rounded-md text-sm font-medium transition ${
+                      isActive
+                        ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100'
+                        : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'
+                    }`
+                  }
+                >
+                  Store Imports
+                </NavLink>
               </>
             )}
           </nav>
@@ -190,6 +207,8 @@ function AppShell() {
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/imported-orders" element={<ImportedOrders />} />
+          <Route path="/store-imports" element={<StoreImports />} />
+          <Route path="/store-imports/:id" element={<StoreImportDetail />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />
           <Route path="/payment-methods" element={<PaymentMethods />} />

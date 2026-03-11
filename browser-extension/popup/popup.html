@@ -23,6 +23,14 @@
     button:hover {
       background: #005ba8;
     }
+    button.secondary {
+      background: #f3f4f6;
+      color: #111;
+      border: 1px solid #d1d5db;
+    }
+    button.secondary:hover {
+      background: #e5e7eb;
+    }
     label {
       display: block;
       margin-bottom: 4px;
@@ -129,6 +137,20 @@
   </style>
 </head>
 <body>
+  <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
+    <button id="openSettingsGlobal" class="secondary" style="width: auto; padding: 6px 10px; font-size: 12px;">
+      Settings
+    </button>
+  </div>
+  <div id="orderManagerSection" style="margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+    <button id="orderManagerConnect">
+      Login
+    </button>
+    <button id="orderManagerDisconnect" style="display: none; background: #f3f4f6; color: #111; border: 1px solid #d1d5db;">
+      Logout
+    </button>
+    <div id="orderManagerStatus" style="margin-top: 6px; font-size: 12px; color: #555;"></div>
+  </div>
   <div id="walmartOrderSection" style="display: none;">
     <button id="getOrderDetails">
       Get Order Details

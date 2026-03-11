@@ -158,6 +158,24 @@ export interface Shipment {
   shipment_items: ShipmentItem[]
 }
 
+export interface StoreOrderImport {
+  id: number
+  store: string
+  external_order_id: string
+  external_order_url: string | null
+  status: string
+  linked_order_id: number | null
+  normalized_payload_json: unknown
+  diff_json: unknown | null
+  created_at: string
+  applied_at?: string | null
+  discarded_at?: string | null
+}
+
+export interface StoreOrderImportListResponse {
+  imports: StoreOrderImport[]
+}
+
 export interface PaymentLineItem {
   id: number
   payment_id: number

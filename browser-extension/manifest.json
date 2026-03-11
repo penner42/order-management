@@ -3,10 +3,24 @@
   "name": "Order Manager Browser Integration",
   "version": "0.1.0",
   "description": "Integrate order data from store order pages into Order Manager.",
-  "permissions": ["activeTab", "storage"],
-  "host_permissions": ["https://api.usabuying.group/*", "https://api.prod.buyinggroup.com/*"],
+  "permissions": ["activeTab", "storage", "tabs"],
+  "host_permissions": [
+    "https://api.usabuying.group/*",
+    "https://api.prod.buyinggroup.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://localhost/*"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "service_worker": "background.js"
+  },
   "action": {
   "default_popup": "popup/popup.html"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
   },
   "content_scripts": [
     {

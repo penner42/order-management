@@ -3,13 +3,29 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import admin, auth, users, buying_groups, rewards, payment_methods, payments, stores, store_accounts, orders, items, shipments, portals
+from app.routers import (
+    admin,
+    auth,
+    users,
+    buying_groups,
+    rewards,
+    payment_methods,
+    payments,
+    stores,
+    store_accounts,
+    orders,
+    items,
+    shipments,
+    portals,
+    store_imports,
+)
 from app.admin_bootstrap import ensure_admin_user
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=r"^(chrome|moz)-extension://.*$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -37,6 +53,7 @@ app.include_router(orders.router, prefix="/api")
 app.include_router(items.router, prefix="/api")
 app.include_router(shipments.router, prefix="/api")
 app.include_router(portals.router, prefix="/api")
+app.include_router(store_imports.router, prefix="/api")
 
 
 @app.get("/")

@@ -10,6 +10,7 @@ from app.models.item import Item
 from app.models.shipment import Shipment, ShipmentItem
 from app.models.payment import Payment, PaymentLineItem
 from app.models.portal import Portal
+from app.models.store_order_import import StoreOrderImport
 
 __all__ = [
     "User",
@@ -27,4 +28,5 @@ __all__ = [
     "Payment",
     "PaymentLineItem",
     "Portal",
+    "StoreOrderImport",
 ]

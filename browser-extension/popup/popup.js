@@ -2,6 +2,8 @@
 let lastOrderDetails = null;
 
 const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
+const ORDER_MANAGER_API_BASE_URL_STORAGE_KEY = "orderManagerApiBaseUrl";
+const ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY = "orderManagerExtensionToken";
 
 function isWalmartOrderDetailUrl(url) {
   if (!url || typeof url !== "string") return false;
@@ -13,6 +15,363 @@ function isWalmartOrderDetailUrl(url) {
   } catch {
     return false;
   }
+}
+
+function getOrderManagerApiBaseUrl(callback) {
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+    callback(null);
+    return;
+  }
+  try {
+    chrome.storage.local.get(ORDER_MANAGER_API_BASE_URL_STORAGE_KEY, (data) => {
+      if (chrome.runtime && chrome.runtime.lastError) {
+        callback(null);
+        return;
+      }
+      const value =
+        data && data[ORDER_MANAGER_API_BASE_URL_STORAGE_KEY]
+          ? String(data[ORDER_MANAGER_API_BASE_URL_STORAGE_KEY]).trim()
+          : "";
+      callback(value || null);
+    });
+  } catch {
+    callback(null);
+  }
+}
+
+function getOrderManagerAuthToken(callback) {
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+    callback(null);
+    return;
+  }
+  try {
+    chrome.storage.local.get(ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY, (data) => {
+      if (chrome.runtime && chrome.runtime.lastError) {
+        callback(null);
+        return;
+      }
+      const value =
+        data && data[ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY]
+          ? String(data[ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY]).trim()
+          : "";
+      callback(value || null);
+    });
+  } catch {
+    callback(null);
+  }
+}
+
+function openExtensionOptionsPage() {
+  try {
+    if (chrome && chrome.runtime && typeof chrome.runtime.openOptionsPage === "function") {
+      chrome.runtime.openOptionsPage();
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+(function setupSettingsButton() {
+  const btn = document.getElementById("openSettingsGlobal");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    openExtensionOptionsPage();
+  });
+})();
+
+(function setupOrderManagerAuthSection() {
+  const section = document.getElementById("orderManagerSection");
+  const connectBtn = document.getElementById("orderManagerConnect");
+  const disconnectBtn = document.getElementById("orderManagerDisconnect");
+  const statusEl = document.getElementById("orderManagerStatus");
+
+  if (!section || !connectBtn || !disconnectBtn || !statusEl || !chrome.tabs) return;
+
+  function showLoggedIn() {
+    connectBtn.style.display = "none";
+    disconnectBtn.style.display = "";
+    statusEl.textContent = "";
+  }
+
+  function showLoggedOut() {
+    connectBtn.style.display = "";
+    disconnectBtn.style.display = "none";
+    statusEl.textContent = "";
+  }
+
+  try {
+    getOrderManagerAuthToken((token) => {
+      if (token) {
+        showLoggedIn();
+      } else {
+        showLoggedOut();
+      }
+    });
+  } catch {
+    // ignore
+  }
+
+  disconnectBtn.addEventListener("click", () => {
+    try {
+      chrome.storage.local.remove(ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY, () => {
+        showLoggedOut();
+      });
+    } catch {
+      showLoggedOut();
+    }
+  });
+
+  connectBtn.addEventListener("click", () => {
+    statusEl.textContent = "Opening authorization…";
+    getOrderManagerApiBaseUrl((baseUrl) => {
+      if (!baseUrl) {
+        statusEl.innerHTML =
+          'Order Manager base URL is not configured. Use <span style="font-weight:600;">Settings</span> to set it first.';
+        return;
+      }
+      try {
+        let authUrl = baseUrl;
+        if (authUrl.endsWith("/")) {
+          authUrl = authUrl.slice(0, -1);
+        }
+        authUrl += "/extension-auth";
+
+        chrome.windows.create({ url: authUrl, type: "popup", width: 500, height: 620 }, () => {
+          statusEl.textContent =
+            "Sign in and authorize in the popup window.";
+          const poll = setInterval(() => {
+            getOrderManagerAuthToken((token) => {
+              if (token) {
+                clearInterval(poll);
+                showLoggedIn();
+              }
+            });
+          }, 2000);
+          setTimeout(() => clearInterval(poll), 60000);
+        });
+      } catch {
+        statusEl.textContent =
+          "Could not open Order Management authorization window.";
+      }
+    });
+  });
+})();
+
+function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Missing Walmart order payload.");
+  }
+
+  const raw = payload.raw || null;
+  let order = payload.order || null;
+
+  if (!order && raw && raw.props && raw.props.pageProps) {
+    try {
+      const pageProps = raw.props.pageProps;
+      if (
+        pageProps.initialData &&
+        pageProps.initialData.data &&
+        pageProps.initialData.data.order
+      ) {
+        order = pageProps.initialData.data.order;
+      }
+    } catch {
+      // ignore, will validate below
+    }
+  }
+
+  if (!order || !order.id) {
+    throw new Error("Walmart order structure not recognized.");
+  }
+
+  const customer = order.customer || {};
+  const groups = Array.isArray(order.groups_2101) ? order.groups_2101 : [];
+
+  const shipments = [];
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i] || {};
+    const status = g.status || {};
+    const shipment = g.shipment || {};
+    const subtotal = g.subtotal || {};
+
+    const shipmentEntry = {
+      shipmentId: shipment.id || null,
+      groupId: g.id || null,
+      trackingNumber: shipment.trackingNumber || null,
+      trackingUrl: shipment.trackingUrl || null,
+      purchaseOrderId: shipment.purchaseOrderId || null,
+      deliveryDate: g.deliveryDate || null,
+      fulfillmentType: g.fulfillmentType || null,
+      detailedGroupType: g.detailedGroupType || null,
+      status: {
+        rawStatusType: status.statusType || null,
+        normalizedStatus: status.statusType || null,
+        message:
+          status.message &&
+          Array.isArray(status.message.parts) &&
+          status.message.parts.length > 0 &&
+          status.message.parts[0] &&
+          typeof status.message.parts[0].text === "string"
+            ? status.message.parts[0].text
+            : null,
+      },
+      financials: {
+        subtotal:
+          typeof subtotal.value === "number" ? subtotal.value : null,
+      },
+    };
+
+    shipments.push(shipmentEntry);
+  }
+
+  const shippingGroup = groups[0] || {};
+  const deliveryAddress = shippingGroup.deliveryAddress || {};
+  const deliveryAddressAddress = deliveryAddress.address || {};
+
+  const shippingAddress = {
+    fullName: deliveryAddress.fullName || null,
+    addressLine1: deliveryAddressAddress.addressLineOne || null,
+    addressLine2: deliveryAddressAddress.addressLineTwo || null,
+    city: deliveryAddressAddress.city || null,
+    state: deliveryAddressAddress.state || null,
+    postalCode: deliveryAddressAddress.postalCode || null,
+    country: deliveryAddressAddress.country || null,
+    phoneNumber: deliveryAddressAddress.phoneNumber || null,
+  };
+
+  const items = [];
+  for (let gi = 0; gi < groups.length; gi++) {
+    const g = groups[gi] || {};
+    const shipment = g.shipment || {};
+    const shipmentId = shipment.id || null;
+    const groupItems = Array.isArray(g.items) ? g.items : [];
+
+    for (let ii = 0; ii < groupItems.length; ii++) {
+      const item = groupItems[ii] || {};
+      const productInfo = item.productInfo || {};
+      const priceInfo = item.priceInfo || {};
+      const itemPrice = priceInfo.itemPrice || {};
+      const linePrice = priceInfo.linePrice || {};
+      const strikethroughPrice = priceInfo.strikethroughPrice || {};
+
+      const variants = Array.isArray(item.selectedVariants)
+        ? item.selectedVariants.map(function (v) {
+            return {
+              name: v && v.name ? String(v.name) : null,
+              value: v && v.value ? String(v.value) : null,
+            };
+          })
+        : [];
+
+      items.push({
+        logicalItemId:
+          item.id != null ? String(item.id) : item.usItemId || null,
+        externalSku: productInfo.usItemId || null,
+        externalOfferId: productInfo.offerId || null,
+        name: productInfo.name || null,
+        productUrl: productInfo.canonicalUrl || null,
+        imageUrl:
+          productInfo.imageInfo && productInfo.imageInfo.thumbnailUrl
+            ? productInfo.imageInfo.thumbnailUrl
+            : null,
+        variants: variants,
+        quantities: {
+          ordered:
+            typeof item.quantity === "number" ? item.quantity : null,
+        },
+        pricing: {
+          unitPrice:
+            typeof itemPrice.value === "number" ? itemPrice.value : null,
+          linePrice:
+            typeof linePrice.value === "number" ? linePrice.value : null,
+          strikethroughPrice:
+            typeof strikethroughPrice.value === "number"
+              ? strikethroughPrice.value
+              : null,
+          discounts: [], // can be extended later from item.discounts
+        },
+        status: {
+          rawStatusCode: item.statusCode || null,
+          normalizedStatus: null,
+        },
+        shipments:
+          shipmentId && item.quantity
+            ? [
+                {
+                  shipmentId: shipmentId,
+                  quantity: item.quantity,
+                  normalizedStatus: null,
+                },
+              ]
+            : [],
+        returnability: {
+          isReturnable: !!item.isReturnable,
+          returnEligibilityMessage:
+            item.returnEligibilityMessage || null,
+        },
+      });
+    }
+  }
+
+  const itemCancelReasons = Array.isArray(order.itemCancelReasons)
+    ? order.itemCancelReasons.map(function (r) {
+        return {
+          code:
+            r && r.subReasonCode != null
+              ? String(r.subReasonCode)
+              : null,
+          description:
+            r && typeof r.subDescription === "string"
+              ? r.subDescription
+              : null,
+        };
+      })
+    : [];
+
+  const totals = {
+    itemCount:
+      typeof order.itemCount === "number" ? order.itemCount : null,
+    subtotal:
+      shippingGroup.subtotal &&
+      typeof shippingGroup.subtotal.value === "number"
+        ? shippingGroup.subtotal.value
+        : null,
+  };
+
+  const externalUrl =
+    sourceUrl || payload.url || (typeof document !== "undefined"
+      ? document.location && document.location.href
+      : null);
+
+  return {
+    store: "walmart",
+    source: "browser-extension",
+    capturedAt: new Date().toISOString(),
+    externalOrder: {
+      id: String(order.id),
+      orderDate: order.orderDate || null,
+      timezone: order.timezone || null,
+      url: externalUrl || null,
+    },
+    customer: {
+      email: customer.email || null,
+      firstName: customer.firstName || null,
+      lastName: customer.lastName || null,
+    },
+    shippingAddress: shippingAddress,
+    shipments: shipments,
+    items: items,
+    cancellations: {
+      orderLevel: Array.isArray(order.cancelReasons)
+        ? order.cancelReasons
+        : [],
+      itemLevelReasons: itemCancelReasons,
+    },
+    totals: totals,
+    rawPayload: raw || null,
+  };
 }
 
 /** Render saved order payload as raw JSON in #results. */
@@ -68,6 +427,117 @@ function renderOrderDetails(payload, resultsEl) {
           if (sendToAppBtn) sendToAppBtn.style.display = "block";
         });
       });
+
+      if (sendToAppBtn) {
+        sendToAppBtn.addEventListener("click", () => {
+          resultsEl.style.display = "block";
+          resultsEl.textContent = "Sending to Order Manager…";
+
+          chrome.storage.local.get(
+            WALMART_ORDER_DETAIL_STORAGE_KEY,
+            (s) => {
+              const current = s && s[WALMART_ORDER_DETAIL_STORAGE_KEY];
+              if (!current || current.url !== url || !current.payload) {
+                resultsEl.innerHTML =
+                  '<span class="error">No saved order data for this page.</span>';
+                return;
+              }
+
+              getOrderManagerApiBaseUrl((baseUrl) => {
+                if (!baseUrl) {
+                  resultsEl.innerHTML =
+                    '<div class="error">Order Manager API base URL is not configured.</div>' +
+                    '<div style="margin-top: 8px;">' +
+                    '  <button id="openSettings" style="width: auto; padding: 8px 10px; font-size: 13px;">Open settings</button>' +
+                    "</div>";
+                  const btn = document.getElementById("openSettings");
+                  if (btn) {
+                    btn.addEventListener("click", () => {
+                      const ok = openExtensionOptionsPage();
+                      if (!ok) {
+                        resultsEl.innerHTML =
+                          '<span class="error">Could not open settings. Please open the extension details and choose “Extension options”.</span>';
+                      }
+                    });
+                  }
+                  return;
+                }
+
+                let endpoint = baseUrl;
+                if (endpoint.endsWith("/")) {
+                  endpoint = endpoint.slice(0, -1);
+                }
+                endpoint += "/api/integrations/stores/orders/import";
+
+                let body;
+                try {
+                  body = normalizeWalmartOrderDetailPayload(
+                    current.payload,
+                    current.url
+                  );
+                } catch (e) {
+                  resultsEl.innerHTML =
+                    '<span class="error">Could not normalize Walmart order data: ' +
+                    escapeHtml(String(e && e.message ? e.message : e)) +
+                    "</span>";
+                  return;
+                }
+
+                getOrderManagerAuthToken((authToken) => {
+                  const headers = {
+                    "Content-Type": "application/json",
+                  };
+                  if (authToken) {
+                    headers["Authorization"] = "Bearer " + authToken;
+                  }
+
+                  fetch(endpoint, {
+                    method: "POST",
+                    headers: headers,
+                    body: JSON.stringify(body),
+                  })
+                    .then((response) => {
+                      if (!response.ok) {
+                        return response
+                          .text()
+                          .catch(() => "")
+                          .then((text) => {
+                            const msg =
+                              "Request failed: " +
+                              response.status +
+                              " " +
+                              response.statusText +
+                              (text ? " - " + text : "");
+                            throw new Error(msg);
+                          });
+                      }
+                      return response.json().catch(() => null);
+                    })
+                    .then((data) => {
+                      resultsEl.innerHTML =
+                        '<span>Sent to Order Manager for review.</span>' +
+                        (data
+                          ? "<pre>" +
+                            escapeHtml(
+                              JSON.stringify(data, null, 2)
+                            ) +
+                            "</pre>"
+                          : "");
+                    })
+                    .catch((err) => {
+                      resultsEl.innerHTML =
+                        '<span class="error">Error sending to Order Manager: ' +
+                        escapeHtml(
+                          String(err && err.message ? err.message : err)
+                        ) +
+                        "</span>";
+                    });
+                });
+              });
+            }
+          );
+        });
+      }
     });
   });
 })();
