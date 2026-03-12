@@ -394,7 +394,8 @@ def _apply_items_and_shipments_for_import(
     payouts = item_payouts or []
     shipments = normalized.get("shipments") or []
 
-    # Build sets of existing data so we can skip duplicates
+    # Build sets of existing data so we can skip duplicates against items that were
+    # already on the order before this import was applied.
     existing_items = db.query(Item).filter(Item.order_id == order.id).all()
     existing_desc_set: set[str] = {(ei.description or "").strip() for ei in existing_items}
 
@@ -452,6 +453,10 @@ def _apply_items_and_shipments_for_import(
     for item_index, item_data in enumerate(items):
         name = (item_data.get("name") or "").strip()
 
+        # Skip only when this description already exists on the order *prior* to this
+        # apply call. We intentionally do not add newly created descriptions to
+        # existing_desc_set so that multiple imported lines with the same description
+        # are all created.
         if name in existing_desc_set:
             continue
 
@@ -487,7 +492,6 @@ def _apply_items_and_shipments_for_import(
                 sales_tax=None,
             )
             db.add(item)
-            existing_desc_set.add(name)
             continue
 
         for slice_data in shipments_slices:
@@ -515,7 +519,6 @@ def _apply_items_and_shipments_for_import(
                         item_id=item.id,
                     )
                 )
-        existing_desc_set.add(name)
 
 
 @router.post(
