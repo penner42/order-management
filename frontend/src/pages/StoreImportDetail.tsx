@@ -147,6 +147,23 @@ export default function StoreImportDetail() {
   const [paymentAmount, setPaymentAmount] = useState<string>('')
   const [paymentAutoMatched, setPaymentAutoMatched] = useState(false)
 
+  const flattenedPaymentMethods = useMemo(
+    () =>
+      paymentMethods.flatMap((pm) => {
+        const rows = [{ id: pm.id, label: pm.label }]
+        if (pm.sub_methods && pm.sub_methods.length > 0) {
+          for (const sub of pm.sub_methods) {
+            rows.push({
+              id: sub.id,
+              label: `${pm.label} — ${sub.label}`,
+            })
+          }
+        }
+        return rows
+      }),
+    [paymentMethods]
+  )
+
   useEffect(() => {
     if (!id) return
     setLoading(true)
@@ -232,7 +249,7 @@ export default function StoreImportDetail() {
   }, [record, paymentAmount])
 
   useEffect(() => {
-    if (!record || paymentMethods.length === 0) return
+    if (!record || flattenedPaymentMethods.length === 0) return
     const payload = record.normalized_payload_json as NormalizedPayload | null
     const externalPaymentMethods = payload?.paymentMethods ?? []
     if (externalPaymentMethods.length === 0) return
@@ -250,7 +267,7 @@ export default function StoreImportDetail() {
       }
     }
     if (!last4) return
-    const match = paymentMethods.find((m) => {
+    const match = flattenedPaymentMethods.find((m) => {
       const labelMatch = /(\d{4})\b/.exec(m.label)
       return labelMatch && labelMatch[1] === last4
     })
@@ -259,7 +276,7 @@ export default function StoreImportDetail() {
     if (paymentAmount.trim()) {
       setPaymentAutoMatched(true)
     }
-  }, [record, paymentMethods, paymentAmount])
+  }, [record, flattenedPaymentMethods, paymentAmount])
 
   // Default buying group when delivery address name contains a buying group name
   useEffect(() => {
@@ -522,7 +539,7 @@ export default function StoreImportDetail() {
               </div>
             </div>
           )}
-          {isPending && paymentMethods.length > 0 && (
+          {isPending && flattenedPaymentMethods.length > 0 && (
             <div className="flex items-start gap-2">
               <span className="text-xs text-ink-muted shrink-0 w-16 pt-0.5">Payment</span>
               <div className="flex flex-col gap-1.5">
@@ -536,7 +553,7 @@ export default function StoreImportDetail() {
                   className="text-sm rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 text-ink dark:text-gray-200"
                 >
                   <option value="">None</option>
-                  {paymentMethods.map((m) => (
+                  {flattenedPaymentMethods.map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.label}
                     </option>
