@@ -447,8 +447,20 @@ def _apply_items_and_shipments_for_import(
 
         pricing = item_data.get("pricing") or {}
         unit_price = pricing.get("unitPrice")
-        status = ItemStatus.PURCHASED
         shipments_slices = item_data.get("shipments") or []
+
+        # If any shipment slice for this line has a tracking number, treat it as shipped.
+        has_tracking = False
+        for slice_data in shipments_slices:
+            sid = slice_data.get("shipmentId")
+            if isinstance(sid, str) and sid:
+                src = shipments_by_id.get(sid) or {}
+                tracking = src.get("trackingNumber")
+                if isinstance(tracking, str) and tracking.strip():
+                    has_tracking = True
+                    break
+
+        status = ItemStatus.SHIPPED if has_tracking else ItemStatus.PURCHASED
 
         if not shipments_slices:
             quantity = item_data.get("quantities", {}).get("ordered") or 1

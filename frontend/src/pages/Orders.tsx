@@ -4,6 +4,7 @@
  * Right: full line-items table (one row per item).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { api } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
@@ -259,8 +260,19 @@ export default function Orders() {
   const [filterBuyingGroupOpen, setFilterBuyingGroupOpen] = useState(false)
   const [filterStoreOpen, setFilterStoreOpen] = useState(false)
   const [filterDateOpen, setFilterDateOpen] = useState(false)
-  const [searchText, setSearchText] = useState('')
-  const [searchDebounced, setSearchDebounced] = useState('')
+  const location = useLocation()
+  const [searchText, setSearchText] = useState(() => {
+    const state = location.state as { orderSearch?: string } | null
+    if (state?.orderSearch) return state.orderSearch
+    const q = new URLSearchParams(location.search).get('q')
+    return q ?? ''
+  })
+  const [searchDebounced, setSearchDebounced] = useState(() => {
+    const state = location.state as { orderSearch?: string } | null
+    if (state?.orderSearch) return state.orderSearch
+    const q = new URLSearchParams(location.search).get('q')
+    return q ?? ''
+  })
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const restoreSearchFocusRef = useRef<{ start: number; end: number } | null>(null)

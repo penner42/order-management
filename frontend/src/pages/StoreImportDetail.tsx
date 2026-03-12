@@ -225,7 +225,9 @@ export default function StoreImportDetail() {
         buying_group_id: selectedBuyingGroupId,
         item_payouts: payouts,
       })
-      navigate('/store-imports')
+      navigate('/', {
+        state: { orderSearch: record.external_order_id },
+      })
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : String(err))
