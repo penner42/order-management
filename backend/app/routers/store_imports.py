@@ -394,20 +394,45 @@ def _apply_items_and_shipments_for_import(
     payouts = item_payouts or []
     shipments = normalized.get("shipments") or []
 
-    # Build sets of existing data so we can skip duplicates against items that were
-    # already on the order before this import was applied.
+    # Build maps of existing data so we can skip duplicates against items that were
+    # already on the order before this import was applied, while still allowing:
+    # - multiple imported lines for the same description when they ship separately, and
+    # - additional quantities when an order is partially imported.
     existing_items = db.query(Item).filter(Item.order_id == order.id).all()
-    existing_desc_set: set[str] = {(ei.description or "").strip() for ei in existing_items}
 
     existing_shipment_ids: set[int] = set()
     for ei in existing_items:
         for si in ei.shipment_items:
             existing_shipment_ids.add(si.shipment_id)
-    existing_tracking_set: set[str] = set()
+
+    existing_shipments: list[Shipment] = []
     if existing_shipment_ids:
-        for s in db.query(Shipment).filter(Shipment.id.in_(existing_shipment_ids)):
-            if s.tracking_number:
-                existing_tracking_set.add(s.tracking_number)
+        existing_shipments = list(
+            db.query(Shipment).filter(Shipment.id.in_(existing_shipment_ids))
+        )
+
+    existing_shipments_by_id: dict[int, Shipment] = {
+        s.id: s for s in existing_shipments
+    }
+
+    # Track (description, tracking_number_or_none) pairs that already exist on the order.
+    existing_item_keys: set[tuple[str, str | None]] = set()
+    for ei in existing_items:
+        desc = (ei.description or "").strip()
+        if not ei.shipment_items:
+            existing_item_keys.add((desc, None))
+            continue
+        for si in ei.shipment_items:
+            s = existing_shipments_by_id.get(si.shipment_id)
+            tracking = s.tracking_number if s and s.tracking_number else None
+            existing_item_keys.add((desc, tracking))
+
+    # Also track existing tracking numbers so we can reuse shipments instead of creating
+    # duplicates when re-importing the same order.
+    existing_shipments_by_tracking: dict[str, Shipment] = {}
+    for s in existing_shipments:
+        if s.tracking_number:
+            existing_shipments_by_tracking[s.tracking_number] = s
 
     # Index shipments by shipmentId for quick lookup
     shipments_by_id: dict[str, dict[str, Any]] = {}
@@ -425,8 +450,8 @@ def _apply_items_and_shipments_for_import(
             return shipments_created[shipment_id]
         src = shipments_by_id.get(shipment_id) or {}
         tracking = src.get("trackingNumber")
-        if tracking and tracking in existing_tracking_set:
-            return None
+        if tracking and tracking in existing_shipments_by_tracking:
+            return existing_shipments_by_tracking[tracking]
         delivered_at: datetime | None = None
         delivery_raw = src.get("deliveryDate")
         if isinstance(delivery_raw, str) and delivery_raw.strip():
@@ -447,18 +472,11 @@ def _apply_items_and_shipments_for_import(
         db.flush()
         shipments_created[shipment_id] = shipment
         if tracking:
-            existing_tracking_set.add(tracking)
+            existing_shipments_by_tracking[tracking] = shipment
         return shipment
 
     for item_index, item_data in enumerate(items):
         name = (item_data.get("name") or "").strip()
-
-        # Skip only when this description already exists on the order *prior* to this
-        # apply call. We intentionally do not add newly created descriptions to
-        # existing_desc_set so that multiple imported lines with the same description
-        # are all created.
-        if name in existing_desc_set:
-            continue
 
         payout = payouts[item_index] if item_index < len(payouts) else None
 
@@ -480,6 +498,9 @@ def _apply_items_and_shipments_for_import(
         status = ItemStatus.SHIPPED if has_tracking else ItemStatus.PURCHASED
 
         if not shipments_slices:
+            # De-duplicate against an existing non-shipped line with the same description.
+            if (name, None) in existing_item_keys:
+                continue
             quantity = item_data.get("quantities", {}).get("ordered") or 1
             item = Item(
                 order_id=order.id,
@@ -492,10 +513,25 @@ def _apply_items_and_shipments_for_import(
                 sales_tax=None,
             )
             db.add(item)
+            existing_item_keys.add((name, None))
             continue
 
         for slice_data in shipments_slices:
             shipment_id = slice_data.get("shipmentId")
+            src = {}
+            if isinstance(shipment_id, str):
+                src = shipments_by_id.get(shipment_id) or {}
+            tracking_for_slice = src.get("trackingNumber")
+            tracking_key: str | None
+            if isinstance(tracking_for_slice, str) and tracking_for_slice.strip():
+                tracking_key = tracking_for_slice
+            else:
+                tracking_key = None
+
+            key = (name, tracking_key)
+            if key in existing_item_keys:
+                continue
+
             quantity = slice_data.get("quantity") or 1
             item = Item(
                 order_id=order.id,
@@ -519,6 +555,7 @@ def _apply_items_and_shipments_for_import(
                         item_id=item.id,
                     )
                 )
+            existing_item_keys.add(key)
 
 
 @router.post(
