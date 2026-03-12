@@ -7,7 +7,19 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import BuyingGroup, Order, Store, StoreAccount, StoreOrderImport, User, Shipment, ShipmentItem, Item
+from app.models import (
+    BuyingGroup,
+    Order,
+    OrderPaymentMethod,
+    Store,
+    StoreAccount,
+    StoreOrderImport,
+    User,
+    Shipment,
+    ShipmentItem,
+    Item,
+    PaymentMethod,
+)
 from app.models.item import ItemStatus
 from app.schemas.store_import import (
     StoreOrderImportApplyBody,
@@ -542,11 +554,49 @@ def apply_store_order_import(
         if not group:
             raise HTTPException(status_code=400, detail="Buying group not found")
 
-    order = _create_or_link_order_for_import(db, import_record, current_user, store_account_id)
+    order = _create_or_link_order_for_import(
+        db, import_record, current_user, store_account_id
+    )
     if buying_group_id is not None:
         order.buying_group_id = buying_group_id
     item_payouts = body.item_payouts if body else None
     _apply_items_and_shipments_for_import(db, import_record, order, item_payouts)
+
+    payment_methods_payload = body.payment_methods if body else None
+    if payment_methods_payload is not None:
+        seen_ids: set[int] = set()
+        for pm in payment_methods_payload:
+            if pm.payment_method_id in seen_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Each payment method can only be used once per order.",
+                )
+            seen_ids.add(pm.payment_method_id)
+
+        if seen_ids:
+            existing_ids = {
+                row.id
+                for row in db.query(PaymentMethod.id).filter(
+                    PaymentMethod.id.in_(seen_ids)
+                )
+            }
+            missing = seen_ids - existing_ids
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail="One or more payment methods not found.",
+                )
+
+        for opm in list(order.order_payments):
+            db.delete(opm)
+        for pm in payment_methods_payload:
+            db.add(
+                OrderPaymentMethod(
+                    order_id=order.id,
+                    payment_method_id=pm.payment_method_id,
+                    amount=pm.amount,
+                )
+            )
 
     import_record.status = "applied"
     import_record.applied_at = datetime.now(timezone.utc)

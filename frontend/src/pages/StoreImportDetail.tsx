@@ -1,7 +1,13 @@
 import { useEffect, useState, useMemo } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
-import type { BuyingGroup, Store, StoreAccount, StoreOrderImport } from '../api/types'
+import type {
+  BuyingGroup,
+  Store,
+  StoreAccount,
+  StoreOrderImport,
+  PaymentMethod,
+} from '../api/types'
 
 interface NormalizedItem {
   logicalItemId?: string | null
@@ -49,7 +55,13 @@ interface NormalizedPayload {
   }
   shipments?: NormalizedShipment[]
   items?: NormalizedItem[]
-  totals?: { itemCount?: number | null; subtotal?: number | null }
+  totals?: { itemCount?: number | null; subtotal?: number | null; grandTotal?: number | null }
+  paymentMethods?: {
+    description?: string | null
+    cardType?: string | null
+    paymentType?: string | null
+    last4?: string | null
+  }[]
 }
 
 interface OrderDiff {
@@ -130,6 +142,10 @@ export default function StoreImportDetail() {
   const [buyingGroups, setBuyingGroups] = useState<BuyingGroup[]>([])
   const [selectedBuyingGroupId, setSelectedBuyingGroupId] = useState<number | null>(null)
   const [itemPayouts, setItemPayouts] = useState<string[]>([])
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
+  const [selectedPaymentMethodId, setSelectedPaymentMethodId] = useState<number | null>(null)
+  const [paymentAmount, setPaymentAmount] = useState<string>('')
+  const [paymentAutoMatched, setPaymentAutoMatched] = useState(false)
 
   useEffect(() => {
     if (!id) return
@@ -139,11 +155,13 @@ export default function StoreImportDetail() {
       api.get<StoreOrderImport>(`/integrations/stores/imports/${id}`),
       api.get<Store[]>('/stores'),
       api.get<BuyingGroup[]>('/buying-groups'),
+      api.get<PaymentMethod[]>('/payment-methods'),
     ])
-      .then(async ([importRecord, storesList, groups]) => {
+      .then(async ([importRecord, storesList, groups, methods]) => {
         setRecord(importRecord)
         setStores(storesList)
         setBuyingGroups(groups)
+        setPaymentMethods(methods)
         const byStore: Record<number, StoreAccount[]> = {}
         await Promise.all(
           storesList.map((s) =>
@@ -189,6 +207,60 @@ export default function StoreImportDetail() {
     }
   }, [record, storeAccounts])
 
+  // Prefill payment total from normalized payload even when no payment method matches.
+  useEffect(() => {
+    if (!record) return
+    if (paymentAmount.trim()) return
+    const payload = record.normalized_payload_json as NormalizedPayload | null
+    if (!payload) return
+    const items = payload.items ?? []
+    let total = payload.totals?.grandTotal ?? payload.totals?.subtotal ?? null
+    if (total == null && items.length > 0) {
+      total = items.reduce((sum, item) => {
+        const qty = item.quantities?.ordered ?? 1
+        const price =
+          item.pricing?.lineTotal ??
+          item.pricing?.linePrice ??
+          item.pricing?.unitPrice ??
+          0
+        return sum + (price ?? 0) * (qty ?? 1)
+      }, 0)
+    }
+    if (typeof total === 'number' && total > 0) {
+      setPaymentAmount(total.toFixed(2))
+    }
+  }, [record, paymentAmount])
+
+  useEffect(() => {
+    if (!record || paymentMethods.length === 0) return
+    const payload = record.normalized_payload_json as NormalizedPayload | null
+    const externalPaymentMethods = payload?.paymentMethods ?? []
+    if (externalPaymentMethods.length === 0) return
+    let last4: string | null = null
+    for (const pm of externalPaymentMethods) {
+      if (pm.last4 && pm.last4.length === 4) {
+        last4 = pm.last4
+        break
+      }
+      const desc = pm.description ?? ''
+      const m = /(\d{4})\b/.exec(desc)
+      if (m) {
+        last4 = m[1]
+        break
+      }
+    }
+    if (!last4) return
+    const match = paymentMethods.find((m) => {
+      const labelMatch = /(\d{4})\b/.exec(m.label)
+      return labelMatch && labelMatch[1] === last4
+    })
+    if (!match) return
+    setSelectedPaymentMethodId(match.id)
+    if (paymentAmount.trim()) {
+      setPaymentAutoMatched(true)
+    }
+  }, [record, paymentMethods, paymentAmount])
+
   // Default buying group when delivery address name contains a buying group name
   useEffect(() => {
     if (!record || buyingGroups.length === 0) return
@@ -220,10 +292,19 @@ export default function StoreImportDetail() {
         const n = Number(t)
         return Number.isFinite(n) ? n : null
       })
+      let paymentPayload: { payment_method_id: number; amount: number }[] | undefined
+      const trimmedAmount = paymentAmount.trim()
+      if (selectedPaymentMethodId != null && trimmedAmount) {
+        const n = Number(trimmedAmount)
+        if (Number.isFinite(n) && n > 0) {
+          paymentPayload = [{ payment_method_id: selectedPaymentMethodId, amount: n }]
+        }
+      }
       await api.post(`/integrations/stores/imports/${record.id}/apply`, {
         store_account_id: selectedAccountId,
         buying_group_id: selectedBuyingGroupId,
         item_payouts: payouts,
+        payment_methods: paymentPayload,
       })
       navigate('/', {
         state: { orderSearch: record.external_order_id },
@@ -438,6 +519,49 @@ export default function StoreImportDetail() {
                     matched by email
                   </span>
                 )}
+              </div>
+            </div>
+          )}
+          {isPending && paymentMethods.length > 0 && (
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-ink-muted shrink-0 w-16 pt-0.5">Payment</span>
+              <div className="flex flex-col gap-1.5">
+                <select
+                  value={selectedPaymentMethodId ?? ''}
+                  onChange={(e) => {
+                    const v = e.target.value ? Number(e.target.value) : null
+                    setSelectedPaymentMethodId(v)
+                    setPaymentAutoMatched(false)
+                  }}
+                  className="text-sm rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 text-ink dark:text-gray-200"
+                >
+                  <option value="">None</option>
+                  {paymentMethods.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-ink-muted">Total</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="—"
+                    value={paymentAmount}
+                    onChange={(e) => {
+                      setPaymentAmount(e.target.value)
+                      setPaymentAutoMatched(false)
+                    }}
+                    className="w-24 text-right text-sm font-mono rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 text-ink dark:text-gray-200 tabular-nums"
+                    aria-label="Order total for selected payment method"
+                  />
+                  {paymentAutoMatched && selectedPaymentMethodId != null && (
+                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium whitespace-nowrap">
+                      matched by last 4
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
           )}

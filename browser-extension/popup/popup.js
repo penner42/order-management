@@ -188,6 +188,9 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
 
   const customer = order.customer || {};
   const groups = Array.isArray(order.groups_2101) ? order.groups_2101 : [];
+  const paymentMethodsRaw = Array.isArray(order.paymentMethods)
+    ? order.paymentMethods
+    : [];
 
   const shipments = [];
   for (let i = 0; i < groups.length; i++) {
@@ -366,6 +369,12 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
       typeof shippingGroup.subtotal.value === "number"
         ? shippingGroup.subtotal.value
         : null,
+    grandTotal:
+      order.priceDetails &&
+      order.priceDetails.grandTotal &&
+      typeof order.priceDetails.grandTotal.value === "number"
+        ? order.priceDetails.grandTotal.value
+        : null,
   };
 
   const externalUrl =
@@ -390,6 +399,23 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
     },
     shippingAddress: shippingAddress,
     shipments: shipments,
+    paymentMethods: paymentMethodsRaw.map(function (pm) {
+      const description =
+        typeof pm.description === "string" ? pm.description : null;
+      let last4 = null;
+      if (description) {
+        const m = /(\d{4})\b/.exec(description);
+        if (m) last4 = m[1];
+      }
+      return {
+        description: description,
+        cardType:
+          typeof pm.cardType === "string" ? pm.cardType : null,
+        paymentType:
+          typeof pm.paymentType === "string" ? pm.paymentType : null,
+        last4: last4,
+      };
+    }),
     items: items,
     cancellations: {
       orderLevel: Array.isArray(order.cancelReasons)

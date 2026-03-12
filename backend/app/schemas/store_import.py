@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.order import OrderPaymentMethodCreate
+
 
 class StoreOrderImportCreate(BaseModel):
     """Payload from browser extension for a store order import.
@@ -29,6 +31,7 @@ class StoreOrderImportCreate(BaseModel):
     items: list[dict[str, Any]] | None = None
     cancellations: dict[str, Any] | None = None
     totals: dict[str, Any] | None = None
+    paymentMethods: list[dict[str, Any]] | None = None
     rawPayload: dict[str, Any] | None = None
 
 
@@ -60,6 +63,7 @@ class StoreOrderImportApplyBody(BaseModel):
     store_account_id: int | None = None
     buying_group_id: int | None = None
     item_payouts: list[float | None] | None = None
+    payment_methods: list[OrderPaymentMethodCreate] | None = None
 
 
 class StoreOrderImportApplyResponse(BaseModel):
