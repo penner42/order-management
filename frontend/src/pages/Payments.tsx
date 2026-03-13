@@ -627,10 +627,10 @@ export default function Payments() {
                           Select all
                         </button>
                       </div>
-                      <div className="border border-brand-200/80 dark:border-gray-700 rounded-lg overflow-hidden">
-                        <div className="overflow-x-auto max-h-[40vh]">
+                      <div className="border border-brand-200/80 dark:border-gray-700 rounded-lg overflow-hidden flex flex-col max-h-[40vh]">
+                        <div className="overflow-x-auto overflow-y-auto min-h-0 flex-1">
                           <table className="w-full text-sm">
-                            <thead className="bg-brand-100/50 dark:bg-gray-700/50 sticky top-0">
+                            <thead className="bg-brand-100 dark:bg-gray-700 sticky top-0 z-10">
                               <tr>
                                 <th className="text-left py-2 px-2 w-10">
                                   <input
@@ -681,9 +681,13 @@ export default function Payments() {
                                 )
                               })}
                             </tbody>
-                            <tfoot className="bg-brand-50/50 dark:bg-gray-700/30 border-t border-brand-200/80 dark:border-gray-700">
+                          </table>
+                        </div>
+                        <div className="border-t border-brand-200/80 dark:border-gray-700 bg-brand-50 dark:bg-gray-700 flex-none py-2 px-2">
+                          <table className="w-full text-sm">
+                            <tbody>
                               <tr>
-                                <td className="py-2 px-2" />
+                                <td className="py-2 px-2 w-10" />
                                 <td className="py-2 px-2" />
                                 <td className="py-2 px-2" />
                                 <td className="py-2 px-2" />
@@ -691,7 +695,7 @@ export default function Payments() {
                                 <td className="py-2 px-2" />
                                 <td className="py-2 px-2" />
                               </tr>
-                            </tfoot>
+                            </tbody>
                           </table>
                         </div>
                       </div>
