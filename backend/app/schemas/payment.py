@@ -32,18 +32,26 @@ class PaymentUpdate(BaseModel):
 
 class PaymentLineItemBase(BaseModel):
     item_id: int
+    amount: float
 
 
-class PaymentLineItemCreate(PaymentLineItemBase):
-    pass
+class PaymentLineItemCreate(BaseModel):
+    item_id: int
+    amount: float | None = None
 
 
-class PaymentLineItemRead(PaymentLineItemBase):
+class PaymentLineItemRead(BaseModel):
     id: int
     payment_id: int
+    item_id: int
+    amount: float
     item: ItemRead | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentLineItemUpdate(BaseModel):
+    amount: float | None = None
 
 
 class PaymentRead(PaymentBase, TimestampsMixin):

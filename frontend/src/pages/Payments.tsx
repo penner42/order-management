@@ -33,6 +33,9 @@ export default function Payments() {
   const [shipments, setShipments] = useState<Shipment[]>([])
   const [itemsLoading, setItemsLoading] = useState(false)
   const [selectedItemIds, setSelectedItemIds] = useState<Set<number>>(new Set())
+  const [createAllocByItemId, setCreateAllocByItemId] = useState<Record<number, string>>({})
+  const [createAllocEditingId, setCreateAllocEditingId] = useState<number | null>(null)
+  const [createAllocValue, setCreateAllocValue] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
 
@@ -44,6 +47,8 @@ export default function Payments() {
   const [editSelectedToAdd, setEditSelectedToAdd] = useState<Set<number>>(new Set())
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+  const [editAllocEditingId, setEditAllocEditingId] = useState<number | null>(null)
+  const [editAllocValue, setEditAllocValue] = useState('')
 
   const [deleteConfirmPayment, setDeleteConfirmPayment] = useState<Payment | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -65,30 +70,35 @@ export default function Payments() {
     return acc
   }, [shipments])
 
-  const itemIdsOnPayments = useMemo(() => {
-    const ids = new Set<number>()
+  const itemIdToPaid = useMemo(() => {
+    const acc = new Map<number, number>()
     for (const p of payments) {
-      for (const li of p.line_items ?? []) ids.add(li.item_id)
+      for (const li of p.line_items ?? []) {
+        const prev = acc.get(li.item_id) ?? 0
+        acc.set(li.item_id, prev + parseDecimal(li.amount))
+      }
     }
-    return ids
+    return acc
   }, [payments])
 
   const availableItems = useMemo(
-    () => receivedItems.filter((i) => !itemIdsOnPayments.has(i.id)),
-    [receivedItems, itemIdsOnPayments]
+    () =>
+      receivedItems.filter((i) => {
+        const qty = i.quantity || 1
+        const total = parseDecimal(i.price_sold) * qty
+        const paid = itemIdToPaid.get(i.id) ?? 0
+        return paid < total - 1e-6
+      }),
+    [receivedItems, itemIdToPaid]
   )
 
   const selectedTotal = useMemo(() => {
     let sum = 0
     for (const id of selectedItemIds) {
-      const item = receivedItems.find((i) => i.id === id)
-      if (item) {
-        const qty = item.quantity || 1
-        sum += parseDecimal(item.price_sold) * qty
-      }
+      sum += parseDecimal(createAllocByItemId[id])
     }
     return sum
-  }, [selectedItemIds, receivedItems])
+  }, [selectedItemIds, createAllocByItemId])
 
   const editItemIdToTracking = useMemo(() => {
     const acc: Record<number, string> = {}
@@ -100,32 +110,31 @@ export default function Payments() {
     return acc
   }, [editShipments])
 
-  const editPaymentItemIds = useMemo(
-    () => new Set((editPayment?.line_items ?? []).map((li) => li.item_id)),
-    [editPayment]
-  )
+  const editItemIdToPaid = useMemo(() => {
+    const acc = new Map<number, number>()
+    for (const li of editPayment?.line_items ?? []) {
+      const prev = acc.get(li.item_id) ?? 0
+      acc.set(li.item_id, prev + parseDecimal(li.amount))
+    }
+    return acc
+  }, [editPayment])
   const editAvailableToAdd = useMemo(
-    () => editScannedItems.filter((i) => !editPaymentItemIds.has(i.id)),
-    [editScannedItems, editPaymentItemIds]
+    () =>
+      editScannedItems.filter((i) => {
+        const qty = i.quantity || 1
+        const total = parseDecimal(i.price_sold) * qty
+        const paid = editItemIdToPaid.get(i.id) ?? 0
+        return paid < total - 1e-6
+      }),
+    [editScannedItems, editItemIdToPaid]
   )
   const editPaymentTotal = useMemo(() => {
     if (!editPayment) return 0
-    let sum = 0
-    for (const li of editPayment.line_items ?? []) {
-      const item = li.item
-      if (item) {
-        const qty = item.quantity ?? 1
-        sum += parseDecimal(item.price_sold) * qty
-      }
-    }
-    return sum
+    return (editPayment.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0)
   }, [editPayment])
 
   const paymentAmount = (p: Payment) =>
-    (p.line_items ?? []).reduce(
-      (sum, li) => sum + parseDecimal(li.item?.price_sold) * (li.item?.quantity ?? 1),
-      0
-    )
+    (p.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0)
 
   const totals = useMemo(() => {
     let amount = 0
@@ -169,27 +178,42 @@ export default function Payments() {
     if (!addPaymentOpen) return
     setReceivedItems([])
     setSelectedItemIds(new Set())
+    setCreateAllocByItemId({})
+    setCreateAllocEditingId(null)
+    setCreateAllocValue('')
     setCreateError(null)
     if (addPaymentGroupId === '') return
     setItemsLoading(true)
     const params = new URLSearchParams()
-    params.set('status', 'scanned')
+    // Include items that are scanned or already on (partial) payments.
+    // Backend order status filtering is based on *effective* status (payment dates override scanned),
+    // so we must request both scanned + payment_* to avoid filtering out partially-paid items.
+    params.append('status', 'scanned')
+    params.append('status', 'payment_requested')
+    params.append('status', 'payment_sent')
+    params.append('status', 'payment_received')
     params.append('buying_group_id', String(addPaymentGroupId))
     Promise.all([api.get<Order[]>(`/orders?${params}`), api.get<Shipment[]>('/shipments')])
       .then(([ordersData, shipmentsData]) => {
         setShipments(shipmentsData)
         const items = ordersData.flatMap((o) => o.items ?? [])
         setReceivedItems(items)
-        const idsOnPayments = new Set(
-          payments.flatMap((p) => (p.line_items ?? []).map((li) => li.item_id))
-        )
-        setSelectedItemIds(
-          new Set(items.filter((i) => !idsOnPayments.has(i.id)).map((i) => i.id))
-        )
+        const allocs: Record<number, string> = {}
+        const selectable = items.filter((i) => {
+          const qty = i.quantity || 1
+          const total = parseDecimal(i.price_sold) * qty
+          const paid = itemIdToPaid.get(i.id) ?? 0
+          const remaining = Math.max(total - paid, 0)
+          if (remaining <= 0) return false
+          allocs[i.id] = String(remaining)
+          return true
+        })
+        setCreateAllocByItemId(allocs)
+        setSelectedItemIds(new Set(selectable.map((i) => i.id)))
       })
       .catch(console.error)
       .finally(() => setItemsLoading(false))
-  }, [addPaymentOpen, addPaymentGroupId, payments])
+  }, [addPaymentOpen, addPaymentGroupId, payments, itemIdToPaid])
 
   useEffect(() => {
     if (!editPayment) return
@@ -200,7 +224,11 @@ export default function Payments() {
     setEditItemsLoading(true)
     const groupId = editPayment.buying_group_id
     const params = new URLSearchParams()
-    params.set('status', 'scanned')
+    // Include items that are scanned or already on (partial) payments.
+    params.append('status', 'scanned')
+    params.append('status', 'payment_requested')
+    params.append('status', 'payment_sent')
+    params.append('status', 'payment_received')
     params.append('buying_group_id', String(groupId))
     Promise.all([api.get<Order[]>(`/orders?${params}`), api.get<Shipment[]>('/shipments')])
       .then(([ordersData, shipmentsData]) => {
@@ -237,13 +265,38 @@ export default function Payments() {
   }
 
   const toggleItemSelection = (id: number) => {
-    if (itemIdsOnPayments.has(id)) return
     setSelectedItemIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
+  }
+
+  const startCreateAllocated = (itemId: number, currentAmount: string) => {
+    setCreateAllocEditingId(itemId)
+    setCreateAllocValue(currentAmount)
+    setCreateError(null)
+  }
+
+  const cancelCreateAllocated = () => {
+    setCreateAllocEditingId(null)
+    setCreateAllocValue('')
+  }
+
+  const saveCreateAllocated = (itemId: number, remainingMax: number) => {
+    const raw = createAllocValue.trim()
+    const value = parseDecimal(raw)
+    if (!Number.isFinite(value) || value <= 0) {
+      setCreateError('Amount must be greater than 0.')
+      return
+    }
+    if (value - remainingMax > 1e-6) {
+      setCreateError('Amount exceeds remaining unpaid amount for this item.')
+      return
+    }
+    setCreateAllocByItemId((prev) => ({ ...prev, [itemId]: String(value) }))
+    cancelCreateAllocated()
   }
 
   const selectAllAvailable = () => {
@@ -261,7 +314,17 @@ export default function Payments() {
         payment_requested_at: `${addPaymentRequestDate}T12:00:00.000Z`,
       })
       for (const itemId of selectedItemIds) {
-        await api.post(`/payments/${payment.id}/line-items`, { item_id: itemId })
+        const item = receivedItems.find((i) => i.id === itemId)
+        if (!item) continue
+        const qty = item.quantity || 1
+        const total = parseDecimal(item.price_sold) * qty
+        const paid = itemIdToPaid.get(itemId) ?? 0
+        const remaining = Math.max(total - paid, 0)
+        if (remaining <= 0) continue
+        const desired = parseDecimal(createAllocByItemId[itemId] ?? String(remaining))
+        const amount = Math.min(desired, remaining)
+        if (amount <= 0) continue
+        await api.post(`/payments/${payment.id}/line-items`, { item_id: itemId, amount })
       }
       const params = filterGroupId === '' ? '' : `?buying_group_id=${filterGroupId}`
       const list = await api.get<Payment[]>(`/payments${params}`)
@@ -306,7 +369,14 @@ export default function Payments() {
     setEditError(null)
     try {
       for (const itemId of editSelectedToAdd) {
-        await api.post(`/payments/${editPayment.id}/line-items`, { item_id: itemId })
+        const item = editScannedItems.find((i) => i.id === itemId)
+        if (!item) continue
+        const qty = item.quantity || 1
+        const total = parseDecimal(item.price_sold) * qty
+        const paid = editItemIdToPaid.get(itemId) ?? 0
+        const remaining = Math.max(total - paid, 0)
+        if (remaining <= 0) continue
+        await api.post(`/payments/${editPayment.id}/line-items`, { item_id: itemId, amount: remaining })
       }
       const updated = await api.get<Payment>(`/payments/${editPayment.id}`)
       setEditPayment(updated)
@@ -314,6 +384,43 @@ export default function Payments() {
       const params = filterGroupId === '' ? '' : `?buying_group_id=${filterGroupId}`
       const list = await api.get<Payment[]>(`/payments${params}`)
       setPayments(list)
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setEditError(msg)
+    } finally {
+      setEditSaving(false)
+    }
+  }
+
+  const startEditAllocated = (lineItemId: number, currentAmount: string | null | number) => {
+    setEditAllocEditingId(lineItemId)
+    setEditAllocValue(String(parseDecimal(currentAmount as string)))
+    setEditError(null)
+  }
+
+  const cancelEditAllocated = () => {
+    setEditAllocEditingId(null)
+    setEditAllocValue('')
+  }
+
+  const saveAllocatedAmount = async (lineItemId: number) => {
+    if (!editPayment) return
+    const raw = editAllocValue.trim()
+    const value = parseDecimal(raw)
+    if (!Number.isFinite(value) || value <= 0) {
+      setEditError('Amount must be greater than 0.')
+      return
+    }
+    setEditSaving(true)
+    setEditError(null)
+    try {
+      await api.patch(`/payments/${editPayment.id}/line-items/${lineItemId}`, { amount: value })
+      const updated = await api.get<Payment>(`/payments/${editPayment.id}`)
+      setEditPayment(updated)
+      const params = filterGroupId === '' ? '' : `?buying_group_id=${filterGroupId}`
+      const list = await api.get<Payment[]>(`/payments${params}`)
+      setPayments(list)
+      cancelEditAllocated()
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       setEditError(msg)
@@ -648,6 +755,8 @@ export default function Payments() {
                                 <th className="text-left py-2 px-2 font-medium text-ink-muted">Item name</th>
                                 <th className="text-right py-2 px-2 font-medium text-ink-muted">Payout price</th>
                                 <th className="text-right py-2 px-2 font-medium text-ink-muted">Total price</th>
+                                <th className="text-right py-2 px-2 font-medium text-ink-muted">Remaining</th>
+                                <th className="text-right py-2 px-2 font-medium text-ink-muted">Allocated</th>
                                 <th className="text-left py-2 px-2 font-medium text-ink-muted">Receipt ID</th>
                                 <th className="text-left py-2 px-2 font-medium text-ink-muted">Tracking</th>
                               </tr>
@@ -657,7 +766,9 @@ export default function Payments() {
                                 const qty = item.quantity || 1
                                 const payout = parseDecimal(item.price_sold)
                                 const total = payout * qty
-                                const disabled = itemIdsOnPayments.has(item.id)
+                                const paid = itemIdToPaid.get(item.id) ?? 0
+                                const remaining = Math.max(total - paid, 0)
+                                const disabled = remaining <= 0
                                 return (
                                   <tr
                                     key={item.id}
@@ -675,6 +786,54 @@ export default function Payments() {
                                     <td className="py-2 px-2 text-ink">{item.description ?? '—'}</td>
                                     <td className="py-2 px-2 text-right text-ink">${formatMoney(payout)}</td>
                                     <td className="py-2 px-2 text-right text-ink">${formatMoney(total)}</td>
+                                    <td className="py-2 px-2 text-right text-ink">${formatMoney(remaining)}</td>
+                                    <td className="py-2 px-2 text-right text-ink">
+                                      {!selectedItemIds.has(item.id) ? (
+                                        <span className="text-ink-muted">—</span>
+                                      ) : createAllocEditingId === item.id ? (
+                                        <input
+                                          type="number"
+                                          className="w-24 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-1 py-0.5 text-right text-sm text-ink"
+                                          value={createAllocValue}
+                                          onChange={(e) => setCreateAllocValue(e.target.value)}
+                                          onBlur={() => saveCreateAllocated(item.id, remaining)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              saveCreateAllocated(item.id, remaining)
+                                            } else if (e.key === 'Escape') {
+                                              cancelCreateAllocated()
+                                            }
+                                          }}
+                                          autoFocus
+                                        />
+                                      ) : (
+                                        <div className="flex items-center justify-end gap-1">
+                                          <span>${formatMoney(parseDecimal(createAllocByItemId[item.id]))}</span>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              startCreateAllocated(
+                                                item.id,
+                                                createAllocByItemId[item.id] ?? String(remaining)
+                                              )
+                                            }
+                                            className="p-1 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20"
+                                            title="Edit allocated amount"
+                                            aria-label="Edit allocated amount"
+                                            disabled={creating}
+                                          >
+                                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                              <path
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                                strokeWidth={2}
+                                                d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                                              />
+                                            </svg>
+                                          </button>
+                                        </div>
+                                      )}
+                                    </td>
                                     <td className="py-2 px-2 text-ink font-mono">{item.receipt_id ?? '—'}</td>
                                     <td className="py-2 px-2 text-ink font-mono">{itemIdToTracking[item.id] ?? '—'}</td>
                                   </tr>
@@ -775,6 +934,7 @@ export default function Payments() {
                             <th className="text-left py-2 px-2 font-medium text-ink-muted">Item name</th>
                             <th className="text-right py-2 px-2 font-medium text-ink-muted">Payout</th>
                             <th className="text-right py-2 px-2 font-medium text-ink-muted">Total</th>
+                            <th className="text-right py-2 px-2 font-medium text-ink-muted">Allocated</th>
                             <th className="text-left py-2 px-2 font-medium text-ink-muted">Receipt ID</th>
                             <th className="text-left py-2 px-2 font-medium text-ink-muted">Tracking</th>
                             <th className="w-20" />
@@ -793,6 +953,46 @@ export default function Payments() {
                                 <td className="py-2 px-2 text-ink">{item.description ?? '—'}</td>
                                 <td className="py-2 px-2 text-right text-ink">${formatMoney(payout)}</td>
                                 <td className="py-2 px-2 text-right text-ink">${formatMoney(total)}</td>
+                                <td className="py-2 px-2 text-right text-ink">
+                                  {editAllocEditingId === li.id ? (
+                                    <input
+                                      type="number"
+                                      className="w-24 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-1 py-0.5 text-right text-sm text-ink"
+                                      value={editAllocValue}
+                                      onChange={(e) => setEditAllocValue(e.target.value)}
+                                      onBlur={() => saveAllocatedAmount(li.id)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          void saveAllocatedAmount(li.id)
+                                        } else if (e.key === 'Escape') {
+                                          cancelEditAllocated()
+                                        }
+                                      }}
+                                      autoFocus
+                                    />
+                                  ) : (
+                                    <div className="flex items-center justify-end gap-1">
+                                      <span>${formatMoney(parseDecimal(li.amount))}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => startEditAllocated(li.id, li.amount)}
+                                        className="p-1 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20"
+                                        title="Edit allocated amount"
+                                        aria-label="Edit allocated amount"
+                                        disabled={editSaving}
+                                      >
+                                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                          <path
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                            strokeWidth={2}
+                                            d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                                          />
+                                        </svg>
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
                                 <td className="py-2 px-2 text-ink font-mono">{item.receipt_id ?? '—'}</td>
                                 <td className="py-2 px-2 text-ink font-mono">{editItemIdToTracking[item.id] ?? '—'}</td>
                                 <td className="py-2 px-2">
@@ -840,6 +1040,7 @@ export default function Payments() {
                               <th className="text-left py-2 px-2 font-medium text-ink-muted">Item name</th>
                               <th className="text-right py-2 px-2 font-medium text-ink-muted">Payout</th>
                               <th className="text-right py-2 px-2 font-medium text-ink-muted">Total</th>
+                              <th className="text-right py-2 px-2 font-medium text-ink-muted">Remaining</th>
                               <th className="text-left py-2 px-2 font-medium text-ink-muted">Receipt ID</th>
                               <th className="text-left py-2 px-2 font-medium text-ink-muted">Tracking</th>
                             </tr>
@@ -849,6 +1050,8 @@ export default function Payments() {
                               const qty = item.quantity || 1
                               const payout = parseDecimal(item.price_sold)
                               const total = payout * qty
+                              const paid = editItemIdToPaid.get(item.id) ?? 0
+                              const remaining = Math.max(total - paid, 0)
                               return (
                                 <tr key={item.id} className="border-t border-brand-100 dark:border-gray-700 hover:bg-brand-50/50 dark:hover:bg-gray-700/30">
                                   <td className="py-2 px-2">
@@ -862,6 +1065,7 @@ export default function Payments() {
                                   <td className="py-2 px-2 text-ink">{item.description ?? '—'}</td>
                                   <td className="py-2 px-2 text-right text-ink">${formatMoney(payout)}</td>
                                   <td className="py-2 px-2 text-right text-ink">${formatMoney(total)}</td>
+                                  <td className="py-2 px-2 text-right text-ink">${formatMoney(remaining)}</td>
                                   <td className="py-2 px-2 text-ink font-mono">{item.receipt_id ?? '—'}</td>
                                   <td className="py-2 px-2 text-ink font-mono">{editItemIdToTracking[item.id] ?? '—'}</td>
                                 </tr>

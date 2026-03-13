@@ -180,6 +180,7 @@ export interface PaymentLineItem {
   id: number
   payment_id: number
   item_id: number
+  amount: string | null
   item?: Item | null
 }
 

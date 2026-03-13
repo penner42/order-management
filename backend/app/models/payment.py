@@ -1,5 +1,5 @@
 """Payment and payment line item models."""
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, UniqueConstraint
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, UniqueConstraint, Numeric
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -37,10 +37,12 @@ class PaymentLineItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     payment_id = Column(Integer, ForeignKey("payments.id", ondelete="CASCADE"), nullable=False)
     item_id = Column(Integer, ForeignKey("items.id", ondelete="CASCADE"), nullable=False)
+    # Allocated amount of this item's payout that this payment covers.
+    # Multiple PaymentLineItem rows across different payments can sum to the full item total.
+    amount = Column(Numeric(12, 2), nullable=False)
 
     __table_args__ = (
         UniqueConstraint("payment_id", "item_id", name="uq_payment_line_item_payment_item"),
-        UniqueConstraint("item_id", name="uq_payment_line_item_item"),
     )
 
     payment = relationship("Payment", back_populates="line_items")
