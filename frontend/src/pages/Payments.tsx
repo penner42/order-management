@@ -142,6 +142,16 @@ export default function Payments() {
     return { amount, requested, sent, received }
   }, [payments])
 
+  const paymentsByRequestDate = useMemo(
+    () =>
+      [...payments].sort((a, b) => {
+        const aAt = a.payment_requested_at ? new Date(a.payment_requested_at).getTime() : 0
+        const bAt = b.payment_requested_at ? new Date(b.payment_requested_at).getTime() : 0
+        return bAt - aAt
+      }),
+    [payments]
+  )
+
   useEffect(() => {
     const params = filterGroupId === '' ? '' : `?buying_group_id=${filterGroupId}`
     api
@@ -426,14 +436,14 @@ export default function Payments() {
             </tr>
           </thead>
           <tbody>
-            {payments.length === 0 ? (
+            {paymentsByRequestDate.length === 0 ? (
               <tr>
                 <td colSpan={8} className="py-12 text-center text-ink-muted">
                   No payments yet.
                 </td>
               </tr>
             ) : (
-              payments.map((p) => (
+              paymentsByRequestDate.map((p) => (
                 <tr key={p.id} className="border-b border-brand-100 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-700/30">
                   <td className="py-3 px-4 text-sm">{p.buying_group?.name ?? '—'}</td>
                   <td className="py-3 px-4 text-sm font-mono min-w-[8rem]">{p.payment_id ?? '—'}</td>
@@ -572,6 +582,8 @@ export default function Payments() {
                 </select>
               </div>
 
+              {addPaymentGroupId !== '' && (
+                <>
               <div>
                 <label htmlFor="add-payment-request-date" className="block text-sm font-medium text-ink mb-1">
                   Payment request date
@@ -584,9 +596,6 @@ export default function Payments() {
                   onChange={(e) => setAddPaymentRequestDate(e.target.value)}
                 />
               </div>
-
-              {addPaymentGroupId !== '' && (
-                <>
               <div>
                 <label htmlFor="add-payment-id" className="block text-sm font-medium text-ink mb-1">
                   Payment ID
