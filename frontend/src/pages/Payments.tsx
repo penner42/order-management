@@ -28,6 +28,7 @@ export default function Payments() {
   const [addPaymentOpen, setAddPaymentOpen] = useState(false)
   const [addPaymentGroupId, setAddPaymentGroupId] = useState<number | ''>('')
   const [addPaymentId, setAddPaymentId] = useState('')
+  const [addPaymentRequestDate, setAddPaymentRequestDate] = useState(() => toYyyyMmDd(new Date()))
   const [receivedItems, setReceivedItems] = useState<Item[]>([])
   const [shipments, setShipments] = useState<Shipment[]>([])
   const [itemsLoading, setItemsLoading] = useState(false)
@@ -247,6 +248,7 @@ export default function Payments() {
       const payment = await api.post<Payment>('/payments', {
         buying_group_id: addPaymentGroupId,
         payment_id: addPaymentId.trim() || null,
+        payment_requested_at: `${addPaymentRequestDate}T12:00:00.000Z`,
       })
       for (const itemId of selectedItemIds) {
         await api.post(`/payments/${payment.id}/line-items`, { item_id: itemId })
@@ -402,6 +404,7 @@ export default function Payments() {
           onClick={() => {
             setAddPaymentOpen(true)
             setAddPaymentId('')
+            setAddPaymentRequestDate(toYyyyMmDd(new Date()))
           }}
           className="rounded-lg bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 text-sm font-medium"
         >
@@ -567,6 +570,19 @@ export default function Payments() {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              <div>
+                <label htmlFor="add-payment-request-date" className="block text-sm font-medium text-ink mb-1">
+                  Payment request date
+                </label>
+                <input
+                  id="add-payment-request-date"
+                  type="date"
+                  className="rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-ink w-full max-w-xs"
+                  value={addPaymentRequestDate}
+                  onChange={(e) => setAddPaymentRequestDate(e.target.value)}
+                />
               </div>
 
               {addPaymentGroupId !== '' && (
