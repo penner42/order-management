@@ -1177,6 +1177,42 @@ export default function Orders() {
     }
   }
 
+  const visibleOrders = useMemo(
+    () => orders.filter((o) => (o.items?.length ?? 0) > 0),
+    [orders]
+  )
+
+  const listTotals = useMemo(() => {
+    let cost = 0
+    let payout = 0
+    let subtotal = 0
+    let shipping = 0
+    let salesTax = 0
+    let totalCost = 0
+    let totalPayout = 0
+
+    for (const o of visibleOrders) {
+      for (const item of o.items ?? []) {
+        const edits = itemEdits[item.id]
+        const qty = edits?.quantity ?? item.quantity ?? 1
+        const itemCost = parseDecimal(edits?.price_paid ?? item.price_paid)
+        const itemPayout = parseDecimal(edits?.price_sold ?? item.price_sold)
+        const itemShipping = parseDecimal(edits?.shipping ?? item.shipping)
+        const itemSalesTax = parseDecimal(edits?.sales_tax ?? item.sales_tax)
+
+        cost += itemCost * qty
+        payout += itemPayout * qty
+        subtotal += itemCost * qty
+        shipping += itemShipping * qty
+        salesTax += itemSalesTax * qty
+        totalCost += (itemCost + itemShipping + itemSalesTax) * qty
+        totalPayout += itemPayout * qty
+      }
+    }
+
+    return { cost, payout, subtotal, shipping, salesTax, totalCost, totalPayout }
+  }, [visibleOrders, itemEdits])
+
   return (
     <div className="space-y-6">
       <div
@@ -1442,12 +1478,12 @@ export default function Orders() {
           loading ? 'opacity-50 pointer-events-none' : ''
         }`}
       >
-        {orders.length === 0 ? (
+        {visibleOrders.length === 0 ? (
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 py-12 text-center text-ink-muted">
             No orders yet. Create one to get started.
           </div>
         ) : (
-          orders.map((o) => {
+          visibleOrders.map((o) => {
             const paymentRows =
               paymentEdits[o.id] ??
               (o.order_payments ?? []).map((op) => ({
@@ -2186,6 +2222,24 @@ export default function Orders() {
           })
         )}
       </div>
+
+      {visibleOrders.length > 0 && (
+        <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-4 text-sm">
+            <div className="font-medium text-ink-muted">Totals for visible orders</div>
+            <div className="flex flex-wrap gap-4 text-xs sm:text-sm">
+              <div className="flex flex-col">
+                <span className="text-ink-muted">Total Cost</span>
+                <span className="font-mono tabular-nums">${listTotals.totalCost.toFixed(2)}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-ink-muted">Total Payout</span>
+                <span className="font-mono tabular-nums">${listTotals.totalPayout.toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         open={confirmDeleteItemId !== null}
