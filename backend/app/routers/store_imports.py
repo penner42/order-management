@@ -1,4 +1,11 @@
-"""Store order import API - generic multi-store integration (e.g. Walmart)."""
+"""Store order import API — in-memory import flow.
+
+The browser extension sends the normalized payload directly to the frontend via
+URL hash.  The frontend calls these endpoints:
+
+  POST /orders/diff   – read-only diff against an existing order
+  POST /orders/apply  – create/update order, items, shipments in one shot
+"""
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,29 +16,30 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import (
     BuyingGroup,
+    Item,
     Order,
     OrderPaymentMethod,
-    Store,
-    StoreAccount,
-    StoreOrderImport,
-    User,
+    PaymentMethod,
     Shipment,
     ShipmentItem,
-    Item,
-    PaymentMethod,
+    Store,
+    StoreAccount,
+    User,
 )
 from app.models.item import ItemStatus
 from app.schemas.store_import import (
-    StoreOrderImportApplyBody,
-    StoreOrderImportApplyResponse,
-    StoreOrderImportCreate,
-    StoreOrderImportListResponse,
-    StoreOrderImportRead,
+    DirectApplyBody,
+    DirectApplyResponse,
+    StoreOrderDiffResponse,
+    StoreOrderImportPayload,
 )
-
 
 router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
 
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 def _get_or_create_store(db: Session, store_name: str, user_id: int | None) -> Store:
     store = db.query(Store).filter(Store.name == store_name).first()
@@ -43,7 +51,9 @@ def _get_or_create_store(db: Session, store_name: str, user_id: int | None) -> S
     return store
 
 
-def _parse_external_order_fields(payload: StoreOrderImportCreate) -> tuple[str, str | None]:
+def _parse_external_order_fields(
+    payload: StoreOrderImportPayload,
+) -> tuple[str, str | None]:
     ext = payload.externalOrder or {}
     external_order_id = str(ext.get("id") or "").strip()
     if not external_order_id:
@@ -54,6 +64,14 @@ def _parse_external_order_fields(payload: StoreOrderImportCreate) -> tuple[str, 
     else:
         external_order_url = None
     return external_order_id, external_order_url
+
+
+def _resolve_store_name(store_raw: str) -> str:
+    """Normalize the store string for DB lookup/creation."""
+    name = store_raw.strip()
+    if name.lower() == "walmart":
+        name = "Walmart"
+    return name
 
 
 def _build_order_diff(
@@ -226,124 +244,23 @@ def _build_order_diff(
     }
 
 
-@router.post(
-    "/orders/import",
-    response_model=StoreOrderImportRead,
-)
-def create_store_order_import(
-    data: StoreOrderImportCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Create or overwrite a store order import from a normalized external payload."""
-    external_order_id, external_order_url = _parse_external_order_fields(data)
-    normalized_payload: dict[str, Any] = data.model_dump(mode="json")
-
-    linked_order: Order | None = (
+def _create_or_find_order(
+    db: Session,
+    normalized: dict[str, Any],
+    external_order_id: str,
+    store_name: str,
+    current_user: User,
+    store_account_id: int | None = None,
+) -> Order:
+    """Return an existing order matched by store_order_number, or create a new one."""
+    existing = (
         db.query(Order)
         .filter(Order.store_order_number == external_order_id)
         .first()
     )
+    if existing:
+        return existing
 
-    diff_json = _build_order_diff(db, linked_order, normalized_payload)
-
-    # Upsert: overwrite any existing import for this (store, external_order_id)
-    import_record = (
-        db.query(StoreOrderImport)
-        .filter(
-            StoreOrderImport.store == data.store,
-            StoreOrderImport.external_order_id == external_order_id,
-        )
-        .first()
-    )
-
-    if import_record:
-        import_record.external_order_url = external_order_url
-        import_record.status = "pending"
-        import_record.linked_order_id = linked_order.id if linked_order else None
-        import_record.raw_payload_json = data.rawPayload or {}
-        import_record.normalized_payload_json = normalized_payload
-        import_record.diff_json = diff_json
-        import_record.applied_at = None
-        import_record.discarded_at = None
-        import_record.applied_by_user_id = None
-    else:
-        import_record = StoreOrderImport(
-            store=data.store,
-            external_order_id=external_order_id,
-            external_order_url=external_order_url,
-            status="pending",
-            linked_order_id=linked_order.id if linked_order else None,
-            raw_payload_json=data.rawPayload or {},
-            normalized_payload_json=normalized_payload,
-            diff_json=diff_json,
-        )
-        db.add(import_record)
-
-    db.commit()
-    db.refresh(import_record)
-    return import_record
-
-
-@router.get(
-    "/imports",
-    response_model=StoreOrderImportListResponse,
-)
-def list_store_order_imports(
-    status: str | None = None,
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    """List store order imports, optionally filtered by status (default: pending only)."""
-    q = db.query(StoreOrderImport)
-    if status:
-        q = q.filter(StoreOrderImport.status == status)
-    else:
-        q = q.filter(StoreOrderImport.status == "pending")
-    imports = q.order_by(StoreOrderImport.created_at.desc()).all()
-    return StoreOrderImportListResponse(imports=imports)
-
-
-@router.get(
-    "/imports/{import_id}",
-    response_model=StoreOrderImportRead,
-)
-def get_store_order_import(
-    import_id: int,
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    record = db.query(StoreOrderImport).filter(StoreOrderImport.id == import_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Import not found")
-    return record
-
-
-def _ensure_walmart_store_for_import(
-    db: Session, import_record: StoreOrderImport, user_id: int | None
-) -> Store:
-    """Return the Store row corresponding to this import's store string."""
-    # For now we use the literal store string as the Store.name (e.g. "walmart" -> "Walmart").
-    # Normalize simple cases but avoid guessing beyond capitalization.
-    store_name = import_record.store.strip()
-    if store_name.lower() == "walmart":
-        store_name = "Walmart"
-    return _get_or_create_store(db, store_name, user_id)
-
-
-def _create_or_link_order_for_import(
-    db: Session,
-    import_record: StoreOrderImport,
-    current_user: User,
-    store_account_id: int | None = None,
-) -> Order:
-    """Ensure an Order exists for this import; create one when needed."""
-    if import_record.linked_order_id:
-        order = db.query(Order).filter(Order.id == import_record.linked_order_id).first()
-        if order:
-            return order
-
-    normalized: dict[str, Any] = import_record.normalized_payload_json or {}
     external_order = normalized.get("externalOrder") or {}
     order_date_raw = external_order.get("orderDate")
 
@@ -358,18 +275,14 @@ def _create_or_link_order_for_import(
     if purchase_date and purchase_date.tzinfo is None:
         purchase_date = purchase_date.replace(tzinfo=timezone.utc)
 
-    store = _ensure_walmart_store_for_import(
-        db,
-        import_record,
-        current_user.id,
-    )
+    store = _get_or_create_store(db, _resolve_store_name(store_name), current_user.id)
 
     order = Order(
         user_id=current_user.id,
         store_id=store.id,
         store_account_id=store_account_id,
         buying_group_id=None,
-        store_order_number=import_record.external_order_id,
+        store_order_number=external_order_id,
         status="imported",
         purchase_date=purchase_date,
         shipping=None,
@@ -378,26 +291,21 @@ def _create_or_link_order_for_import(
     )
     db.add(order)
     db.flush()
-    import_record.linked_order_id = order.id
     return order
 
 
-def _apply_items_and_shipments_for_import(
+def _apply_items_and_shipments(
     db: Session,
-    import_record: StoreOrderImport,
+    normalized: dict[str, Any],
+    store_name: str,
     order: Order,
     item_payouts: list[float | None] | None = None,
 ) -> None:
-    """Create items and shipments for an import, skipping duplicates for existing orders."""
-    normalized: dict[str, Any] = import_record.normalized_payload_json or {}
+    """Create items and shipments from a normalized payload, skipping duplicates."""
     items = normalized.get("items") or []
     payouts = item_payouts or []
     shipments = normalized.get("shipments") or []
 
-    # Build maps of existing data so we can skip duplicates against items that were
-    # already on the order before this import was applied, while still allowing:
-    # - multiple imported lines for the same description when they ship separately, and
-    # - additional quantities when an order is partially imported.
     existing_items = db.query(Item).filter(Item.order_id == order.id).all()
 
     existing_shipment_ids: set[int] = set()
@@ -415,7 +323,6 @@ def _apply_items_and_shipments_for_import(
         s.id: s for s in existing_shipments
     }
 
-    # Track (description, tracking_number_or_none) pairs that already exist on the order.
     existing_item_keys: set[tuple[str, str | None]] = set()
     for ei in existing_items:
         desc = (ei.description or "").strip()
@@ -427,14 +334,11 @@ def _apply_items_and_shipments_for_import(
             tracking = s.tracking_number if s and s.tracking_number else None
             existing_item_keys.add((desc, tracking))
 
-    # Also track existing tracking numbers so we can reuse shipments instead of creating
-    # duplicates when re-importing the same order.
     existing_shipments_by_tracking: dict[str, Shipment] = {}
     for s in existing_shipments:
         if s.tracking_number:
             existing_shipments_by_tracking[s.tracking_number] = s
 
-    # Index shipments by shipmentId for quick lookup
     shipments_by_id: dict[str, dict[str, Any]] = {}
     for s in shipments:
         sid = s.get("shipmentId")
@@ -466,7 +370,7 @@ def _apply_items_and_shipments_for_import(
             tracking_number=tracking,
             shipped_at=None,
             delivered_at=delivered_at,
-            notes=f"Imported from store '{import_record.store}'.",
+            notes=f"Imported from store '{store_name}'.",
         )
         db.add(shipment)
         db.flush()
@@ -484,7 +388,6 @@ def _apply_items_and_shipments_for_import(
         unit_price = pricing.get("unitPrice")
         shipments_slices = item_data.get("shipments") or []
 
-        # If any shipment slice for this line has a tracking number, treat it as shipped.
         has_tracking = False
         for slice_data in shipments_slices:
             sid = slice_data.get("shipmentId")
@@ -498,7 +401,6 @@ def _apply_items_and_shipments_for_import(
         status = ItemStatus.SHIPPED if has_tracking else ItemStatus.PURCHASED
 
         if not shipments_slices:
-            # De-duplicate against an existing non-shipped line with the same description.
             if (name, None) in existing_item_keys:
                 continue
             quantity = item_data.get("quantities", {}).get("ordered") or 1
@@ -558,51 +460,64 @@ def _apply_items_and_shipments_for_import(
             existing_item_keys.add(key)
 
 
-@router.post(
-    "/imports/{import_id}/apply",
-    response_model=StoreOrderImportApplyResponse,
-)
-def apply_store_order_import(
-    import_id: int,
-    body: StoreOrderImportApplyBody | None = None,
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/orders/diff", response_model=StoreOrderDiffResponse)
+def compute_order_diff(
+    data: StoreOrderImportPayload,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Read-only diff: compare an incoming payload against an existing order."""
+    external_order_id, _ = _parse_external_order_fields(data)
+    normalized: dict[str, Any] = data.model_dump(mode="json")
+
+    linked_order: Order | None = (
+        db.query(Order)
+        .filter(Order.store_order_number == external_order_id)
+        .first()
+    )
+
+    diff = _build_order_diff(db, linked_order, normalized)
+    return StoreOrderDiffResponse(diff=diff)
+
+
+@router.post("/orders/apply", response_model=DirectApplyResponse)
+def apply_store_order_direct(
+    body: DirectApplyBody,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Apply a pending store order import: create/update order, items, and shipments."""
-    import_record = (
-        db.query(StoreOrderImport)
-        .filter(StoreOrderImport.id == import_id)
-        .first()
-    )
-    if not import_record:
-        raise HTTPException(status_code=404, detail="Import not found")
-    if import_record.status != "pending":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Import status must be 'pending' to apply (got '{import_record.status}').",
-        )
+    """Create or update an order directly from a normalized payload (no staging row)."""
+    payload = body.payload
+    external_order_id, _ = _parse_external_order_fields(payload)
+    normalized: dict[str, Any] = payload.model_dump(mode="json")
 
-    store_account_id: int | None = body.store_account_id if body else None
+    store_account_id = body.store_account_id
     if store_account_id is not None:
         account = db.query(StoreAccount).filter(StoreAccount.id == store_account_id).first()
         if not account:
             raise HTTPException(status_code=400, detail="Store account not found")
 
-    buying_group_id: int | None = body.buying_group_id if body else None
+    buying_group_id = body.buying_group_id
     if buying_group_id is not None:
         group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()
         if not group:
             raise HTTPException(status_code=400, detail="Buying group not found")
 
-    order = _create_or_link_order_for_import(
-        db, import_record, current_user, store_account_id
+    order = _create_or_find_order(
+        db, normalized, external_order_id, payload.store, current_user, store_account_id
     )
     if buying_group_id is not None:
         order.buying_group_id = buying_group_id
-    item_payouts = body.item_payouts if body else None
-    _apply_items_and_shipments_for_import(db, import_record, order, item_payouts)
 
-    payment_methods_payload = body.payment_methods if body else None
+    _apply_items_and_shipments(
+        db, normalized, payload.store, order, body.item_payouts
+    )
+
+    payment_methods_payload = body.payment_methods
     if payment_methods_payload is not None:
         seen_ids: set[int] = set()
         for pm in payment_methods_payload:
@@ -638,44 +553,5 @@ def apply_store_order_import(
                 )
             )
 
-    import_record.status = "applied"
-    import_record.applied_at = datetime.now(timezone.utc)
-    import_record.applied_by_user_id = current_user.id
-
     db.commit()
-    db.refresh(import_record)
-    return StoreOrderImportApplyResponse(
-        import_record=import_record,
-        order_id=order.id,
-    )
-
-
-@router.post(
-    "/imports/{import_id}/discard",
-    response_model=StoreOrderImportRead,
-)
-def discard_store_order_import(
-    import_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Discard a pending store order import without applying changes."""
-    import_record = (
-        db.query(StoreOrderImport)
-        .filter(StoreOrderImport.id == import_id)
-        .first()
-    )
-    if not import_record:
-        raise HTTPException(status_code=404, detail="Import not found")
-    if import_record.status != "pending":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Import status must be 'pending' to discard (got '{import_record.status}').",
-        )
-    import_record.status = "discarded"
-    import_record.discarded_at = datetime.now(timezone.utc)
-    import_record.applied_by_user_id = current_user.id
-    db.commit()
-    db.refresh(import_record)
-    return import_record
-
+    return DirectApplyResponse(order_id=order.id)

@@ -485,7 +485,7 @@ function renderOrderDetails(payload, resultsEl) {
       if (sendToAppBtn) {
         sendToAppBtn.addEventListener("click", () => {
           resultsEl.style.display = "block";
-          resultsEl.textContent = "Sending to Order Manager…";
+          resultsEl.textContent = "Opening Order Manager…";
 
           chrome.storage.local.get(
             WALMART_ORDER_DETAIL_STORAGE_KEY,
@@ -500,7 +500,7 @@ function renderOrderDetails(payload, resultsEl) {
               getOrderManagerApiBaseUrl((baseUrl) => {
                 if (!baseUrl) {
                   resultsEl.innerHTML =
-                    '<div class="error">Order Manager API base URL is not configured.</div>' +
+                    '<div class="error">Order Manager base URL is not configured.</div>' +
                     '<div style="margin-top: 8px;">' +
                     '  <button id="openSettings" style="width: auto; padding: 8px 10px; font-size: 13px;">Open settings</button>' +
                     "</div>";
@@ -517,12 +517,6 @@ function renderOrderDetails(payload, resultsEl) {
                   return;
                 }
 
-                let endpoint = baseUrl;
-                if (endpoint.endsWith("/")) {
-                  endpoint = endpoint.slice(0, -1);
-                }
-                endpoint += "/api/integrations/stores/orders/import";
-
                 let body;
                 try {
                   body = normalizeWalmartOrderDetailPayload(
@@ -537,55 +531,21 @@ function renderOrderDetails(payload, resultsEl) {
                   return;
                 }
 
-                getOrderManagerAuthToken((authToken) => {
-                  const headers = {
-                    "Content-Type": "application/json",
-                  };
-                  if (authToken) {
-                    headers["Authorization"] = "Bearer " + authToken;
-                  }
-
-                  fetch(endpoint, {
-                    method: "POST",
-                    headers: headers,
-                    body: JSON.stringify(body),
-                  })
-                    .then((response) => {
-                      if (!response.ok) {
-                        return response
-                          .text()
-                          .catch(() => "")
-                          .then((text) => {
-                            const msg =
-                              "Request failed: " +
-                              response.status +
-                              " " +
-                              response.statusText +
-                              (text ? " - " + text : "");
-                            throw new Error(msg);
-                          });
-                      }
-                      return response.json().catch(() => null);
-                    })
-                    .then((data) => {
-                      resultsEl.innerHTML =
-                        '<span>Sent to Order Manager for review.</span>';
-                      if (data && data.id) {
-                        let detailUrl = baseUrl;
-                        if (detailUrl.endsWith('/')) detailUrl = detailUrl.slice(0, -1);
-                        detailUrl += '/store-imports/' + data.id;
-                        chrome.tabs.create({ url: detailUrl });
-                      }
-                    })
-                    .catch((err) => {
-                      resultsEl.innerHTML =
-                        '<span class="error">Error sending to Order Manager: ' +
-                        escapeHtml(
-                          String(err && err.message ? err.message : err)
-                        ) +
-                        "</span>";
-                    });
-                });
+                try {
+                  const json = JSON.stringify(body);
+                  const hash = btoa(unescape(encodeURIComponent(json)));
+                  let reviewUrl = baseUrl;
+                  if (reviewUrl.endsWith("/")) reviewUrl = reviewUrl.slice(0, -1);
+                  reviewUrl += "/import-review#" + hash;
+                  chrome.tabs.create({ url: reviewUrl });
+                  resultsEl.innerHTML =
+                    "<span>Opened Order Manager for review.</span>";
+                } catch (e) {
+                  resultsEl.innerHTML =
+                    '<span class="error">Error encoding order data: ' +
+                    escapeHtml(String(e && e.message ? e.message : e)) +
+                    "</span>";
+                }
               });
             }
           );

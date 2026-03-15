@@ -12,10 +12,9 @@ import Login from './pages/Login'
 import Admin from './pages/Admin'
 import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
+import ImportReview from './pages/ImportReview'
 import ImportedOrders from './pages/ImportedOrders'
 import Portals from './pages/Portals'
-import StoreImports from './pages/StoreImports'
-import StoreImportDetail from './pages/StoreImportDetail'
 import ExtensionAuth from './pages/ExtensionAuth'
 
 function DarkToggle() {
@@ -165,18 +164,6 @@ function AppShell() {
                 >
                   Imported Orders
                 </NavLink>
-                <NavLink
-                  to="/store-imports"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${
-                      isActive
-                        ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100'
-                        : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'
-                    }`
-                  }
-                >
-                  Store Imports
-                </NavLink>
               </>
             )}
           </nav>
@@ -206,9 +193,8 @@ function AppShell() {
         <Routes>
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
           <Route path="/import-preview" element={<ImportPreview />} />
+          <Route path="/import-review" element={<ImportReview />} />
           <Route path="/imported-orders" element={<ImportedOrders />} />
-          <Route path="/store-imports" element={<StoreImports />} />
-          <Route path="/store-imports/:id" element={<StoreImportDetail />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />
           <Route path="/payment-methods" element={<PaymentMethods />} />

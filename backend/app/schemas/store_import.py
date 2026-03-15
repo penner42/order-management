@@ -1,27 +1,21 @@
-"""Store order import schemas."""
-from datetime import datetime
+"""Store order import schemas (in-memory import flow)."""
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from app.schemas.order import OrderPaymentMethodCreate
 
 
-class StoreOrderImportCreate(BaseModel):
-    """Payload from browser extension for a store order import.
+class StoreOrderImportPayload(BaseModel):
+    """Normalized payload from browser extension for a store order.
 
-    This is intentionally flexible: we persist the full body as normalized_payload_json,
-    and only pull out the fields we need for matching and display.
+    Used as input for both the diff (read-only) and apply (write) endpoints.
     """
 
     store: str = Field(..., description="External store identifier, e.g. 'walmart'.")
     source: str | None = Field(
         default=None,
         description="Source of the import, e.g. 'browser-extension'.",
-    )
-    capturedAt: datetime | None = Field(
-        default=None,
-        description="When the snapshot was captured on the client (optional).",
     )
 
     externalOrder: dict[str, Any]
@@ -32,43 +26,25 @@ class StoreOrderImportCreate(BaseModel):
     cancellations: dict[str, Any] | None = None
     totals: dict[str, Any] | None = None
     paymentMethods: list[dict[str, Any]] | None = None
-    rawPayload: dict[str, Any] | None = None
 
 
-class StoreOrderImportRead(BaseModel):
-    """Store order import record for UI / API clients."""
+class StoreOrderDiffResponse(BaseModel):
+    """Read-only diff result comparing an incoming payload against an existing order."""
 
-    id: int
-    store: str
-    external_order_id: str
-    external_order_url: str | None = None
-    status: str
-    linked_order_id: int | None = None
-    normalized_payload_json: dict[str, Any]
-    diff_json: dict[str, Any] | None = None
-    created_at: datetime
-    applied_at: datetime | None = None
-    discarded_at: datetime | None = None
-
-    model_config = ConfigDict(from_attributes=True)
+    diff: dict[str, Any]
 
 
-class StoreOrderImportListResponse(BaseModel):
-    imports: list[StoreOrderImportRead]
+class DirectApplyBody(BaseModel):
+    """Payload + user selections to create/update an order directly (no staging row)."""
 
-
-class StoreOrderImportApplyBody(BaseModel):
-    """Optional body when applying an import."""
-
+    payload: StoreOrderImportPayload
     store_account_id: int | None = None
     buying_group_id: int | None = None
     item_payouts: list[float | None] | None = None
     payment_methods: list[OrderPaymentMethodCreate] | None = None
 
 
-class StoreOrderImportApplyResponse(BaseModel):
-    """Response when an import has been applied."""
+class DirectApplyResponse(BaseModel):
+    """Response after directly applying an import."""
 
-    import_record: StoreOrderImportRead
     order_id: int
-

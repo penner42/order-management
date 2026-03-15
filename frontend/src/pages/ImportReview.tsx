@@ -1,11 +1,10 @@
 import { useEffect, useState, useMemo } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import type {
   BuyingGroup,
   Store,
   StoreAccount,
-  StoreOrderImport,
   PaymentMethod,
 } from '../api/types'
 
@@ -127,14 +126,27 @@ function fmtDate(iso: string | null | undefined): string {
   }
 }
 
-export default function StoreImportDetail() {
-  const { id } = useParams<{ id: string }>()
+function decodeHashPayload(): NormalizedPayload | null {
+  const hash = window.location.hash.slice(1)
+  if (!hash) return null
+  try {
+    const json = decodeURIComponent(escape(atob(hash)))
+    const data = JSON.parse(json) as NormalizedPayload
+    if (!data || !data.externalOrder) return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+export default function ImportReview() {
   const navigate = useNavigate()
-  const [record, setRecord] = useState<StoreOrderImport | null>(null)
+  const payload = useMemo(() => decodeHashPayload(), [])
+
+  const [diff, setDiff] = useState<OrderDiff | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
-  const [discarding, setDiscarding] = useState(false)
   const [stores, setStores] = useState<Store[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
@@ -165,17 +177,20 @@ export default function StoreImportDetail() {
   )
 
   useEffect(() => {
-    if (!id) return
+    if (!payload) {
+      setLoading(false)
+      return
+    }
     setLoading(true)
     setError(null)
     Promise.all([
-      api.get<StoreOrderImport>(`/integrations/stores/imports/${id}`),
+      api.post<{ diff: OrderDiff }>('/integrations/stores/orders/diff', payload),
       api.get<Store[]>('/stores'),
       api.get<BuyingGroup[]>('/buying-groups'),
       api.get<PaymentMethod[]>('/payment-methods'),
     ])
-      .then(async ([importRecord, storesList, groups, methods]) => {
-        setRecord(importRecord)
+      .then(async ([diffRes, storesList, groups, methods]) => {
+        setDiff(diffRes.diff)
         setStores(storesList)
         setBuyingGroups(groups)
         setPaymentMethods(methods)
@@ -188,48 +203,46 @@ export default function StoreImportDetail() {
           )
         )
         setAccountsByStore(byStore)
-        const items = (importRecord.normalized_payload_json as NormalizedPayload | null)?.items ?? []
-        setItemPayouts((prev) => {
-          if (prev.length !== items.length) return items.map(() => '')
-          return prev
-        })
+        const items = payload.items ?? []
+        setItemPayouts(items.map(() => ''))
       })
       .catch((err: unknown) => {
         console.error(err)
         setError(err instanceof Error ? err.message : String(err))
       })
       .finally(() => setLoading(false))
-  }, [id])
+  }, [payload])
+
+  const storeName = payload?.store ?? ''
+  const externalOrderId = payload?.externalOrder?.id ?? ''
+  const externalOrderUrl = payload?.externalOrder?.url ?? null
 
   const matchedStore = useMemo(() => {
-    if (!record) return null
-    const storeName = record.store.trim().toLowerCase()
-    return stores.find((s) => s.name.toLowerCase() === storeName) ?? null
-  }, [record, stores])
+    const name = storeName.trim().toLowerCase()
+    return stores.find((s) => s.name.toLowerCase() === name) ?? null
+  }, [storeName, stores])
 
   const storeAccounts = useMemo(() => {
     if (!matchedStore) return []
     return accountsByStore[matchedStore.id] ?? []
   }, [matchedStore, accountsByStore])
 
+  // Auto-match account by email
   useEffect(() => {
-    if (!record || storeAccounts.length === 0) return
-    const payload = record.normalized_payload_json as NormalizedPayload | null
-    const email = payload?.customer?.email?.trim().toLowerCase()
+    if (!payload || storeAccounts.length === 0) return
+    const email = payload.customer?.email?.trim().toLowerCase()
     if (!email) return
     const match = storeAccounts.find((a) => a.name.trim().toLowerCase() === email)
     if (match) {
       setSelectedAccountId(match.id)
       setAccountAutoMatched(true)
     }
-  }, [record, storeAccounts])
+  }, [payload, storeAccounts])
 
-  // Prefill payment total from normalized payload even when no payment method matches.
+  // Prefill payment total
   useEffect(() => {
-    if (!record) return
-    if (paymentAmount.trim()) return
-    const payload = record.normalized_payload_json as NormalizedPayload | null
     if (!payload) return
+    if (paymentAmount.trim()) return
     const items = payload.items ?? []
     let total = payload.totals?.grandTotal ?? payload.totals?.subtotal ?? null
     if (total == null && items.length > 0) {
@@ -246,12 +259,12 @@ export default function StoreImportDetail() {
     if (typeof total === 'number' && total > 0) {
       setPaymentAmount(total.toFixed(2))
     }
-  }, [record, paymentAmount])
+  }, [payload, paymentAmount])
 
+  // Auto-match payment method by last4
   useEffect(() => {
-    if (!record || flattenedPaymentMethods.length === 0) return
-    const payload = record.normalized_payload_json as NormalizedPayload | null
-    const externalPaymentMethods = payload?.paymentMethods ?? []
+    if (!payload || flattenedPaymentMethods.length === 0) return
+    const externalPaymentMethods = payload.paymentMethods ?? []
     if (externalPaymentMethods.length === 0) return
     let last4: string | null = null
     for (const pm of externalPaymentMethods) {
@@ -276,13 +289,12 @@ export default function StoreImportDetail() {
     if (paymentAmount.trim()) {
       setPaymentAutoMatched(true)
     }
-  }, [record, flattenedPaymentMethods, paymentAmount])
+  }, [payload, flattenedPaymentMethods, paymentAmount])
 
-  // Default buying group when delivery address name contains a buying group name
+  // Auto-match buying group by address name
   useEffect(() => {
-    if (!record || buyingGroups.length === 0) return
-    const payload = record.normalized_payload_json as NormalizedPayload | null
-    const addressName = payload?.shippingAddress?.fullName?.trim()
+    if (!payload || buyingGroups.length === 0) return
+    const addressName = payload.shippingAddress?.fullName?.trim()
     if (!addressName) return
     const addressNameLower = addressName.toLowerCase()
     const matching = buyingGroups.filter((g) => {
@@ -291,15 +303,14 @@ export default function StoreImportDetail() {
       return addressNameLower.includes(groupName.toLowerCase())
     })
     if (matching.length === 0) return
-    // Prefer longest match so "Smith Family" wins over "Smith"
     const best = matching.reduce((a, b) =>
       (a.name.length >= b.name.length ? a : b)
     )
     setSelectedBuyingGroupId(best.id)
-  }, [record, buyingGroups])
+  }, [payload, buyingGroups])
 
   async function handleApply() {
-    if (!record || applying || discarding) return
+    if (!payload || applying) return
     setApplying(true)
     setError(null)
     try {
@@ -317,14 +328,15 @@ export default function StoreImportDetail() {
           paymentPayload = [{ payment_method_id: selectedPaymentMethodId, amount: n }]
         }
       }
-      await api.post(`/integrations/stores/imports/${record.id}/apply`, {
+      await api.post('/integrations/stores/orders/apply', {
+        payload,
         store_account_id: selectedAccountId,
         buying_group_id: selectedBuyingGroupId,
         item_payouts: payouts,
         payment_methods: paymentPayload,
       })
       navigate('/', {
-        state: { orderSearch: record.external_order_id },
+        state: { orderSearch: externalOrderId },
       })
     } catch (err) {
       console.error(err)
@@ -334,19 +346,25 @@ export default function StoreImportDetail() {
     }
   }
 
-  async function handleDiscard() {
-    if (!record || applying || discarding) return
-    setDiscarding(true)
-    setError(null)
-    try {
-      await api.post(`/integrations/stores/imports/${record.id}/discard`, {})
-      navigate('/store-imports')
-    } catch (err) {
-      console.error(err)
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setDiscarding(false)
-    }
+  if (!payload) {
+    return (
+      <div className="max-w-2xl mx-auto">
+        <h1 className="text-xl font-semibold text-ink dark:text-gray-100 mb-2">
+          Import review
+        </h1>
+        <p className="text-ink-muted dark:text-gray-400 mb-4">
+          No order data in this link. Use the Order Manager browser extension on
+          a store order page: get order details, then click &ldquo;Send to Order
+          Manager&rdquo;.
+        </p>
+        <Link
+          to="/"
+          className="text-brand-600 dark:text-brand-400 hover:underline text-sm"
+        >
+          Back to Orders
+        </Link>
+      </div>
+    )
   }
 
   if (loading) {
@@ -357,34 +375,13 @@ export default function StoreImportDetail() {
     )
   }
 
-  if (!record) {
-    return (
-      <div>
-        <h1 className="text-xl font-semibold text-ink dark:text-gray-100 mb-2">
-          Store import
-        </h1>
-        <p className="text-ink-muted dark:text-gray-400 mb-4">
-          Import not found.
-        </p>
-        <Link
-          to="/store-imports"
-          className="text-sm text-brand-600 dark:text-brand-400 hover:underline"
-        >
-          Back to Store Imports
-        </Link>
-      </div>
-    )
-  }
-
-  const p = record.normalized_payload_json as NormalizedPayload | null
-  const items = p?.items ?? []
-  const shipments = p?.shipments ?? []
+  const p = payload
+  const items = p.items ?? []
+  const shipments = p.shipments ?? []
   const shipmentsById = new Map(shipments.map((s) => [s.shipmentId, s]))
-  const customer = p?.customer
-  const address = p?.shippingAddress
-  const isPending = record.status === 'pending'
+  const customer = p.customer
+  const address = p.shippingAddress
 
-  const diff = record.diff_json as OrderDiff | null
   const isExistingOrder = diff?.is_existing_order === true
 
   const itemDiffMap = new Map<string, ItemDiffInfo>()
@@ -422,19 +419,19 @@ export default function StoreImportDetail() {
       <div className="flex items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-xl font-semibold text-ink dark:text-gray-100">
-            Store import — {record.store} #{record.external_order_id}
+            Import review — {storeName} #{externalOrderId}
           </h1>
           <p className="text-sm text-ink-muted dark:text-gray-400 mt-1">
             {isExistingOrder
               ? 'This order already exists — review the changes below.'
-              : 'Review this store order before importing.'}
+              : 'Review this store order before importing. Nothing has been saved yet.'}
           </p>
         </div>
         <Link
-          to="/store-imports"
+          to="/"
           className="text-sm text-brand-600 dark:text-brand-400 hover:underline whitespace-nowrap"
         >
-          Back to Store Imports
+          Back to Orders
         </Link>
       </div>
 
@@ -496,23 +493,22 @@ export default function StoreImportDetail() {
         </div>
       )}
 
-      {/* Order strip — same layout as Orders page */}
       <div className="flex gap-0 border-2 border-brand-400 dark:border-gray-400 rounded-xl overflow-hidden bg-brand-50/50 dark:bg-gray-600/80 mb-6">
         {/* Left: order info box */}
         <div className="w-[340px] shrink-0 flex flex-col gap-2.5 p-4 border-r-2 border-brand-400 dark:border-gray-400 bg-white/80 dark:bg-gray-700/80">
           <div className="flex items-center gap-2">
             <span className="text-xs text-ink-muted shrink-0 w-16">Order #</span>
             <span className="text-sm font-medium text-brand-700 dark:text-brand-400">
-              {record.external_order_id}
+              {externalOrderId}
             </span>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-ink-muted shrink-0 w-16">Store</span>
             <span className="text-sm text-ink dark:text-gray-200 capitalize">
-              {record.store}
+              {storeName}
             </span>
           </div>
-          {isPending && storeAccounts.length > 0 && (
+          {storeAccounts.length > 0 && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-ink-muted shrink-0 w-16">Account</span>
               <div className="flex items-center gap-1.5">
@@ -539,7 +535,7 @@ export default function StoreImportDetail() {
               </div>
             </div>
           )}
-          {isPending && flattenedPaymentMethods.length > 0 && (
+          {flattenedPaymentMethods.length > 0 && (
             <div className="flex items-start gap-2">
               <span className="text-xs text-ink-muted shrink-0 w-16 pt-0.5">Payment</span>
               <div className="flex flex-col gap-1.5">
@@ -582,7 +578,7 @@ export default function StoreImportDetail() {
               </div>
             </div>
           )}
-          {isPending && buyingGroups.length > 0 && (
+          {buyingGroups.length > 0 && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-ink-muted shrink-0 w-16">Buying group</span>
               <select
@@ -602,7 +598,7 @@ export default function StoreImportDetail() {
           <div className="flex items-center gap-2">
             <span className="text-xs text-ink-muted shrink-0 w-16">Date</span>
             <span className="text-sm font-mono text-ink dark:text-gray-200">
-              {fmtDate(p?.externalOrder?.orderDate)}
+              {fmtDate(p.externalOrder?.orderDate)}
             </span>
           </div>
           {customer && (customer.firstName || customer.lastName || customer.email) && (
@@ -634,11 +630,11 @@ export default function StoreImportDetail() {
               </div>
             </div>
           )}
-          {record.external_order_url && (
+          {externalOrderUrl && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-ink-muted shrink-0 w-16">Link</span>
               <a
-                href={record.external_order_url}
+                href={externalOrderUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="text-sm text-brand-600 dark:text-brand-400 hover:underline truncate"
@@ -652,38 +648,16 @@ export default function StoreImportDetail() {
           )}
 
           <div className="border-t border-brand-200 dark:border-gray-600 pt-2.5 mt-1 flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-ink-muted shrink-0 w-16">Status</span>
-              <span className={`text-xs font-semibold uppercase tracking-wide ${
-                record.status === 'pending'
-                  ? 'text-yellow-600 dark:text-yellow-400'
-                  : record.status === 'applied'
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : 'text-ink-muted dark:text-gray-400'
-              }`}>
-                {record.status}
-              </span>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleApply}
+                disabled={applying}
+                className="inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-md bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {applying ? 'Saving…' : isExistingOrder ? 'Update order' : 'Import order'}
+              </button>
             </div>
-            {isPending && (
-              <div className="flex gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={handleApply}
-                  disabled={applying || discarding}
-                  className="inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-md bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {applying ? 'Applying…' : isExistingOrder ? 'Update order' : 'Import order'}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDiscard}
-                  disabled={applying || discarding}
-                  className="inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-md border border-brand-200/80 dark:border-gray-600 text-ink-muted hover:text-ink hover:bg-brand-100/60 dark:text-gray-300 dark:hover:text-gray-100 dark:hover:bg-gray-700 disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {discarding ? 'Discarding…' : 'Discard'}
-                </button>
-              </div>
-            )}
           </div>
         </div>
 
@@ -697,19 +671,15 @@ export default function StoreImportDetail() {
                 <th className="py-1.5 px-2 font-medium text-ink-muted">Tracking</th>
                 <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Unit cost</th>
                 <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Line total</th>
-                {isPending && (
-                  <>
-                    <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Unit Payout</th>
-                    <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Payout</th>
-                  </>
-                )}
+                <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Unit Payout</th>
+                <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Payout</th>
                 <th className="py-1.5 px-2 font-medium text-ink-muted">Shipment status</th>
               </tr>
             </thead>
             <tbody>
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={isPending ? 8 : 6} className="py-4 px-2 text-center text-ink-muted dark:text-gray-400">
+                  <td colSpan={8} className="py-4 px-2 text-center text-ink-muted dark:text-gray-400">
                     No items in this order.
                   </td>
                 </tr>
@@ -810,31 +780,27 @@ export default function StoreImportDetail() {
                       <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
                         {fmtMoney(lineTotal)}
                       </td>
-                      {isPending && (
-                        <>
-                          <td className="py-1.5 px-2">
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              placeholder="—"
-                              value={itemPayouts[idx] ?? ''}
-                              onChange={(e) => {
-                                setItemPayouts((prev) => {
-                                  const next = [...prev]
-                                  while (next.length <= idx) next.push('')
-                                  next[idx] = e.target.value
-                                  return next
-                                })
-                              }}
-                              className="w-20 text-right text-sm font-mono rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 text-ink dark:text-gray-200 tabular-nums"
-                              aria-label={`Unit payout for ${(item.name || '').slice(0, 30)}`}
-                            />
-                          </td>
-                          <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
-                            {lineTotalPayout != null ? fmtMoney(lineTotalPayout) : '—'}
-                          </td>
-                        </>
-                      )}
+                      <td className="py-1.5 px-2">
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="—"
+                          value={itemPayouts[idx] ?? ''}
+                          onChange={(e) => {
+                            setItemPayouts((prev) => {
+                              const next = [...prev]
+                              while (next.length <= idx) next.push('')
+                              next[idx] = e.target.value
+                              return next
+                            })
+                          }}
+                          className="w-20 text-right text-sm font-mono rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 text-ink dark:text-gray-200 tabular-nums"
+                          aria-label={`Unit payout for ${(item.name || '').slice(0, 30)}`}
+                        />
+                      </td>
+                      <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
+                        {lineTotalPayout != null ? fmtMoney(lineTotalPayout) : '—'}
+                      </td>
                       <td className="py-1.5 px-2">
                         {shipmentStatus && (
                           <span className="text-xs text-ink-muted dark:text-gray-400">
@@ -855,28 +821,26 @@ export default function StoreImportDetail() {
                 })
               )}
             </tbody>
-            {items.length > 0 && (p?.totals?.subtotal != null || (isPending && items.length > 0)) && (
+            {items.length > 0 && (p.totals?.subtotal != null || items.length > 0) && (
               <tfoot>
                 <tr className="border-t border-brand-200 dark:border-gray-600 bg-brand-100/30 dark:bg-gray-700/40">
-                  <td className="py-1.5 px-2 text-right font-medium text-ink-muted" colSpan={isPending ? 5 : 4}>
+                  <td className="py-1.5 px-2 text-right font-medium text-ink-muted" colSpan={5}>
                     Subtotal
                   </td>
-                  {isPending && <td />}
+                  <td />
                   <td className="py-1.5 px-2 text-right font-mono text-sm font-semibold tabular-nums">
-                    {p?.totals?.subtotal != null ? fmtMoney(p.totals.subtotal) : '—'}
+                    {p.totals?.subtotal != null ? fmtMoney(p.totals.subtotal) : '—'}
                   </td>
-                  {isPending && (
-                    <td className="py-1.5 px-2 text-right font-mono text-sm font-semibold tabular-nums">
-                      {fmtMoney(
-                        items.reduce((sum, item, i) => {
-                          const u = itemPayouts[i]?.trim()
-                          const n = u ? Number(u) : NaN
-                          const qty = item.quantities?.ordered ?? 1
-                          return sum + (Number.isFinite(n) ? n * qty : 0)
-                        }, 0)
-                      )}
-                    </td>
-                  )}
+                  <td className="py-1.5 px-2 text-right font-mono text-sm font-semibold tabular-nums">
+                    {fmtMoney(
+                      items.reduce((sum, item, i) => {
+                        const u = itemPayouts[i]?.trim()
+                        const n = u ? Number(u) : NaN
+                        const qty = item.quantities?.ordered ?? 1
+                        return sum + (Number.isFinite(n) ? n * qty : 0)
+                      }, 0)
+                    )}
+                  </td>
                   <td />
                 </tr>
               </tfoot>
@@ -902,7 +866,6 @@ export default function StoreImportDetail() {
         </div>
       )}
 
-      {/* Shipments summary */}
       {shipments.length > 0 && (
         <div className="mb-6">
           <h2 className="text-sm font-semibold text-ink dark:text-gray-200 mb-2">
