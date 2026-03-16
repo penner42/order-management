@@ -74,10 +74,41 @@ def _resolve_store_name(store_raw: str) -> str:
     return name
 
 
+def _normalize_tracking_for_store(
+    store_name: str,
+    external_order_id: str | None,
+    tracking_raw: Any,
+) -> tuple[str | None, str | None]:
+    """Return a canonical tracking key and optional Walmart-original tracking.
+
+    For Walmart orders where the tracking number is a 20-digit value starting
+    with 555, we treat the order id as the tracking number in our system and
+    preserve the original Walmart tracking in notes.
+    """
+    if not isinstance(tracking_raw, str):
+        return None, None
+    tracking_trimmed = tracking_raw.strip()
+    if not tracking_trimmed:
+        return None, None
+
+    store_lower = (store_name or "").strip().lower()
+    if external_order_id and store_lower == "walmart":
+        compact = tracking_trimmed.replace(" ", "")
+        if len(compact) == 20 and compact.startswith("555"):
+            return external_order_id, compact
+
+    return tracking_trimmed, None
+
+
 def _build_order_diff(
     db: Session, linked_order: Order | None, normalized: dict[str, Any]
 ) -> dict[str, Any]:
-    """Build a structured diff between an existing order and the incoming import."""
+    """Build a structured diff between an existing order and the incoming import.
+
+    For consumers that only care about a coarse view, the older 'changes' arrays are
+    still present and contain field names.  For richer UIs, additional metadata is
+    attached that includes before/after values for specific fields.
+    """
     if not linked_order:
         return {"is_existing_order": False}
 
@@ -119,33 +150,58 @@ def _build_order_diff(
         quantities = inc_item.get("quantities") or {}
         inc_qty = quantities.get("ordered") or 1
         inc_price = pricing.get("unitPrice")
+        inc_line_total = pricing.get("lineTotal")
 
         if name in existing_by_desc:
             existing = existing_by_desc.pop(name)
             changes: list[str] = []
+            detailed_changes: list[dict[str, Any]] = []
+
             if existing["price_paid"] != inc_price:
                 changes.append("price")
+                detailed_changes.append(
+                    {
+                        "field": "price",
+                        "before": existing["price_paid"],
+                        "after": inc_price,
+                    }
+                )
             if existing["total_quantity"] != inc_qty:
                 changes.append("quantity")
-            matched_items.append({
-                "name": name,
-                "current": {
-                    "quantity": existing["total_quantity"],
-                    "price_paid": existing["price_paid"],
-                    "statuses": sorted(existing["statuses"]),
-                },
-                "incoming": {
+                detailed_changes.append(
+                    {
+                        "field": "quantity",
+                        "before": existing["total_quantity"],
+                        "after": inc_qty,
+                    }
+                )
+
+            matched_items.append(
+                {
+                    "name": name,
+                    "current": {
+                        "quantity": existing["total_quantity"],
+                        "price_paid": existing["price_paid"],
+                        "statuses": sorted(existing["statuses"]),
+                    },
+                    "incoming": {
+                        "quantity": inc_qty,
+                        "unit_price": inc_price,
+                        "line_total": inc_line_total,
+                    },
+                    "changes": changes,
+                    "detailed_changes": detailed_changes,
+                }
+            )
+        else:
+            added_items.append(
+                {
+                    "name": name,
                     "quantity": inc_qty,
                     "unit_price": inc_price,
-                },
-                "changes": changes,
-            })
-        else:
-            added_items.append({
-                "name": name,
-                "quantity": inc_qty,
-                "unit_price": inc_price,
-            })
+                    "line_total": inc_line_total,
+                }
+            )
 
     unmatched_existing = [
         {
@@ -168,33 +224,74 @@ def _build_order_diff(
     added_shipments: list[dict[str, Any]] = []
     used_existing_tracking: set[str] = set()
 
+    store_name = (normalized.get("store") or "").strip()
+    incoming_ext = normalized.get("externalOrder") or {}
+    external_order_id = str(incoming_ext.get("id") or "").strip()
+
     for inc_ship in incoming_shipments:
-        tracking = inc_ship.get("trackingNumber")
+        tracking_raw = inc_ship.get("trackingNumber")
+        tracking_key, _ = _normalize_tracking_for_store(
+            store_name, external_order_id, tracking_raw
+        )
+        tracking_display = tracking_raw if isinstance(tracking_raw, str) else None
         delivery = inc_ship.get("deliveryDate")
         status_info = inc_ship.get("status") or {}
         status_msg = status_info.get("message")
+        incoming_status_raw = status_info.get("rawStatusType")
 
-        if tracking and tracking in existing_shipments_by_tracking:
-            existing_s = existing_shipments_by_tracking[tracking]
-            used_existing_tracking.add(tracking)
+        if tracking_key and tracking_key in existing_shipments_by_tracking:
+            existing_s = existing_shipments_by_tracking[tracking_key]
+            used_existing_tracking.add(tracking_key)
             ship_changes: list[str] = []
+            detailed_ship_changes: list[dict[str, Any]] = []
             existing_delivered = (
                 existing_s.delivered_at.isoformat() if existing_s.delivered_at else None
             )
+
             if existing_delivered != delivery:
                 ship_changes.append("delivery_date")
-            matched_shipments.append({
-                "tracking_number": tracking,
-                "current": {"delivered_at": existing_delivered},
-                "incoming": {"delivery_date": delivery, "status_message": status_msg},
-                "changes": ship_changes,
-            })
+                detailed_ship_changes.append(
+                    {
+                        "field": "delivery_date",
+                        "before": existing_delivered,
+                        "after": delivery,
+                    }
+                )
+
+            # We only have incoming status information; still note it as a change
+            # if there is any human-readable status message or code.
+            if status_msg or incoming_status_raw:
+                ship_changes.append("status")
+                detailed_ship_changes.append(
+                    {
+                        "field": "status",
+                        "before": None,
+                        "after": status_msg or incoming_status_raw,
+                    }
+                )
+
+            matched_shipments.append(
+                {
+                    "tracking_number": tracking_display,
+                    "current": {"delivered_at": existing_delivered},
+                    "incoming": {
+                        "delivery_date": delivery,
+                        "status_message": status_msg,
+                        "status_code": incoming_status_raw,
+                    },
+                    "changes": ship_changes,
+                    "detailed_changes": detailed_ship_changes,
+                }
+            )
         else:
-            added_shipments.append({
-                "tracking_number": tracking,
-                "delivery_date": delivery,
-                "status_message": status_msg,
-            })
+            added_shipments.append(
+                {
+                    "tracking_number": tracking_display,
+                    "delivery_date": delivery,
+                    "status_message": status_msg,
+                    "status_code": incoming_status_raw,
+                }
+            )
 
     unmatched_existing_shipments = [
         {
@@ -300,6 +397,7 @@ def _apply_items_and_shipments(
     store_name: str,
     order: Order,
     item_payouts: list[float | None] | None = None,
+    external_order_id: str | None = None,
 ) -> None:
     """Create items and shipments from a normalized payload, skipping duplicates."""
     items = normalized.get("items") or []
@@ -353,9 +451,20 @@ def _apply_items_and_shipments(
         if shipment_id in shipments_created:
             return shipments_created[shipment_id]
         src = shipments_by_id.get(shipment_id) or {}
-        tracking = src.get("trackingNumber")
-        if tracking and tracking in existing_shipments_by_tracking:
-            return existing_shipments_by_tracking[tracking]
+        tracking_raw = src.get("trackingNumber")
+        tracking_key, walmart_original = _normalize_tracking_for_store(
+            store_name, external_order_id, tracking_raw
+        )
+        if tracking_key and tracking_key in existing_shipments_by_tracking:
+            shipment = existing_shipments_by_tracking[tracking_key]
+            if walmart_original:
+                base_notes = (shipment.notes or "").rstrip()
+                note_line = f"Walmart tracking: {walmart_original}"
+                if note_line not in base_notes.splitlines():
+                    shipment.notes = (
+                        f"{base_notes}\n{note_line}" if base_notes else note_line
+                    )
+            return shipment
         delivered_at: datetime | None = None
         delivery_raw = src.get("deliveryDate")
         if isinstance(delivery_raw, str) and delivery_raw.strip():
@@ -367,16 +476,20 @@ def _apply_items_and_shipments(
                 delivered_at = None
         shipment = Shipment(
             user_id=order.user_id,
-            tracking_number=tracking,
+            tracking_number=tracking_key,
             shipped_at=None,
             delivered_at=delivered_at,
             notes=f"Imported from store '{store_name}'.",
         )
+        if walmart_original:
+            base_notes = (shipment.notes or "").rstrip()
+            note_line = f"Walmart tracking: {walmart_original}"
+            shipment.notes = f"{base_notes}\n{note_line}" if base_notes else note_line
         db.add(shipment)
         db.flush()
         shipments_created[shipment_id] = shipment
-        if tracking:
-            existing_shipments_by_tracking[tracking] = shipment
+        if tracking_key:
+            existing_shipments_by_tracking[tracking_key] = shipment
         return shipment
 
     for item_index, item_data in enumerate(items):
@@ -424,11 +537,9 @@ def _apply_items_and_shipments(
             if isinstance(shipment_id, str):
                 src = shipments_by_id.get(shipment_id) or {}
             tracking_for_slice = src.get("trackingNumber")
-            tracking_key: str | None
-            if isinstance(tracking_for_slice, str) and tracking_for_slice.strip():
-                tracking_key = tracking_for_slice
-            else:
-                tracking_key = None
+            tracking_key, _ = _normalize_tracking_for_store(
+                store_name, external_order_id, tracking_for_slice
+            )
 
             key = (name, tracking_key)
             if key in existing_item_keys:
@@ -514,7 +625,7 @@ def apply_store_order_direct(
         order.buying_group_id = buying_group_id
 
     _apply_items_and_shipments(
-        db, normalized, payload.store, order, body.item_payouts
+        db, normalized, payload.store, order, body.item_payouts, external_order_id
     )
 
     payment_methods_payload = body.payment_methods

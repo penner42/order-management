@@ -13,6 +13,7 @@ import Admin from './pages/Admin'
 import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
 import ImportReview from './pages/ImportReview'
+import ImportReviewBulk from './pages/ImportReviewBulk'
 import ImportedOrders from './pages/ImportedOrders'
 import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
@@ -194,6 +195,7 @@ function AppShell() {
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/import-review" element={<ImportReview />} />
+          <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
           <Route path="/imported-orders" element={<ImportedOrders />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />

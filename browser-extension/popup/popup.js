@@ -17,6 +17,18 @@ function isWalmartOrderDetailUrl(url) {
   }
 }
 
+function isWalmartOrdersListUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "www.walmart.com") return false;
+    const path = u.pathname || "";
+    return path === "/orders";
+  } catch {
+    return false;
+  }
+}
+
 function getOrderManagerApiBaseUrl(callback) {
   if (!chrome || !chrome.storage || !chrome.storage.local) {
     callback(null);
@@ -551,6 +563,219 @@ function renderOrderDetails(payload, resultsEl) {
           );
         });
       }
+    });
+  });
+})();
+
+(function setupWalmartBulkSection() {
+  const section = document.getElementById("walmartBulkSection");
+  const pagesInput = document.getElementById("walmartBulkPages");
+  const startBtn = document.getElementById("walmartStartBulk");
+  const resultsEl = document.getElementById("walmartBulkResults");
+
+  if (!section || !pagesInput || !startBtn || !resultsEl || !chrome.tabs) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0];
+    const url = tab && tab.url ? String(tab.url) : "";
+    const onWalmartOrdersList = isWalmartOrdersListUrl(url);
+
+    section.style.display = onWalmartOrdersList ? "block" : "none";
+    if (!onWalmartOrdersList || !tab || typeof tab.id !== "number") {
+      resultsEl.style.display = "none";
+      return;
+    }
+
+    function appendStatusRow(text, status) {
+      if (!resultsEl) return;
+      const row = document.createElement("div");
+      row.textContent = text;
+      if (status === "error") {
+        row.style.color = "#c00";
+      } else if (status === "ok") {
+        row.style.color = "#065f46";
+      } else if (status === "pending") {
+        row.style.color = "#555";
+      }
+      resultsEl.appendChild(row);
+    }
+
+    async function processOrderSequential(orderNumbers) {
+      if (!Array.isArray(orderNumbers) || orderNumbers.length === 0) {
+        appendStatusRow("No orders found on these pages.", "error");
+        return;
+      }
+      resultsEl.style.display = "block";
+      resultsEl.innerHTML = "";
+      appendStatusRow(
+        "Found " + orderNumbers.length + " order(s). Collecting details…",
+        "pending"
+      );
+
+      const baseUrlPromise = new Promise((resolve) =>
+        getOrderManagerApiBaseUrl((v) => resolve(v))
+      );
+      const baseUrl = await baseUrlPromise;
+      if (!baseUrl) {
+        appendStatusRow(
+          "Order Manager base URL is not configured. Configure it in Settings first.",
+          "error"
+        );
+        return;
+      }
+
+      const collectedPayloads = [];
+
+      for (let i = 0; i < orderNumbers.length; i++) {
+        const orderNumber = orderNumbers[i];
+        appendStatusRow("Collecting " + orderNumber + "…", "pending");
+
+        try {
+          // Clear stale detail payload before requesting a new order
+          await new Promise((resolve) => {
+            chrome.storage.local.remove(WALMART_ORDER_DETAIL_STORAGE_KEY, () => resolve(null));
+          });
+
+          // Navigate the tab directly to this order's detail URL.
+          // We can't click DOM buttons because the tab may have navigated
+          // away from /orders after the first order loaded.
+          var orderDetailUrl = "https://www.walmart.com/orders/" + orderNumber;
+          await new Promise((resolve) => {
+            chrome.tabs.update(tab.id, { url: orderDetailUrl }, () => resolve(null));
+          });
+
+          const payloadObj = await new Promise((resolve, reject) => {
+            const start = Date.now();
+            const timeoutMs = 20000;
+
+            function poll() {
+              chrome.storage.local.get(WALMART_ORDER_DETAIL_STORAGE_KEY, (s) => {
+                const current = s && s[WALMART_ORDER_DETAIL_STORAGE_KEY];
+                if (current && current.payload) {
+                  var urlMatch = current.url && current.url.indexOf(orderNumber) !== -1;
+                  if (urlMatch) {
+                    resolve(current);
+                    return;
+                  }
+                }
+                if (Date.now() - start >= timeoutMs) {
+                  reject(
+                    new Error(
+                      "Timed out waiting for Walmart order detail payload for " +
+                        orderNumber
+                    )
+                  );
+                  return;
+                }
+                setTimeout(poll, 500);
+              });
+            }
+
+            poll();
+          });
+
+          let body;
+          try {
+            body = normalizeWalmartOrderDetailPayload(
+              payloadObj.payload,
+              payloadObj.url
+            );
+          } catch (e) {
+            appendStatusRow(
+              "Order " +
+                orderNumber +
+                ": could not normalize data (" +
+                String(e && e.message ? e.message : e) +
+                ")",
+              "error"
+            );
+            continue;
+          }
+
+          collectedPayloads.push(body);
+          appendStatusRow("Order " + orderNumber + ": collected.", "ok");
+        } catch (e) {
+          appendStatusRow(
+            "Order " +
+              orderNumber +
+              ": failed (" +
+              String(e && e.message ? e.message : e) +
+              ")",
+            "error"
+          );
+        }
+
+        // Throttle between orders to avoid Walmart rate limits
+        if (i < orderNumbers.length - 1) {
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+      }
+
+      if (collectedPayloads.length > 0) {
+        try {
+          const json = JSON.stringify({ orders: collectedPayloads });
+          const hash = btoa(unescape(encodeURIComponent(json)));
+          let reviewUrl = baseUrl;
+          if (reviewUrl.endsWith("/")) reviewUrl = reviewUrl.slice(0, -1);
+          reviewUrl += "/import-review/bulk#" + hash;
+          chrome.tabs.create({ url: reviewUrl });
+          appendStatusRow(
+            "Opened bulk review for " + collectedPayloads.length + " order(s).",
+            "ok"
+          );
+        } catch (e) {
+          appendStatusRow(
+            "Failed to open bulk review (" +
+              String(e && e.message ? e.message : e) +
+              ")",
+            "error"
+          );
+        }
+      }
+    }
+
+    startBtn.addEventListener("click", () => {
+      let raw = pagesInput.value;
+      let pages = parseInt(String(raw), 10);
+      if (!Number.isFinite(pages) || pages <= 0) pages = 1;
+      if (pages > 20) pages = 20;
+      pagesInput.value = String(pages);
+
+      resultsEl.style.display = "block";
+      resultsEl.innerHTML = '<div class="loading">Collecting orders…</div>';
+
+      chrome.tabs.sendMessage(
+        tab.id,
+        {
+          store: "walmart",
+          type: "walmartCollectOrdersAcrossPages",
+          maxPages: pages,
+        },
+        (resp) => {
+          if (chrome.runtime && chrome.runtime.lastError) {
+            resultsEl.innerHTML =
+              '<span class="error">Could not talk to Walmart page: ' +
+              escapeHtml(
+                chrome.runtime.lastError.message ||
+                  "Unknown communication error."
+              ) +
+              "</span>";
+            return;
+          }
+          if (!resp || resp.success !== true) {
+            resultsEl.innerHTML =
+              '<span class="error">Could not collect orders from Walmart page.</span>';
+            return;
+          }
+
+          const orders = Array.isArray(resp.orders) ? resp.orders : [];
+          const orderNumbers = orders
+            .map((o) => (o && o.orderNumber ? String(o.orderNumber) : null))
+            .filter(Boolean);
+
+          processOrderSequential(orderNumbers);
+        }
+      );
     });
   });
 })();

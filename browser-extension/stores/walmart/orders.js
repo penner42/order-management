@@ -93,13 +93,36 @@
           payload.orders = pageProps.orderHistory.orders
         }
 
-        if (pageProps.paginationInfo) {
-          payload.paginationInfo = pageProps.paginationInfo
-        } else if (
-          pageProps.orderHistory &&
-          pageProps.orderHistory.paginationInfo
-        ) {
-          payload.paginationInfo = pageProps.orderHistory.paginationInfo
+        // Walmart redesigned purchase history: orders live inside
+        // pageProps.phRedesignInitialData.data.purchaseHistory
+        if (!payload.orders) {
+          try {
+            const ph =
+              pageProps.phRedesignInitialData &&
+              pageProps.phRedesignInitialData.data &&
+              pageProps.phRedesignInitialData.data.purchaseHistory
+            if (ph) {
+              if (Array.isArray(ph.orders)) {
+                payload.orders = ph.orders
+              }
+              if (ph.paginationInfo) {
+                payload.paginationInfo = ph.paginationInfo
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!payload.paginationInfo) {
+          if (pageProps.paginationInfo) {
+            payload.paginationInfo = pageProps.paginationInfo
+          } else if (
+            pageProps.orderHistory &&
+            pageProps.orderHistory.paginationInfo
+          ) {
+            payload.paginationInfo = pageProps.orderHistory.paginationInfo
+          }
         }
       }
     } catch {
@@ -433,10 +456,213 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Bulk helpers (used via extension <-> page RPC)
+  // ---------------------------------------------------------------------------
+
+  function extractOrderNumbersFromListPayload(payload) {
+    const orders = []
+    if (!payload || !Array.isArray(payload.orders)) return orders
+    for (let i = 0; i < payload.orders.length; i++) {
+      const o = payload.orders[i] || {}
+      const rawId =
+        o.legacyOrderId != null
+          ? o.legacyOrderId
+          : o.orderNumber != null
+            ? o.orderNumber
+            : o.orderId != null
+              ? o.orderId
+              : o.id != null
+                ? o.id
+                : null
+      if (rawId == null) continue
+      const orderNumber = String(rawId)
+      orders.push({
+        orderNumber,
+        detailButtonId: 'view-order-details-link-' + orderNumber,
+      })
+    }
+    return orders
+  }
+
+  function findNextPageButton() {
+    try {
+      const candidates = [
+        'button[aria-label="Next"]',
+        'button[aria-label*="Next"]',
+        '[data-automation-id*="next"]',
+      ]
+      for (let i = 0; i < candidates.length; i++) {
+        const el = document.querySelector(candidates[i])
+        if (el) return el
+      }
+    } catch {
+      // ignore
+    }
+    return null
+  }
+
+  function waitForNextOrdersList(previousRaw, timeoutMs) {
+    return new Promise((resolve) => {
+      const start = Date.now()
+
+      function check() {
+        try {
+          if (ordersListCache && ordersListCache.raw && ordersListCache.raw !== previousRaw) {
+            resolve(ordersListCache)
+            return
+          }
+        } catch {
+          // ignore
+        }
+        if (Date.now() - start >= timeoutMs) {
+          resolve(null)
+          return
+        }
+        setTimeout(check, 300)
+      }
+
+      check()
+    })
+  }
+
+  async function collectOrdersAcrossPages(maxPages) {
+    const safeMaxPages = typeof maxPages === 'number' && maxPages > 0 ? Math.floor(maxPages) : 1
+    const limit = Math.min(safeMaxPages, 50)
+    const allOrders = []
+    let pagesCollected = 0
+
+    // Ensure we have the current page's orders at least once, even if no
+    // GraphQL list request has been intercepted yet.
+    if (!ordersListCache && isOrdersListPage()) {
+      const nextData = getNextData()
+      if (nextData) {
+        const extracted = extractOrdersFromNextData(nextData)
+        if (extracted) {
+          ordersListCache = extracted
+        }
+      }
+    }
+
+    // Start from whatever we already have for this URL.
+    if (ordersListCache) {
+      const firstBatch = extractOrderNumbersFromListPayload(ordersListCache)
+      for (let i = 0; i < firstBatch.length; i++) {
+        allOrders.push(firstBatch[i])
+      }
+      pagesCollected++
+    }
+
+    while (pagesCollected < limit) {
+      const nextBtn = findNextPageButton()
+      if (!nextBtn) break
+
+      const previousRaw = ordersListCache ? ordersListCache.raw : null
+      try {
+        nextBtn.click()
+      } catch {
+        break
+      }
+
+      const nextPayload = await waitForNextOrdersList(previousRaw, 8000)
+      if (!nextPayload) {
+        break
+      }
+
+      const batch = extractOrderNumbersFromListPayload(nextPayload)
+      if (batch.length === 0) {
+        pagesCollected++
+        break
+      }
+      for (let i = 0; i < batch.length; i++) {
+        allOrders.push(batch[i])
+      }
+      pagesCollected++
+    }
+
+    // De-duplicate by orderNumber while preserving order.
+    const seen = new Set()
+    const deduped = []
+    for (let i = 0; i < allOrders.length; i++) {
+      const o = allOrders[i]
+      if (!o || !o.orderNumber) continue
+      if (seen.has(o.orderNumber)) continue
+      seen.add(o.orderNumber)
+      deduped.push(o)
+    }
+
+    return { orders: deduped, pagesCollected }
+  }
+
+  function openOrderDetailByNumber(orderNumber) {
+    if (!orderNumber) return
+    const id = 'view-order-details-link-' + String(orderNumber)
+    try {
+      const el =
+        document.querySelector('[data-automation-id="' + id + '"]') ||
+        document.getElementById(id)
+      if (el && typeof el.click === 'function') {
+        el.click()
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function installExtensionRpcListener() {
+    try {
+      window.addEventListener('message', (event) => {
+        try {
+          const data = event.data
+          if (!data || data.source !== 'order-manager-walmart-extension') return
+
+          if (data.type === 'collectOrdersAcrossPages') {
+            const maxPages = data.maxPages
+            collectOrdersAcrossPages(maxPages)
+              .then((result) => {
+                window.postMessage(
+                  {
+                    source: 'order-manager-walmart-extension',
+                    type: 'collectOrdersResult',
+                    orders: result.orders,
+                    pagesCollected: result.pagesCollected,
+                    error: null,
+                  },
+                  '*'
+                )
+              })
+              .catch((err) => {
+                window.postMessage(
+                  {
+                    source: 'order-manager-walmart-extension',
+                    type: 'collectOrdersResult',
+                    orders: [],
+                    pagesCollected: 0,
+                    error: err && err.message ? String(err.message) : 'Unknown error',
+                  },
+                  '*'
+                )
+              })
+          } else if (data.type === 'openOrderDetail') {
+            openOrderDetailByNumber(data.orderNumber)
+          }
+        } catch {
+          // never break the page
+        }
+      })
+    } catch {
+      // ignore
+    }
+  }
+
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     init()
+    installExtensionRpcListener()
   } else {
-    window.addEventListener('DOMContentLoaded', init)
+    window.addEventListener('DOMContentLoaded', () => {
+      init()
+      installExtensionRpcListener()
+    })
   }
 })()
 

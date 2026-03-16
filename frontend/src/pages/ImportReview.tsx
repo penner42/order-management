@@ -71,10 +71,11 @@ interface OrderDiff {
     matched: Array<{
       name: string
       current: { quantity: number; price_paid: number | null; statuses: string[] }
-      incoming: { quantity: number; unit_price: number | null }
+      incoming: { quantity: number; unit_price: number | null; line_total?: number | null }
       changes: string[]
+      detailed_changes?: { field: string; before: unknown; after: unknown }[]
     }>
-    added: Array<{ name: string; quantity: number; unit_price: number | null }>
+    added: Array<{ name: string; quantity: number; unit_price: number | null; line_total?: number | null }>
     unmatched_existing: Array<{
       description: string
       quantity: number
@@ -86,13 +87,19 @@ interface OrderDiff {
     matched: Array<{
       tracking_number: string
       current: { delivered_at: string | null }
-      incoming: { delivery_date: string | null; status_message: string | null }
+      incoming: {
+        delivery_date: string | null
+        status_message: string | null
+        status_code?: string | null
+      }
       changes: string[]
+      detailed_changes?: { field: string; before: unknown; after: unknown }[]
     }>
     added: Array<{
       tracking_number: string
       delivery_date: string | null
       status_message: string | null
+      status_code?: string | null
     }>
     unmatched_existing: Array<{
       tracking_number: string
@@ -106,6 +113,21 @@ interface ItemDiffInfo {
   changes: string[]
   currentQuantity?: number
   currentPrice?: number | null
+  detailedChanges?: { field: string; before: unknown; after: unknown }[]
+}
+
+function normalizeTrackingForDisplay(
+  storeName: string,
+  externalOrderId: string | undefined | null,
+  trackingNumber: string | undefined | null
+): string | null {
+  if (!trackingNumber) return null
+  const storeLower = (storeName || '').trim().toLowerCase()
+  const compact = trackingNumber.replace(/\s+/g, '')
+  if (storeLower === 'walmart' && compact.length === 20 && compact.startsWith('555') && /^\d+$/.test(compact)) {
+    return externalOrderId && externalOrderId.trim() ? externalOrderId.trim() : trackingNumber
+  }
+  return trackingNumber
 }
 
 function fmtMoney(v: number | null | undefined): string {
@@ -392,6 +414,7 @@ export default function ImportReview() {
         changes: m.changes,
         currentQuantity: m.current.quantity,
         currentPrice: m.current.price_paid,
+        detailedChanges: m.detailed_changes,
       })
     }
     for (const a of diff.items.added) {
@@ -399,12 +422,20 @@ export default function ImportReview() {
     }
   }
 
-  const shipmentDiffMap = new Map<string, { status: 'new' | 'unchanged' | 'changed'; changes: string[] }>()
+  const shipmentDiffMap = new Map<
+    string,
+    {
+      status: 'new' | 'unchanged' | 'changed'
+      changes: string[]
+      detailedChanges?: { field: string; before: unknown; after: unknown }[]
+    }
+  >()
   if (isExistingOrder && diff?.shipments) {
     for (const m of diff.shipments.matched) {
       shipmentDiffMap.set(m.tracking_number, {
         status: m.changes.length > 0 ? 'changed' : 'unchanged',
         changes: m.changes,
+        detailedChanges: m.detailed_changes,
       })
     }
     for (const a of diff.shipments.added) {
@@ -699,7 +730,12 @@ export default function ImportReview() {
                   const firstShipment = shipSlices[0]
                     ? shipmentsById.get(shipSlices[0].shipmentId ?? '')
                     : undefined
-                  const trackingNumber = firstShipment?.trackingNumber ?? null
+                  const trackingNumberRaw = firstShipment?.trackingNumber ?? null
+                  const trackingNumber = normalizeTrackingForDisplay(
+                    storeName,
+                    externalOrderId,
+                    trackingNumberRaw
+                  )
                   const trackingUrl = firstShipment?.trackingUrl ?? null
                   const shipmentStatus = firstShipment?.status?.message ?? firstShipment?.status?.rawStatusType ?? null
                   const deliveryDate = firstShipment?.deliveryDate
@@ -720,6 +756,14 @@ export default function ImportReview() {
                             was {diffInfo.currentQuantity}
                           </span>
                         )}
+                        {diffInfo?.detailedChanges &&
+                          diffInfo.detailedChanges.some((c) => c.field === 'quantity') &&
+                          typeof diffInfo.currentQuantity === 'number' &&
+                          typeof qty === 'number' && (
+                            <span className="block text-[10px] text-amber-700 dark:text-amber-300">
+                              {diffInfo.currentQuantity} → {qty}
+                            </span>
+                          )}
                       </td>
                       <td className="py-1.5 px-2">
                         <div className="flex items-center gap-2 min-w-0">
@@ -776,6 +820,14 @@ export default function ImportReview() {
                             was {fmtMoney(diffInfo.currentPrice)}
                           </span>
                         )}
+                        {diffInfo?.detailedChanges &&
+                          diffInfo.detailedChanges.some((c) => c.field === 'price') &&
+                          typeof diffInfo.currentPrice === 'number' &&
+                          typeof unitCost === 'number' && (
+                            <span className="block text-[10px] text-amber-700 dark:text-amber-300">
+                              {fmtMoney(diffInfo.currentPrice)} → {fmtMoney(unitCost)}
+                            </span>
+                          )}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
                         {fmtMoney(lineTotal)}
@@ -873,6 +925,11 @@ export default function ImportReview() {
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {shipments.map((s, idx) => {
+              const displayTracking = normalizeTrackingForDisplay(
+                storeName,
+                externalOrderId,
+                s.trackingNumber ?? null
+              )
               const shipDiff = s.trackingNumber ? shipmentDiffMap.get(s.trackingNumber) : undefined
               return (
               <div
@@ -895,7 +952,7 @@ export default function ImportReview() {
                     Updated
                   </span>
                 )}
-                {s.trackingNumber && (
+                {displayTracking && (
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-ink-muted shrink-0">Tracking:</span>
                     {s.trackingUrl ? (
@@ -906,13 +963,13 @@ export default function ImportReview() {
                         className="font-mono text-brand-600 dark:text-brand-400 hover:underline text-xs"
                         aria-label="Track shipment"
                       >
-                        {s.trackingNumber}
+                        {displayTracking}
                         <svg className="w-3 h-3 inline-block ml-0.5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                         </svg>
                       </a>
                     ) : (
-                      <span className="font-mono text-xs">{s.trackingNumber}</span>
+                      <span className="font-mono text-xs">{displayTracking}</span>
                     )}
                   </div>
                 )}
@@ -924,6 +981,34 @@ export default function ImportReview() {
                 {s.deliveryDate && (
                   <div className="text-xs text-ink-muted dark:text-gray-400">
                     Delivered: {fmtDate(s.deliveryDate)}
+                  </div>
+                )}
+                {shipDiff?.detailedChanges && shipDiff.detailedChanges.length > 0 && (
+                  <div className="mt-1 space-y-0.5">
+                    {shipDiff.detailedChanges.map((c, i) => {
+                      if (c.field === 'delivery_date') {
+                        return (
+                          <div
+                            key={i}
+                            className="text-[11px] text-amber-700 dark:text-amber-300"
+                          >
+                            Delivery date changed: {c.before ? fmtDate(String(c.before)) : '—'} →{' '}
+                            {c.after ? fmtDate(String(c.after)) : '—'}
+                          </div>
+                        )
+                      }
+                      if (c.field === 'status') {
+                        return (
+                          <div
+                            key={i}
+                            className="text-[11px] text-amber-700 dark:text-amber-300"
+                          >
+                            Status updated: {String(c.before ?? '—')} → {String(c.after ?? '—')}
+                          </div>
+                        )
+                      }
+                      return null
+                    })}
                   </div>
                 )}
                 {s.fulfillmentType && (

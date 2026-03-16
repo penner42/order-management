@@ -151,6 +151,17 @@
     </button>
     <div id="orderManagerStatus" style="margin-top: 6px; font-size: 12px; color: #555;"></div>
   </div>
+  <div id="walmartBulkSection" style="display: none; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+    <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #333;">
+      Walmart bulk import (orders list)
+    </div>
+    <label for="walmartBulkPages">Pages to import (1–20)</label>
+    <input id="walmartBulkPages" type="number" min="1" max="20" value="1" />
+    <button id="walmartStartBulk" style="margin-top: 4px;">
+      Start bulk import
+    </button>
+    <div id="walmartBulkResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
+  </div>
   <div id="walmartOrderSection" style="display: none;">
     <button id="getOrderDetails">
       Get Order Details
