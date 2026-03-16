@@ -55,6 +55,7 @@
     postEvent('reset', { url: currentUrl })
   }
 
+
   function getNextData() {
     try {
       if (window.__NEXT_DATA__) return window.__NEXT_DATA__
@@ -185,6 +186,31 @@
       const newUrl = window.location.href
       if (newUrl === currentUrl) return
       postReset(newUrl)
+      // #region agent log
+      try {
+        fetch('http://localhost:7823/ingest/728b760a-8edb-455e-a019-596e2988cd87', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Debug-Session-Id': 'dc3cbd',
+          },
+          body: JSON.stringify({
+            sessionId: 'dc3cbd',
+            runId: 'pre-fix',
+            hypothesisId: 'H2',
+            location: 'orders.js:handleUrlChange',
+            message: 'URL changed on Walmart orders site',
+            data: {
+              previousUrl: currentUrl,
+              newUrl,
+              isOrdersList: isOrdersListPage(),
+              isOrderDetail: isOrderDetailPage(),
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {})
+      } catch {}
+      // #endregion agent log
       processInitialNextData()
     } catch {
       // ignore
@@ -525,7 +551,7 @@
       check()
     })
   }
-
+ 
   async function collectOrdersAcrossPages(maxPages) {
     const safeMaxPages = typeof maxPages === 'number' && maxPages > 0 ? Math.floor(maxPages) : 1
     const limit = Math.min(safeMaxPages, 50)

@@ -436,7 +436,6 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
       itemLevelReasons: itemCancelReasons,
     },
     totals: totals,
-    rawPayload: raw || null,
   };
 }
 
@@ -713,16 +712,63 @@ function renderOrderDetails(payload, resultsEl) {
 
       if (collectedPayloads.length > 0) {
         try {
-          const json = JSON.stringify({ orders: collectedPayloads });
-          const hash = btoa(unescape(encodeURIComponent(json)));
-          let reviewUrl = baseUrl;
-          if (reviewUrl.endsWith("/")) reviewUrl = reviewUrl.slice(0, -1);
-          reviewUrl += "/import-review/bulk#" + hash;
-          chrome.tabs.create({ url: reviewUrl });
-          appendStatusRow(
-            "Opened bulk review for " + collectedPayloads.length + " order(s).",
-            "ok"
-          );
+          let rootUrl = baseUrl;
+          if (rootUrl.endsWith("/")) rootUrl = rootUrl.slice(0, -1);
+
+          // Support both configurations:
+          // - baseUrl = "https://app.example.com"
+          // - baseUrl = "https://app.example.com/api"
+          const hasApiSuffix = rootUrl.endsWith("/api");
+          const appBase = hasApiSuffix ? rootUrl.slice(0, -4) : rootUrl;
+          const apiBase = hasApiSuffix ? rootUrl : rootUrl + "/api";
+
+          const apiUrl = apiBase + "/integrations/stores/orders/bulk-session";
+
+          fetch(apiUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ orders: collectedPayloads }),
+          })
+            .then((resp) => {
+              if (!resp.ok) {
+                return resp
+                  .json()
+                  .catch(() => ({}))
+                  .then((errBody) => {
+                    const msg =
+                      (errBody && errBody.detail) ||
+                      "Server returned " + resp.status + " " + resp.statusText;
+                    throw new Error(msg);
+                  });
+              }
+              return resp.json();
+            })
+            .then((data) => {
+              const token = data && data.token;
+              if (!token) {
+                appendStatusRow(
+                  "Failed to open bulk review (missing token from server response).",
+                  "error"
+                );
+                return;
+              }
+              const bulkUrl = appBase + "/import-review/bulk?token=" + encodeURIComponent(token);
+              chrome.tabs.create({ url: bulkUrl });
+              appendStatusRow(
+                "Opened bulk review for " + collectedPayloads.length + " order(s).",
+                "ok"
+              );
+            })
+            .catch((e) => {
+              appendStatusRow(
+                "Failed to open bulk review (" +
+                  String(e && e.message ? e.message : e) +
+                  ")",
+                "error"
+              );
+            });
         } catch (e) {
           appendStatusRow(
             "Failed to open bulk review (" +

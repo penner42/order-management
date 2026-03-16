@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { Store } from '../api/types'
 
@@ -118,21 +118,10 @@ function fmtDate(iso: string | null | undefined): string {
   }
 }
 
-function decodeBulkHash(): NormalizedPayload[] {
-  const hash = window.location.hash.slice(1)
-  if (!hash) return []
-  try {
-    const json = decodeURIComponent(escape(atob(hash)))
-    const data = JSON.parse(json) as { orders?: NormalizedPayload[] }
-    if (!data || !Array.isArray(data.orders)) return []
-    return data.orders
-  } catch {
-    return []
-  }
-}
-
 export default function ImportReviewBulk() {
-  const payloads = useMemo(() => decodeBulkHash(), [])
+  const [searchParams] = useSearchParams()
+  const token = searchParams.get('token') || ''
+  const [payloads, setPayloads] = useState<NormalizedPayload[]>([])
   const [stores, setStores] = useState<Store[]>([])
   const [diffs, setDiffs] = useState<Record<number, OrderDiff | null>>({})
   const [loading, setLoading] = useState(true)
@@ -142,38 +131,48 @@ export default function ImportReviewBulk() {
   const [applyErrorByIndex, setApplyErrorByIndex] = useState<Record<number, string | null>>({})
 
   useEffect(() => {
-    if (payloads.length === 0) {
+    if (!token) {
       setLoading(false)
+      setPayloads([])
       return
     }
     setLoading(true)
     setError(null)
-    Promise.all([
-      api.get<Store[]>('/stores'),
-      Promise.all(
-        payloads.map((p, idx) =>
-          api
-            .post<{ diff: OrderDiff }>('/integrations/stores/orders/diff', p)
-            .then((res) => ({ idx, diff: res.diff }))
-        )
-      ),
-    ])
-      .then(async ([storesList, diffResults]) => {
-        setStores(storesList)
-        const nextDiffs: Record<number, OrderDiff | null> = {}
-        for (const r of diffResults) {
-          nextDiffs[r.idx] = r.diff
+    api
+      .get<{ orders: NormalizedPayload[] }>(`/integrations/stores/orders/bulk-session/${encodeURIComponent(token)}`)
+      .then((res) => {
+        const orders = Array.isArray(res.orders) ? res.orders : []
+        setPayloads(orders)
+        if (orders.length === 0) {
+          setDiffs({})
+          return
         }
-        setDiffs(nextDiffs)
+        return Promise.all([
+          api.get<Store[]>('/stores'),
+          Promise.all(
+            orders.map((p, idx) =>
+              api
+                .post<{ diff: OrderDiff }>('/integrations/stores/orders/diff', p)
+                .then((diffRes) => ({ idx, diff: diffRes.diff }))
+            )
+          ),
+        ]).then(async ([storesList, diffResults]) => {
+          setStores(storesList)
+          const nextDiffs: Record<number, OrderDiff | null> = {}
+          for (const r of diffResults) {
+            nextDiffs[r.idx] = r.diff
+          }
+          setDiffs(nextDiffs)
+        })
       })
       .catch((err: unknown) => {
         console.error(err)
         setError(err instanceof Error ? err.message : String(err))
       })
       .finally(() => setLoading(false))
-  }, [payloads])
+  }, [token])
 
-  if (payloads.length === 0) {
+  if (!token || payloads.length === 0) {
     return (
       <div className="max-w-2xl mx-auto">
         <h1 className="text-xl font-semibold text-ink dark:text-gray-100 mb-2">

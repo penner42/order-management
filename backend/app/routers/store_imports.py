@@ -7,7 +7,8 @@ URL hash.  The frontend calls these endpoints:
   POST /orders/apply  – create/update order, items, shipments in one shot
 """
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Dict
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -32,9 +33,16 @@ from app.schemas.store_import import (
     DirectApplyResponse,
     StoreOrderDiffResponse,
     StoreOrderImportPayload,
+    BulkImportSessionCreate,
+    BulkImportSessionResponse,
+    BulkImportSessionPayloads,
 )
 
 router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
+
+
+# In-memory store for short-lived bulk import sessions.
+_bulk_sessions: Dict[str, list[StoreOrderImportPayload]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -666,3 +674,33 @@ def apply_store_order_direct(
 
     db.commit()
     return DirectApplyResponse(order_id=order.id)
+
+
+@router.post("/orders/bulk-session", response_model=BulkImportSessionResponse)
+def create_bulk_import_session(
+    body: BulkImportSessionCreate,
+):
+    """Create an in-memory bulk import session for multiple normalized payloads.
+
+    The browser extension POSTs the normalized orders here and receives a short token
+    that the frontend can use to fetch the payloads without putting them in the URL.
+    """
+    if not body.orders:
+        raise HTTPException(status_code=400, detail="At least one order payload is required.")
+
+    # Generate a short, URL-safe token. This is not security-critical; it only
+    # references in-memory data and still requires a logged-in user to consume.
+    token = secrets.token_urlsafe(16)
+    _bulk_sessions[token] = body.orders
+    return BulkImportSessionResponse(token=token)
+
+
+@router.get("/orders/bulk-session/{token}", response_model=BulkImportSessionPayloads)
+def get_bulk_import_session(
+    token: str,
+):
+    """Resolve a bulk import session token into the original payloads."""
+    payloads = _bulk_sessions.get(token)
+    if not payloads:
+        raise HTTPException(status_code=404, detail="Bulk import session not found or expired.")
+    return BulkImportSessionPayloads(orders=payloads)

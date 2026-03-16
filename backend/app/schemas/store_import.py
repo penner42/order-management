@@ -48,3 +48,21 @@ class DirectApplyResponse(BaseModel):
     """Response after directly applying an import."""
 
     order_id: int
+
+
+class BulkImportSessionCreate(BaseModel):
+    """Create a short-lived bulk import session from multiple normalized payloads."""
+
+    orders: list[StoreOrderImportPayload]
+
+
+class BulkImportSessionResponse(BaseModel):
+    """Identifier for a bulk import session that the frontend can use to fetch payloads."""
+
+    token: str
+
+
+class BulkImportSessionPayloads(BaseModel):
+    """Resolved bulk session payloads for the frontend review UI."""
+
+    orders: list[StoreOrderImportPayload]
