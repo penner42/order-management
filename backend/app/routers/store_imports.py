@@ -11,7 +11,7 @@ from typing import Any, Dict
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -33,6 +33,8 @@ from app.schemas.store_import import (
     DirectApplyResponse,
     StoreOrderDiffResponse,
     StoreOrderImportPayload,
+    BulkStoreOrderDiffRequest,
+    BulkStoreOrderDiffResponse,
     BulkImportSessionCreate,
     BulkImportSessionResponse,
     BulkImportSessionPayloads,
@@ -109,7 +111,12 @@ def _normalize_tracking_for_store(
 
 
 def _build_order_diff(
-    db: Session, linked_order: Order | None, normalized: dict[str, Any]
+    db: Session,
+    linked_order: Order | None,
+    normalized: dict[str, Any],
+    *,
+    existing_items: list[Item] | None = None,
+    existing_shipments: list[Shipment] | None = None,
 ) -> dict[str, Any]:
     """Build a structured diff between an existing order and the incoming import.
 
@@ -120,17 +127,24 @@ def _build_order_diff(
     if not linked_order:
         return {"is_existing_order": False}
 
-    existing_items = db.query(Item).filter(Item.order_id == linked_order.id).all()
+    if existing_items is None:
+        existing_items = (
+            db.query(Item)
+            .options(joinedload(Item.shipment_items))
+            .filter(Item.order_id == linked_order.id)
+            .all()
+        )
 
-    existing_shipment_ids: set[int] = set()
-    for item in existing_items:
-        for si in item.shipment_items:
-            existing_shipment_ids.add(si.shipment_id)
-    existing_shipments = (
-        db.query(Shipment).filter(Shipment.id.in_(existing_shipment_ids)).all()
-        if existing_shipment_ids
-        else []
-    )
+    if existing_shipments is None:
+        existing_shipment_ids: set[int] = set()
+        for item in existing_items:
+            for si in item.shipment_items:
+                existing_shipment_ids.add(si.shipment_id)
+        existing_shipments = (
+            db.query(Shipment).filter(Shipment.id.in_(existing_shipment_ids)).all()
+            if existing_shipment_ids
+            else []
+        )
 
     # --- Item comparison (aggregate by description since items may be split per shipment) ---
     existing_by_desc: dict[str, dict[str, Any]] = {}
@@ -601,6 +615,92 @@ def compute_order_diff(
 
     diff = _build_order_diff(db, linked_order, normalized)
     return StoreOrderDiffResponse(diff=diff)
+
+
+@router.post("/orders/diff-bulk", response_model=BulkStoreOrderDiffResponse)
+def compute_order_diff_bulk(
+    body: BulkStoreOrderDiffRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Read-only bulk diff: compute diffs for many payloads in one request."""
+    orders = body.orders or []
+    if not orders:
+        raise HTTPException(status_code=400, detail="At least one order payload is required.")
+
+    normalized_payloads: list[dict[str, Any]] = []
+    external_ids: list[str] = []
+    for p in orders:
+        external_order_id, _ = _parse_external_order_fields(p)
+        external_ids.append(external_order_id)
+        normalized_payloads.append(p.model_dump(mode="json"))
+
+    linked_orders: list[Order] = (
+        db.query(Order).filter(Order.store_order_number.in_(external_ids)).all()
+        if external_ids
+        else []
+    )
+    linked_by_external: dict[str, Order] = {
+        (o.store_order_number or ""): o for o in linked_orders if o.store_order_number
+    }
+
+    linked_order_ids = [o.id for o in linked_orders]
+    items_by_order_id: dict[int, list[Item]] = {}
+    shipments_by_order_id: dict[int, list[Shipment]] = {}
+
+    if linked_order_ids:
+        all_items: list[Item] = (
+            db.query(Item)
+            .options(joinedload(Item.shipment_items))
+            .filter(Item.order_id.in_(linked_order_ids))
+            .all()
+        )
+        for it in all_items:
+            items_by_order_id.setdefault(it.order_id, []).append(it)
+
+        shipment_ids: set[int] = set()
+        for it in all_items:
+            for si in it.shipment_items:
+                shipment_ids.add(si.shipment_id)
+
+        shipments_by_id: dict[int, Shipment] = {}
+        if shipment_ids:
+            all_shipments: list[Shipment] = (
+                db.query(Shipment).filter(Shipment.id.in_(shipment_ids)).all()
+            )
+            shipments_by_id = {s.id: s for s in all_shipments}
+
+        # Map shipments back to orders using the item's shipment_items.
+        for order_id, its in items_by_order_id.items():
+            seen: set[int] = set()
+            out: list[Shipment] = []
+            for it in its:
+                for si in it.shipment_items:
+                    sid = si.shipment_id
+                    if sid in seen:
+                        continue
+                    seen.add(sid)
+                    s = shipments_by_id.get(sid)
+                    if s:
+                        out.append(s)
+            shipments_by_order_id[order_id] = out
+
+    diffs: list[dict[str, Any]] = []
+    for external_id, normalized in zip(external_ids, normalized_payloads):
+        linked = linked_by_external.get(external_id)
+        pre_items = items_by_order_id.get(linked.id, []) if linked else None
+        pre_shipments = shipments_by_order_id.get(linked.id, []) if linked else None
+        diffs.append(
+            _build_order_diff(
+                db,
+                linked,
+                normalized,
+                existing_items=pre_items,
+                existing_shipments=pre_shipments,
+            )
+        )
+
+    return BulkStoreOrderDiffResponse(diffs=diffs)
 
 
 @router.post("/orders/apply", response_model=DirectApplyResponse)

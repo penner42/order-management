@@ -199,18 +199,13 @@ export default function ImportReviewBulk() {
         }
         return Promise.all([
           api.get<Store[]>('/stores'),
-          Promise.all(
-            orders.map((p, idx) =>
-              api
-                .post<{ diff: OrderDiff }>('/integrations/stores/orders/diff', p)
-                .then((diffRes) => ({ idx, diff: diffRes.diff }))
-            )
-          ),
-        ]).then(async ([storesList, diffResults]) => {
+          api.post<{ diffs: OrderDiff[] }>('/integrations/stores/orders/diff-bulk', { orders }),
+        ]).then(async ([storesList, diffRes]) => {
           setStores(storesList)
           const nextDiffs: Record<number, OrderDiff | null> = {}
-          for (const r of diffResults) {
-            nextDiffs[r.idx] = r.diff
+          const diffsArr = Array.isArray(diffRes.diffs) ? diffRes.diffs : []
+          for (let i = 0; i < orders.length; i++) {
+            nextDiffs[i] = diffsArr[i] ?? null
           }
           setDiffs(nextDiffs)
         })

@@ -34,6 +34,18 @@ class StoreOrderDiffResponse(BaseModel):
     diff: dict[str, Any]
 
 
+class BulkStoreOrderDiffRequest(BaseModel):
+    """Compute diffs for multiple normalized payloads in one request."""
+
+    orders: list[StoreOrderImportPayload]
+
+
+class BulkStoreOrderDiffResponse(BaseModel):
+    """Bulk diff results aligned by index to the input payload list."""
+
+    diffs: list[dict[str, Any]]
+
+
 class DirectApplyBody(BaseModel):
     """Payload + user selections to create/update an order directly (no staging row)."""
 
