@@ -97,6 +97,17 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // ---------------------------------------------------------------------------
 
 const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
+const WALMART_BULK_PORTS = new Set();
+
+function broadcastToBulkPorts(message) {
+  WALMART_BULK_PORTS.forEach((port) => {
+    try {
+      port.postMessage(message);
+    } catch {
+      // ignore
+    }
+  });
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -538,7 +549,7 @@ async function openReviewTab(url) {
 
 async function collectOrderNumbersFromOrdersListTab(tabId, maxPages) {
   const safeMaxPages = typeof maxPages === "number" && Number.isFinite(maxPages) ? maxPages : parseInt(String(maxPages || "1"), 10);
-  const pages = Number.isFinite(safeMaxPages) && safeMaxPages > 0 ? Math.min(Math.floor(safeMaxPages), 20) : 1;
+  const pages = Number.isFinite(safeMaxPages) && safeMaxPages > 0 ? Math.min(Math.floor(safeMaxPages), 50) : 1;
 
   const resp = await new Promise((resolve) => {
     try {
@@ -569,10 +580,29 @@ async function collectOrderNumbersFromOrdersListTab(tabId, maxPages) {
 
 function attachBulkPortHandlers(port) {
   let running = false;
+  let cancelled = false;
+  let scrapeTabId = null;
 
   port.onMessage.addListener(async (msg) => {
     if (!msg || typeof msg !== "object") return;
-    if (msg.store !== "walmart" || msg.type !== "start") return;
+    if (msg.store !== "walmart") return;
+
+    if (msg.type === "cancel") {
+      cancelled = true;
+      try {
+        await closeTab(scrapeTabId);
+      } catch {
+        // ignore
+      }
+      try {
+        port.postMessage({ type: "jobCancelled" });
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    if (msg.type !== "start") return;
     if (running) return;
     running = true;
 
@@ -625,19 +655,28 @@ function attachBulkPortHandlers(port) {
 
     port.postMessage({ type: "jobStarted" });
 
-    let scrapeTabId = null;
     try {
       scrapeTabId = await createWalmartScrapeTab(cookieStoreId);
 
       const collectedPayloads = [];
 
       for (let i = 0; i < orderNumbers.length; i++) {
+        if (cancelled) {
+          port.postMessage({ type: "jobCancelled" });
+          return;
+        }
+
         const orderNumber = orderNumbers[i];
         port.postMessage({ type: "orderStatus", status: "pending", orderNumber });
 
         try {
           await clearWalmartDetailStorage();
           await navigateTab(scrapeTabId, "https://www.walmart.com/orders/" + encodeURIComponent(orderNumber));
+
+          if (cancelled) {
+            port.postMessage({ type: "jobCancelled" });
+            return;
+          }
 
           const payloadObj = await waitForWalmartDetail(orderNumber, 20000);
           const body = normalizeWalmartOrderDetailPayloadSafe(payloadObj.payload, payloadObj.url);
@@ -657,6 +696,11 @@ function attachBulkPortHandlers(port) {
         }
       }
 
+      if (cancelled) {
+        port.postMessage({ type: "jobCancelled" });
+        return;
+      }
+
       if (collectedPayloads.length > 0) {
         const { appBase, token } = await postBulkSession(baseUrl, collectedPayloads);
         const bulkUrl = appBase + "/import-review/bulk?token=" + encodeURIComponent(token);
@@ -669,7 +713,15 @@ function attachBulkPortHandlers(port) {
 
       port.postMessage({ type: "jobDone" });
     } catch (e) {
-      port.postMessage({ type: "jobError", error: String(e && e.message ? e.message : e) });
+      if (cancelled) {
+        try {
+          port.postMessage({ type: "jobCancelled" });
+        } catch {
+          // ignore
+        }
+      } else {
+        port.postMessage({ type: "jobError", error: String(e && e.message ? e.message : e) });
+      }
     } finally {
       await closeTab(scrapeTabId);
     }
@@ -680,7 +732,45 @@ if (chrome && chrome.runtime && chrome.runtime.onConnect) {
   chrome.runtime.onConnect.addListener((port) => {
     try {
       if (!port || port.name !== "walmartBulkImport") return;
+      try {
+        WALMART_BULK_PORTS.add(port);
+      } catch {
+        // ignore
+      }
+      try {
+        port.onDisconnect.addListener(() => {
+          try {
+            WALMART_BULK_PORTS.delete(port);
+          } catch {
+            // ignore
+          }
+        });
+      } catch {
+        // ignore
+      }
       attachBulkPortHandlers(port);
+    } catch {
+      // ignore
+    }
+  });
+}
+
+// Receive per-page collection progress from the Walmart orders list content script bridge
+// and forward to the bulk progress tab.
+if (chrome && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener((msg) => {
+    try {
+      if (!msg || msg.store !== "walmart") return;
+      if (msg.type !== "walmartCollectOrdersProgress") return;
+
+      broadcastToBulkPorts({
+        type: "orderNumbersPageProgress",
+        page: msg.page,
+        extracted: msg.extracted,
+        total: msg.total,
+        pagesCollected: msg.pagesCollected,
+        maxPages: msg.maxPages,
+      });
     } catch {
       // ignore
     }

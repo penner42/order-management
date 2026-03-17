@@ -781,7 +781,7 @@ function renderOrderDetails(payload, resultsEl) {
       let raw = pagesInput.value;
       let pages = parseInt(String(raw), 10);
       if (!Number.isFinite(pages) || pages <= 0) pages = 1;
-      if (pages > 20) pages = 20;
+      if (pages > 50) pages = 50;
       pagesInput.value = String(pages);
 
       resultsEl.style.display = "block";

@@ -28,6 +28,9 @@
   // Bridge runtime messages from the extension to the page script for bulk operations.
   // This lets the popup/background ask the Walmart page script to collect order numbers
   // or open specific order detail pages by “clicking” the appropriate buttons.
+  //
+  // Also forwards incremental progress updates from the page script back to the background
+  // so the extension bulk progress tab can render per-page updates.
   if (chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
@@ -96,4 +99,25 @@
       }
     })
   }
+
+  // Forward progress messages (page-by-page collection) to background.
+  window.addEventListener('message', (event) => {
+    try {
+      const data = event.data
+      if (!data || data.source !== EXTENSION_SOURCE || data.type !== 'collectOrdersProgress') return
+      if (!chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') return
+
+      chrome.runtime.sendMessage({
+        store: 'walmart',
+        type: 'walmartCollectOrdersProgress',
+        page: data.page,
+        extracted: data.extracted,
+        total: data.total,
+        pagesCollected: data.pagesCollected,
+        maxPages: data.maxPages,
+      })
+    } catch {
+      // ignore
+    }
+  })
 })()

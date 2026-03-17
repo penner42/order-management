@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { Store } from '../api/types'
@@ -118,6 +118,55 @@ function fmtDate(iso: string | null | undefined): string {
   }
 }
 
+function coerceStatusText(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  try {
+    if (typeof v === 'object') {
+      const maybe = (v as any).status ?? (v as any).state ?? (v as any).code ?? (v as any).type
+      if (typeof maybe === 'string') return maybe
+      if (typeof maybe === 'number' || typeof maybe === 'boolean') return String(maybe)
+    }
+  } catch {
+    // ignore
+  }
+  return ''
+}
+
+function isCanceledOrderPayload(p: NormalizedPayload): boolean {
+  const externalOrder = p?.externalOrder ?? null
+  const candidates: unknown[] = [
+    p?.status,
+    p?.orderStatus,
+    externalOrder?.status,
+    externalOrder?.orderStatus,
+    externalOrder?.fulfillmentStatus,
+    externalOrder?.state,
+    externalOrder?.statusType,
+  ]
+
+  for (const c of candidates) {
+    const s = coerceStatusText(c).trim().toLowerCase()
+    if (!s) continue
+    if (s.includes('canceled') || s.includes('cancelled')) return true
+  }
+
+  try {
+    const items: any[] = Array.isArray(p?.items) ? p.items : []
+    for (const item of items) {
+      const s = coerceStatusText(item?.status ?? item?.status?.normalizedStatus ?? item?.status?.rawStatusCode)
+        .trim()
+        .toLowerCase()
+      if (s.includes('canceled') || s.includes('cancelled')) return true
+    }
+  } catch {
+    // ignore
+  }
+
+  return false
+}
+
 export default function ImportReviewBulk() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token') || ''
@@ -129,6 +178,7 @@ export default function ImportReviewBulk() {
   const [applyingByIndex, setApplyingByIndex] = useState<Record<number, boolean>>({})
   const [appliedByIndex, setAppliedByIndex] = useState<Record<number, boolean>>({})
   const [applyErrorByIndex, setApplyErrorByIndex] = useState<Record<number, string | null>>({})
+  const [collapsedByIndex, setCollapsedByIndex] = useState<Record<number, boolean>>({})
 
   useEffect(() => {
     if (!token) {
@@ -171,6 +221,18 @@ export default function ImportReviewBulk() {
       })
       .finally(() => setLoading(false))
   }, [token])
+
+  useEffect(() => {
+    if (!payloads || payloads.length === 0) return
+    setCollapsedByIndex((prev) => {
+      const next = { ...prev }
+      for (let i = 0; i < payloads.length; i++) {
+        if (typeof next[i] === 'boolean') continue
+        next[i] = isCanceledOrderPayload(payloads[i]) === true
+      }
+      return next
+    })
+  }, [payloads])
 
   if (!token || payloads.length === 0) {
     return (
@@ -262,6 +324,7 @@ export default function ImportReviewBulk() {
           const isExisting = diff && diff.is_existing_order === true
           const hasChanges = diff && diff.has_changes
           const store = findStoreForPayload(p)
+          const isCanceled = isCanceledOrderPayload(p)
           const itemChangesCount =
             diff && diff.items
               ? (diff.items.matched.filter((m) => m.changes.length > 0).length || 0) +
@@ -275,6 +338,7 @@ export default function ImportReviewBulk() {
           const applying = applyingByIndex[idx] === true
           const applied = appliedByIndex[idx] === true
           const applyError = applyErrorByIndex[idx] || null
+          const collapsed = collapsedByIndex[idx] === true
 
           const items: NormalizedItem[] = p.items ?? []
           const shipments: NormalizedShipment[] = p.shipments ?? []
@@ -333,6 +397,11 @@ export default function ImportReviewBulk() {
                       <div className="text-sm font-semibold text-ink dark:text-gray-100">
                         {storeName} #{orderId}
                       </div>
+                      {isCanceled && (
+                        <span className="inline-flex items-center rounded-full bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 px-2 py-0.5 text-[11px]">
+                          Canceled
+                        </span>
+                      )}
                       {store && (
                         <span className="inline-flex items-center rounded-full bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100 px-2 py-0.5 text-[11px]">
                           {store.name}
@@ -369,6 +438,16 @@ export default function ImportReviewBulk() {
                   <div className="flex flex-col items-end gap-2">
                     <button
                       type="button"
+                      onClick={() =>
+                        setCollapsedByIndex((prev) => ({ ...prev, [idx]: !(prev[idx] === true) }))
+                      }
+                      className="text-xs text-ink-muted dark:text-gray-300 hover:underline"
+                      aria-label={collapsed ? 'Expand order details' : 'Collapse order details'}
+                    >
+                      {collapsed ? 'Expand' : 'Collapse'}
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => handleApplySingle(idx)}
                       disabled={applying || applied}
                       className={`inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-md ${
@@ -390,7 +469,8 @@ export default function ImportReviewBulk() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-[320px,minmax(0,1fr)] gap-4">
+                {!collapsed && (
+                  <div className="grid grid-cols-1 md:grid-cols-[320px,minmax(0,1fr)] gap-4">
                   {/* Left: customer & shipping info */}
                   <div className="flex flex-col gap-2.5 rounded-lg border border-brand-200/70 dark:border-gray-700 bg-brand-50/40 dark:bg-gray-900/40 px-3 py-2.5">
                     <div className="flex items-center gap-2">
@@ -522,11 +602,6 @@ export default function ImportReviewBulk() {
                                 trackingNumberRaw
                               )
                               const trackingUrl = firstShipment?.trackingUrl ?? null
-                              const shipmentStatus =
-                                firstShipment?.status?.message ??
-                                firstShipment?.status?.rawStatusType ??
-                                null
-                              const deliveryDate = firstShipment?.deliveryDate
                               const diffInfo = isExisting
                                 ? itemDiffMap.get((item.name || '').trim())
                                 : undefined
@@ -754,6 +829,7 @@ export default function ImportReviewBulk() {
                     )}
                   </div>
                 </div>
+                )}
               </div>
             </div>
           )

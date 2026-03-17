@@ -322,6 +322,9 @@
           data.purchaseHistory.paginationInfo
         ) {
           payload.paginationInfo = data.purchaseHistory.paginationInfo
+        } else if (data.purchaseHistory && data.purchaseHistory.pageInfo) {
+          // PurchaseHistoryV3 shape
+          payload.paginationInfo = { pageInfo: data.purchaseHistory.pageInfo }
         }
       } catch {
         // fall back to raw only
@@ -511,21 +514,348 @@
     return orders
   }
 
-  function findNextPageButton() {
+  function findNextPageButtons() {
     try {
-      const candidates = [
-        'button[aria-label="Next"]',
-        'button[aria-label*="Next"]',
-        '[data-automation-id*="next"]',
+      function isVisible(el) {
+        try {
+          if (!el) return false
+          const r = el.getBoundingClientRect()
+          if (!r || r.width <= 0 || r.height <= 0) return false
+          // Do not require being within viewport; paginator is often below fold.
+          const style = window.getComputedStyle ? window.getComputedStyle(el) : null
+          if (style && (style.visibility === 'hidden' || style.display === 'none')) return false
+          return true
+        } catch {
+          return true
+        }
+      }
+
+      function isDisabled(el) {
+        try {
+          if (!el) return true
+          if (el.disabled) return true
+          const aria = el.getAttribute && el.getAttribute('aria-disabled')
+          if (aria === 'true') return true
+        } catch {
+          // ignore
+        }
+        return false
+      }
+
+      // Prefer pagination-ish regions to avoid clicking unrelated "Next" buttons
+      const scopes = []
+      try {
+        const navs = document.querySelectorAll(
+          'nav[aria-label*="Pagination" i],nav[aria-label*="pagination" i],[data-testid*="pagination" i]'
+        )
+        for (let i = 0; i < navs.length; i++) scopes.push(navs[i])
+      } catch {
+        // ignore
+      }
+      scopes.push(document)
+
+      const selectors = [
+        'button[aria-label="Next" i]',
+        'button[aria-label*="Next" i]',
+        'a[aria-label="Next" i]',
+        'a[aria-label*="Next" i]',
+        '[data-automation-id*="next" i]',
       ]
-      for (let i = 0; i < candidates.length; i++) {
-        const el = document.querySelector(candidates[i])
-        if (el) return el
+
+      const found = []
+      for (let s = 0; s < scopes.length; s++) {
+        const scope = scopes[s]
+        for (let i = 0; i < selectors.length; i++) {
+          const list = scope.querySelectorAll ? scope.querySelectorAll(selectors[i]) : []
+          for (let j = 0; j < list.length; j++) {
+            const el = list[j]
+            if (!el) continue
+            if (!isVisible(el)) continue
+            if (isDisabled(el)) continue
+            found.push(el)
+          }
+        }
+        if (found.length > 0) break
+      }
+      return found
+    } catch {
+      // ignore
+    }
+    return []
+  }
+
+  function clickNextPage(nextBtn) {
+    if (!nextBtn) return false
+    try {
+      if (typeof nextBtn.scrollIntoView === 'function') {
+        nextBtn.scrollIntoView({ block: 'center', inline: 'center' })
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      if (typeof nextBtn.focus === 'function') nextBtn.focus()
+    } catch {
+      // ignore
+    }
+
+    // Some React components ignore .click() unless pointer/mouse events fire.
+    try {
+      const evOpts = { bubbles: true, cancelable: true, view: window }
+      try {
+        nextBtn.dispatchEvent(new PointerEvent('pointerdown', evOpts))
+        nextBtn.dispatchEvent(new PointerEvent('pointerup', evOpts))
+      } catch {
+        // PointerEvent may not exist in older contexts
+      }
+      nextBtn.dispatchEvent(new MouseEvent('mousedown', evOpts))
+      nextBtn.dispatchEvent(new MouseEvent('mouseup', evOpts))
+      nextBtn.dispatchEvent(new MouseEvent('click', evOpts))
+      return true
+    } catch {
+      // Fall back to plain click
+      try {
+        nextBtn.click()
+        return true
+      } catch {
+        return false
+      }
+    }
+  }
+
+  function getCurrentPageNumberFromPagination() {
+    try {
+      const roots = document.querySelectorAll(
+        'nav[aria-label*="Pagination" i],nav[aria-label*="pagination" i],[data-testid*="pagination" i]'
+      )
+      for (let r = 0; r < roots.length; r++) {
+        const root = roots[r]
+        if (!root) continue
+
+        // Common a11y: aria-current="page" on the active page link/button
+        const current = root.querySelector('[aria-current="page"]')
+        if (current && current.textContent) {
+          const n = parseInt(String(current.textContent).trim(), 10)
+          if (Number.isFinite(n) && n > 0) return n
+        }
+
+        // Sometimes active page is marked via aria-selected
+        const selected = root.querySelector('[aria-selected="true"]')
+        if (selected && selected.textContent) {
+          const n = parseInt(String(selected.textContent).trim(), 10)
+          if (Number.isFinite(n) && n > 0) return n
+        }
       }
     } catch {
       // ignore
     }
     return null
+  }
+
+  function waitForPageNumberChange(previousPageNumber, timeoutMs) {
+    return new Promise((resolve) => {
+      const start = Date.now()
+
+      function check() {
+        try {
+          const cur = getCurrentPageNumberFromPagination()
+          if (cur != null && cur !== previousPageNumber) {
+            resolve(cur)
+            return
+          }
+        } catch {
+          // ignore
+        }
+        if (Date.now() - start >= timeoutMs) {
+          resolve(null)
+          return
+        }
+        setTimeout(check, 250)
+      }
+
+      check()
+    })
+  }
+
+  function waitForPageAdvanceSignals({ previousPageNumber, previousRaw, previousFirstOrderNumber, timeoutMs }) {
+    return new Promise((resolve) => {
+      const start = Date.now()
+
+      function check() {
+        let pageNumChanged = false
+        let payloadChanged = false
+        let domChanged = false
+        let currentPageNumber = null
+
+        try {
+          if (previousPageNumber != null) {
+            currentPageNumber = getCurrentPageNumberFromPagination()
+            if (currentPageNumber != null && currentPageNumber !== previousPageNumber) {
+              pageNumChanged = true
+            }
+          }
+        } catch {
+          // ignore
+        }
+
+        try {
+          if (previousRaw != null && ordersListCache && ordersListCache.raw && ordersListCache.raw !== previousRaw) {
+            payloadChanged = true
+          }
+        } catch {
+          // ignore
+        }
+
+        try {
+          if (previousFirstOrderNumber) {
+            const batch = extractOrdersFromDom()
+            const first =
+              batch && batch[0] && batch[0].orderNumber ? String(batch[0].orderNumber) : null
+            if (first && first !== previousFirstOrderNumber) domChanged = true
+          }
+        } catch {
+          // ignore
+        }
+
+        if (pageNumChanged || payloadChanged || domChanged) {
+          resolve({ pageNumChanged, payloadChanged, domChanged, currentPageNumber })
+          return
+        }
+
+        if (Date.now() - start >= timeoutMs) {
+          resolve({ pageNumChanged: false, payloadChanged: false, domChanged: false, currentPageNumber })
+          return
+        }
+
+        setTimeout(check, 250)
+      }
+
+      check()
+    })
+  }
+
+  function extractOrdersFromDom() {
+    const out = []
+    try {
+      const selector =
+        '[data-automation-id^="view-order-details-link-"],' +
+        '[id^="view-order-details-link-"],' +
+        'a[href^="/orders/"],a[href*="/orders/"]'
+      const els = document.querySelectorAll(selector)
+      for (let i = 0; i < els.length; i++) {
+        const el = els[i]
+        const dataId =
+          (el && el.getAttribute && el.getAttribute('data-automation-id')) ||
+          (el && el.getAttribute && el.getAttribute('id')) ||
+          null
+        let candidate = null
+        if (dataId && typeof dataId === 'string' && dataId.includes('view-order-details-link-')) {
+          candidate = dataId.split('view-order-details-link-')[1] || null
+        }
+        if (!candidate) {
+          const href = el && el.getAttribute ? el.getAttribute('href') : null
+          if (href && typeof href === 'string') {
+            try {
+              const u = new URL(href, window.location.origin)
+              const parts = (u.pathname || '').split('/').filter(Boolean)
+              const idx = parts.indexOf('orders')
+              if (idx >= 0 && parts[idx + 1]) candidate = parts[idx + 1]
+            } catch {
+              // ignore
+            }
+          }
+        }
+        if (!candidate) continue
+        const orderNumber = String(candidate).trim()
+        if (!orderNumber) continue
+        out.push({
+          orderNumber,
+          detailButtonId: 'view-order-details-link-' + orderNumber,
+        })
+      }
+    } catch {
+      // ignore
+    }
+    return out
+  }
+
+  function waitForOrdersDomChange(previousFirstOrderNumber, timeoutMs) {
+    return new Promise((resolve) => {
+      const start = Date.now()
+
+      function check() {
+        try {
+          const batch = extractOrdersFromDom()
+          const first =
+            batch && batch[0] && batch[0].orderNumber ? String(batch[0].orderNumber) : null
+          if (batch && batch.length > 0 && first && first !== previousFirstOrderNumber) {
+            resolve(batch)
+            return
+          }
+        } catch {
+          // ignore
+        }
+        if (Date.now() - start >= timeoutMs) {
+          resolve(null)
+          return
+        }
+        setTimeout(check, 300)
+      }
+
+      check()
+    })
+  }
+
+  function waitForOrdersDomStabilize(timeoutMs) {
+    return new Promise((resolve) => {
+      const start = Date.now()
+      let lastSig = null
+      let lastChangedAt = Date.now()
+
+      function signature(batch) {
+        try {
+          if (!Array.isArray(batch) || batch.length === 0) return ''
+          const first = batch[0] && batch[0].orderNumber ? String(batch[0].orderNumber) : ''
+          const last =
+            batch[batch.length - 1] && batch[batch.length - 1].orderNumber
+              ? String(batch[batch.length - 1].orderNumber)
+              : ''
+          return first + '|' + last + '|' + String(batch.length)
+        } catch {
+          return ''
+        }
+      }
+
+      function check() {
+        let batch = []
+        try {
+          batch = extractOrdersFromDom()
+        } catch {
+          batch = []
+        }
+        const sig = signature(batch)
+        if (sig && sig !== lastSig) {
+          lastSig = sig
+          lastChangedAt = Date.now()
+        }
+
+        // Stable once unchanged for ~900ms
+        if (sig && Date.now() - lastChangedAt >= 900) {
+          resolve(batch)
+          return
+        }
+
+        if (Date.now() - start >= timeoutMs) {
+          resolve(batch && batch.length > 0 ? batch : null)
+          return
+        }
+
+        setTimeout(check, 250)
+      }
+
+      check()
+    })
   }
 
   function waitForNextOrdersList(previousRaw, timeoutMs) {
@@ -560,7 +890,41 @@
     const safeMaxPages = typeof maxPages === 'number' && maxPages > 0 ? Math.floor(maxPages) : 1
     const limit = Math.min(safeMaxPages, 50)
     const allOrders = []
+    const seenOrderNumbers = new Set()
     let pagesCollected = 0
+
+    function emitProgress(pageNumber, extractedCount, totalCount) {
+      try {
+        window.postMessage(
+          {
+            source: 'order-manager-walmart-extension',
+            type: 'collectOrdersProgress',
+            page: pageNumber,
+            extracted: extractedCount,
+            total: totalCount,
+            pagesCollected,
+            maxPages: limit,
+          },
+          '*'
+        )
+      } catch {
+        // ignore
+      }
+    }
+
+    function addUniqueOrders(batch) {
+      let added = 0
+      if (!Array.isArray(batch) || batch.length === 0) return added
+      for (let i = 0; i < batch.length; i++) {
+        const o = batch[i]
+        if (!o || !o.orderNumber) continue
+        if (seenOrderNumbers.has(o.orderNumber)) continue
+        seenOrderNumbers.add(o.orderNumber)
+        allOrders.push(o)
+        added++
+      }
+      return added
+    }
 
     // Ensure we have the current page's orders at least once, even if no
     // GraphQL list request has been intercepted yet.
@@ -577,53 +941,120 @@
     // Start from whatever we already have for this URL.
     if (ordersListCache) {
       const firstBatch = extractOrderNumbersFromListPayload(ordersListCache)
-      for (let i = 0; i < firstBatch.length; i++) {
-        allOrders.push(firstBatch[i])
-      }
+      const added = addUniqueOrders(firstBatch)
       pagesCollected++
+      emitProgress(1, added, allOrders.length)
+    } else {
+      const firstBatch = extractOrdersFromDom()
+      const added = addUniqueOrders(firstBatch)
+      if (added > 0) {
+        pagesCollected++
+        emitProgress(1, added, allOrders.length)
+      }
     }
 
     while (pagesCollected < limit) {
-      const nextBtn = findNextPageButton()
-      if (!nextBtn) break
+      const nextBtns = findNextPageButtons()
+      if (!nextBtns || nextBtns.length === 0) break
 
       const previousRaw = ordersListCache ? ordersListCache.raw : null
-      try {
-        nextBtn.click()
-      } catch {
-        break
+      const prevPageNum = getCurrentPageNumberFromPagination()
+      const prevDomBatch = extractOrdersFromDom()
+      const prevDomFirst =
+        prevDomBatch && prevDomBatch[0] && prevDomBatch[0].orderNumber
+          ? String(prevDomBatch[0].orderNumber)
+          : null
+
+      // Page 3 (after collecting 2 pages) is often the slowest to hydrate.
+      // Use a longer wait window there to avoid “double-next” skipping.
+      const isPage3Transition = pagesCollected === 2
+      const stepWaitMs = isPage3Transition ? 25000 : 8000
+      const postClickDelayMs = isPage3Transition ? 1600 : 700
+      const stabilizeWaitMs = isPage3Transition ? 18000 : 4500
+      const maxAttempts = isPage3Transition ? 3 : 2
+
+      let progressed = false
+      for (let attempt = 0; attempt < maxAttempts && !progressed; attempt++) {
+        for (let b = 0; b < nextBtns.length && !progressed; b++) {
+          const clicked = clickNextPage(nextBtns[b])
+          if (!clicked) continue
+
+          // Give the UI time to navigate and hydrate (later pages can be slower)
+          await await_sleep(postClickDelayMs)
+
+          // Wait until *any* advance signal fires (page number, payload, or DOM),
+          // so we don't burn the full timeout when page numbers aren't detectable.
+          const advance = await waitForPageAdvanceSignals({
+            previousPageNumber: prevPageNum,
+            previousRaw,
+            previousFirstOrderNumber: prevDomFirst,
+            timeoutMs: stepWaitMs,
+          })
+
+          const nextPayload = await waitForNextOrdersList(
+            previousRaw,
+            advance && (advance.pageNumChanged || advance.payloadChanged || advance.domChanged) ? 6000 : 0
+          )
+          const domBatch = await waitForOrdersDomChange(
+            prevDomFirst,
+            advance && (advance.pageNumChanged || advance.payloadChanged || advance.payloadChanged) ? 12000 : 0
+          )
+
+          // Then wait for the DOM list to settle and extract.
+          let batch = null
+          const stabilized = await waitForOrdersDomStabilize(stabilizeWaitMs)
+          if (stabilized && stabilized.length > 0) {
+            batch = stabilized
+          } else if (domBatch && domBatch.length > 0) {
+            batch = domBatch
+          } else if (nextPayload) {
+            const extracted = extractOrderNumbersFromListPayload(nextPayload)
+            if (extracted && extracted.length > 0) batch = extracted
+          } else {
+            batch = []
+          }
+
+          // If we detected a transition but grabbed an intermediate/empty state,
+          // wait for the DOM list to settle.
+          const batchFirst =
+            batch && batch[0] && batch[0].orderNumber ? String(batch[0].orderNumber) : null
+          const batchLooksNew = !!(batchFirst && prevDomFirst && batchFirst !== prevDomFirst)
+
+          const added = addUniqueOrders(batch)
+          const payloadChanged = !!(nextPayload && nextPayload.raw && nextPayload.raw !== previousRaw)
+          const domChanged =
+            domBatch &&
+            domBatch[0] &&
+            domBatch[0].orderNumber &&
+            prevDomFirst &&
+            String(domBatch[0].orderNumber) !== String(prevDomFirst)
+          // Critical: for the page-3 transition, do NOT advance unless we have
+          // strong evidence we are actually on the next page AND have orders.
+          // Otherwise we can incorrectly “progress” while still looking at page 2.
+          const hasAnyOrders = Array.isArray(batch) && batch.length > 0
+          const page3Ok = isPage3Transition
+            ? hasAnyOrders && (batchLooksNew || domChanged || payloadChanged)
+            : false
+          const nonPage3Ok = !isPage3Transition && (added > 0 || domChanged || payloadChanged)
+          if (added > 0 || page3Ok || nonPage3Ok) {
+            pagesCollected++
+            emitProgress(pagesCollected, added, allOrders.length)
+            progressed = true
+            break
+          }
+
+          await await_sleep(900)
+        }
       }
 
-      await await_sleep(1000) 
-
-      const nextPayload = await waitForNextOrdersList(previousRaw, 8000)
-      if (!nextPayload) {
-        break
-      }
-
-      const batch = extractOrderNumbersFromListPayload(nextPayload)
-      if (batch.length === 0) {
+      if (!progressed) {
         pagesCollected++
+        emitProgress(pagesCollected, 0, allOrders.length)
         break
       }
-      for (let i = 0; i < batch.length; i++) {
-        allOrders.push(batch[i])
-      }
-      pagesCollected++
     }
 
-    // De-duplicate by orderNumber while preserving order.
-    const seen = new Set()
-    const deduped = []
-    for (let i = 0; i < allOrders.length; i++) {
-      const o = allOrders[i]
-      if (!o || !o.orderNumber) continue
-      if (seen.has(o.orderNumber)) continue
-      seen.add(o.orderNumber)
-      deduped.push(o)
-    }
-
-    return { orders: deduped, pagesCollected }
+    return { orders: allOrders, pagesCollected }
   }
 
   function openOrderDetailByNumber(orderNumber) {

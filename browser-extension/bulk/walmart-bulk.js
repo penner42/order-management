@@ -78,6 +78,7 @@ async function clearJob() {
 
 (async function main() {
   const closeBtn = $("closeBtn");
+  const cancelBtn = $("cancelBtn");
   const currentText = $("currentText");
   const reviewLink = $("reviewLink");
 
@@ -99,6 +100,7 @@ async function clearJob() {
     setStatus("err", "No job found");
     appendLog("No bulk job found. Start from the Walmart orders list popup.", "err");
     if (closeBtn) closeBtn.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = true;
     return;
   }
 
@@ -122,7 +124,26 @@ async function clearJob() {
     setStatus("err", "Could not connect");
     appendLog("Could not connect to background worker.", "err", String(e && e.message ? e.message : e));
     if (closeBtn) closeBtn.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = true;
     return;
+  }
+
+  let cancelRequested = false;
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", () => {
+      if (cancelRequested) return;
+      cancelRequested = true;
+      cancelBtn.disabled = true;
+      setStatus("pending", "Cancelling…");
+      appendLog("Cancel requested. Stopping background job…", "pending");
+      if (currentText) currentText.textContent = "Cancelling…";
+      try {
+        port.postMessage({ type: "cancel", store: "walmart" });
+      } catch (e) {
+        appendLog("Could not send cancel request.", "err", String(e && e.message ? e.message : e));
+        if (closeBtn) closeBtn.disabled = false;
+      }
+    });
   }
 
   let done = 0;
@@ -143,6 +164,46 @@ async function clearJob() {
       setStatus("pending", "Collecting…");
       if (currentText) currentText.textContent = "Collecting order numbers from the orders list…";
       appendLog("Collecting order numbers from the orders list…", "pending");
+      return;
+    }
+
+    if (msg.type === "orderNumbersPageProgress") {
+      const page = typeof msg.page === "number" ? msg.page : parseInt(String(msg.page || ""), 10);
+      const extracted =
+        typeof msg.extracted === "number" ? msg.extracted : parseInt(String(msg.extracted || ""), 10);
+      const totalSoFar =
+        typeof msg.total === "number" ? msg.total : parseInt(String(msg.total || ""), 10);
+      const maxPages =
+        typeof msg.maxPages === "number" ? msg.maxPages : parseInt(String(msg.maxPages || ""), 10);
+
+      const pageLabel = Number.isFinite(page) && page > 0 ? String(page) : "?";
+      const maxLabel = Number.isFinite(maxPages) && maxPages > 0 ? String(maxPages) : "?";
+
+      const extractedLabel = Number.isFinite(extracted) ? extracted : 0;
+      const totalLabel = Number.isFinite(totalSoFar) ? totalSoFar : null;
+
+      if (currentText) {
+        currentText.textContent =
+          "Orders list received (page " +
+          pageLabel +
+          "/" +
+          maxLabel +
+          "): +" +
+          extractedLabel +
+          (totalLabel != null ? " (" + totalLabel + " total)" : "");
+      }
+
+      appendLog(
+        "Orders list received (page " +
+          pageLabel +
+          "/" +
+          maxLabel +
+          "): extracted " +
+          extractedLabel +
+          " order(s).",
+        "pending",
+        totalLabel != null ? "Total extracted so far: " + String(totalLabel) : null
+      );
       return;
     }
 
@@ -199,8 +260,19 @@ async function clearJob() {
       appendLog("Finished.", "ok");
 
       if (closeBtn) closeBtn.disabled = false;
+      if (cancelBtn) cancelBtn.disabled = true;
 
       // Best-effort cleanup: clear job payload to avoid replays.
+      clearJob().finally(() => {});
+      return;
+    }
+
+    if (msg.type === "jobCancelled") {
+      setStatus("err", "Cancelled");
+      appendLog("Cancelled.", "err");
+      if (currentText) currentText.textContent = "Cancelled. You can close this tab.";
+      if (closeBtn) closeBtn.disabled = false;
+      if (cancelBtn) cancelBtn.disabled = true;
       clearJob().finally(() => {});
       return;
     }
@@ -210,6 +282,7 @@ async function clearJob() {
       appendLog("Bulk import failed.", "err", msg.error ? String(msg.error) : null);
       if (currentText) currentText.textContent = "Failed. You can close this tab.";
       if (closeBtn) closeBtn.disabled = false;
+      if (cancelBtn) cancelBtn.disabled = true;
       return;
     }
   }
@@ -219,6 +292,7 @@ async function clearJob() {
     setStatus("err", "Disconnected");
     appendLog("Disconnected from background worker.", "err");
     if (closeBtn) closeBtn.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = true;
   });
 
   try {
