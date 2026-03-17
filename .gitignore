@@ -33,3 +33,5 @@ Thumbs.db
 *.log
 browser-extension/stores/walmart/sample.json
 browser-extension/order.json
+.cursor/graphqldata
+.cursor/nextdata
