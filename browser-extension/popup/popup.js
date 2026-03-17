@@ -687,6 +687,11 @@ function renderOrderDetails(payload, resultsEl) {
                   if (reviewUrl.endsWith("/")) reviewUrl = reviewUrl.slice(0, -1);
                   reviewUrl += "/import-review#" + hash;
                   chrome.tabs.create({ url: reviewUrl });
+                  try {
+                    window.close();
+                  } catch {
+                    // ignore (best-effort; some browsers may block programmatic close)
+                  }
                   resultsEl.innerHTML =
                     "<span>Opened Order Manager for review.</span>";
                 } catch (e) {
@@ -768,6 +773,11 @@ function renderOrderDetails(payload, resultsEl) {
       try {
         const url = chrome.runtime.getURL("bulk/walmart-bulk.html");
         chrome.tabs.create({ url, active: true });
+        try {
+          window.close();
+        } catch {
+          // ignore (best-effort; some browsers may block programmatic close)
+        }
         appendStatusRow("Started. Continue in the bulk import tab.", "ok");
       } catch (e) {
         appendStatusRow(

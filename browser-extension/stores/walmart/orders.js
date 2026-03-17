@@ -5,6 +5,14 @@
   window.__wmOrdersHookInstalled = true
 
   const SOURCE = 'order-manager-walmart'
+  const DEBUG =
+    (function () {
+      try {
+        return !!(window && window.localStorage && localStorage.getItem('order-manager-debug') === '1')
+      } catch {
+        return false
+      }
+    })()
 
   let currentUrl = window.location.href
   let ordersListCache = null
@@ -40,7 +48,7 @@
       window.postMessage(message, '*')
 
       // Helpful during development.
-      if (typeof console !== 'undefined' && console.debug) {
+      if (DEBUG && typeof console !== 'undefined' && console.debug) {
         console.debug('[order-manager][walmart]', type, message)
       }
     } catch {
@@ -186,31 +194,6 @@
       const newUrl = window.location.href
       if (newUrl === currentUrl) return
       postReset(newUrl)
-      // #region agent log
-      try {
-        fetch('http://localhost:7823/ingest/728b760a-8edb-455e-a019-596e2988cd87', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Debug-Session-Id': 'dc3cbd',
-          },
-          body: JSON.stringify({
-            sessionId: 'dc3cbd',
-            runId: 'pre-fix',
-            hypothesisId: 'H2',
-            location: 'orders.js:handleUrlChange',
-            message: 'URL changed on Walmart orders site',
-            data: {
-              previousUrl: currentUrl,
-              newUrl,
-              isOrdersList: isOrdersListPage(),
-              isOrderDetail: isOrderDetailPage(),
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {})
-      } catch {}
-      // #endregion agent log
       processInitialNextData()
     } catch {
       // ignore
@@ -709,9 +692,7 @@
 
         try {
           if (previousFirstOrderNumber) {
-            const batch = extractOrdersFromDom()
-            const first =
-              batch && batch[0] && batch[0].orderNumber ? String(batch[0].orderNumber) : null
+            const first = getFirstOrderNumberFromDom()
             if (first && first !== previousFirstOrderNumber) domChanged = true
           }
         } catch {
@@ -742,42 +723,99 @@
         '[data-automation-id^="view-order-details-link-"],' +
         '[id^="view-order-details-link-"],' +
         'a[href^="/orders/"],a[href*="/orders/"]'
+
+      function parseOrderNumberFromHref(href) {
+        try {
+          if (!href || typeof href !== 'string') return null
+          // Avoid URL() allocations; keep it simple.
+          const raw = href.split('?')[0].split('#')[0]
+          const idx = raw.indexOf('/orders/')
+          if (idx < 0) return null
+          const after = raw.slice(idx + '/orders/'.length)
+          const seg = after.split('/')[0]
+          return seg ? String(seg).trim() : null
+        } catch {
+          return null
+        }
+      }
+
+      function parseOrderNumberFromEl(el) {
+        if (!el) return null
+        try {
+          const getAttr = el.getAttribute ? el.getAttribute.bind(el) : null
+          if (getAttr) {
+            const dataId = getAttr('data-automation-id') || getAttr('id') || null
+            if (dataId && typeof dataId === 'string') {
+              const prefix = 'view-order-details-link-'
+              const pos = dataId.indexOf(prefix)
+              if (pos >= 0) {
+                const candidate = dataId.slice(pos + prefix.length)
+                const orderNumber = candidate ? String(candidate).trim() : null
+                if (orderNumber) return orderNumber
+              }
+            }
+
+            const href = getAttr('href')
+            const fromHref = parseOrderNumberFromHref(href)
+            if (fromHref) return fromHref
+          }
+        } catch {
+          // ignore
+        }
+        return null
+      }
+
       const els = document.querySelectorAll(selector)
       for (let i = 0; i < els.length; i++) {
         const el = els[i]
-        const dataId =
-          (el && el.getAttribute && el.getAttribute('data-automation-id')) ||
-          (el && el.getAttribute && el.getAttribute('id')) ||
-          null
-        let candidate = null
-        if (dataId && typeof dataId === 'string' && dataId.includes('view-order-details-link-')) {
-          candidate = dataId.split('view-order-details-link-')[1] || null
-        }
-        if (!candidate) {
-          const href = el && el.getAttribute ? el.getAttribute('href') : null
-          if (href && typeof href === 'string') {
-            try {
-              const u = new URL(href, window.location.origin)
-              const parts = (u.pathname || '').split('/').filter(Boolean)
-              const idx = parts.indexOf('orders')
-              if (idx >= 0 && parts[idx + 1]) candidate = parts[idx + 1]
-            } catch {
-              // ignore
-            }
-          }
-        }
-        if (!candidate) continue
-        const orderNumber = String(candidate).trim()
+        const orderNumber = parseOrderNumberFromEl(el)
         if (!orderNumber) continue
-        out.push({
-          orderNumber,
-          detailButtonId: 'view-order-details-link-' + orderNumber,
-        })
+        out.push({ orderNumber, detailButtonId: 'view-order-details-link-' + orderNumber })
       }
     } catch {
       // ignore
     }
     return out
+  }
+
+  function getFirstOrderNumberFromDom() {
+    try {
+      const selector =
+        '[data-automation-id^="view-order-details-link-"],' +
+        '[id^="view-order-details-link-"],' +
+        'a[href^="/orders/"],a[href*="/orders/"]'
+      const el = document.querySelector(selector)
+      if (!el) return null
+
+      const getAttr = el.getAttribute ? el.getAttribute.bind(el) : null
+      if (!getAttr) return null
+
+      const dataId = getAttr('data-automation-id') || getAttr('id') || null
+      if (dataId && typeof dataId === 'string') {
+        const prefix = 'view-order-details-link-'
+        const pos = dataId.indexOf(prefix)
+        if (pos >= 0) {
+          const candidate = dataId.slice(pos + prefix.length)
+          const orderNumber = candidate ? String(candidate).trim() : null
+          if (orderNumber) return orderNumber
+        }
+      }
+
+      const href = getAttr('href')
+      if (href && typeof href === 'string') {
+        const raw = href.split('?')[0].split('#')[0]
+        const idx = raw.indexOf('/orders/')
+        if (idx >= 0) {
+          const after = raw.slice(idx + '/orders/'.length)
+          const seg = after.split('/')[0]
+          const orderNumber = seg ? String(seg).trim() : null
+          if (orderNumber) return orderNumber
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null
   }
 
   function waitForOrdersDomChange(previousFirstOrderNumber, timeoutMs) {
@@ -786,11 +824,11 @@
 
       function check() {
         try {
-          const batch = extractOrdersFromDom()
-          const first =
-            batch && batch[0] && batch[0].orderNumber ? String(batch[0].orderNumber) : null
-          if (batch && batch.length > 0 && first && first !== previousFirstOrderNumber) {
-            resolve(batch)
+          const first = getFirstOrderNumberFromDom()
+          if (first && first !== previousFirstOrderNumber) {
+            // Do the expensive full extraction once we have a change signal.
+            const batch = extractOrdersFromDom()
+            resolve(batch && batch.length > 0 ? batch : null)
             return
           }
         } catch {
@@ -813,28 +851,50 @@
       let lastSig = null
       let lastChangedAt = Date.now()
 
-      function signature(batch) {
+      function signatureFromNodeList(nodeList) {
         try {
-          if (!Array.isArray(batch) || batch.length === 0) return ''
-          const first = batch[0] && batch[0].orderNumber ? String(batch[0].orderNumber) : ''
-          const last =
-            batch[batch.length - 1] && batch[batch.length - 1].orderNumber
-              ? String(batch[batch.length - 1].orderNumber)
-              : ''
-          return first + '|' + last + '|' + String(batch.length)
+          if (!nodeList || nodeList.length === 0) return ''
+          const first = getFirstOrderNumberFromDom() || ''
+          let last = ''
+          try {
+            const lastEl = nodeList[nodeList.length - 1]
+            if (lastEl && lastEl.getAttribute) {
+              const dataId = lastEl.getAttribute('data-automation-id') || lastEl.getAttribute('id') || null
+              if (dataId && typeof dataId === 'string') {
+                const prefix = 'view-order-details-link-'
+                const pos = dataId.indexOf(prefix)
+                if (pos >= 0) last = String(dataId.slice(pos + prefix.length) || '')
+              }
+              if (!last) {
+                const href = lastEl.getAttribute('href')
+                if (href && typeof href === 'string') {
+                  const raw = href.split('?')[0].split('#')[0]
+                  const idx = raw.indexOf('/orders/')
+                  if (idx >= 0) last = String((raw.slice(idx + '/orders/'.length).split('/')[0]) || '')
+                }
+              }
+            }
+          } catch {
+            // ignore
+          }
+          return String(first) + '|' + String(last) + '|' + String(nodeList.length)
         } catch {
           return ''
         }
       }
 
       function check() {
-        let batch = []
+        let nodeList = null
         try {
-          batch = extractOrdersFromDom()
+          const selector =
+            '[data-automation-id^="view-order-details-link-"],' +
+            '[id^="view-order-details-link-"],' +
+            'a[href^="/orders/"],a[href*="/orders/"]'
+          nodeList = document.querySelectorAll(selector)
         } catch {
-          batch = []
+          nodeList = null
         }
-        const sig = signature(batch)
+        const sig = signatureFromNodeList(nodeList)
         if (sig && sig !== lastSig) {
           lastSig = sig
           lastChangedAt = Date.now()
@@ -842,11 +902,13 @@
 
         // Stable once unchanged for ~900ms
         if (sig && Date.now() - lastChangedAt >= 900) {
+          const batch = extractOrdersFromDom()
           resolve(batch)
           return
         }
 
         if (Date.now() - start >= timeoutMs) {
+          const batch = extractOrdersFromDom()
           resolve(batch && batch.length > 0 ? batch : null)
           return
         }
@@ -968,6 +1030,7 @@
       // Page 3 (after collecting 2 pages) is often the slowest to hydrate.
       // Use a longer wait window there to avoid “double-next” skipping.
       const isPage3Transition = pagesCollected === 2
+      const isAfterPage3 = pagesCollected >= 3
       const stepWaitMs = isPage3Transition ? 25000 : 8000
       const postClickDelayMs = isPage3Transition ? 1600 : 700
       const stabilizeWaitMs = isPage3Transition ? 18000 : 4500
@@ -991,18 +1054,24 @@
             timeoutMs: stepWaitMs,
           })
 
-          const nextPayload = await waitForNextOrdersList(
-            previousRaw,
-            advance && (advance.pageNumChanged || advance.payloadChanged || advance.domChanged) ? 6000 : 0
+          const hasAdvanceSignal = !!(
+            advance && (advance.pageNumChanged || advance.payloadChanged || advance.domChanged)
           )
-          const domBatch = await waitForOrdersDomChange(
-            prevDomFirst,
-            advance && (advance.pageNumChanged || advance.payloadChanged || advance.payloadChanged) ? 12000 : 0
-          )
+          // After page 3, keep these waits tighter so later pages don't feel laggy.
+          // (We still rely primarily on DOM stabilization for correctness.)
+          const payloadWaitMs = isPage3Transition ? 6000 : isAfterPage3 ? 2000 : 4000
+          const domWaitMs = isPage3Transition ? 12000 : isAfterPage3 ? 3500 : 7000
 
-          // Then wait for the DOM list to settle and extract.
+          // Run the "next payload", "DOM changed", and "DOM stabilized" waits in parallel.
+          // Previously these were sequential, which compounded into long per-page delays.
+          const [nextPayload, domBatch, stabilized] = await Promise.all([
+            waitForNextOrdersList(previousRaw, hasAdvanceSignal ? payloadWaitMs : 0),
+            waitForOrdersDomChange(prevDomFirst, hasAdvanceSignal ? domWaitMs : 0),
+            waitForOrdersDomStabilize(stabilizeWaitMs),
+          ])
+
+          // Then extract in order of reliability.
           let batch = null
-          const stabilized = await waitForOrdersDomStabilize(stabilizeWaitMs)
           if (stabilized && stabilized.length > 0) {
             batch = stabilized
           } else if (domBatch && domBatch.length > 0) {
