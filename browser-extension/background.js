@@ -213,6 +213,24 @@ function normalizeWalmartOrderDetailPayloadFallback(payload, sourceUrl) {
 
   const customer = order.customer || {};
   const groups = Array.isArray(order.groups_2101) ? order.groups_2101 : [];
+  let overallStatusType = null;
+  try {
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i] || {};
+      const status = g.status || {};
+      const statusType =
+        typeof status.statusType === "string" ? status.statusType.trim() : "";
+      if (!statusType) continue;
+      const lower = statusType.toLowerCase();
+      if (overallStatusType == null) overallStatusType = statusType;
+      if (lower.includes("canceled") || lower.includes("cancelled")) {
+        overallStatusType = statusType;
+        break;
+      }
+    }
+  } catch {
+    // ignore
+  }
   const paymentMethodsRaw = Array.isArray(order.paymentMethods) ? order.paymentMethods : [];
 
   const shipments = [];
@@ -381,6 +399,7 @@ function normalizeWalmartOrderDetailPayloadFallback(payload, sourceUrl) {
       orderDate: order.orderDate || null,
       timezone: order.timezone || null,
       url: externalUrl || null,
+      statusType: overallStatusType || null,
     },
     customer: {
       email: customer.email || null,

@@ -51,6 +51,44 @@ _bulk_sessions: Dict[str, list[StoreOrderImportPayload]] = {}
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
+def _normalize_iso_datetime_str(value: str | None) -> str | None:
+    """Return a canonical ISO datetime string for comparison.
+
+    This avoids treating format-only differences (e.g. 'Z' vs '+00:00') or
+    missing tzinfo as real changes when computing diffs.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _normalize_iso_date_str(value: str | None) -> str | None:
+    """Return a canonical YYYY-MM-DD string for date-only comparison.
+
+    For shipment delivery dates we only care about the calendar date, not the
+    exact timestamp or timezone offset, so we collapse any valid ISO datetime
+    down to its date component.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        # If we can't parse it as a datetime, fall back to the raw string so
+        # obviously different values still count as changes.
+        return raw
+    return dt.date().isoformat()
+
+
 def _get_or_create_store(db: Session, store_name: str, user_id: int | None) -> Store:
     store = db.query(Store).filter(Store.name == store_name).first()
     if store:
@@ -266,36 +304,43 @@ def _build_order_diff(
             used_existing_tracking.add(tracking_key)
             ship_changes: list[str] = []
             detailed_ship_changes: list[dict[str, Any]] = []
-            existing_delivered = (
+            existing_delivered_raw = (
                 existing_s.delivered_at.isoformat() if existing_s.delivered_at else None
             )
+            existing_delivered_date = _normalize_iso_date_str(existing_delivered_raw)
+            incoming_delivered_date = _normalize_iso_date_str(delivery)
 
-            if existing_delivered != delivery:
+            # Only treat delivery_date as changed when the *calendar date*
+            # differs, ignoring time-of-day / timezone formatting differences.
+            if existing_delivered_date != incoming_delivered_date:
                 ship_changes.append("delivery_date")
                 detailed_ship_changes.append(
                     {
                         "field": "delivery_date",
-                        "before": existing_delivered,
+                        "before": existing_delivered_raw,
                         "after": delivery,
                     }
                 )
 
-            # We only have incoming status information; still note it as a change
-            # if there is any human-readable status message or code.
+            # We only have incoming status information. Treat it as a change
+            # while the shipment is still in-flight (no delivered_at yet), but
+            # once the delivery date is locked in we avoid repeatedly flagging
+            # the same "Delivered on X" status on every subsequent import.
             if status_msg or incoming_status_raw:
-                ship_changes.append("status")
-                detailed_ship_changes.append(
-                    {
-                        "field": "status",
-                        "before": None,
-                        "after": status_msg or incoming_status_raw,
-                    }
-                )
+                if existing_delivered_date is None or existing_delivered_date != incoming_delivered_date:
+                    ship_changes.append("status")
+                    detailed_ship_changes.append(
+                        {
+                            "field": "status",
+                            "before": None,
+                            "after": status_msg or incoming_status_raw,
+                        }
+                    )
 
             matched_shipments.append(
                 {
                     "tracking_number": tracking_display,
-                    "current": {"delivered_at": existing_delivered},
+                    "current": {"delivered_at": existing_delivered_raw},
                     "incoming": {
                         "delivery_date": delivery,
                         "status_message": status_msg,
@@ -327,14 +372,16 @@ def _build_order_diff(
     # --- Order-level comparison ---
     order_changes: dict[str, Any] = {}
     incoming_ext = normalized.get("externalOrder") or {}
-    incoming_date = incoming_ext.get("orderDate")
-    existing_date_str = (
+    incoming_date_raw = incoming_ext.get("orderDate")
+    existing_date_raw = (
         linked_order.purchase_date.isoformat() if linked_order.purchase_date else None
     )
-    if existing_date_str != incoming_date:
+    existing_date = _normalize_iso_datetime_str(existing_date_raw)
+    incoming_date = _normalize_iso_datetime_str(incoming_date_raw)
+    if existing_date != incoming_date:
         order_changes["purchase_date"] = {
-            "current": existing_date_str,
-            "incoming": incoming_date,
+            "current": existing_date_raw,
+            "incoming": incoming_date_raw,
         }
 
     has_changes = bool(
@@ -477,8 +524,28 @@ def _apply_items_and_shipments(
         tracking_key, walmart_original = _normalize_tracking_for_store(
             store_name, external_order_id, tracking_raw
         )
+
+        # Parse delivery date (if any) from the normalized shipment slice.
+        delivery_raw = src.get("deliveryDate")
+        delivered_at: datetime | None = None
+        if isinstance(delivery_raw, str) and delivery_raw.strip():
+            try:
+                delivered_at = datetime.fromisoformat(
+                    delivery_raw.replace("Z", "+00:00")
+                )
+            except ValueError:
+                delivered_at = None
+
+        # If we already have a shipment for this tracking number, update its
+        # delivery timestamp (so future diffs don't keep flagging a change) and
+        # append any Walmart tracking metadata if needed.
         if tracking_key and tracking_key in existing_shipments_by_tracking:
             shipment = existing_shipments_by_tracking[tracking_key]
+            if delivered_at is not None:
+                # Only update when the incoming value is meaningful and
+                # different from what we have stored.
+                if shipment.delivered_at != delivered_at:
+                    shipment.delivered_at = delivered_at
             if walmart_original:
                 base_notes = (shipment.notes or "").rstrip()
                 note_line = f"Walmart tracking: {walmart_original}"
@@ -487,15 +554,7 @@ def _apply_items_and_shipments(
                         f"{base_notes}\n{note_line}" if base_notes else note_line
                     )
             return shipment
-        delivered_at: datetime | None = None
-        delivery_raw = src.get("deliveryDate")
-        if isinstance(delivery_raw, str) and delivery_raw.strip():
-            try:
-                delivered_at = datetime.fromisoformat(
-                    delivery_raw.replace("Z", "+00:00")
-                )
-            except ValueError:
-                delivered_at = None
+
         shipment = Shipment(
             user_id=order.user_id,
             tracking_number=tracking_key,

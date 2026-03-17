@@ -287,6 +287,19 @@ export default function ImportReviewBulk() {
     }
   }
 
+  const indexedPayloads = payloads.map((p, index) => ({
+    payload: p,
+    index,
+    isCanceled: isCanceledOrderPayload(p),
+  }))
+
+  const sortedPayloads = [...indexedPayloads].sort((a, b) => {
+    if (a.isCanceled === b.isCanceled) return 0
+    return a.isCanceled ? 1 : -1
+  })
+
+  const firstCanceledIndex = sortedPayloads.findIndex((x) => x.isCanceled)
+
   return (
     <div>
       <div className="flex items-center justify-between gap-4 mb-6">
@@ -311,7 +324,10 @@ export default function ImportReviewBulk() {
       )}
 
       <div className="space-y-6">
-        {payloads.map((p, idx) => {
+        {sortedPayloads.map((entry, renderIdx) => {
+          const p = entry.payload
+          const idx = entry.index
+          const isCanceled = entry.isCanceled
           const diff = diffs[idx]
           const externalOrder = p.externalOrder || {}
           const storeName: string = p.store || ''
@@ -319,7 +335,6 @@ export default function ImportReviewBulk() {
           const isExisting = diff && diff.is_existing_order === true
           const hasChanges = diff && diff.has_changes
           const store = findStoreForPayload(p)
-          const isCanceled = isCanceledOrderPayload(p)
           const itemChangesCount =
             diff && diff.items
               ? (diff.items.matched.filter((m) => m.changes.length > 0).length || 0) +
@@ -340,6 +355,8 @@ export default function ImportReviewBulk() {
           const shipmentsById = new Map((shipments as NormalizedShipment[]).map((s) => [s.shipmentId, s]))
           const customer = p.customer
           const address = p.shippingAddress
+
+          const showCanceledSeparator = firstCanceledIndex >= 0 && renderIdx === firstCanceledIndex
 
           const itemDiffMap = new Map<string, ItemDiffInfo>()
           if (isExisting && diff?.items) {
@@ -381,10 +398,16 @@ export default function ImportReviewBulk() {
           }
 
           return (
-            <div
-              key={idx}
-              className="border border-brand-300 dark:border-gray-700 rounded-xl bg-white/80 dark:bg-gray-800/80 p-4"
-            >
+            <>
+              {showCanceledSeparator && (
+                <div className="pt-2 border-t border-dashed border-brand-200 dark:border-gray-700 text-xs text-ink-muted dark:text-gray-400">
+                  Canceled orders
+                </div>
+              )}
+              <div
+                key={idx}
+                className="border border-brand-300 dark:border-gray-700 rounded-xl bg-white/80 dark:bg-gray-800/80 p-4"
+              >
               <div className="flex flex-col gap-4">
                 <div className="flex items-start justify-between gap-4">
                   <div className="space-y-1">
@@ -827,6 +850,7 @@ export default function ImportReviewBulk() {
                 )}
               </div>
             </div>
+          </>
           )
         })}
       </div>
