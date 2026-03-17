@@ -651,6 +651,42 @@ def _apply_items_and_shipments(
                 )
             existing_item_keys.add(key)
 
+    # Second pass: update existing shipments' delivered_at / notes even when
+    # there are no new items for a given tracking number. This ensures that
+    # delivery date changes coming from the store payload are actually
+    # persisted, so subsequent diff runs stop flagging the same change.
+    for src in shipments:
+        if not isinstance(src, dict):
+            continue
+        tracking_raw = src.get("trackingNumber")
+        tracking_key, walmart_original = _normalize_tracking_for_store(
+            store_name, external_order_id, tracking_raw
+        )
+        if not tracking_key or tracking_key not in existing_shipments_by_tracking:
+            # Do not create new shipments here; creation still happens via
+            # get_or_create_shipment_for_slice when new items are imported.
+            continue
+
+        delivery_raw = src.get("deliveryDate")
+        delivered_at: datetime | None = None
+        if isinstance(delivery_raw, str) and delivery_raw.strip():
+            try:
+                delivered_at = datetime.fromisoformat(
+                    delivery_raw.replace("Z", "+00:00")
+                )
+            except ValueError:
+                delivered_at = None
+
+        shipment = existing_shipments_by_tracking[tracking_key]
+        if delivered_at is not None and shipment.delivered_at != delivered_at:
+            shipment.delivered_at = delivered_at
+        if walmart_original:
+            base_notes = (shipment.notes or "").rstrip()
+            note_line = f"Walmart tracking: {walmart_original}"
+            if note_line not in base_notes.splitlines():
+                shipment.notes = (
+                    f"{base_notes}\n{note_line}" if base_notes else note_line
+                )
 
 # ---------------------------------------------------------------------------
 # Endpoints
