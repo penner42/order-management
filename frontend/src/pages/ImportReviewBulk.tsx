@@ -333,7 +333,6 @@ export default function ImportReviewBulk() {
           const storeName: string = p.store || ''
           const orderId: string = externalOrder.id || ''
           const isExisting = diff && diff.is_existing_order === true
-          const hasChanges = diff && diff.has_changes
           const store = findStoreForPayload(p)
           const itemChangesCount =
             diff && diff.items
@@ -347,6 +346,9 @@ export default function ImportReviewBulk() {
               : 0
           const applying = applyingByIndex[idx] === true
           const applied = appliedByIndex[idx] === true
+          const hasVisibleChanges =
+            !isExisting || itemChangesCount > 0 || shipmentChangesCount > 0
+          const hasNoChanges = isExisting && !hasVisibleChanges
           const applyError = applyErrorByIndex[idx] || null
           const collapsed = collapsedByIndex[idx] === true
 
@@ -428,9 +430,9 @@ export default function ImportReviewBulk() {
                     </div>
                     <div className="text-xs text-ink-muted dark:text-gray-400">
                       {isExisting
-                        ? hasChanges
+                        ? hasVisibleChanges
                           ? 'Existing order with differences'
-                          : 'Existing order with no differences'
+                          : 'Existing order with no visible differences'
                         : 'New order'}
                     </div>
                     {(itemChangesCount > 0 || shipmentChangesCount > 0) && (
@@ -467,11 +469,13 @@ export default function ImportReviewBulk() {
                     <button
                       type="button"
                       onClick={() => handleApplySingle(idx)}
-                      disabled={applying || applied}
+                      disabled={applying || applied || hasNoChanges}
                       className={`inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-md ${
                         applied
                           ? 'bg-gray-300 text-gray-600 dark:bg-gray-700 dark:text-gray-300 cursor-default'
-                          : 'bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed'
+                          : hasNoChanges
+                            ? 'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400 cursor-not-allowed'
+                            : 'bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed'
                       }`}
                     >
                       {applying
@@ -481,7 +485,9 @@ export default function ImportReviewBulk() {
                             ? 'Update Complete'
                             : 'Import Complete'
                           : isExisting
-                            ? 'Update order'
+                            ? hasNoChanges
+                              ? 'Update order'
+                              : 'Update order'
                             : 'Import order'}
                     </button>
                   </div>
