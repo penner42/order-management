@@ -28,6 +28,7 @@ export default function Payments() {
   const [addPaymentOpen, setAddPaymentOpen] = useState(false)
   const [addPaymentGroupId, setAddPaymentGroupId] = useState<number | ''>('')
   const [addPaymentId, setAddPaymentId] = useState('')
+  const [addPaymentBonus, setAddPaymentBonus] = useState('')
   const [addPaymentRequestDate, setAddPaymentRequestDate] = useState(() => toYyyyMmDd(new Date()))
   const [receivedItems, setReceivedItems] = useState<Item[]>([])
   const [shipments, setShipments] = useState<Shipment[]>([])
@@ -100,6 +101,10 @@ export default function Payments() {
     return sum
   }, [selectedItemIds, createAllocByItemId])
 
+  const addPaymentTotal = useMemo(() => {
+    return selectedTotal + parseDecimal(addPaymentBonus)
+  }, [selectedTotal, addPaymentBonus])
+
   const editItemIdToTracking = useMemo(() => {
     const acc: Record<number, string> = {}
     for (const s of editShipments) {
@@ -130,11 +135,14 @@ export default function Payments() {
   )
   const editPaymentTotal = useMemo(() => {
     if (!editPayment) return 0
-    return (editPayment.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0)
+    return (
+      (editPayment.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0) +
+      parseDecimal((editPayment as Payment).payment_bonus)
+    )
   }, [editPayment])
 
   const paymentAmount = (p: Payment) =>
-    (p.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0)
+    (p.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0) + parseDecimal(p.payment_bonus)
 
   const totals = useMemo(() => {
     let amount = 0
@@ -311,6 +319,7 @@ export default function Payments() {
       const payment = await api.post<Payment>('/payments', {
         buying_group_id: addPaymentGroupId,
         payment_id: addPaymentId.trim() || null,
+        payment_bonus: parseDecimal(addPaymentBonus),
         payment_requested_at: `${addPaymentRequestDate}T12:00:00.000Z`,
       })
       for (const itemId of selectedItemIds) {
@@ -332,6 +341,7 @@ export default function Payments() {
       setAddPaymentOpen(false)
       setAddPaymentGroupId('')
       setAddPaymentId('')
+      setAddPaymentBonus('')
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       setCreateError(msg)
@@ -521,6 +531,7 @@ export default function Payments() {
           onClick={() => {
             setAddPaymentOpen(true)
             setAddPaymentId('')
+            setAddPaymentBonus('')
             setAddPaymentRequestDate(toYyyyMmDd(new Date()))
           }}
           className="rounded-lg bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 text-sm font-medium"
@@ -670,52 +681,74 @@ export default function Payments() {
               <h2 className="text-lg font-semibold text-ink">Add payment</h2>
             </div>
             <div className="p-4 flex flex-col gap-4 overflow-auto min-h-0">
-              <div>
-                <label htmlFor="add-payment-group" className="block text-sm font-medium text-ink mb-1">
-                  Buying group
-                </label>
-                <select
-                  id="add-payment-group"
-                  className="rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-ink w-full max-w-xs"
-                  value={addPaymentGroupId}
-                  onChange={(e) => setAddPaymentGroupId(e.target.value === '' ? '' : Number(e.target.value))}
-                >
-                  <option value="">Select a buying group…</option>
-                  {buyingGroups.map((g) => (
-                    <option key={g.id} value={g.id}>
-                      {g.name}
-                    </option>
-                  ))}
-                </select>
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="min-w-[16rem] max-w-xs flex-1">
+                  <label htmlFor="add-payment-group" className="block text-sm font-medium text-ink mb-1">
+                    Buying group
+                  </label>
+                  <select
+                    id="add-payment-group"
+                    className="rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-ink w-full"
+                    value={addPaymentGroupId}
+                    onChange={(e) => setAddPaymentGroupId(e.target.value === '' ? '' : Number(e.target.value))}
+                  >
+                    <option value="">Select a buying group…</option>
+                    {buyingGroups.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="min-w-[16rem] max-w-xs flex-1">
+                  <label htmlFor="add-payment-request-date" className="block text-sm font-medium text-ink mb-1">
+                    Payment request date
+                  </label>
+                  <input
+                    id="add-payment-request-date"
+                    type="date"
+                    className="rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-ink w-full"
+                    value={addPaymentRequestDate}
+                    onChange={(e) => setAddPaymentRequestDate(e.target.value)}
+                    disabled={addPaymentGroupId === ''}
+                  />
+                </div>
               </div>
 
               {addPaymentGroupId !== '' && (
                 <>
-              <div>
-                <label htmlFor="add-payment-request-date" className="block text-sm font-medium text-ink mb-1">
-                  Payment request date
-                </label>
-                <input
-                  id="add-payment-request-date"
-                  type="date"
-                  className="rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-ink w-full max-w-xs"
-                  value={addPaymentRequestDate}
-                  onChange={(e) => setAddPaymentRequestDate(e.target.value)}
-                />
-              </div>
-              <div>
-                <label htmlFor="add-payment-id" className="block text-sm font-medium text-ink mb-1">
-                  Payment ID
-                </label>
-                <input
-                  id="add-payment-id"
-                  type="text"
-                  className="rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-ink w-full max-w-xs font-mono"
-                  value={addPaymentId}
-                  onChange={(e) => setAddPaymentId(e.target.value)}
-                  placeholder="Optional external reference"
-                />
-              </div>
+                  <div className="flex flex-wrap items-end gap-4">
+                    <div className="min-w-[16rem] max-w-xs flex-1">
+                      <label htmlFor="add-payment-id" className="block text-sm font-medium text-ink mb-1">
+                        Payment ID
+                      </label>
+                      <input
+                        id="add-payment-id"
+                        type="text"
+                        className="rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-ink w-full font-mono"
+                        value={addPaymentId}
+                        onChange={(e) => setAddPaymentId(e.target.value)}
+                        placeholder="Optional external reference"
+                      />
+                    </div>
+                    <div className="min-w-[16rem] max-w-xs flex-1">
+                      <label htmlFor="add-payment-bonus" className="block text-sm font-medium text-ink mb-1">
+                        Payment Bonus
+                      </label>
+                      <div className="flex items-center rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-ink w-full">
+                        <span className="text-ink-muted mr-2">$</span>
+                        <input
+                          id="add-payment-bonus"
+                          type="text"
+                          inputMode="decimal"
+                          className="bg-transparent outline-none w-full"
+                          value={addPaymentBonus}
+                          onChange={(e) => setAddPaymentBonus(e.target.value)}
+                          placeholder="0.00"
+                        />
+                      </div>
+                    </div>
+                  </div>
 
                   {itemsLoading ? (
                     <div className="text-ink-muted py-6">Loading scanned items…</div>
@@ -850,7 +883,7 @@ export default function Payments() {
                                 <td className="py-2 px-2" />
                                 <td className="py-2 px-2" />
                                 <td className="py-2 px-2" />
-                                <td className="py-2 px-2 text-right font-medium text-ink">${formatMoney(selectedTotal)}</td>
+                                <td className="py-2 px-2 text-right font-medium text-ink">${formatMoney(addPaymentTotal)}</td>
                                 <td className="py-2 px-2" />
                                 <td className="py-2 px-2" />
                               </tr>

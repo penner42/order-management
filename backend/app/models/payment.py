@@ -15,6 +15,7 @@ class Payment(Base):
     id = Column(Integer, primary_key=True, index=True)
     buying_group_id = Column(Integer, ForeignKey("buying_groups.id", ondelete="RESTRICT"), nullable=False)
     payment_id = Column(String(255), nullable=True)  # External reference; not unique
+    payment_bonus = Column(Numeric(12, 2), nullable=False, server_default="0")
     payment_requested_at = Column(DateTime(timezone=True), nullable=False)
     payment_sent_at = Column(DateTime(timezone=True), nullable=True)
     payment_received_at = Column(DateTime(timezone=True), nullable=True)

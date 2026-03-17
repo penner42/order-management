@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 class PaymentBase(BaseModel):
     buying_group_id: int
     payment_id: str | None = None
+    payment_bonus: float = 0
     payment_requested_at: datetime  # Required on payment; backfilled from created_at if missing
     payment_sent_at: datetime | None = None
     payment_received_at: datetime | None = None
@@ -18,6 +19,7 @@ class PaymentBase(BaseModel):
 class PaymentCreate(BaseModel):
     buying_group_id: int
     payment_id: str | None = None
+    payment_bonus: float = 0
     payment_requested_at: datetime | None = None  # Defaults to now() if not provided
     payment_sent_at: datetime | None = None
     payment_received_at: datetime | None = None
@@ -25,6 +27,7 @@ class PaymentCreate(BaseModel):
 
 class PaymentUpdate(BaseModel):
     payment_id: str | None = None
+    payment_bonus: float | None = None
     payment_requested_at: datetime | None = None
     payment_sent_at: datetime | None = None
     payment_received_at: datetime | None = None

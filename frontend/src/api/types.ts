@@ -170,6 +170,7 @@ export interface Payment {
   id: number
   buying_group_id: number
   payment_id: string | null
+  payment_bonus?: string | number | null
   payment_requested_at: string | null
   payment_sent_at: string | null
   payment_received_at: string | null
