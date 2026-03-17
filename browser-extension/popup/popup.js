@@ -2,8 +2,20 @@
 let lastOrderDetails = null;
 
 const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
-const ORDER_MANAGER_API_BASE_URL_STORAGE_KEY = "orderManagerApiBaseUrl";
-const ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY = "orderManagerExtensionToken";
+const WALMART_BULK_JOB_STORAGE_KEY = "walmartBulkJob";
+const ORDER_MANAGER_API_BASE_URL_STORAGE_KEY_LEGACY = "orderManagerApiBaseUrl";
+const ORDER_MANAGER_PROD_API_BASE_URL_STORAGE_KEY = "orderManagerProdApiBaseUrl";
+const ORDER_MANAGER_DEV_API_BASE_URL_STORAGE_KEY = "orderManagerDevApiBaseUrl";
+const ORDER_MANAGER_DEV_ENABLED_STORAGE_KEY = "orderManagerDevEnabled";
+const ORDER_MANAGER_ACTIVE_SERVER_STORAGE_KEY = "orderManagerActiveServer"; // "prod" | "dev"
+
+const ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY_LEGACY = "orderManagerExtensionToken";
+const ORDER_MANAGER_EXTENSION_TOKEN_PROD_STORAGE_KEY = "orderManagerExtensionTokenProd";
+const ORDER_MANAGER_EXTENSION_TOKEN_DEV_STORAGE_KEY = "orderManagerExtensionTokenDev";
+
+function normalizeActiveServer(v) {
+  return v === "dev" ? "dev" : "prod";
+}
 
 function isWalmartOrderDetailUrl(url) {
   if (!url || typeof url !== "string") return false;
@@ -29,20 +41,121 @@ function isWalmartOrdersListUrl(url) {
   }
 }
 
-function getOrderManagerApiBaseUrl(callback) {
+function getOrderManagerActiveServer(callback) {
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+    callback("prod");
+    return;
+  }
+  try {
+    chrome.storage.local.get(ORDER_MANAGER_ACTIVE_SERVER_STORAGE_KEY, (data) => {
+      if (chrome.runtime && chrome.runtime.lastError) {
+        callback("prod");
+        return;
+      }
+      const value =
+        data && data[ORDER_MANAGER_ACTIVE_SERVER_STORAGE_KEY]
+          ? String(data[ORDER_MANAGER_ACTIVE_SERVER_STORAGE_KEY]).trim()
+          : "prod";
+      callback(normalizeActiveServer(value));
+    });
+  } catch {
+    callback("prod");
+  }
+}
+
+function setOrderManagerActiveServer(server, callback) {
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+    if (callback) callback(false);
+    return;
+  }
+  const normalized = normalizeActiveServer(server);
+  try {
+    chrome.storage.local.set(
+      { [ORDER_MANAGER_ACTIVE_SERVER_STORAGE_KEY]: normalized },
+      () => {
+        if (callback) callback(!(chrome.runtime && chrome.runtime.lastError));
+      }
+    );
+  } catch {
+    if (callback) callback(false);
+  }
+}
+
+function getOrderManagerApiBaseUrlForServer(server, callback) {
   if (!chrome || !chrome.storage || !chrome.storage.local) {
     callback(null);
     return;
   }
   try {
-    chrome.storage.local.get(ORDER_MANAGER_API_BASE_URL_STORAGE_KEY, (data) => {
+    const normalizedServer = normalizeActiveServer(server);
+    const keys =
+      normalizedServer === "dev"
+        ? [ORDER_MANAGER_DEV_ENABLED_STORAGE_KEY, ORDER_MANAGER_DEV_API_BASE_URL_STORAGE_KEY]
+        : [ORDER_MANAGER_PROD_API_BASE_URL_STORAGE_KEY, ORDER_MANAGER_API_BASE_URL_STORAGE_KEY_LEGACY];
+
+    chrome.storage.local.get(keys, (data) => {
+      if (chrome.runtime && chrome.runtime.lastError) {
+        callback(null);
+        return;
+      }
+
+      if (normalizedServer === "dev") {
+        const enabled = !!(data && data[ORDER_MANAGER_DEV_ENABLED_STORAGE_KEY]);
+        const value =
+          data && data[ORDER_MANAGER_DEV_API_BASE_URL_STORAGE_KEY]
+            ? String(data[ORDER_MANAGER_DEV_API_BASE_URL_STORAGE_KEY]).trim()
+            : "";
+        callback(enabled && value ? value : null);
+        return;
+      }
+
+      const value =
+        data && data[ORDER_MANAGER_PROD_API_BASE_URL_STORAGE_KEY]
+          ? String(data[ORDER_MANAGER_PROD_API_BASE_URL_STORAGE_KEY]).trim()
+          : data && data[ORDER_MANAGER_API_BASE_URL_STORAGE_KEY_LEGACY]
+            ? String(data[ORDER_MANAGER_API_BASE_URL_STORAGE_KEY_LEGACY]).trim()
+            : "";
+      callback(value || null);
+    });
+  } catch {
+    callback(null);
+  }
+}
+
+function getOrderManagerApiBaseUrl(callback) {
+  if (globalThis.OrderManagerWalmart && typeof globalThis.OrderManagerWalmart.getOrderManagerApiBaseUrl === "function") {
+    globalThis.OrderManagerWalmart.getOrderManagerApiBaseUrl(callback);
+    return;
+  }
+  getOrderManagerActiveServer((server) => {
+    getOrderManagerApiBaseUrlForServer(server, callback);
+  });
+}
+
+function getOrderManagerAuthTokenForServer(server, callback) {
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+    callback(null);
+    return;
+  }
+  try {
+    const normalizedServer = normalizeActiveServer(server);
+    const key =
+      normalizedServer === "dev"
+        ? ORDER_MANAGER_EXTENSION_TOKEN_DEV_STORAGE_KEY
+        : ORDER_MANAGER_EXTENSION_TOKEN_PROD_STORAGE_KEY;
+
+    chrome.storage.local.get([key, ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY_LEGACY], (data) => {
       if (chrome.runtime && chrome.runtime.lastError) {
         callback(null);
         return;
       }
       const value =
-        data && data[ORDER_MANAGER_API_BASE_URL_STORAGE_KEY]
-          ? String(data[ORDER_MANAGER_API_BASE_URL_STORAGE_KEY]).trim()
+        data && data[key]
+          ? String(data[key]).trim()
+          : normalizedServer === "prod" &&
+              data &&
+              data[ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY_LEGACY]
+            ? String(data[ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY_LEGACY]).trim()
           : "";
       callback(value || null);
     });
@@ -52,25 +165,9 @@ function getOrderManagerApiBaseUrl(callback) {
 }
 
 function getOrderManagerAuthToken(callback) {
-  if (!chrome || !chrome.storage || !chrome.storage.local) {
-    callback(null);
-    return;
-  }
-  try {
-    chrome.storage.local.get(ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY, (data) => {
-      if (chrome.runtime && chrome.runtime.lastError) {
-        callback(null);
-        return;
-      }
-      const value =
-        data && data[ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY]
-          ? String(data[ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY]).trim()
-          : "";
-      callback(value || null);
-    });
-  } catch {
-    callback(null);
-  }
+  getOrderManagerActiveServer((server) => {
+    getOrderManagerAuthTokenForServer(server, callback);
+  });
 }
 
 function openExtensionOptionsPage() {
@@ -90,6 +187,28 @@ function openExtensionOptionsPage() {
   if (!btn) return;
   btn.addEventListener("click", () => {
     openExtensionOptionsPage();
+  });
+})();
+
+(function setupDevServerToggle() {
+  const toggle = document.getElementById("devServerToggle");
+  if (!toggle) return;
+
+  // Default to off if not set.
+  getOrderManagerActiveServer((server) => {
+    toggle.checked = server === "dev";
+  });
+
+  toggle.addEventListener("change", () => {
+    const next = toggle.checked ? "dev" : "prod";
+    setOrderManagerActiveServer(next, () => {
+      // Re-render auth section state based on new active server
+      try {
+        window.dispatchEvent(new CustomEvent("orderManagerActiveServerChanged"));
+      } catch {
+        // ignore
+      }
+    });
   });
 })();
 
@@ -113,22 +232,36 @@ function openExtensionOptionsPage() {
     statusEl.textContent = "";
   }
 
-  try {
-    getOrderManagerAuthToken((token) => {
-      if (token) {
-        showLoggedIn();
-      } else {
-        showLoggedOut();
-      }
-    });
-  } catch {
-    // ignore
+  function refreshAuthUi() {
+    try {
+      getOrderManagerAuthToken((token) => {
+        if (token) {
+          showLoggedIn();
+        } else {
+          showLoggedOut();
+        }
+      });
+    } catch {
+      // ignore
+    }
   }
+
+  refreshAuthUi();
+
+  window.addEventListener("orderManagerActiveServerChanged", () => {
+    refreshAuthUi();
+  });
 
   disconnectBtn.addEventListener("click", () => {
     try {
-      chrome.storage.local.remove(ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY, () => {
-        showLoggedOut();
+      getOrderManagerActiveServer((server) => {
+        const keysToRemove =
+          server === "dev"
+            ? [ORDER_MANAGER_EXTENSION_TOKEN_DEV_STORAGE_KEY]
+            : [ORDER_MANAGER_EXTENSION_TOKEN_PROD_STORAGE_KEY, ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY_LEGACY];
+        chrome.storage.local.remove(keysToRemove, () => {
+          showLoggedOut();
+        });
       });
     } catch {
       showLoggedOut();
@@ -137,10 +270,11 @@ function openExtensionOptionsPage() {
 
   connectBtn.addEventListener("click", () => {
     statusEl.textContent = "Opening authorization…";
-    getOrderManagerApiBaseUrl((baseUrl) => {
+    getOrderManagerActiveServer((server) => {
+      getOrderManagerApiBaseUrlForServer(server, (baseUrl) => {
       if (!baseUrl) {
         statusEl.innerHTML =
-          'Order Manager base URL is not configured. Use <span style="font-weight:600;">Settings</span> to set it first.';
+          'Order Manager base URL is not configured for the selected server. Use <span style="font-weight:600;">Settings</span> to set it first.';
         return;
       }
       try {
@@ -154,7 +288,7 @@ function openExtensionOptionsPage() {
           statusEl.textContent =
             "Sign in and authorize in the popup window.";
           const poll = setInterval(() => {
-            getOrderManagerAuthToken((token) => {
+            getOrderManagerAuthTokenForServer(server, (token) => {
               if (token) {
                 clearInterval(poll);
                 showLoggedIn();
@@ -168,10 +302,14 @@ function openExtensionOptionsPage() {
           "Could not open Order Management authorization window.";
       }
     });
+    });
   });
 })();
 
 function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
+  if (globalThis.OrderManagerWalmart && typeof globalThis.OrderManagerWalmart.normalizeWalmartOrderDetailPayload === "function") {
+    return globalThis.OrderManagerWalmart.normalizeWalmartOrderDetailPayload(payload, sourceUrl);
+  }
   if (!payload || typeof payload !== "object") {
     throw new Error("Missing Walmart order payload.");
   }
@@ -599,184 +737,43 @@ function renderOrderDetails(payload, resultsEl) {
       resultsEl.appendChild(row);
     }
 
-    async function processOrderSequential(orderNumbers) {
-      if (!Array.isArray(orderNumbers) || orderNumbers.length === 0) {
-        appendStatusRow("No orders found on these pages.", "error");
-        return;
-      }
+    async function startBulkInExtensionTab(orderNumbers, maxPages) {
       resultsEl.style.display = "block";
       resultsEl.innerHTML = "";
-      appendStatusRow(
-        "Found " + orderNumbers.length + " order(s). Collecting details…",
-        "pending"
-      );
+      appendStatusRow("Opening bulk import tab…", "pending");
 
-      const baseUrlPromise = new Promise((resolve) =>
-        getOrderManagerApiBaseUrl((v) => resolve(v))
-      );
-      const baseUrl = await baseUrlPromise;
-      if (!baseUrl) {
+      try {
+        await new Promise((resolve) => {
+          chrome.storage.local.set(
+            {
+              [WALMART_BULK_JOB_STORAGE_KEY]: {
+                store: "walmart",
+                createdAt: Date.now(),
+                sourceTabId: tab.id,
+                maxPages: typeof maxPages === "number" ? maxPages : null,
+                orderNumbers: Array.isArray(orderNumbers) ? orderNumbers : [],
+              },
+            },
+            () => resolve(null)
+          );
+        });
+      } catch (e) {
         appendStatusRow(
-          "Order Manager base URL is not configured. Configure it in Settings first.",
+          "Could not start bulk import (" + String(e && e.message ? e.message : e) + ")",
           "error"
         );
         return;
       }
 
-      const collectedPayloads = [];
-
-      for (let i = 0; i < orderNumbers.length; i++) {
-        const orderNumber = orderNumbers[i];
-        appendStatusRow("Collecting " + orderNumber + "…", "pending");
-
-        try {
-          // Clear stale detail payload before requesting a new order
-          await new Promise((resolve) => {
-            chrome.storage.local.remove(WALMART_ORDER_DETAIL_STORAGE_KEY, () => resolve(null));
-          });
-
-          // Navigate the tab directly to this order's detail URL.
-          // We can't click DOM buttons because the tab may have navigated
-          // away from /orders after the first order loaded.
-          var orderDetailUrl = "https://www.walmart.com/orders/" + orderNumber;
-          await new Promise((resolve) => {
-            chrome.tabs.update(tab.id, { url: orderDetailUrl }, () => resolve(null));
-          });
-
-          const payloadObj = await new Promise((resolve, reject) => {
-            const start = Date.now();
-            const timeoutMs = 20000;
-
-            function poll() {
-              chrome.storage.local.get(WALMART_ORDER_DETAIL_STORAGE_KEY, (s) => {
-                const current = s && s[WALMART_ORDER_DETAIL_STORAGE_KEY];
-                if (current && current.payload) {
-                  var urlMatch = current.url && current.url.indexOf(orderNumber) !== -1;
-                  if (urlMatch) {
-                    resolve(current);
-                    return;
-                  }
-                }
-                if (Date.now() - start >= timeoutMs) {
-                  reject(
-                    new Error(
-                      "Timed out waiting for Walmart order detail payload for " +
-                        orderNumber
-                    )
-                  );
-                  return;
-                }
-                setTimeout(poll, 500);
-              });
-            }
-
-            poll();
-          });
-
-          let body;
-          try {
-            body = normalizeWalmartOrderDetailPayload(
-              payloadObj.payload,
-              payloadObj.url
-            );
-          } catch (e) {
-            appendStatusRow(
-              "Order " +
-                orderNumber +
-                ": could not normalize data (" +
-                String(e && e.message ? e.message : e) +
-                ")",
-              "error"
-            );
-            continue;
-          }
-
-          collectedPayloads.push(body);
-          appendStatusRow("Order " + orderNumber + ": collected.", "ok");
-        } catch (e) {
-          appendStatusRow(
-            "Order " +
-              orderNumber +
-              ": failed (" +
-              String(e && e.message ? e.message : e) +
-              ")",
-            "error"
-          );
-        }
-
-        // Throttle between orders to avoid Walmart rate limits
-        if (i < orderNumbers.length - 1) {
-          await new Promise((r) => setTimeout(r, 1500));
-        }
-      }
-
-      if (collectedPayloads.length > 0) {
-        try {
-          let rootUrl = baseUrl;
-          if (rootUrl.endsWith("/")) rootUrl = rootUrl.slice(0, -1);
-
-          // Support both configurations:
-          // - baseUrl = "https://app.example.com"
-          // - baseUrl = "https://app.example.com/api"
-          const hasApiSuffix = rootUrl.endsWith("/api");
-          const appBase = hasApiSuffix ? rootUrl.slice(0, -4) : rootUrl;
-          const apiBase = hasApiSuffix ? rootUrl : rootUrl + "/api";
-
-          const apiUrl = apiBase + "/integrations/stores/orders/bulk-session";
-
-          fetch(apiUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ orders: collectedPayloads }),
-          })
-            .then((resp) => {
-              if (!resp.ok) {
-                return resp
-                  .json()
-                  .catch(() => ({}))
-                  .then((errBody) => {
-                    const msg =
-                      (errBody && errBody.detail) ||
-                      "Server returned " + resp.status + " " + resp.statusText;
-                    throw new Error(msg);
-                  });
-              }
-              return resp.json();
-            })
-            .then((data) => {
-              const token = data && data.token;
-              if (!token) {
-                appendStatusRow(
-                  "Failed to open bulk review (missing token from server response).",
-                  "error"
-                );
-                return;
-              }
-              const bulkUrl = appBase + "/import-review/bulk?token=" + encodeURIComponent(token);
-              chrome.tabs.create({ url: bulkUrl });
-              appendStatusRow(
-                "Opened bulk review for " + collectedPayloads.length + " order(s).",
-                "ok"
-              );
-            })
-            .catch((e) => {
-              appendStatusRow(
-                "Failed to open bulk review (" +
-                  String(e && e.message ? e.message : e) +
-                  ")",
-                "error"
-              );
-            });
-        } catch (e) {
-          appendStatusRow(
-            "Failed to open bulk review (" +
-              String(e && e.message ? e.message : e) +
-              ")",
-            "error"
-          );
-        }
+      try {
+        const url = chrome.runtime.getURL("bulk/walmart-bulk.html");
+        chrome.tabs.create({ url, active: true });
+        appendStatusRow("Started. Continue in the bulk import tab.", "ok");
+      } catch (e) {
+        appendStatusRow(
+          "Could not open bulk import tab (" + String(e && e.message ? e.message : e) + ")",
+          "error"
+        );
       }
     }
 
@@ -788,38 +785,23 @@ function renderOrderDetails(payload, resultsEl) {
       pagesInput.value = String(pages);
 
       resultsEl.style.display = "block";
-      resultsEl.innerHTML = '<div class="loading">Collecting orders…</div>';
+      resultsEl.innerHTML = '<div class="loading">Starting…</div>';
 
-      chrome.tabs.sendMessage(
-        tab.id,
+      // Open the extension progress tab first, and let background collect order numbers
+      // (popup closes when the tab opens, so we can't own async callbacks here).
+      chrome.storage.local.set(
         {
-          store: "walmart",
-          type: "walmartCollectOrdersAcrossPages",
-          maxPages: pages,
+          [WALMART_BULK_JOB_STORAGE_KEY]: {
+            store: "walmart",
+            createdAt: Date.now(),
+            sourceTabId: tab.id,
+            maxPages: pages,
+            orderNumbers: [],
+          },
         },
-        (resp) => {
-          if (chrome.runtime && chrome.runtime.lastError) {
-            resultsEl.innerHTML =
-              '<span class="error">Could not talk to Walmart page: ' +
-              escapeHtml(
-                chrome.runtime.lastError.message ||
-                  "Unknown communication error."
-              ) +
-              "</span>";
-            return;
-          }
-          if (!resp || resp.success !== true) {
-            resultsEl.innerHTML =
-              '<span class="error">Could not collect orders from Walmart page.</span>';
-            return;
-          }
-
-          const orders = Array.isArray(resp.orders) ? resp.orders : [];
-          const orderNumbers = orders
-            .map((o) => (o && o.orderNumber ? String(o.orderNumber) : null))
-            .filter(Boolean);
-
-          processOrderSequential(orderNumbers);
+        () => {
+          startBulkInExtensionTab([], pages);
+          appendStatusRow("Started. Continue in the bulk import tab.", "ok");
         }
       );
     });

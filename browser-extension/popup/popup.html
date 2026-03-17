@@ -137,7 +137,11 @@
   </style>
 </head>
 <body>
-  <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px;">
+    <label style="display:flex; align-items:center; gap: 8px; font-size: 12px; color: #333;">
+      <input id="devServerToggle" type="checkbox" style="width: 16px; height: 16px; margin: 0;" />
+      dev server
+    </label>
     <button id="openSettingsGlobal" class="secondary" style="width: auto; padding: 6px 10px; font-size: 12px;">
       Settings
     </button>
@@ -185,6 +189,7 @@
     </button>
     <pre id="bgResults" style="display: none;"></pre>
   </div>
+  <script src="../lib/walmart.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

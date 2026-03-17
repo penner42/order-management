@@ -551,7 +551,11 @@
       check()
     })
   }
- 
+
+  function await_sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   async function collectOrdersAcrossPages(maxPages) {
     const safeMaxPages = typeof maxPages === 'number' && maxPages > 0 ? Math.floor(maxPages) : 1
     const limit = Math.min(safeMaxPages, 50)
@@ -589,6 +593,8 @@
       } catch {
         break
       }
+
+      await await_sleep(1000) 
 
       const nextPayload = await waitForNextOrdersList(previousRaw, 8000)
       if (!nextPayload) {
