@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Orders from './pages/Orders'
@@ -49,8 +49,40 @@ function DarkToggle() {
 function AppShell() {
   const { user, loading, logout } = useAuth()
   const location = useLocation()
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const isPublic =
     location.pathname === '/login' || location.pathname === '/extension-auth'
+
+  useEffect(() => {
+    setMobileNavOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    if (!mobileNavOpen) return
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setMobileNavOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [mobileNavOpen])
+
+  const navItems = useMemo(() => {
+    if (!user) return []
+    if (user.role === 'admin') {
+      return [{ to: '/admin', label: 'Admin' }]
+    }
+    return [
+      { to: '/', label: 'Orders' },
+      { to: '/buying-groups', label: 'Buying Groups' },
+      { to: '/rewards', label: 'Rewards' },
+      { to: '/payment-methods', label: 'Payment Methods' },
+      { to: '/payments', label: 'Payments' },
+      { to: '/shipments', label: 'Shipments' },
+      { to: '/stores', label: 'Stores' },
+      { to: '/portals', label: 'Portals' },
+      { to: '/imported-orders', label: 'Imported Orders' },
+    ]
+  }, [user])
 
   if (isPublic) {
     return (
@@ -77,105 +109,32 @@ function AppShell() {
   return (
     <div className="min-h-screen flex flex-col">
       <header className="bg-white dark:bg-gray-900 border-b border-brand-200/80 dark:border-gray-700 sticky top-0 z-10">
-        <div className="max-w-[1920px] mx-auto px-4 h-14 flex items-center gap-6 w-full">
-          <NavLink to={user.role === 'admin' ? '/admin' : '/'} className="font-semibold text-brand-800 dark:text-gray-100 text-lg">
+        <div className="max-w-[1920px] mx-auto px-4 h-14 flex items-center gap-3 sm:gap-6 w-full">
+          <NavLink
+            to={user.role === 'admin' ? '/admin' : '/'}
+            className="font-semibold text-brand-800 dark:text-gray-100 text-lg shrink-0 whitespace-nowrap"
+          >
             Order Management
           </NavLink>
-          <nav className="flex gap-1">
-            {user.role === 'admin' ? (
+          <nav className="hidden md:flex flex-1 min-w-0 gap-1 overflow-x-auto">
+            {navItems.map((item) => (
               <NavLink
-                to="/admin"
+                key={item.to}
+                to={item.to}
                 className={({ isActive }) =>
                   `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
                 }
               >
-                Admin
+                {item.label}
               </NavLink>
-            ) : (
-              <>
-                <NavLink
-                  to="/"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Orders
-                </NavLink>
-                <NavLink
-                  to="/buying-groups"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Buying Groups
-                </NavLink>
-                <NavLink
-                  to="/rewards"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Rewards
-                </NavLink>
-                <NavLink
-                  to="/payment-methods"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Payment Methods
-                </NavLink>
-                <NavLink
-                  to="/payments"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Payments
-                </NavLink>
-                <NavLink
-                  to="/shipments"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Shipments
-                </NavLink>
-                <NavLink
-                  to="/stores"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Stores
-                </NavLink>
-                <NavLink
-                  to="/portals"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Portals
-                </NavLink>
-                <NavLink
-                  to="/imported-orders"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                  }
-                >
-                  Imported Orders
-                </NavLink>
-              </>
-            )}
+            ))}
           </nav>
-          <div className="flex items-center gap-2 ml-auto">
+          <div className="flex items-center gap-1.5 sm:gap-2 ml-auto">
             <DarkToggle />
             {user.role !== 'admin' && (
               <NavLink
                 to="/profile"
-                className={({ isActive }) =>
-                  `text-sm ${isActive ? 'text-brand-700 dark:text-brand-400 font-medium' : 'text-ink-muted hover:text-ink dark:text-gray-400 dark:hover:text-gray-100'}`
-                }
+                className={({ isActive }) => `hidden md:inline text-sm ${isActive ? 'text-brand-700 dark:text-brand-400 font-medium' : 'text-ink-muted hover:text-ink dark:text-gray-400 dark:hover:text-gray-100'}`}
               >
                 {user.username}
               </NavLink>
@@ -183,14 +142,82 @@ function AppShell() {
             <button
               type="button"
               onClick={logout}
-              className="px-3 py-1.5 text-sm text-ink-muted hover:text-ink dark:hover:text-gray-100 rounded"
+              className="hidden md:inline-flex px-3 py-1.5 text-sm text-ink-muted hover:text-ink dark:hover:text-gray-100 rounded"
             >
               Sign out
+            </button>
+            <button
+              type="button"
+              className="md:hidden p-2 rounded-md text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100 transition"
+              aria-label={mobileNavOpen ? 'Close navigation menu' : 'Open navigation menu'}
+              aria-expanded={mobileNavOpen}
+              onClick={() => setMobileNavOpen((v) => !v)}
+            >
+              {mobileNavOpen ? (
+                <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                  <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 6h14a1 1 0 010 2H3a1 1 0 010-2zm0 6h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
+                </svg>
+              )}
             </button>
           </div>
         </div>
       </header>
-      <main className="flex-1 w-full mx-auto px-12 py-8">
+      {mobileNavOpen && (
+        <div className="fixed inset-0 z-20 md:hidden">
+          <button
+            type="button"
+            aria-label="Close navigation menu"
+            className="absolute inset-0 bg-black/30"
+            onClick={() => setMobileNavOpen(false)}
+          />
+          <div className="absolute right-0 top-0 h-full w-[min(20rem,85vw)] bg-white dark:bg-gray-900 border-l border-brand-200/80 dark:border-gray-700 shadow-xl p-3 flex flex-col">
+            <div className="px-1 pb-2 border-b border-brand-100/70 dark:border-gray-700">
+              <div className="font-semibold text-brand-800 dark:text-gray-100">Menu</div>
+            </div>
+            <div className="py-2 flex-1 overflow-auto">
+              <div className="flex flex-col gap-1">
+                {navItems.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    className={({ isActive }) =>
+                      `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
+                    }
+                  >
+                    {item.label}
+                  </NavLink>
+                ))}
+              </div>
+              {user.role !== 'admin' && (
+                <div className="mt-3 pt-3 border-t border-brand-100/70 dark:border-gray-700">
+                  <NavLink
+                    to="/profile"
+                    className={({ isActive }) =>
+                      `block px-3 py-2 rounded-md text-sm transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100 font-medium' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
+                    }
+                  >
+                    Profile ({user.username})
+                  </NavLink>
+                </div>
+              )}
+            </div>
+            <div className="pt-2 border-t border-brand-100/70 dark:border-gray-700">
+              <button
+                type="button"
+                onClick={logout}
+                className="w-full px-3 py-2 rounded-md text-sm text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100 transition text-left"
+              >
+                Sign out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <main className="flex-1 w-full mx-auto px-3 sm:px-4 md:px-12 lg:px-12 py-4 md:py-8">
         <Routes>
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
           <Route path="/import-preview" element={<ImportPreview />} />

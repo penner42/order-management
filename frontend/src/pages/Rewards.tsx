@@ -71,7 +71,7 @@ export default function Rewards() {
           Add
         </button>
       </form>
-      <div className="w-fit min-w-[600px] max-w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div className="w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
         <ul className="divide-y divide-brand-100 dark:divide-gray-700">
           {rewards.length === 0 ? (
             <li className="py-8 text-center text-ink-muted">No rewards yet.</li>

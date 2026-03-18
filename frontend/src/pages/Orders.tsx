@@ -265,6 +265,7 @@ export default function Orders() {
   const [filterBuyingGroupOpen, setFilterBuyingGroupOpen] = useState(false)
   const [filterStoreOpen, setFilterStoreOpen] = useState(false)
   const [filterDateOpen, setFilterDateOpen] = useState(false)
+  const [showFiltersMobile, setShowFiltersMobile] = useState(false)
   const location = useLocation()
   const navigate = useNavigate()
   const [page, setPage] = useState(() => {
@@ -292,6 +293,16 @@ export default function Orders() {
     const q = new URLSearchParams(location.search).get('q')
     return q ?? ''
   })
+
+  // Mobile-only draft state: popup edits won't affect the actual query until "Apply".
+  const [mobileDraftSearchText, setMobileDraftSearchText] = useState('')
+  const [mobileDraftFilterStatuses, setMobileDraftFilterStatuses] = useState<Set<string>>(new Set())
+  const [mobileDraftFilterBuyingGroups, setMobileDraftFilterBuyingGroups] = useState<Set<number>>(new Set())
+  const [mobileDraftFilterStores, setMobileDraftFilterStores] = useState<Set<number>>(new Set())
+  const [mobileDraftFilterStoreAccounts, setMobileDraftFilterStoreAccounts] = useState<Set<number>>(new Set())
+  const [mobileDraftFilterDateFrom, setMobileDraftFilterDateFrom] = useState('')
+  const [mobileDraftFilterDateTo, setMobileDraftFilterDateTo] = useState('')
+
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const restoreSearchFocusRef = useRef<{ start: number; end: number } | null>(null)
@@ -471,6 +482,138 @@ export default function Orders() {
     }
   }
 
+  // ---- Mobile draft filter toggles (only commit on "Apply") ----
+  const toggleMobileDraftStatus = (status: string) => {
+    setMobileDraftFilterStatuses((prev) => {
+      const next = new Set(prev)
+      if (next.has(status)) next.delete(status)
+      else next.add(status)
+      return next
+    })
+  }
+
+  const toggleMobileDraftBuyingGroup = (id: number) => {
+    setMobileDraftFilterBuyingGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleMobileDraftStore = (id: number) => {
+    if (mobileDraftFilterStores.has(id)) {
+      const accountIds = (accountsByStore[id] ?? []).map((a) => a.id)
+      setMobileDraftFilterStoreAccounts((prev) => {
+        const next = new Set(prev)
+        accountIds.forEach((aid) => next.delete(aid))
+        return next
+      })
+      setMobileDraftFilterStores((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+    } else {
+      setMobileDraftFilterStores((prev) => {
+        const next = new Set(prev)
+        next.add(id)
+        return next
+      })
+    }
+  }
+
+  const toggleMobileDraftStoreAccount = (accountId: number, storeId: number) => {
+    const storeAccounts = accountsByStore[storeId] ?? []
+    const storeIsSelected = mobileDraftFilterStores.has(storeId)
+    const accountCurrentlyChecked = mobileDraftFilterStoreAccounts.has(accountId) || storeIsSelected
+    if (accountCurrentlyChecked) {
+      if (storeIsSelected) {
+        setMobileDraftFilterStores((prev) => {
+          const next = new Set(prev)
+          next.delete(storeId)
+          return next
+        })
+        setMobileDraftFilterStoreAccounts((prev) => {
+          const next = new Set(prev)
+          storeAccounts.forEach((a) => {
+            if (a.id !== accountId) next.add(a.id)
+          })
+          return next
+        })
+      } else {
+        setMobileDraftFilterStoreAccounts((prev) => {
+          const next = new Set(prev)
+          next.delete(accountId)
+          return next
+        })
+      }
+    } else {
+      setMobileDraftFilterStoreAccounts((prev) => {
+        const next = new Set(prev)
+        next.add(accountId)
+        const allSubaccountsSelected =
+          storeAccounts.length > 0 && storeAccounts.every((a) => next.has(a.id))
+        if (allSubaccountsSelected) {
+          setMobileDraftFilterStores((prevStores) => {
+            const nextStores = new Set(prevStores)
+            nextStores.add(storeId)
+            return nextStores
+          })
+          storeAccounts.forEach((a) => next.delete(a.id))
+        }
+        return next
+      })
+    }
+  }
+
+  const applyDraftDatePreset = (preset: 'today' | 'week' | 'past7' | 'past30' | 'month' | 'year' | 'lastYear') => {
+    const now = new Date()
+    const today = toYyyyMmDdLocal(now)
+    switch (preset) {
+      case 'today':
+        setMobileDraftFilterDateFrom(today)
+        setMobileDraftFilterDateTo(today)
+        break
+      case 'week': {
+        const day = now.getDay() // 0 = Sunday, 1 = Monday, …
+        const start = new Date(now)
+        start.setDate(now.getDate() - day) // week starts on Sunday
+        setMobileDraftFilterDateFrom(toYyyyMmDdLocal(start))
+        setMobileDraftFilterDateTo(today)
+        break
+      }
+      case 'past7': {
+        const d = new Date(now)
+        d.setDate(d.getDate() - 6)
+        setMobileDraftFilterDateFrom(toYyyyMmDdLocal(d))
+        setMobileDraftFilterDateTo(today)
+        break
+      }
+      case 'past30': {
+        const d = new Date(now)
+        d.setDate(d.getDate() - 29)
+        setMobileDraftFilterDateFrom(toYyyyMmDdLocal(d))
+        setMobileDraftFilterDateTo(today)
+        break
+      }
+      case 'month':
+        setMobileDraftFilterDateFrom(toYyyyMmDdLocal(new Date(now.getFullYear(), now.getMonth(), 1)))
+        setMobileDraftFilterDateTo(today)
+        break
+      case 'year':
+        setMobileDraftFilterDateFrom(`${now.getFullYear()}-01-01`)
+        setMobileDraftFilterDateTo(today)
+        break
+      case 'lastYear': {
+        const y = now.getFullYear() - 1
+        setMobileDraftFilterDateFrom(`${y}-01-01`)
+        setMobileDraftFilterDateTo(`${y}-12-31`)
+        break
+      }
+    }
+  }
+
   const hasActiveFilters =
     filterStatuses.size > 0 ||
     filterBuyingGroups.size > 0 ||
@@ -479,6 +622,15 @@ export default function Orders() {
     !!filterDateFrom ||
     !!filterDateTo ||
     !!searchText.trim()
+
+  const hasActiveMobileDraftFilters =
+    mobileDraftFilterStatuses.size > 0 ||
+    mobileDraftFilterBuyingGroups.size > 0 ||
+    mobileDraftFilterStores.size > 0 ||
+    mobileDraftFilterStoreAccounts.size > 0 ||
+    !!mobileDraftFilterDateFrom ||
+    !!mobileDraftFilterDateTo ||
+    !!mobileDraftSearchText.trim()
 
   const didInitPagingRef = useRef(false)
   useEffect(() => {
@@ -503,6 +655,60 @@ export default function Orders() {
     setFilterBuyingGroupOpen(false)
     setFilterStoreOpen(false)
     setFilterDateOpen(false)
+  }
+
+  const syncMobileDraftFromApplied = () => {
+    setMobileDraftSearchText(searchText)
+    setMobileDraftFilterStatuses(new Set(filterStatuses))
+    setMobileDraftFilterBuyingGroups(new Set(filterBuyingGroups))
+    setMobileDraftFilterStores(new Set(filterStores))
+    setMobileDraftFilterStoreAccounts(new Set(filterStoreAccounts))
+    setMobileDraftFilterDateFrom(filterDateFrom)
+    setMobileDraftFilterDateTo(filterDateTo)
+  }
+
+  const openMobileFilters = () => {
+    syncMobileDraftFromApplied()
+    setShowFiltersMobile(true)
+    // Avoid competing dropdown state under the popup.
+    setFilterStatusOpen(false)
+    setFilterBuyingGroupOpen(false)
+    setFilterStoreOpen(false)
+    setFilterDateOpen(false)
+  }
+
+  const closeMobileFilters = () => {
+    setShowFiltersMobile(false)
+    setFilterStatusOpen(false)
+    setFilterBuyingGroupOpen(false)
+    setFilterStoreOpen(false)
+    setFilterDateOpen(false)
+  }
+
+  const applyMobileFilters = () => {
+    setFilterStatuses(new Set(mobileDraftFilterStatuses))
+    setFilterBuyingGroups(new Set(mobileDraftFilterBuyingGroups))
+    setFilterStores(new Set(mobileDraftFilterStores))
+    setFilterStoreAccounts(new Set(mobileDraftFilterStoreAccounts))
+    setFilterDateFrom(mobileDraftFilterDateFrom)
+    setFilterDateTo(mobileDraftFilterDateTo)
+    setSearchText(mobileDraftSearchText)
+    setSearchDebounced(mobileDraftSearchText)
+    setShowFiltersMobile(false)
+    setFilterStatusOpen(false)
+    setFilterBuyingGroupOpen(false)
+    setFilterStoreOpen(false)
+    setFilterDateOpen(false)
+  }
+
+  const resetMobileDraftFilters = () => {
+    setMobileDraftFilterStatuses(new Set())
+    setMobileDraftFilterBuyingGroups(new Set())
+    setMobileDraftFilterStores(new Set())
+    setMobileDraftFilterStoreAccounts(new Set())
+    setMobileDraftFilterDateFrom('')
+    setMobileDraftFilterDateTo('')
+    setMobileDraftSearchText('')
   }
 
   useEffect(() => {
@@ -1309,7 +1515,7 @@ export default function Orders() {
   return (
     <div className="space-y-6">
       <div
-        className={`flex items-center justify-between gap-4 flex-wrap transition-opacity duration-200 ${
+        className={`flex items-center justify-between gap-2 sm:gap-4 flex-wrap transition-opacity duration-200 ${
           loading ? 'opacity-50 pointer-events-none' : ''
         }`}
       >
@@ -1324,9 +1530,265 @@ export default function Orders() {
             )}
           </span>
         </div>
-        <div className="flex-1 flex justify-center items-center min-w-0">
-          <div className="flex items-center gap-3 flex-wrap justify-center">
-        <div ref={filterStatusRef} className="relative w-[110px] shrink-0">
+        <div className="flex-1 flex flex-col gap-2 min-w-0">
+          <div className="flex items-center gap-2 justify-end w-full sm:justify-center flex-wrap">
+            <button
+              type="button"
+              className={`inline-flex items-center justify-center w-10 h-10 rounded-lg border sm:hidden ${
+                hasActiveFilters
+                  ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                  : 'border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200'
+              }`}
+              onClick={() => {
+                if (showFiltersMobile) closeMobileFilters()
+                else openMobileFilters()
+              }}
+              aria-expanded={showFiltersMobile}
+              aria-controls="orders-mobile-filters-popup"
+              aria-label="Filters"
+              title="Filters"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="w-5 h-5"
+                aria-hidden="true"
+              >
+                <path d="M22 3H2l8 9v7l4 2v-9l8-9z" />
+              </svg>
+            </button>
+          </div>
+
+          {showFiltersMobile && (
+            <div
+              className="fixed inset-0 bg-black/40 z-50 sm:hidden"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Filters"
+              onClick={closeMobileFilters}
+            >
+              <div
+                id="orders-mobile-filters-popup"
+                className="absolute inset-x-0 bottom-0 bg-white dark:bg-gray-800 rounded-t-xl shadow-xl max-h-[85vh] overflow-auto border-t border-brand-200/80 dark:border-gray-700"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="p-4 border-b border-brand-200/80 dark:border-gray-700 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-ink dark:text-gray-200 font-semibold">Filters</div>
+                    <div className="text-xs text-ink-muted dark:text-gray-400">
+                      Apply changes to update the list
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-brand-200 dark:border-gray-700 bg-white dark:bg-gray-700 text-ink dark:text-gray-200"
+                    onClick={closeMobileFilters}
+                    aria-label="Close filters"
+                    title="Close"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5" aria-hidden="true">
+                      <path d="M18 6 6 18M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div className="p-4 space-y-5">
+                  <div>
+                    <label className="block text-xs font-medium text-ink-muted dark:text-gray-400 mb-2">Search</label>
+                    <input
+                      type="search"
+                      placeholder="Search order #, item, store, amount…"
+                      value={mobileDraftSearchText}
+                      onChange={(e) => setMobileDraftSearchText(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && (e.currentTarget as HTMLInputElement).blur()}
+                      className="h-10 w-full rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-ink dark:text-gray-200 text-sm px-3 placeholder:text-ink-muted focus:outline-none focus:ring-1 focus:ring-brand-500"
+                      aria-label="Search orders"
+                    />
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="text-xs font-medium text-ink-muted dark:text-gray-400">Status</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {STATUS_FILTER_OPTIONS.map(([value, label]) => (
+                        <label
+                          key={value}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-brand-200/60 dark:border-gray-700/60 bg-white/60 dark:bg-gray-700/40"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={mobileDraftFilterStatuses.has(value)}
+                            onChange={() => toggleMobileDraftStatus(value)}
+                            className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                          />
+                          <span className="text-sm text-ink dark:text-gray-200">{label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="text-xs font-medium text-ink-muted dark:text-gray-400">Buying groups</div>
+                    <div className="max-h-36 overflow-auto rounded-lg border border-brand-200/70 dark:border-gray-700/70 bg-white/60 dark:bg-gray-700/40 p-2">
+                      {groups.length === 0 ? (
+                        <div className="text-sm text-ink-muted dark:text-gray-400 px-2 py-2">No buying groups</div>
+                      ) : (
+                        groups.map((g) => (
+                          <label key={g.id} className="flex items-center gap-2 px-2 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-600/30 rounded cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={mobileDraftFilterBuyingGroups.has(g.id)}
+                              onChange={() => toggleMobileDraftBuyingGroup(g.id)}
+                              className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                            />
+                            <span className="text-sm text-ink dark:text-gray-200">{g.name}</span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="text-xs font-medium text-ink-muted dark:text-gray-400">Stores</div>
+                    <div className="max-h-44 overflow-auto rounded-lg border border-brand-200/70 dark:border-gray-700/70 bg-white/60 dark:bg-gray-700/40 p-2 space-y-2">
+                      {stores.length === 0 ? (
+                        <div className="text-sm text-ink-muted dark:text-gray-400 px-2 py-2">No stores</div>
+                      ) : (
+                        stores.map((s) => {
+                          const storeAccounts = accountsByStore[s.id] ?? []
+                          const storeChecked = mobileDraftFilterStores.has(s.id)
+                          const someAccountsSelected = storeAccounts.some((a) => mobileDraftFilterStoreAccounts.has(a.id))
+                          const storeIndeterminate = !storeChecked && someAccountsSelected
+                          return (
+                            <div key={s.id} className="border border-brand-200/60 dark:border-gray-700/60 rounded-lg bg-white/50 dark:bg-gray-700/30 p-2">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  ref={(el) => {
+                                    if (el) el.indeterminate = storeIndeterminate
+                                  }}
+                                  type="checkbox"
+                                  checked={storeChecked}
+                                  onChange={() => toggleMobileDraftStore(s.id)}
+                                  className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                                />
+                                <span className="text-sm text-ink dark:text-gray-200">{s.name}</span>
+                              </label>
+                              <div className="pl-6 mt-2 space-y-1">
+                                {storeAccounts.length === 0 ? (
+                                  <div className="text-xs text-ink-muted dark:text-gray-400 px-2">No accounts</div>
+                                ) : (
+                                  storeAccounts.map((a) => (
+                                    <label
+                                      key={a.id}
+                                      className="flex items-center gap-2 cursor-pointer hover:bg-brand-50 dark:hover:bg-gray-600/30 rounded px-2 py-1.5"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={mobileDraftFilterStoreAccounts.has(a.id) || storeChecked}
+                                        onChange={() => toggleMobileDraftStoreAccount(a.id, s.id)}
+                                        className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                                      />
+                                      <span className="text-sm text-ink dark:text-gray-200">{a.name}</span>
+                                    </label>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="text-xs font-medium text-ink-muted dark:text-gray-400">Date range</div>
+                    <div className="rounded-lg border border-brand-200/70 dark:border-gray-700/70 bg-white/60 dark:bg-gray-700/40 p-3 space-y-3">
+                      <div>
+                        <div className="text-xs font-medium text-ink-muted dark:text-gray-400 mb-2">Presets</div>
+                        <div className="flex flex-wrap gap-1">
+                          {(['today', 'week', 'past7', 'past30', 'month', 'year', 'lastYear'] as const).map((p) => (
+                            <button
+                              key={p}
+                              type="button"
+                              onClick={() => applyDraftDatePreset(p)}
+                              className="px-2 py-1 rounded text-xs font-medium text-ink dark:text-gray-200 hover:bg-brand-100 dark:hover:bg-gray-600 transition border border-brand-200/70 dark:border-gray-700/70"
+                            >
+                              {p === 'today' && 'Today'}
+                              {p === 'week' && 'This Week'}
+                              {p === 'past7' && 'Past 7 Days'}
+                              {p === 'past30' && 'Past 30 Days'}
+                              {p === 'month' && 'This Month'}
+                              {p === 'year' && 'This Year'}
+                              {p === 'lastYear' && 'Last Year'}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="date"
+                          value={mobileDraftFilterDateFrom}
+                          onChange={(e) => setMobileDraftFilterDateFrom(e.target.value)}
+                          className="flex-1 px-2 py-1.5 rounded border border-brand-200 dark:border-gray-600 text-sm text-ink dark:text-gray-200 bg-white dark:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent min-w-0"
+                          title="From date"
+                        />
+                        <span className="text-ink-muted text-xs">–</span>
+                        <input
+                          type="date"
+                          value={mobileDraftFilterDateTo}
+                          onChange={(e) => setMobileDraftFilterDateTo(e.target.value)}
+                          className="flex-1 px-2 py-1.5 rounded border border-brand-200 dark:border-gray-600 text-sm text-ink dark:text-gray-200 bg-white dark:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent min-w-0"
+                          title="To date"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-4 border-t border-brand-200/80 dark:border-gray-700 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetMobileDraftFilters()
+                    }}
+                    disabled={!hasActiveMobileDraftFilters}
+                    className={`px-3 py-2 rounded-lg border text-sm transition shrink-0 ${
+                      hasActiveMobileDraftFilters
+                        ? 'border-brand-200 dark:border-gray-600 text-ink dark:text-gray-200 hover:bg-brand-50 dark:hover:bg-gray-700'
+                        : 'border-brand-200 dark:border-gray-600 text-ink-muted dark:text-gray-500 opacity-60 cursor-not-allowed'
+                    }`}
+                  >
+                    Reset
+                  </button>
+                  <div className="flex-1" />
+                  <button
+                    type="button"
+                    onClick={closeMobileFilters}
+                    className="px-3 py-2 border border-brand-300 dark:border-gray-700 rounded-lg text-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={applyMobileFilters}
+                    className="px-3 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 transition font-medium"
+                  >
+                    Apply
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div
+            id="orders-mobile-filters"
+            className="hidden sm:flex items-center gap-3 flex-wrap justify-center"
+          >
+        <div ref={filterStatusRef} className="relative w-full sm:w-[110px] shrink-0">
           <button
             type="button"
             onClick={() => {
@@ -1362,7 +1824,7 @@ export default function Orders() {
             </div>
           )}
         </div>
-        <div ref={filterBuyingGroupRef} className="relative w-[145px] shrink-0">
+        <div ref={filterBuyingGroupRef} className="relative w-full sm:w-[145px] shrink-0">
           <button
             type="button"
             onClick={() => {
@@ -1402,7 +1864,7 @@ export default function Orders() {
             </div>
           )}
         </div>
-        <div ref={filterStoreRef} className="relative w-[120px] shrink-0">
+        <div ref={filterStoreRef} className="relative w-full sm:w-[120px] shrink-0">
           <button
             type="button"
             onClick={() => {
@@ -1467,7 +1929,7 @@ export default function Orders() {
             </div>
           )}
         </div>
-        <div ref={filterDateRef} className="relative w-[240px] shrink-0">
+        <div ref={filterDateRef} className="relative w-full sm:w-[240px] shrink-0">
           <button
             type="button"
             onClick={() => {
@@ -1540,25 +2002,9 @@ export default function Orders() {
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-          className="h-8 w-[220px] shrink-0 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 text-sm px-2 placeholder:text-ink-muted focus:outline-none focus:ring-1 focus:ring-brand-500"
+          className="h-10 w-full sm:h-8 sm:w-[220px] shrink-0 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 text-sm px-3 sm:px-2 placeholder:text-ink-muted focus:outline-none focus:ring-1 focus:ring-brand-500"
           aria-label="Search orders"
         />
-        <select
-          value={perPage}
-          onChange={(e) => {
-            const n = parseInt(e.target.value, 10)
-            setPerPage(Number.isFinite(n) ? n : 50)
-            setPage(1)
-          }}
-          className="h-8 shrink-0 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 text-sm px-2 focus:outline-none focus:ring-1 focus:ring-brand-500"
-          aria-label="Orders per page"
-          title="Orders per page"
-        >
-          <option value={25}>25 / page</option>
-          <option value={50}>50 / page</option>
-          <option value={100}>100 / page</option>
-          <option value={0}>All</option>
-        </select>
         <button
           type="button"
           onClick={resetFilters}
@@ -1576,9 +2022,26 @@ export default function Orders() {
         <button
           onClick={handleCreateNewOrder}
           disabled={creatingOrder}
-          className="px-4 py-2 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition shrink-0 disabled:opacity-60"
+          aria-label="New order"
+          title="New order"
+          className="sm:px-4 sm:py-2 px-0 py-0 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition shrink-0 disabled:opacity-60 w-10 h-10 sm:w-auto sm:h-auto inline-flex items-center justify-center"
         >
-          {creatingOrder ? 'Creating…' : 'New order'}
+          <span className="sm:hidden inline-flex items-center justify-center">
+            {creatingOrder ? (
+              <span
+                className="inline-block w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin"
+                aria-label="Creating order"
+              />
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5" aria-hidden="true">
+                <path d="M12 5v14" />
+                <path d="M5 12h14" />
+              </svg>
+            )}
+          </span>
+          <span className="hidden sm:inline">
+            {creatingOrder ? 'Creating…' : 'New order'}
+          </span>
         </button>
       </div>
 
@@ -1589,7 +2052,23 @@ export default function Orders() {
       >
         <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-ink-muted">
           <div className="shrink-0">{rangeLabel}</div>
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            <select
+              value={perPage}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10)
+                setPerPage(Number.isFinite(n) ? n : 50)
+                setPage(1)
+              }}
+              className="h-8 shrink-0 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 text-sm px-2 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              aria-label="Orders per page"
+              title="Orders per page"
+            >
+              <option value={25}>25 / page</option>
+              <option value={50}>50 / page</option>
+              <option value={100}>100 / page</option>
+              <option value={0}>All</option>
+            </select>
             <button
               type="button"
               onClick={() => setPage((p) => Math.max(1, p - 1))}
@@ -1648,18 +2127,15 @@ export default function Orders() {
               }))
             const totalPaid = orderTotals(o.items ?? [])
             const itemCount = o.items?.length ?? 0
-            const lineItemsHeight = itemCount * 32 + 40 // approx row height + header
 
             return (
               <div
                 key={o.id}
-                className="flex gap-0 border-2 border-brand-400 dark:border-gray-400 rounded-xl overflow-hidden bg-brand-50/50 dark:bg-gray-600/80"
-                style={{ minHeight: Math.max(120, lineItemsHeight) }}
+                className="flex flex-col lg:flex-row gap-0 border-2 border-brand-400 dark:border-gray-400 rounded-xl overflow-hidden bg-brand-50/50 dark:bg-gray-600/80"
               >
                 {/* Left: vertical order box */}
                 <div
-                  className="w-[400px] shrink-0 flex flex-col gap-2 p-3 border-r-2 border-brand-400 dark:border-gray-400 bg-white/80 dark:bg-gray-700/80 overflow-hidden"
-                  style={{ minHeight: lineItemsHeight }}
+                  className="w-full lg:w-[400px] shrink-0 flex flex-col gap-2 p-3 lg:border-r-2 border-brand-400 dark:border-gray-400 bg-white/80 dark:bg-gray-700/80 overflow-hidden border-b-2 lg:border-b-0"
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <label className="text-xs text-ink-muted shrink-0 w-14">Order #</label>
@@ -1941,7 +2417,7 @@ export default function Orders() {
                 </div>
 
                 {/* Right: line items table */}
-                <div className="flex-1 min-w-0 overflow-x-auto">
+                <div className="flex-1 min-w-0">
                   {itemCount === 0 ? (
                     <div className="p-4 text-sm text-ink-muted flex items-center gap-2">
                       No line items.
@@ -1955,135 +2431,143 @@ export default function Orders() {
                     </div>
                   ) : (
                     <div className="line-items-section rounded-lg overflow-hidden">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="bg-brand-100/50 dark:bg-gray-700/50 text-left border-b border-brand-200 dark:border-gray-600">
-                            <th className="w-8 py-1 px-2">
-                              <input
-                                type="checkbox"
-                                checked={o.items!.every((i) => selectedItemIds.has(i.id)) && o.items!.length > 0}
-                                onChange={() => toggleSelectAll(o.items!)}
-                                className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
-                              />
-                            </th>
-                            <th className="py-1 px-2 font-medium text-ink-muted w-12">Qty</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted">Description</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted">Tracking</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Cost</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Subtotal</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Shipping</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Sales Tax</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Cost</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Payout</th>
-                            <th className="py-1 px-2 font-medium text-ink-muted">Status</th>
-                            <th className="w-8 py-1 px-1.5 text-right">
-                              <div className="flex items-center justify-end gap-0.5">
-                                <button
-                                  type="button"
-                                  onClick={() => addItem(o)}
-                                  className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600"
-                                  title="Add line item"
-                                  aria-label="Add line item"
-                                >
-                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                                  </svg>
-                                </button>
-                                {o.items && o.items.length > 0 && (
-                                  <button
-                                    type="button"
-                                    title="Copy order"
-                                    onClick={(e) => copyOrder(o, e)}
-                                    disabled={copyingId === o.id}
-                                    className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition disabled:opacity-50"
-                                    aria-label="Copy order"
-                                  >
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                    </svg>
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  title="Delete order"
-                                  onClick={() => setConfirmDeleteOrderId(o.id)}
-                                  disabled={deletingOrderId === o.id}
-                                  className="p-1.5 rounded text-red-600 hover:text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40 transition disabled:opacity-50"
-                                  aria-label="Delete order"
-                                >
-                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                  </svg>
-                                </button>
-                              </div>
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {groupOrderItemsByShipment(o).map((group) =>
-                            group.items.map((item, itemIndex) => {
-                              const isFirstInGroup = itemIndex === 0
-                              const effectiveStatus = getEffectiveItemStatus(item)
-                              const nextStatuses = group.items
-                                .map((i) => getNextStatus(getEffectiveItemStatus(i)))
-                                .filter((s): s is EffectiveItemStatus => s != null)
-                              const lowestNext =
-                                nextStatuses.length > 0
-                                  ? STATUS_PROGRESSION[Math.min(...nextStatuses.map((s) => STATUS_PROGRESSION.indexOf(s)))]
-                                  : null
-                              const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
-                              const isSubmitted = lowestNext === 'submitted'
-                              const isScanned = lowestNext === 'scanned'
-                              const hideAdvanceButton = lowestNext === 'payment_requested'
-                              const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
-                              const trackingInfo = trackingInfoByItemId[item.id] ?? null
-                              return (
-                                <tr key={item.id} className={getStatusRowClass(effectiveStatus)}>
-                                  <td className="py-1 px-2">
-                                    <input
-                                      type="checkbox"
-                                      checked={selectedItemIds.has(item.id)}
-                                      onChange={() => toggleItemSelect(item.id)}
-                                      className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
-                                    />
-                                  </td>
-                                  <td className="py-1 px-2">
-                                    <input
-                                      type="number"
-                                      min={1}
-                                      value={itemEdits[item.id]?.quantity ?? (item.quantity ?? 1)}
-                                      onChange={(e) => {
-                                        const n = parseInt(e.target.value, 10)
-                                        if (!Number.isNaN(n) && n >= 1)
-                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], quantity: n } }))
-                                      }}
-                                      onBlur={() => {
-                                        const v = itemEdits[item.id]?.quantity
-                                        if (v != null && v !== (item.quantity ?? 1)) updateItem(item.id, { quantity: v })
-                                      }}
-                                      disabled={savingItemId === item.id}
-                                      className={`w-12 h-5 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
-                                    />
-                                  </td>
-                                  <td className="py-1 px-2">
-                                    <input
-                                      type="text"
-                                      value={itemEdits[item.id]?.description ?? (item.description ?? '')}
-                                      onChange={(e) =>
-                                        setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], description: e.target.value } }))
-                                      }
-                                      onBlur={() => {
-                                        const v = (itemEdits[item.id]?.description ?? item.description ?? '').trim()
-                                        if (v !== (item.description ?? '')) updateItem(item.id, { description: v || null })
-                                      }}
-                                      placeholder="Description"
-                                      disabled={savingItemId === item.id}
-                                      className={`w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
-                                    />
-                                  </td>
-                                  <td className="py-1 px-2">
-                                    <div className="flex items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500">
+                      <div className="md:hidden bg-white/70 dark:bg-gray-700/70 border-b border-brand-200 dark:border-gray-600 px-2 py-2 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={o.items!.every((i) => selectedItemIds.has(i.id)) && o.items!.length > 0}
+                            onChange={() => toggleSelectAll(o.items!)}
+                            className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                            aria-label="Select all line items"
+                          />
+                          <div className="text-xs font-medium text-ink-muted">Line items ({itemCount})</div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => addItem(o)}
+                            className="p-2 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600"
+                            title="Add line item"
+                            aria-label="Add line item"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                            </svg>
+                          </button>
+                          {o.items && o.items.length > 0 && (
+                            <button
+                              type="button"
+                              title="Copy order"
+                              onClick={(e) => copyOrder(o, e)}
+                              disabled={copyingId === o.id}
+                              className="p-2 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition disabled:opacity-50"
+                              aria-label="Copy order"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                              </svg>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            title="Delete order"
+                            onClick={() => setConfirmDeleteOrderId(o.id)}
+                            disabled={deletingOrderId === o.id}
+                            className="p-2 rounded text-red-600 hover:text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40 transition disabled:opacity-50"
+                            aria-label="Delete order"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="md:hidden p-2 space-y-2">
+                        {groupOrderItemsByShipment(o).flatMap((group) =>
+                          group.items.map((item, itemIndex) => {
+                            const isFirstInGroup = itemIndex === 0
+                            const effectiveStatus = getEffectiveItemStatus(item)
+                            const nextStatuses = group.items
+                              .map((i) => getNextStatus(getEffectiveItemStatus(i)))
+                              .filter((s): s is EffectiveItemStatus => s != null)
+                            const lowestNext =
+                              nextStatuses.length > 0
+                                ? STATUS_PROGRESSION[Math.min(...nextStatuses.map((s) => STATUS_PROGRESSION.indexOf(s)))]
+                                : null
+                            const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
+                            const isSubmitted = lowestNext === 'submitted'
+                            const isScanned = lowestNext === 'scanned'
+                            const hideAdvanceButton = lowestNext === 'payment_requested'
+                            const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
+                            const trackingInfo = trackingInfoByItemId[item.id] ?? null
+
+                            return (
+                              <div key={item.id} className={`rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 p-2 ${getStatusRowClass(effectiveStatus)}`}>
+                                <div className="flex items-start gap-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedItemIds.has(item.id)}
+                                    onChange={() => toggleItemSelect(item.id)}
+                                    className="mt-1 rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                                    aria-label="Select line item"
+                                  />
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2">
+                                      <input
+                                        type="number"
+                                        min={1}
+                                        value={itemEdits[item.id]?.quantity ?? (item.quantity ?? 1)}
+                                        onChange={(e) => {
+                                          const n = parseInt(e.target.value, 10)
+                                          if (!Number.isNaN(n) && n >= 1)
+                                            setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], quantity: n } }))
+                                        }}
+                                        onBlur={() => {
+                                          const v = itemEdits[item.id]?.quantity
+                                          if (v != null && v !== (item.quantity ?? 1)) updateItem(item.id, { quantity: v })
+                                        }}
+                                        disabled={savingItemId === item.id}
+                                        className={`w-16 h-9 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                        aria-label="Quantity"
+                                      />
+                                      <select
+                                        value={itemEdits[item.id]?.status ?? item.status}
+                                        onChange={(e) => {
+                                          const s = e.target.value as ItemStatus
+                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], status: s } }))
+                                          updateItem(item.id, { status: s })
+                                        }}
+                                        disabled={savingItemId === item.id}
+                                        className={`flex-1 min-w-0 h-9 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                        aria-label="Status"
+                                      >
+                                        {ITEM_STATUSES_FOR_EDIT.map((val) => (
+                                          <option key={val} value={val}>
+                                            {STATUS_LABELS[val]}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+
+                                    <div className="mt-2">
+                                      <input
+                                        type="text"
+                                        value={itemEdits[item.id]?.description ?? (item.description ?? '')}
+                                        onChange={(e) =>
+                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], description: e.target.value } }))
+                                        }
+                                        onBlur={() => {
+                                          const v = (itemEdits[item.id]?.description ?? item.description ?? '').trim()
+                                          if (v !== (item.description ?? '')) updateItem(item.id, { description: v || null })
+                                        }}
+                                        placeholder="Description"
+                                        disabled={savingItemId === item.id}
+                                        className={`w-full h-9 rounded border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                      />
+                                    </div>
+
+                                    <div className="mt-2 flex items-stretch min-w-0 h-9 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500 overflow-hidden">
                                       <input
                                         type="text"
                                         value={trackingRaw}
@@ -2092,152 +2576,68 @@ export default function Orders() {
                                           const v = e.target.value
                                           const current = getTracking(item.id)
                                           if (v.trim() !== current.trim() || (v === '' && current !== '')) saveItemTracking(item.id, v)
-                                          else setTrackingEdits((prev) => { const next = { ...prev }; delete next[item.id]; return next })
+                                          else
+                                            setTrackingEdits((prev) => {
+                                              const next = { ...prev }
+                                              delete next[item.id]
+                                              return next
+                                            })
                                         }}
-                                        placeholder=""
                                         disabled={savingTrackingId === item.id}
-                                        className="flex-1 min-w-[5rem] h-5 border-0 rounded-l px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
+                                        className="flex-1 min-w-0 h-9 border-0 px-3 py-1.5 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
+                                        placeholder="Tracking"
                                       />
                                       {trackingInfo && trackingInfo.url && (
                                         <a
                                           href={trackingInfo.url}
                                           target="_blank"
                                           rel="noopener noreferrer"
-                                          className="shrink-0 flex items-center gap-1 h-5 border-l border-brand-200 dark:border-gray-600 pl-2 pr-2 py-0 text-xs font-medium text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-gray-700/50"
+                                          className="shrink-0 inline-flex items-center gap-1 px-3 text-sm font-medium text-brand-600 dark:text-brand-400 border-l border-brand-200 dark:border-gray-600 hover:bg-brand-50 dark:hover:bg-gray-700/50"
                                           title={`Track via ${trackingInfo.carrier}`}
+                                          aria-label={`Track via ${trackingInfo.carrier}`}
                                         >
                                           <span className="whitespace-nowrap">{trackingInfo.carrier}</span>
-                                          <svg className="w-3.5 h-3.5 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <svg className="w-4 h-4 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                                           </svg>
                                         </a>
                                       )}
                                     </div>
-                                  </td>
-                                  <td className="py-1 px-2">
-                                    <input
-                                      type="text"
-                                      value={itemEdits[item.id]?.price_paid ?? (item.price_paid ?? '')}
-                                      onChange={(e) =>
-                                        setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], price_paid: e.target.value } }))
-                                      }
-                                      onBlur={() => {
-                                        const v = (itemEdits[item.id]?.price_paid ?? item.price_paid ?? '').trim()
-                                        if (v !== (item.price_paid ?? '')) updateItem(item.id, { price_paid: v || null })
-                                      }}
-                                      placeholder="0.00"
-                                      disabled={savingItemId === item.id}
-                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
-                                    />
-                                  </td>
-                                  <td className="py-1 px-2">
-                                    <input
-                                      type="text"
-                                      value={itemEdits[item.id]?.price_sold ?? (item.price_sold ?? '')}
-                                      onChange={(e) =>
-                                        setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], price_sold: e.target.value } }))
-                                      }
-                                      onBlur={() => {
-                                        const v = (itemEdits[item.id]?.price_sold ?? item.price_sold ?? '').trim()
-                                        if (v !== (item.price_sold ?? '')) updateItem(item.id, { price_sold: v || null })
-                                      }}
-                                      placeholder="0.00"
-                                      disabled={savingItemId === item.id}
-                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
-                                    />
-                                  </td>
-                                  <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
-                                    ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1))).toFixed(2)}
-                                  </td>
-                                  <td className="py-1 px-2">
-                                    <input
-                                      type="text"
-                                      value={itemEdits[item.id]?.shipping ?? (item.shipping ?? '')}
-                                      onChange={(e) =>
-                                        setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], shipping: e.target.value } }))
-                                      }
-                                      onBlur={() => {
-                                        const v = (itemEdits[item.id]?.shipping ?? item.shipping ?? '').trim()
-                                        if (v !== (item.shipping ?? '')) updateItem(item.id, { shipping: v || null })
-                                      }}
-                                      placeholder="0.00"
-                                      disabled={savingItemId === item.id}
-                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
-                                    />
-                                  </td>
-                                  <td className="py-1 px-2">
-                                    <input
-                                      type="text"
-                                      value={itemEdits[item.id]?.sales_tax ?? (item.sales_tax ?? '')}
-                                      onChange={(e) =>
-                                        setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], sales_tax: e.target.value } }))
-                                      }
-                                      onBlur={() => {
-                                        const v = (itemEdits[item.id]?.sales_tax ?? item.sales_tax ?? '').trim()
-                                        if (v !== (item.sales_tax ?? '')) updateItem(item.id, { sales_tax: v || null })
-                                      }}
-                                      placeholder="0.00"
-                                      disabled={savingItemId === item.id}
-                                      className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
-                                    />
-                                  </td>
-                                  <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
-                                    ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) + parseDecimal(itemEdits[item.id]?.shipping ?? item.shipping) + parseDecimal(itemEdits[item.id]?.sales_tax ?? item.sales_tax)) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1)).toFixed(2)}
-                                  </td>
-                                  <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
-                                    ${((parseDecimal(itemEdits[item.id]?.price_sold ?? item.price_sold) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1))).toFixed(2)}
-                                  </td>
-                                  <td className="py-1 px-2">
-                                    <select
-                                      value={itemEdits[item.id]?.status ?? item.status}
-                                      onChange={(e) => {
-                                        const s = e.target.value as ItemStatus
-                                        setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], status: s } }))
-                                        updateItem(item.id, { status: s })
-                                      }}
-                                      disabled={savingItemId === item.id}
-                                      className={`min-w-[6.5rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
-                                    >
-                                      {ITEM_STATUSES_FOR_EDIT.map((val) => (
-                                        <option key={val} value={val}>
-                                          {STATUS_LABELS[val]}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </td>
-                                  <td className="py-1 px-1.5 text-right w-8">
-                                    <div className="flex items-center justify-end gap-0.5">
-                                      {getNextStatus(effectiveStatus) === 'scanned' ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => setScanSingleItemModal(item)}
-                                          className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700"
-                                          title="Mark as Scanned"
-                                          aria-label="Mark as Scanned"
-                                        >
-                                          Scanned
-                                        </button>
-                                      ) : isFirstInGroup && advanceLabel && !hideAdvanceButton ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            if (isSubmitted) setSubmitShipmentModal({ group })
-                                            else if (isScanned) setScanReceiptModal({ group })
-                                            else advanceShipmentToNextStatus(group)
-                                          }}
-                                          disabled={advancingGroupKey === group.key}
-                                          className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
-                                          title={isSubmitted ? 'Mark as Submitted' : isScanned ? 'Mark as Scanned' : `Advance to ${advanceLabel}`}
-                                          aria-label={isSubmitted ? 'Mark as Submitted' : isScanned ? 'Mark as Scanned' : `Advance to ${advanceLabel}`}
-                                        >
-                                          {advancingGroupKey === group.key ? '…' : advanceLabel}
-                                        </button>
-                                      ) : null}
+                                  </div>
+
+                                  <div className="flex flex-col items-end gap-1">
+                                    {getNextStatus(effectiveStatus) === 'scanned' ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => setScanSingleItemModal(item)}
+                                        className="px-2 py-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700"
+                                        title="Mark as Scanned"
+                                        aria-label="Mark as Scanned"
+                                      >
+                                        Scanned
+                                      </button>
+                                    ) : isFirstInGroup && advanceLabel && !hideAdvanceButton ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (isSubmitted) setSubmitShipmentModal({ group })
+                                          else if (isScanned) setScanReceiptModal({ group })
+                                          else advanceShipmentToNextStatus(group)
+                                        }}
+                                        disabled={advancingGroupKey === group.key}
+                                        className="px-2 py-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
+                                        title={isSubmitted ? 'Mark as Submitted' : isScanned ? 'Mark as Scanned' : `Advance to ${advanceLabel}`}
+                                        aria-label={isSubmitted ? 'Mark as Submitted' : isScanned ? 'Mark as Scanned' : `Advance to ${advanceLabel}`}
+                                      >
+                                        {advancingGroupKey === group.key ? '…' : advanceLabel}
+                                      </button>
+                                    ) : null}
+                                    <div className="flex items-center justify-end gap-1">
                                       {(item.quantity ?? 1) >= 2 ? (
                                         <button
                                           type="button"
                                           onClick={() => setSplitModalItem(item)}
-                                          className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition shrink-0"
+                                          className="p-2 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition"
                                           title="Split for separate shipping"
                                           aria-label="Split for separate shipping"
                                         >
@@ -2247,18 +2647,16 @@ export default function Orders() {
                                             <path d="M8.6 8.6l10.4 10.4M8.6 15.4l10.4 -10.4" />
                                           </svg>
                                         </button>
-                                      ) : (
-                                        <span className="inline-block w-6 h-6 shrink-0" aria-hidden />
-                                      )}
+                                      ) : null}
                                       <button
                                         type="button"
                                         onClick={() => copyItem(o, item)}
                                         disabled={copyingItemId === item.id}
-                                        className="p-1 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 disabled:opacity-50"
+                                        className="p-2 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 disabled:opacity-50"
                                         title="Copy line item"
                                         aria-label="Copy line item"
                                       >
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                                         </svg>
                                       </button>
@@ -2266,22 +2664,352 @@ export default function Orders() {
                                         type="button"
                                         onClick={() => setConfirmDeleteItemId(item.id)}
                                         disabled={deletingItemId === item.id}
-                                        className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
+                                        className="p-2 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
                                         title="Delete line item"
                                         aria-label="Delete line item"
                                       >
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                                         </svg>
                                       </button>
                                     </div>
-                                  </td>
-                                </tr>
-                              )
-                            })
-                          )}
-                        </tbody>
-                      </table>
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          }),
+                        )}
+                      </div>
+
+                      <div className="hidden md:block overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="bg-brand-100/50 dark:bg-gray-700/50 text-left border-b border-brand-200 dark:border-gray-600">
+                              <th className="w-8 py-1 px-2">
+                                <input
+                                  type="checkbox"
+                                  checked={o.items!.every((i) => selectedItemIds.has(i.id)) && o.items!.length > 0}
+                                  onChange={() => toggleSelectAll(o.items!)}
+                                  className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                                />
+                              </th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-12">Qty</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted">Description</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted">Tracking</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Cost</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Subtotal</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Shipping</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Sales Tax</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Cost</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Total Payout</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted">Status</th>
+                              <th className="w-8 py-1 px-1.5 text-right">
+                                <div className="flex items-center justify-end gap-0.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => addItem(o)}
+                                    className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600"
+                                    title="Add line item"
+                                    aria-label="Add line item"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                    </svg>
+                                  </button>
+                                  {o.items && o.items.length > 0 && (
+                                    <button
+                                      type="button"
+                                      title="Copy order"
+                                      onClick={(e) => copyOrder(o, e)}
+                                      disabled={copyingId === o.id}
+                                      className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition disabled:opacity-50"
+                                      aria-label="Copy order"
+                                    >
+                                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                      </svg>
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    title="Delete order"
+                                    onClick={() => setConfirmDeleteOrderId(o.id)}
+                                    disabled={deletingOrderId === o.id}
+                                    className="p-1.5 rounded text-red-600 hover:text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40 transition disabled:opacity-50"
+                                    aria-label="Delete order"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {groupOrderItemsByShipment(o).map((group) =>
+                              group.items.map((item, itemIndex) => {
+                                const isFirstInGroup = itemIndex === 0
+                                const effectiveStatus = getEffectiveItemStatus(item)
+                                const nextStatuses = group.items
+                                  .map((i) => getNextStatus(getEffectiveItemStatus(i)))
+                                  .filter((s): s is EffectiveItemStatus => s != null)
+                                const lowestNext =
+                                  nextStatuses.length > 0
+                                    ? STATUS_PROGRESSION[Math.min(...nextStatuses.map((s) => STATUS_PROGRESSION.indexOf(s)))]
+                                    : null
+                                const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
+                                const isSubmitted = lowestNext === 'submitted'
+                                const isScanned = lowestNext === 'scanned'
+                                const hideAdvanceButton = lowestNext === 'payment_requested'
+                                const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
+                                const trackingInfo = trackingInfoByItemId[item.id] ?? null
+                                return (
+                                  <tr key={item.id} className={getStatusRowClass(effectiveStatus)}>
+                                    <td className="py-1 px-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedItemIds.has(item.id)}
+                                        onChange={() => toggleItemSelect(item.id)}
+                                        className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                                      />
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <input
+                                        type="number"
+                                        min={1}
+                                        value={itemEdits[item.id]?.quantity ?? (item.quantity ?? 1)}
+                                        onChange={(e) => {
+                                          const n = parseInt(e.target.value, 10)
+                                          if (!Number.isNaN(n) && n >= 1)
+                                            setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], quantity: n } }))
+                                        }}
+                                        onBlur={() => {
+                                          const v = itemEdits[item.id]?.quantity
+                                          if (v != null && v !== (item.quantity ?? 1)) updateItem(item.id, { quantity: v })
+                                        }}
+                                        disabled={savingItemId === item.id}
+                                        className={`w-12 h-5 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                      />
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <input
+                                        type="text"
+                                        value={itemEdits[item.id]?.description ?? (item.description ?? '')}
+                                        onChange={(e) =>
+                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], description: e.target.value } }))
+                                        }
+                                        onBlur={() => {
+                                          const v = (itemEdits[item.id]?.description ?? item.description ?? '').trim()
+                                          if (v !== (item.description ?? '')) updateItem(item.id, { description: v || null })
+                                        }}
+                                        placeholder="Description"
+                                        disabled={savingItemId === item.id}
+                                        className={`w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                      />
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <div className="flex items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500">
+                                        <input
+                                          type="text"
+                                          value={trackingRaw}
+                                          onChange={(e) => setTrackingEdits((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                                          onBlur={(e) => {
+                                            const v = e.target.value
+                                            const current = getTracking(item.id)
+                                            if (v.trim() !== current.trim() || (v === '' && current !== '')) saveItemTracking(item.id, v)
+                                            else setTrackingEdits((prev) => { const next = { ...prev }; delete next[item.id]; return next })
+                                          }}
+                                          placeholder=""
+                                          disabled={savingTrackingId === item.id}
+                                          className="flex-1 min-w-[5rem] h-5 border-0 rounded-l px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
+                                        />
+                                        {trackingInfo && trackingInfo.url && (
+                                          <a
+                                            href={trackingInfo.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="shrink-0 flex items-center gap-1 h-5 border-l border-brand-200 dark:border-gray-600 pl-2 pr-2 py-0 text-xs font-medium text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-gray-700/50"
+                                            title={`Track via ${trackingInfo.carrier}`}
+                                          >
+                                            <span className="whitespace-nowrap">{trackingInfo.carrier}</span>
+                                            <svg className="w-3.5 h-3.5 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                            </svg>
+                                          </a>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <input
+                                        type="text"
+                                        value={itemEdits[item.id]?.price_paid ?? (item.price_paid ?? '')}
+                                        onChange={(e) =>
+                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], price_paid: e.target.value } }))
+                                        }
+                                        onBlur={() => {
+                                          const v = (itemEdits[item.id]?.price_paid ?? item.price_paid ?? '').trim()
+                                          if (v !== (item.price_paid ?? '')) updateItem(item.id, { price_paid: v || null })
+                                        }}
+                                        placeholder="0.00"
+                                        disabled={savingItemId === item.id}
+                                        className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                      />
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <input
+                                        type="text"
+                                        value={itemEdits[item.id]?.price_sold ?? (item.price_sold ?? '')}
+                                        onChange={(e) =>
+                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], price_sold: e.target.value } }))
+                                        }
+                                        onBlur={() => {
+                                          const v = (itemEdits[item.id]?.price_sold ?? item.price_sold ?? '').trim()
+                                          if (v !== (item.price_sold ?? '')) updateItem(item.id, { price_sold: v || null })
+                                        }}
+                                        placeholder="0.00"
+                                        disabled={savingItemId === item.id}
+                                        className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                      />
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
+                                      ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1))).toFixed(2)}
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <input
+                                        type="text"
+                                        value={itemEdits[item.id]?.shipping ?? (item.shipping ?? '')}
+                                        onChange={(e) =>
+                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], shipping: e.target.value } }))
+                                        }
+                                        onBlur={() => {
+                                          const v = (itemEdits[item.id]?.shipping ?? item.shipping ?? '').trim()
+                                          if (v !== (item.shipping ?? '')) updateItem(item.id, { shipping: v || null })
+                                        }}
+                                        placeholder="0.00"
+                                        disabled={savingItemId === item.id}
+                                        className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                      />
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <input
+                                        type="text"
+                                        value={itemEdits[item.id]?.sales_tax ?? (item.sales_tax ?? '')}
+                                        onChange={(e) =>
+                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], sales_tax: e.target.value } }))
+                                        }
+                                        onBlur={() => {
+                                          const v = (itemEdits[item.id]?.sales_tax ?? item.sales_tax ?? '').trim()
+                                          if (v !== (item.sales_tax ?? '')) updateItem(item.id, { sales_tax: v || null })
+                                        }}
+                                        placeholder="0.00"
+                                        disabled={savingItemId === item.id}
+                                        className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                      />
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
+                                      ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) + parseDecimal(itemEdits[item.id]?.shipping ?? item.shipping) + parseDecimal(itemEdits[item.id]?.sales_tax ?? item.sales_tax)) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1)).toFixed(2)}
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
+                                      ${((parseDecimal(itemEdits[item.id]?.price_sold ?? item.price_sold) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1))).toFixed(2)}
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <select
+                                        value={itemEdits[item.id]?.status ?? item.status}
+                                        onChange={(e) => {
+                                          const s = e.target.value as ItemStatus
+                                          setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], status: s } }))
+                                          updateItem(item.id, { status: s })
+                                        }}
+                                        disabled={savingItemId === item.id}
+                                        className={`min-w-[6.5rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
+                                      >
+                                        {ITEM_STATUSES_FOR_EDIT.map((val) => (
+                                          <option key={val} value={val}>
+                                            {STATUS_LABELS[val]}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </td>
+                                    <td className="py-1 px-1.5 text-right w-8">
+                                      <div className="flex items-center justify-end gap-0.5">
+                                        {getNextStatus(effectiveStatus) === 'scanned' ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => setScanSingleItemModal(item)}
+                                            className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700"
+                                            title="Mark as Scanned"
+                                            aria-label="Mark as Scanned"
+                                          >
+                                            Scanned
+                                          </button>
+                                        ) : isFirstInGroup && advanceLabel && !hideAdvanceButton ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (isSubmitted) setSubmitShipmentModal({ group })
+                                              else if (isScanned) setScanReceiptModal({ group })
+                                              else advanceShipmentToNextStatus(group)
+                                            }}
+                                            disabled={advancingGroupKey === group.key}
+                                            className="p-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
+                                            title={isSubmitted ? 'Mark as Submitted' : isScanned ? 'Mark as Scanned' : `Advance to ${advanceLabel}`}
+                                            aria-label={isSubmitted ? 'Mark as Submitted' : isScanned ? 'Mark as Scanned' : `Advance to ${advanceLabel}`}
+                                          >
+                                            {advancingGroupKey === group.key ? '…' : advanceLabel}
+                                          </button>
+                                        ) : null}
+                                        {(item.quantity ?? 1) >= 2 ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => setSplitModalItem(item)}
+                                            className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition shrink-0"
+                                            title="Split for separate shipping"
+                                            aria-label="Split for separate shipping"
+                                          >
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}>
+                                              <circle cx="6" cy="7" r="3" />
+                                              <circle cx="6" cy="17" r="3" />
+                                              <path d="M8.6 8.6l10.4 10.4M8.6 15.4l10.4 -10.4" />
+                                            </svg>
+                                          </button>
+                                        ) : (
+                                          <span className="inline-block w-6 h-6 shrink-0" aria-hidden />
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => copyItem(o, item)}
+                                          disabled={copyingItemId === item.id}
+                                          className="p-1 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 disabled:opacity-50"
+                                          title="Copy line item"
+                                          aria-label="Copy line item"
+                                        >
+                                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                          </svg>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setConfirmDeleteItemId(item.id)}
+                                          disabled={deletingItemId === item.id}
+                                          className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
+                                          title="Delete line item"
+                                          aria-label="Delete line item"
+                                        >
+                                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                          </svg>
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )
+                              }),
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                       {getSelectedIdsForOrder(o).length > 0 && (
                         <div className="mt-2 px-2 pb-2 flex flex-wrap items-center gap-3">
                           <select

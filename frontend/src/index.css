@@ -4,6 +4,7 @@
 
 body {
   @apply bg-brand-50 text-ink antialiased;
+  overflow-x: hidden;
 }
 
 @layer base {

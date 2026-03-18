@@ -552,9 +552,9 @@ export default function ImportReview() {
         </div>
       )}
 
-      <div className="flex gap-0 border-2 border-brand-400 dark:border-gray-400 rounded-xl overflow-hidden bg-brand-50/50 dark:bg-gray-600/80 mb-6">
+      <div className="flex flex-col lg:flex-row gap-0 border-2 border-brand-400 dark:border-gray-400 rounded-xl overflow-hidden bg-brand-50/50 dark:bg-gray-600/80 mb-6">
         {/* Left: order info box */}
-        <div className="w-[340px] shrink-0 flex flex-col gap-2.5 p-4 border-r-2 border-brand-400 dark:border-gray-400 bg-white/80 dark:bg-gray-700/80">
+        <div className="w-full lg:w-[340px] shrink-0 flex flex-col gap-2.5 p-4 lg:border-r-2 border-brand-400 dark:border-gray-400 bg-white/80 dark:bg-gray-700/80 border-b-2 lg:border-b-0">
           <div className="flex items-center gap-2">
             <span className="text-xs text-ink-muted shrink-0 w-16">Order #</span>
             <span className="text-sm font-medium text-brand-700 dark:text-brand-400">
