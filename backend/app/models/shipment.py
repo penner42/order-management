@@ -13,6 +13,7 @@ class Shipment(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     tracking_number = Column(String(255), nullable=True)
+    status = Column(String(255), nullable=True)
     shipped_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     notes = Column(String(1000), nullable=True)

@@ -432,10 +432,32 @@ export default function ImportReview() {
   >()
   if (isExistingOrder && diff?.shipments) {
     for (const m of diff.shipments.matched) {
+      // Find the corresponding shipment in the incoming payload by tracking number
+      const payloadShipment = shipments.find(
+        (s) => (s.trackingNumber ?? '') && s.trackingNumber === m.tracking_number
+      )
+      const hasDeliveryDate = !!payloadShipment?.deliveryDate
+
+      const rawDetailed = m.detailed_changes ?? []
+      const rawChanges = m.changes ?? []
+
+      // If the shipment has a delivery date, treat its status as effectively "Delivered"
+      // and ignore pure status diffs so already-delivered shipments don't keep
+      // showing as "updated" on re-import.
+      const effectiveDetailed = hasDeliveryDate
+        ? rawDetailed.filter((c) => c.field !== 'status')
+        : rawDetailed
+      const effectiveChanges = hasDeliveryDate
+        ? rawChanges.filter((name) => name !== 'status')
+        : rawChanges
+
+      const status: 'new' | 'unchanged' | 'changed' =
+        effectiveChanges.length > 0 || effectiveDetailed.length > 0 ? 'changed' : 'unchanged'
+
       shipmentDiffMap.set(m.tracking_number, {
-        status: m.changes.length > 0 ? 'changed' : 'unchanged',
-        changes: m.changes,
-        detailedChanges: m.detailed_changes,
+        status,
+        changes: effectiveChanges,
+        detailedChanges: effectiveDetailed,
       })
     }
     for (const a of diff.shipments.added) {
@@ -512,9 +534,15 @@ export default function ImportReview() {
                       {diff.shipments!.added.length} new shipment(s)
                     </span>
                   )}
-                  {(diff.shipments?.matched.filter(m => m.changes.length > 0).length ?? 0) > 0 && (
+                  {Array.from(shipmentDiffMap.values()).filter((s) => s.status === 'changed').length >
+                    0 && (
                     <span className="text-amber-700 dark:text-amber-300">
-                      {diff.shipments!.matched.filter(m => m.changes.length > 0).length} shipment(s) updated
+                      {
+                        Array.from(shipmentDiffMap.values()).filter(
+                          (s) => s.status === 'changed'
+                        ).length
+                      }{' '}
+                      shipment(s) updated
                     </span>
                   )}
                 </div>
@@ -983,34 +1011,54 @@ export default function ImportReview() {
                     Delivered: {fmtDate(s.deliveryDate)}
                   </div>
                 )}
-                {shipDiff?.detailedChanges && shipDiff.detailedChanges.length > 0 && (
-                  <div className="mt-1 space-y-0.5">
-                    {shipDiff.detailedChanges.map((c, i) => {
-                      if (c.field === 'delivery_date') {
-                        return (
-                          <div
-                            key={i}
-                            className="text-[11px] text-amber-700 dark:text-amber-300"
-                          >
-                            Delivery date changed: {c.before ? fmtDate(String(c.before)) : '—'} →{' '}
-                            {c.after ? fmtDate(String(c.after)) : '—'}
-                          </div>
-                        )
+                {shipDiff?.detailedChanges && shipDiff.detailedChanges.length > 0 && (() => {
+                  // Ignore "changes" that don't actually change the effective delivery day,
+                  // and ignore status changes when the shipment has a delivery date (treated as Delivered).
+                  const meaningfulChanges = shipDiff.detailedChanges.filter((c) => {
+                    if (c.field === 'status' && s.deliveryDate) return false
+                    if (c.field === 'delivery_date') {
+                      try {
+                        if (!c.before || !c.after) return !!(c.before || c.after)
+                        const beforeDay = new Date(String(c.before)).toDateString()
+                        const afterDay = new Date(String(c.after)).toDateString()
+                        return beforeDay !== afterDay
+                      } catch {
+                        // If parsing fails, fall back to comparing raw strings
+                        return String(c.before) !== String(c.after)
                       }
-                      if (c.field === 'status') {
-                        return (
-                          <div
-                            key={i}
-                            className="text-[11px] text-amber-700 dark:text-amber-300"
-                          >
-                            Status updated: {String(c.before ?? '—')} → {String(c.after ?? '—')}
-                          </div>
-                        )
-                      }
-                      return null
-                    })}
-                  </div>
-                )}
+                    }
+                    return true
+                  })
+                  if (meaningfulChanges.length === 0) return null
+                  return (
+                    <div className="mt-1 space-y-0.5">
+                      {meaningfulChanges.map((c, i) => {
+                        if (c.field === 'delivery_date') {
+                          return (
+                            <div
+                              key={i}
+                              className="text-[11px] text-amber-700 dark:text-amber-300"
+                            >
+                              Delivery date changed: {c.before ? fmtDate(String(c.before)) : '—'} →{' '}
+                              {c.after ? fmtDate(String(c.after)) : '—'}
+                            </div>
+                          )
+                        }
+                        if (c.field === 'status') {
+                          return (
+                            <div
+                              key={i}
+                              className="text-[11px] text-amber-700 dark:text-amber-300"
+                            >
+                              Status updated: {String(c.before ?? '—')} → {String(c.after ?? '—')}
+                            </div>
+                          )
+                        }
+                        return null
+                      })}
+                    </div>
+                  )
+                })()}
                 {s.fulfillmentType && (
                   <div className="text-xs text-ink-muted dark:text-gray-400 capitalize">
                     {s.fulfillmentType}

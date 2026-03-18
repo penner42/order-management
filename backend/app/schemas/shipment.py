@@ -23,6 +23,7 @@ class ShipmentItemRead(ShipmentItemBase):
 
 class ShipmentBase(BaseModel):
     tracking_number: str | None = None
+    status: str | None = None
     shipped_at: datetime | None = None
     delivered_at: datetime | None = None
     notes: str | None = None
@@ -35,6 +36,7 @@ class ShipmentCreate(ShipmentBase):
 
 class ShipmentUpdate(BaseModel):
     tracking_number: str | None = None
+    status: str | None = None
     shipped_at: datetime | None = None
     delivered_at: datetime | None = None
     notes: str | None = None

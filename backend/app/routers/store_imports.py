@@ -89,6 +89,40 @@ def _normalize_iso_date_str(value: str | None) -> str | None:
     return dt.date().isoformat()
 
 
+def _shipment_delivery_calendar_key(value: Any) -> str | None:
+    """Normalize any store shipment delivery string to YYYY-MM-DD for comparison.
+
+    Walmart often sends human-readable dates (e.g. \"Mar 15, 2026\") while the DB
+    stores ISO datetimes. Comparing raw strings falsely flags perpetual diffs.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.date().isoformat()
+    except ValueError:
+        pass
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _delivery_string_to_utc_datetime(value: str | None) -> datetime | None:
+    """Parse store deliveryDate into a timezone-aware datetime for Shipment.delivered_at."""
+    key = _shipment_delivery_calendar_key(value)
+    if not key:
+        return None
+    return datetime.strptime(key, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
 def _get_or_create_store(db: Session, store_name: str, user_id: int | None) -> Store:
     store = db.query(Store).filter(Store.name == store_name).first()
     if store:
@@ -293,6 +327,7 @@ def _build_order_diff(
         tracking_key, _ = _normalize_tracking_for_store(
             store_name, external_order_id, tracking_raw
         )
+
         tracking_display = tracking_raw if isinstance(tracking_raw, str) else None
         delivery = inc_ship.get("deliveryDate")
         status_info = inc_ship.get("status") or {}
@@ -307,12 +342,15 @@ def _build_order_diff(
             existing_delivered_raw = (
                 existing_s.delivered_at.isoformat() if existing_s.delivered_at else None
             )
-            existing_delivered_date = _normalize_iso_date_str(existing_delivered_raw)
-            incoming_delivered_date = _normalize_iso_date_str(delivery)
+            existing_delivered_date = _shipment_delivery_calendar_key(existing_delivered_raw)
+            incoming_delivered_date = _shipment_delivery_calendar_key(
+                delivery if isinstance(delivery, str) else None
+            )
 
             # Only treat delivery_date as changed when the *calendar date*
             # differs, ignoring time-of-day / timezone formatting differences.
-            if existing_delivered_date != incoming_delivered_date:
+            delivery_changed = existing_delivered_date != incoming_delivered_date
+            if delivery_changed:
                 ship_changes.append("delivery_date")
                 detailed_ship_changes.append(
                     {
@@ -326,8 +364,10 @@ def _build_order_diff(
             # while the shipment is still in-flight (no delivered_at yet), but
             # once the delivery date is locked in we avoid repeatedly flagging
             # the same "Delivered on X" status on every subsequent import.
+            status_changed = False
             if status_msg or incoming_status_raw:
                 if existing_delivered_date is None or existing_delivered_date != incoming_delivered_date:
+                    status_changed = True
                     ship_changes.append("status")
                     detailed_ship_changes.append(
                         {
@@ -525,16 +565,23 @@ def _apply_items_and_shipments(
             store_name, external_order_id, tracking_raw
         )
 
-        # Parse delivery date (if any) from the normalized shipment slice.
+        # Parse delivery date (if any) and shipment-level status from the
+        # normalized shipment slice.
         delivery_raw = src.get("deliveryDate")
-        delivered_at: datetime | None = None
-        if isinstance(delivery_raw, str) and delivery_raw.strip():
-            try:
-                delivered_at = datetime.fromisoformat(
-                    delivery_raw.replace("Z", "+00:00")
-                )
-            except ValueError:
-                delivered_at = None
+        delivered_at = (
+            _delivery_string_to_utc_datetime(delivery_raw)
+            if isinstance(delivery_raw, str)
+            else None
+        )
+
+        status_info = src.get("status") or {}
+        status_message = status_info.get("message")
+        status_type = status_info.get("statusType")
+        normalized_status: str | None = None
+        if isinstance(status_message, str) and status_message.strip():
+            normalized_status = status_message.strip()
+        elif isinstance(status_type, str) and status_type.strip():
+            normalized_status = status_type.strip()
 
         # If we already have a shipment for this tracking number, update its
         # delivery timestamp (so future diffs don't keep flagging a change) and
@@ -542,10 +589,14 @@ def _apply_items_and_shipments(
         if tracking_key and tracking_key in existing_shipments_by_tracking:
             shipment = existing_shipments_by_tracking[tracking_key]
             if delivered_at is not None:
-                # Only update when the incoming value is meaningful and
-                # different from what we have stored.
-                if shipment.delivered_at != delivered_at:
+                old_key = _shipment_delivery_calendar_key(
+                    shipment.delivered_at.isoformat() if shipment.delivered_at else None
+                )
+                new_key = _shipment_delivery_calendar_key(delivery_raw)
+                if new_key and old_key != new_key:
                     shipment.delivered_at = delivered_at
+            if normalized_status is not None and normalized_status != (shipment.status or "").strip():
+                shipment.status = normalized_status
             if walmart_original:
                 base_notes = (shipment.notes or "").rstrip()
                 note_line = f"Walmart tracking: {walmart_original}"
@@ -558,6 +609,7 @@ def _apply_items_and_shipments(
         shipment = Shipment(
             user_id=order.user_id,
             tracking_number=tracking_key,
+            status=normalized_status,
             shipped_at=None,
             delivered_at=delivered_at,
             notes=f"Imported from store '{store_name}'.",
@@ -668,18 +720,31 @@ def _apply_items_and_shipments(
             continue
 
         delivery_raw = src.get("deliveryDate")
-        delivered_at: datetime | None = None
-        if isinstance(delivery_raw, str) and delivery_raw.strip():
-            try:
-                delivered_at = datetime.fromisoformat(
-                    delivery_raw.replace("Z", "+00:00")
-                )
-            except ValueError:
-                delivered_at = None
+        delivered_at = (
+            _delivery_string_to_utc_datetime(delivery_raw)
+            if isinstance(delivery_raw, str)
+            else None
+        )
+
+        status_info = src.get("status") or {}
+        status_message = status_info.get("message")
+        status_type = status_info.get("statusType")
+        normalized_status: str | None = None
+        if isinstance(status_message, str) and status_message.strip():
+            normalized_status = status_message.strip()
+        elif isinstance(status_type, str) and status_type.strip():
+            normalized_status = status_type.strip()
 
         shipment = existing_shipments_by_tracking[tracking_key]
-        if delivered_at is not None and shipment.delivered_at != delivered_at:
-            shipment.delivered_at = delivered_at
+        if delivered_at is not None:
+            old_key = _shipment_delivery_calendar_key(
+                shipment.delivered_at.isoformat() if shipment.delivered_at else None
+            )
+            new_key = _shipment_delivery_calendar_key(delivery_raw)
+            if new_key and old_key != new_key:
+                shipment.delivered_at = delivered_at
+        if normalized_status is not None and normalized_status != (shipment.status or "").strip():
+            shipment.status = normalized_status
         if walmart_original:
             base_notes = (shipment.notes or "").rstrip()
             note_line = f"Walmart tracking: {walmart_original}"

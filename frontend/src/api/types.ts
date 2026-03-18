@@ -151,6 +151,7 @@ export interface Shipment {
   id: number
   user_id: number | null
   tracking_number: string | null
+  status: string | null
   shipped_at: string | null
   delivered_at: string | null
   notes: string | null
