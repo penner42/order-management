@@ -1,5 +1,6 @@
 """Orders API."""
 from datetime import date, datetime, timezone
+import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func, or_
@@ -20,7 +21,7 @@ from app.models import (
     ShipmentItem,
 )
 from app.models.user import get_default_app_user_id
-from app.schemas.order import OrderRead, OrderCreate, OrderUpdate, OrderPaymentMethodCreate
+from app.schemas.order import OrderRead, OrderCreate, OrderUpdate, OrderPaymentMethodCreate, OrderListPage
 from app.schemas.item import ItemCreateNested
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -42,20 +43,19 @@ def _effective_item_status(item: Item) -> str:
     return item.status.value
 
 
-@router.get("", response_model=list[OrderRead])
-def list_orders(
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
-    order_status: str | None = Query(default=None, alias="order_status"),  # when "imported", only imported; else exclude imported
-    status: list[str] = Query(default=[], alias="status"),
-    buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
-    store_id: list[int] = Query(default=[], alias="store_id"),
-    store_account_id: list[int] = Query(default=[], alias="store_account_id"),
-    date_from: str | None = None,
-    date_to: str | None = None,
-    date_from_utc: str | None = None,
-    date_to_utc: str | None = None,
-    search: str | None = Query(default=None, alias="q"),
+def _build_orders_query(
+    *,
+    db: Session,
+    order_status: str | None,
+    status: list[str],
+    buying_group_id: list[int],
+    store_id: list[int],
+    store_account_id: list[int],
+    date_from: str | None,
+    date_to: str | None,
+    date_from_utc: str | None,
+    date_to_utc: str | None,
+    search: str | None,
 ):
     # Order-level filters: which orders to include
     q = db.query(Order).order_by(Order.purchase_date.desc())
@@ -132,6 +132,7 @@ def list_orders(
                 q = q.filter(func.date(Order.purchase_date) <= d)
             except ValueError:
                 pass
+
     search_order_level_ids = None
     search_item_match_pairs = None
     if search and search.strip():
@@ -141,30 +142,63 @@ def list_orders(
         if order_status:
             base_order = base_order.filter(Order.status == order_status)
         # Order-level matches: show whole order
-        by_order_number = base_order.filter(Order.store_order_number.isnot(None)).filter(func.lower(Order.store_order_number).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_order_number = (
+            base_order.filter(Order.store_order_number.isnot(None))
+            .filter(func.lower(Order.store_order_number).like(func.lower(term), escape=escape))
+            .with_entities(Order.id)
+            .distinct()
+        )
         by_store = base_order.join(Store).filter(func.lower(Store.name).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
-        by_buying_group = base_order.join(BuyingGroup).filter(BuyingGroup.name.isnot(None)).filter(func.lower(BuyingGroup.name).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
-        by_payment_label = base_order.join(OrderPaymentMethod).join(PaymentMethod).filter(func.lower(PaymentMethod.label).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_buying_group = (
+            base_order.join(BuyingGroup)
+            .filter(BuyingGroup.name.isnot(None))
+            .filter(func.lower(BuyingGroup.name).like(func.lower(term), escape=escape))
+            .with_entities(Order.id)
+            .distinct()
+        )
+        by_payment_label = (
+            base_order.join(OrderPaymentMethod)
+            .join(PaymentMethod)
+            .filter(func.lower(PaymentMethod.label).like(func.lower(term), escape=escape))
+            .with_entities(Order.id)
+            .distinct()
+        )
         by_dollars = base_order.filter(
             or_(
                 cast(Order.shipping, String).like(term, escape=escape),
                 cast(Order.sales_tax, String).like(term, escape=escape),
             )
         ).with_entities(Order.id).distinct()
-        by_payment_amount = base_order.join(OrderPaymentMethod).filter(cast(OrderPaymentMethod.amount, String).like(term, escape=escape)).with_entities(Order.id).distinct()
+        by_payment_amount = (
+            base_order.join(OrderPaymentMethod)
+            .filter(cast(OrderPaymentMethod.amount, String).like(term, escape=escape))
+            .with_entities(Order.id)
+            .distinct()
+        )
         order_level_ids_subq = by_order_number.union(by_store, by_buying_group, by_payment_label, by_dollars, by_payment_amount)
         search_order_level_ids = set(row[0] for row in order_level_ids_subq.all())
 
         # Item-level matches: (order_id, item_id) for filtering items when order is not in order_level
-        by_item_desc_pairs = base_order.join(Item).filter(Item.description.isnot(None)).filter(func.lower(Item.description).like(func.lower(term), escape=escape)).with_entities(Order.id, Item.id).distinct()
-        by_item_dollars_pairs = base_order.join(Item).filter(
-            or_(
-                cast(Item.price_paid, String).like(term, escape=escape),
-                cast(Item.price_sold, String).like(term, escape=escape),
-                cast(Item.shipping, String).like(term, escape=escape),
-                cast(Item.sales_tax, String).like(term, escape=escape),
+        by_item_desc_pairs = (
+            base_order.join(Item)
+            .filter(Item.description.isnot(None))
+            .filter(func.lower(Item.description).like(func.lower(term), escape=escape))
+            .with_entities(Order.id, Item.id)
+            .distinct()
+        )
+        by_item_dollars_pairs = (
+            base_order.join(Item)
+            .filter(
+                or_(
+                    cast(Item.price_paid, String).like(term, escape=escape),
+                    cast(Item.price_sold, String).like(term, escape=escape),
+                    cast(Item.shipping, String).like(term, escape=escape),
+                    cast(Item.sales_tax, String).like(term, escape=escape),
+                )
             )
-        ).with_entities(Order.id, Item.id).distinct()
+            .with_entities(Order.id, Item.id)
+            .distinct()
+        )
         # Tracking number is per-shipment: show only items in the matching shipment(s)
         by_tracking_pairs = (
             base_order.join(Item)
@@ -175,12 +209,16 @@ def list_orders(
             .with_entities(Order.id, Item.id)
             .distinct()
         )
-        search_item_match_pairs = set(
-            by_item_desc_pairs.union(by_item_dollars_pairs).union(by_tracking_pairs).all()
-        )
+        search_item_match_pairs = set(by_item_desc_pairs.union(by_item_dollars_pairs).union(by_tracking_pairs).all())
 
         # Orders to include: matched at order level OR at item/tracking level
-        by_item_desc = base_order.join(Item).filter(Item.description.isnot(None)).filter(func.lower(Item.description).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_item_desc = (
+            base_order.join(Item)
+            .filter(Item.description.isnot(None))
+            .filter(func.lower(Item.description).like(func.lower(term), escape=escape))
+            .with_entities(Order.id)
+            .distinct()
+        )
         by_item_dollars = base_order.join(Item).filter(
             or_(
                 cast(Item.price_paid, String).like(term, escape=escape),
@@ -189,9 +227,28 @@ def list_orders(
                 cast(Item.sales_tax, String).like(term, escape=escape),
             )
         ).with_entities(Order.id).distinct()
-        by_tracking = base_order.join(Item).join(ShipmentItem).join(Shipment).filter(Shipment.tracking_number.isnot(None)).filter(func.lower(Shipment.tracking_number).like(func.lower(term), escape=escape)).with_entities(Order.id).distinct()
+        by_tracking = (
+            base_order.join(Item)
+            .join(ShipmentItem)
+            .join(Shipment)
+            .filter(Shipment.tracking_number.isnot(None))
+            .filter(func.lower(Shipment.tracking_number).like(func.lower(term), escape=escape))
+            .with_entities(Order.id)
+            .distinct()
+        )
         search_ids = order_level_ids_subq.union(by_item_desc, by_item_dollars, by_tracking).subquery()
         q = q.filter(Order.id.in_(search_ids))
+
+    return q, search_order_level_ids, search_item_match_pairs
+
+
+def _materialize_orders(
+    *,
+    q,
+    status: list[str],
+    search_order_level_ids,
+    search_item_match_pairs,
+):
     # Eager load relationships to avoid N+1 when building OrderRead (store, store_account, buying_group,
     # items + payment dates from Payment, order_payments + payment_method). Use selectinload for one-to-many to avoid cartesian product.
     q = q.options(
@@ -221,7 +278,97 @@ def list_orders(
                     items = [i for i in items if (o.id, i.id) in search_item_match_pairs]
             result.append(read.model_copy(update={"items": items}))
         return result
-    return orders
+
+    return [OrderRead.model_validate(o) for o in orders]
+
+
+@router.get("", response_model=list[OrderRead])
+def list_orders(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    order_status: str | None = Query(default=None, alias="order_status"),  # when "imported", only imported; else exclude imported
+    status: list[str] = Query(default=[], alias="status"),
+    buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
+    store_id: list[int] = Query(default=[], alias="store_id"),
+    store_account_id: list[int] = Query(default=[], alias="store_account_id"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    date_from_utc: str | None = None,
+    date_to_utc: str | None = None,
+    search: str | None = Query(default=None, alias="q"),
+):
+    q, search_order_level_ids, search_item_match_pairs = _build_orders_query(
+        db=db,
+        order_status=order_status,
+        status=status,
+        buying_group_id=buying_group_id,
+        store_id=store_id,
+        store_account_id=store_account_id,
+        date_from=date_from,
+        date_to=date_to,
+        date_from_utc=date_from_utc,
+        date_to_utc=date_to_utc,
+        search=search,
+    )
+    return _materialize_orders(
+        q=q,
+        status=status,
+        search_order_level_ids=search_order_level_ids,
+        search_item_match_pairs=search_item_match_pairs,
+    )
+
+
+@router.get("/paged", response_model=OrderListPage)
+def list_orders_paged(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    order_status: str | None = Query(default=None, alias="order_status"),  # when "imported", only imported; else exclude imported
+    status: list[str] = Query(default=[], alias="status"),
+    buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
+    store_id: list[int] = Query(default=[], alias="store_id"),
+    store_account_id: list[int] = Query(default=[], alias="store_account_id"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    date_from_utc: str | None = None,
+    date_to_utc: str | None = None,
+    search: str | None = Query(default=None, alias="q"),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=50),
+):
+    allowed = {0, 25, 50, 100}
+    if per_page not in allowed:
+        per_page = 50
+
+    q, search_order_level_ids, search_item_match_pairs = _build_orders_query(
+        db=db,
+        order_status=order_status,
+        status=status,
+        buying_group_id=buying_group_id,
+        store_id=store_id,
+        store_account_id=store_account_id,
+        date_from=date_from,
+        date_to=date_to,
+        date_from_utc=date_from_utc,
+        date_to_utc=date_to_utc,
+        search=search,
+    )
+
+    total = int(q.order_by(None).with_entities(func.count(func.distinct(Order.id))).scalar() or 0)
+    if per_page == 0:
+        pages = 1
+        page = 1
+    else:
+        pages = max(1, int(math.ceil(total / per_page)))
+        page = min(max(1, page), pages)
+        q = q.offset((page - 1) * per_page).limit(per_page)
+
+    items = _materialize_orders(
+        q=q,
+        status=status,
+        search_order_level_ids=search_order_level_ids,
+        search_item_match_pairs=search_item_match_pairs,
+    )
+    return OrderListPage(items=items, page=page, per_page=per_page, total=total, pages=pages)
 
 
 @router.post("", response_model=OrderRead)

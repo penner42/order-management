@@ -68,5 +68,13 @@ class OrderRead(OrderBase, TimestampsMixin):
     model_config = ConfigDict(from_attributes=True)
 
 
+class OrderListPage(BaseModel):
+    items: list[OrderRead]
+    page: int
+    per_page: int
+    total: int
+    pages: int
+
+
 from app.schemas.item import ItemCreateNested  # noqa: E402
 OrderCreate.model_rebuild()

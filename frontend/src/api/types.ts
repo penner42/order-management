@@ -140,6 +140,14 @@ export interface Order {
   order_payments: OrderPaymentMethod[]
 }
 
+export interface OrderListPage {
+  items: Order[]
+  page: number
+  per_page: number
+  total: number
+  pages: number
+}
+
 export interface ShipmentItem {
   id: number
   shipment_id: number

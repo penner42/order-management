@@ -4,12 +4,13 @@
  * Right: full line-items table (one row per item).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
 import type {
   Order,
+  OrderListPage,
   BuyingGroup,
   Shipment,
   Store,
@@ -186,6 +187,8 @@ function buildOrdersPath(opts: {
   filterDateFrom: string
   filterDateTo: string
   searchText: string
+  page: number
+  perPage: number
 }): string {
   const params = new URLSearchParams()
   const statuses =
@@ -206,7 +209,9 @@ function buildOrdersPath(opts: {
     params.set('date_to_utc', end.toISOString())
   }
   if (opts.searchText.trim()) params.set('q', opts.searchText.trim())
-  return `/orders?${params.toString()}`
+  params.set('page', String(opts.page))
+  params.set('per_page', String(opts.perPage))
+  return `/orders/paged?${params.toString()}`
 }
 
 export default function Orders() {
@@ -261,6 +266,20 @@ export default function Orders() {
   const [filterStoreOpen, setFilterStoreOpen] = useState(false)
   const [filterDateOpen, setFilterDateOpen] = useState(false)
   const location = useLocation()
+  const navigate = useNavigate()
+  const [page, setPage] = useState(() => {
+    const v = new URLSearchParams(location.search).get('page')
+    const n = v ? parseInt(v, 10) : 1
+    return Number.isFinite(n) && n >= 1 ? n : 1
+  })
+  const [perPage, setPerPage] = useState(() => {
+    const v = new URLSearchParams(location.search).get('per_page')
+    const n = v ? parseInt(v, 10) : 50
+    const allowed = new Set([0, 25, 50, 100])
+    return Number.isFinite(n) && allowed.has(n) ? n : 50
+  })
+  const [totalOrders, setTotalOrders] = useState(0)
+  const [totalPages, setTotalPages] = useState(1)
   const [searchText, setSearchText] = useState(() => {
     const state = location.state as { orderSearch?: string } | null
     if (state?.orderSearch) return state.orderSearch
@@ -305,8 +324,10 @@ export default function Orders() {
         filterDateFrom,
         filterDateTo,
         searchText: searchDebounced,
+        page,
+        perPage,
       }),
-    [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced]
+    [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced, page, perPage]
   )
 
   /** Format date as YYYY-MM-DD in local time (for display and date inputs). */
@@ -459,6 +480,16 @@ export default function Orders() {
     !!filterDateTo ||
     !!searchText.trim()
 
+  const didInitPagingRef = useRef(false)
+  useEffect(() => {
+    if (!didInitPagingRef.current) {
+      didInitPagingRef.current = true
+      return
+    }
+    // Changing filters/search/per-page should reset to page 1.
+    if (page !== 1) setPage(1)
+  }, [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced, perPage])
+
   const resetFilters = () => {
     setFilterStatuses(new Set())
     setFilterBuyingGroups(new Set())
@@ -533,8 +564,14 @@ export default function Orders() {
     }
     setLoading(true)
     api
-      .get<Order[]>(ordersPath)
-      .then(setOrders)
+      .get<OrderListPage>(ordersPath)
+      .then((data) => {
+        setOrders(data.items)
+        setTotalOrders(data.total)
+        setTotalPages(data.pages)
+        if (data.page !== page) setPage(data.page)
+        if (data.per_page !== perPage) setPerPage(data.per_page)
+      })
       .catch(console.error)
       .finally(() => setLoading(false))
   }, [ordersPath])
@@ -550,6 +587,32 @@ export default function Orders() {
       }
     }
   }, [loading])
+
+  useEffect(() => {
+    // Keep URL params in sync for shareable paging (and back/forward).
+    const params = new URLSearchParams(location.search)
+    const nextPage = params.get('page')
+    const nextPerPage = params.get('per_page')
+    const p = nextPage ? parseInt(nextPage, 10) : 1
+    const pp = nextPerPage ? parseInt(nextPerPage, 10) : 50
+    const allowed = new Set([0, 25, 50, 100])
+    const parsedPage = Number.isFinite(p) && p >= 1 ? p : 1
+    const parsedPerPage = Number.isFinite(pp) && allowed.has(pp) ? pp : 50
+    if (parsedPage !== page) setPage(parsedPage)
+    if (parsedPerPage !== perPage) setPerPage(parsedPerPage)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search])
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const curPage = params.get('page')
+    const curPerPage = params.get('per_page')
+    if (curPage !== String(page) || curPerPage !== String(perPage)) {
+      params.set('page', String(page))
+      params.set('per_page', String(perPage))
+      navigate({ search: `?${params.toString()}` }, { replace: true, state: location.state })
+    }
+  }, [page, perPage, navigate, location.search, location.state])
 
   useEffect(() => {
     if (pendingAccountSelection) {
@@ -687,10 +750,13 @@ export default function Orders() {
         await removeItemFromShipment(shipment, itemId)
       }
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>(ordersPath),
+        api.get<OrderListPage>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
-      setOrders(ordersData)
+      setOrders(ordersData.items)
+      setTotalOrders(ordersData.total)
+      setTotalPages(ordersData.pages)
+      if (ordersData.page !== page) setPage(ordersData.page)
       setShipments(shipmentsData)
       setTrackingEdits((prev) => {
         const next = { ...prev }; delete next[itemId]; return next
@@ -702,7 +768,7 @@ export default function Orders() {
     }
   }
 
-  const toggleItemSelect = (itemId: number, items: { id: number }[]) => {
+  const toggleItemSelect = (itemId: number) => {
     setSelectedItemIds((prev) => {
       const next = new Set(prev)
       if (next.has(itemId)) next.delete(itemId)
@@ -741,10 +807,13 @@ export default function Orders() {
         shipped_at: state.shippedAt ? `${state.shippedAt}T00:00:00.000Z` : undefined,
       })
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>(ordersPath),
+        api.get<OrderListPage>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
-      setOrders(ordersData)
+      setOrders(ordersData.items)
+      setTotalOrders(ordersData.total)
+      setTotalPages(ordersData.pages)
+      if (ordersData.page !== page) setPage(ordersData.page)
       setShipments(shipmentsData)
       setSelectedItemIds((prev) => {
         const next = new Set(prev); ids.forEach((id) => next.delete(id)); return next
@@ -957,12 +1026,15 @@ export default function Orders() {
         const paymentId = toUpdate[0].payment_id
         if (!paymentId) return
         await api.patch(`/payments/${paymentId}`, next === 'payment_sent' ? { payment_sent_at: now } : { payment_received_at: now })
-        const ordersData = await api.get<Order[]>(ordersPath)
-        setOrders(ordersData)
+        const ordersData = await api.get<OrderListPage>(ordersPath)
+        setOrders(ordersData.items)
+        setTotalOrders(ordersData.total)
+        setTotalPages(ordersData.pages)
+        if (ordersData.page !== page) setPage(ordersData.page)
       } else {
         for (const item of toUpdate) {
           const n = getNextStatus(getEffectiveItemStatus(item))
-          if (n && n !== 'payment_sent' && n !== 'payment_received') {
+          if (n && n !== 'payment_requested' && n !== 'payment_sent' && n !== 'payment_received') {
             const dateField = STATUS_TO_DATE_FIELD[n]
             const payload: Partial<Item> = { status: n }
             if (dateField) (payload as any)[dateField] = now.slice(0, 19)
@@ -1015,10 +1087,13 @@ export default function Orders() {
     try {
       await api.delete(`/items/${itemId}`)
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>(ordersPath),
+        api.get<OrderListPage>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
-      setOrders(ordersData)
+      setOrders(ordersData.items)
+      setTotalOrders(ordersData.total)
+      setTotalPages(ordersData.pages)
+      if (ordersData.page !== page) setPage(ordersData.page)
       setShipments(shipmentsData)
       setSelectedItemIds((prev) => { const next = new Set(prev); next.delete(itemId); return next })
       setItemEdits((prev) => { const next = { ...prev }; delete next[itemId]; return next })
@@ -1035,10 +1110,13 @@ export default function Orders() {
     try {
       await api.post('/items/bulk-delete', { item_ids: itemIds })
       const [ordersData, shipmentsData] = await Promise.all([
-        api.get<Order[]>(ordersPath),
+        api.get<OrderListPage>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
-      setOrders(ordersData)
+      setOrders(ordersData.items)
+      setTotalOrders(ordersData.total)
+      setTotalPages(ordersData.pages)
+      if (ordersData.page !== page) setPage(ordersData.page)
       setShipments(shipmentsData)
       const idSet = new Set(itemIds)
       setSelectedItemIds((prev) => {
@@ -1119,36 +1197,13 @@ export default function Orders() {
 
   const nowIso = () => new Date().toISOString().slice(0, 19)
 
-  const copyLineItems = (o: Order) => {
-    const items = o.items ?? []
-    if (items.length === 0) return
-    const ids = getSelectedIdsForOrder(o)
-    const toCopy = ids.length > 0 ? items.filter((i) => ids.includes(i.id)) : items
-    if (toCopy.length === 0) return
-    const header = ['Qty', 'Description', 'Tracking', 'Cost', 'Payout', 'Total cost', 'Total payout', 'Status']
-    const rows = toCopy.map((item) => {
-      const edits = itemEdits[item.id]
-      const qty = edits?.quantity ?? item.quantity ?? 1
-      const desc = edits?.description ?? item.description ?? ''
-      const tracking = trackingEdits[item.id] ?? getTracking(item.id) ?? ''
-      const cost = edits?.price_paid ?? item.price_paid ?? ''
-      const payout = edits?.price_sold ?? item.price_sold ?? ''
-      const totalCost = (parseDecimal(cost) * qty).toFixed(2)
-      const totalPayout = (parseDecimal(payout) * qty).toFixed(2)
-      const status = STATUS_LABELS[item.status] ?? item.status
-      return [qty, desc, tracking, cost, payout, totalCost, totalPayout, status]
-    })
-    const tsv = [header.join('\t'), ...rows.map((r) => r.join('\t'))].join('\n')
-    copyToClipboard(tsv)
-  }
-
   const copyOrder = async (o: Order, e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
     if (!o.items?.length) return
     setCopyingId(o.id)
     try {
-      const created = await api.post<Order>('/orders', {
+      await api.post<Order>('/orders', {
         store_id: o.store_id,
         store_account_id: o.store_account_id ?? null,
         store_order_number: null,
@@ -1169,7 +1224,24 @@ export default function Orders() {
           sales_tax: item.sales_tax ?? undefined,
         })),
       })
-      setOrders((prev) => [created, ...prev])
+      const refreshed = await api.get<OrderListPage>(
+        buildOrdersPath({
+          filterStatuses,
+          filterBuyingGroups,
+          filterStores,
+          filterStoreAccounts,
+          filterDateFrom,
+          filterDateTo,
+          searchText: searchDebounced,
+          page: 1,
+          perPage,
+        })
+      )
+      setPage(refreshed.page)
+      setPerPage(refreshed.per_page)
+      setOrders(refreshed.items)
+      setTotalOrders(refreshed.total)
+      setTotalPages(refreshed.pages)
     } catch (err) {
       console.error(err)
     } finally {
@@ -1181,6 +1253,27 @@ export default function Orders() {
     () => orders.filter((o) => (o.items?.length ?? 0) > 0),
     [orders]
   )
+
+  const pageButtons = useMemo(() => {
+    const pages = totalPages
+    if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1)
+    const out: Array<number | '…'> = [1]
+    const left = Math.max(2, page - 1)
+    const right = Math.min(pages - 1, page + 1)
+    if (left > 2) out.push('…')
+    for (let p = left; p <= right; p++) out.push(p)
+    if (right < pages - 1) out.push('…')
+    out.push(pages)
+    return out
+  }, [page, totalPages])
+
+  const rangeLabel = useMemo(() => {
+    if (totalOrders === 0) return '0 of 0'
+    if (perPage === 0) return `1–${totalOrders} of ${totalOrders}`
+    const start = (page - 1) * perPage + 1
+    const end = Math.min(totalOrders, start + visibleOrders.length - 1)
+    return `${start}–${end} of ${totalOrders}`
+  }, [page, perPage, totalOrders, visibleOrders.length])
 
   const listTotals = useMemo(() => {
     let cost = 0
@@ -1450,6 +1543,22 @@ export default function Orders() {
           className="h-8 w-[220px] shrink-0 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 text-sm px-2 placeholder:text-ink-muted focus:outline-none focus:ring-1 focus:ring-brand-500"
           aria-label="Search orders"
         />
+        <select
+          value={perPage}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10)
+            setPerPage(Number.isFinite(n) ? n : 50)
+            setPage(1)
+          }}
+          className="h-8 shrink-0 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 text-sm px-2 focus:outline-none focus:ring-1 focus:ring-brand-500"
+          aria-label="Orders per page"
+          title="Orders per page"
+        >
+          <option value={25}>25 / page</option>
+          <option value={50}>50 / page</option>
+          <option value={100}>100 / page</option>
+          <option value={0}>All</option>
+        </select>
         <button
           type="button"
           onClick={resetFilters}
@@ -1478,6 +1587,53 @@ export default function Orders() {
           loading ? 'opacity-50 pointer-events-none' : ''
         }`}
       >
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-ink-muted">
+          <div className="shrink-0">{rangeLabel}</div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={loading || page <= 1}
+              className="h-8 px-2 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 disabled:opacity-50"
+              aria-label="Previous page"
+              title="Previous page"
+            >
+              Prev
+            </button>
+            {pageButtons.map((p, idx) =>
+              p === '…' ? (
+                <span key={`ellipsis-${idx}`} className="px-1 text-ink-muted" aria-hidden>
+                  …
+                </span>
+              ) : (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setPage(p)}
+                  disabled={loading}
+                  className={`h-8 min-w-8 px-2 rounded border text-sm ${
+                    p === page
+                      ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                      : 'border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 hover:bg-brand-50/50 dark:hover:bg-gray-700'
+                  }`}
+                  aria-label={`Page ${p}`}
+                >
+                  {p}
+                </button>
+              )
+            )}
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={loading || page >= totalPages}
+              className="h-8 px-2 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 disabled:opacity-50"
+              aria-label="Next page"
+              title="Next page"
+            >
+              Next
+            </button>
+          </div>
+        </div>
         {visibleOrders.length === 0 ? (
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 py-12 text-center text-ink-muted">
             No orders yet. Create one to get started.
@@ -1888,7 +2044,7 @@ export default function Orders() {
                                     <input
                                       type="checkbox"
                                       checked={selectedItemIds.has(item.id)}
-                                      onChange={() => toggleItemSelect(item.id, o.items!)}
+                                      onChange={() => toggleItemSelect(item.id)}
                                       className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
                                     />
                                   </td>
@@ -2411,8 +2567,25 @@ export default function Orders() {
         store_id: stores[0].id,
         purchase_date: nowIso(),
       })
-      const newItem = await api.post<Item>('/items', { order_id: newOrder.id, status: 'purchased' })
-      setOrders((prev) => [{ ...newOrder, items: [newItem] }, ...prev])
+      await api.post<Item>('/items', { order_id: newOrder.id, status: 'purchased' })
+      const refreshed = await api.get<OrderListPage>(
+        buildOrdersPath({
+          filterStatuses,
+          filterBuyingGroups,
+          filterStores,
+          filterStoreAccounts,
+          filterDateFrom,
+          filterDateTo,
+          searchText: searchDebounced,
+          page: 1,
+          perPage,
+        })
+      )
+      setPage(refreshed.page)
+      setPerPage(refreshed.per_page)
+      setOrders(refreshed.items)
+      setTotalOrders(refreshed.total)
+      setTotalPages(refreshed.pages)
     } catch (err) {
       console.error(err)
     } finally {
