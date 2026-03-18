@@ -2380,21 +2380,71 @@ export default function Orders() {
       </div>
 
       {visibleOrders.length > 0 && (
-        <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-4 text-sm">
-            <div className="font-medium text-ink-muted">Totals for visible orders</div>
-            <div className="flex flex-wrap gap-4 text-xs sm:text-sm">
-              <div className="flex flex-col">
-                <span className="text-ink-muted">Total Cost</span>
-                <span className="font-mono tabular-nums">${listTotals.totalCost.toFixed(2)}</span>
-              </div>
-              <div className="flex flex-col">
-                <span className="text-ink-muted">Total Payout</span>
-                <span className="font-mono tabular-nums">${listTotals.totalPayout.toFixed(2)}</span>
+        <>
+          <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-4 text-sm">
+              <div className="font-medium text-ink-muted">Totals for visible orders</div>
+              <div className="flex flex-wrap gap-4 text-xs sm:text-sm">
+                <div className="flex flex-col">
+                  <span className="text-ink-muted">Total Cost</span>
+                  <span className="font-mono tabular-nums">${listTotals.totalCost.toFixed(2)}</span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-ink-muted">Total Payout</span>
+                  <span className="font-mono tabular-nums">${listTotals.totalPayout.toFixed(2)}</span>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-ink-muted">
+            <div className="shrink-0">{rangeLabel}</div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={loading || page <= 1}
+                className="h-8 px-2 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 disabled:opacity-50"
+                aria-label="Previous page"
+                title="Previous page"
+              >
+                Prev
+              </button>
+              {pageButtons.map((p, idx) =>
+                p === '…' ? (
+                  <span key={`bottom-ellipsis-${idx}`} className="px-1 text-ink-muted" aria-hidden>
+                    …
+                  </span>
+                ) : (
+                  <button
+                    key={`bottom-${p}`}
+                    type="button"
+                    onClick={() => setPage(p)}
+                    disabled={loading}
+                    className={`h-8 min-w-8 px-2 rounded border text-sm ${
+                      p === page
+                        ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:border-brand-600 dark:text-brand-400'
+                        : 'border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 hover:bg-brand-50/50 dark:hover:bg-gray-700'
+                    }`}
+                    aria-label={`Page ${p}`}
+                  >
+                    {p}
+                  </button>
+                )
+              )}
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={loading || page >= totalPages}
+                className="h-8 px-2 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-200 disabled:opacity-50"
+                aria-label="Next page"
+                title="Next page"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </>
       )}
 
       <ConfirmDialog
