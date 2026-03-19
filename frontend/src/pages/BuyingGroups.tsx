@@ -71,7 +71,7 @@ export default function BuyingGroups() {
           Add
         </button>
       </form>
-      <div className="w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div className="w-full md:w-fit md:min-w-[600px] md:max-w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
         <ul className="divide-y divide-brand-100 dark:divide-gray-700">
           {groups.length === 0 ? (
             <li className="py-8 text-center text-ink-muted">No buying groups yet.</li>
