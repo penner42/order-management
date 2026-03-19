@@ -3,8 +3,8 @@
 A full-stack order management system for reselling: track orders (with store and optional store account), items (purchase/sell price, buying group, status workflow), multiple payment methods per order, payments with line items, shipments (items from one or more orders can ship together), and rewards. Supports importing orders from store order pages via a browser extension.
 
 ## Stack
-
 - **Backend:** Python, FastAPI, SQLAlchemy, PostgreSQL, Alembic migrations, JWT auth
+- **Package tracking service:** FastAPI (UPS tracking; proxied by the frontend)
 - **Frontend:** React 18, TypeScript, Vite, Tailwind CSS
 - **Database:** PostgreSQL (multi-user ready; `user_id` on orders, stores, etc.)
 
@@ -17,9 +17,12 @@ cd order-management
 docker compose up --build
 ```
 
-- **App:** http://localhost:5173  
-- **API docs:** http://localhost:8000/docs  
+- **App:** http://localhost:5173
+- **Package tracking API docs (tracking features):** http://localhost:8080/docs
+- **API docs:** If you expose the backend port (see note below), then http://localhost:8000/docs
 - **PostgreSQL:** localhost:5432 (user `postgres`, password `postgres`, db `order_management`)
+
+Note: in the current `docker-compose.yml`, the backend port mapping is intentionally commented out. The frontend proxies `/api` to the backend, so the app works without exposing `8000`. If you want to browse OpenAPI directly, uncomment `backend.ports` (the `8000:8000` mapping) and restart with `docker compose up --build`.
 
 The backend runs migrations and ensures an admin user on startup (from `ADMIN_USERNAME` / `ADMIN_PASSWORD`, default `admin` / `admin`). Log in at the app, then create stores, buying groups, payment methods, and orders.
 
@@ -46,8 +49,22 @@ export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/order_managem
 export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD=admin
 alembic upgrade head
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+**2.5. Package tracking service (optional, for UPS tracking):**
+
+```bash
+cd ../package-tracking
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+export UPS_CLIENT="your_ups_client_id"
+export UPS_SECRET="your_ups_secret"
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
+```
+
+If `UPS_CLIENT` / `UPS_SECRET` are not set, the service can still generate tracking links (`POST /link`), but UPS status lookups (`GET /track`) will fail.
 
 **3. Frontend:**
 
@@ -57,7 +74,10 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 and log in with the admin credentials.
+Open http://localhost:5173 and log in with the admin credentials. The frontend proxies:
+
+- `/api` -> `API_PROXY_TARGET` (default `http://127.0.0.1:8000`)
+- `/tracking` -> `PACKAGE_TRACKING_PROXY_TARGET` (default `http://127.0.0.1:8080`)
 
 ## Data model (multi-user ready)
 
@@ -87,7 +107,7 @@ All API routes are under `/api`. Auth: send `Authorization: Bearer <token>` (fro
 - **Store accounts:** `GET /api/store-accounts`
 - **Shipments:** `GET/POST /api/shipments`, `GET/PATCH/DELETE /api/shipments/{id}`
 
-OpenAPI docs: http://localhost:8000/docs
+OpenAPI docs: http://localhost:8000/docs (only if the backend port is exposed; see the Docker quick-start note above)
 
 ## Browser extension
 
@@ -145,6 +165,10 @@ order-management/
 │   │   └── App.tsx
 │   ├── package.json
 │   ├── vite.config.ts
+│   └── Dockerfile
+├── package-tracking/
+│   ├── app/main.py
+│   ├── requirements.txt
 │   └── Dockerfile
 ├── browser-extension/
 │   ├── manifest.json
