@@ -1168,7 +1168,8 @@ export default function Orders() {
       if (!order || !paymentEdits[orderId]?.length) return
       const rows = paymentEdits[orderId]!
       const validRows = rows.filter((r) => r.payment_method_id !== 0)
-      const totalPaid = orderTotals(order.items ?? [])
+      const discount = orderEdits[orderId]?.order_discount ?? order.order_discount ?? '0'
+      const totalPaid = orderTotals(order.items ?? [], discount)
       const paymentSum = validRows.reduce((s, r) => s + parseDecimal(r.amount), 0)
       const usedIds = new Set(validRows.map((r) => r.payment_method_id))
       const canSave =
@@ -1391,14 +1392,16 @@ export default function Orders() {
     return Number.isNaN(n) ? 0 : n
   }
   const orderTotals = (
-    items: { price_paid?: string | null; quantity?: number; shipping?: string | null; sales_tax?: string | null }[]
+    items: { price_paid?: string | null; quantity?: number; shipping?: string | null; sales_tax?: string | null }[],
+    orderDiscount: string | null | undefined
   ) => {
     let totalPaid = 0
     for (const item of items) {
       const qty = Math.max(0, item.quantity ?? 1)
       totalPaid += (parseDecimal(item.price_paid) + parseDecimal(item.shipping) + parseDecimal(item.sales_tax)) * qty
     }
-    return totalPaid
+    const discount = Math.max(0, parseDecimal(orderDiscount))
+    return Math.max(0, totalPaid - discount)
   }
 
   const nowIso = () => new Date().toISOString().slice(0, 19)
@@ -1491,6 +1494,7 @@ export default function Orders() {
     let totalPayout = 0
 
     for (const o of visibleOrders) {
+      const discount = parseDecimal(orderEdits[o.id]?.order_discount ?? o.order_discount ?? '0')
       for (const item of o.items ?? []) {
         const edits = itemEdits[item.id]
         const qty = edits?.quantity ?? item.quantity ?? 1
@@ -1507,10 +1511,11 @@ export default function Orders() {
         totalCost += (itemCost + itemShipping + itemSalesTax) * qty
         totalPayout += itemPayout * qty
       }
+      totalCost -= discount
     }
 
     return { cost, payout, subtotal, shipping, salesTax, totalCost, totalPayout }
-  }, [visibleOrders, itemEdits])
+  }, [visibleOrders, itemEdits, orderEdits])
 
   return (
     <div className="space-y-6">
@@ -2125,7 +2130,8 @@ export default function Orders() {
                 payment_method_id: op.payment_method_id,
                 amount: op.amount != null ? String(op.amount) : '',
               }))
-            const totalPaid = orderTotals(o.items ?? [])
+            const discount = orderEdits[o.id]?.order_discount ?? o.order_discount ?? '0'
+            const totalPaid = orderTotals(o.items ?? [], discount)
             const itemCount = o.items?.length ?? 0
 
             return (
