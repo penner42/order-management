@@ -14,6 +14,12 @@ try {
 } catch {
   // ignore (Firefox may not support importScripts in some contexts)
 }
+try {
+  // eslint-disable-next-line no-undef
+  importScripts("lib/costco.js");
+} catch {
+  // ignore (Firefox may not support importScripts in some contexts)
+}
 
 function normalizeBaseUrl(s) {
   const v = String(s || "").trim();
@@ -97,10 +103,22 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // ---------------------------------------------------------------------------
 
 const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
+const COSTCO_ORDER_DETAIL_STORAGE_KEY = "costcoOrderDetailsGraphqlCapture";
 const WALMART_BULK_PORTS = new Set();
+const COSTCO_BULK_PORTS = new Set();
 
 function broadcastToBulkPorts(message) {
   WALMART_BULK_PORTS.forEach((port) => {
+    try {
+      port.postMessage(message);
+    } catch {
+      // ignore
+    }
+  });
+}
+
+function broadcastToCostcoBulkPorts(message) {
+  COSTCO_BULK_PORTS.forEach((port) => {
     try {
       port.postMessage(message);
     } catch {
@@ -186,6 +204,191 @@ function normalizeWalmartOrderDetailPayloadSafe(payload, sourceUrl) {
   }
   // Fallback: keep background self-sufficient even if importScripts fails.
   return normalizeWalmartOrderDetailPayloadFallback(payload, sourceUrl);
+}
+
+function normalizeCostcoOrdersGraphqlPayloadSafe(payload, sourceUrl) {
+  const c = globalThis.OrderManagerCostco;
+  if (c && typeof c.normalizeCostcoOrdersGraphqlPayload === "function") {
+    return c.normalizeCostcoOrdersGraphqlPayload(payload, sourceUrl);
+  }
+  // Fallback: keep background self-sufficient even if importScripts fails.
+  return normalizeCostcoOrdersGraphqlPayloadFallback(payload, sourceUrl);
+}
+
+function normalizeCostcoOrdersGraphqlPayloadFallback(graphqlPayload, sourceUrl) {
+  function coerceString(v) {
+    if (v == null) return null;
+    if (typeof v === "string") return v;
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    return null;
+  }
+
+  function normalizeIsoOrNull(v) {
+    const s = coerceString(v);
+    if (!s || !s.trim()) return null;
+    return s.trim();
+  }
+
+  function safeNumber(v) {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (
+      v &&
+      typeof v === "object" &&
+      typeof v.parsedValue === "number" &&
+      Number.isFinite(v.parsedValue)
+    ) {
+      return v.parsedValue;
+    }
+    if (typeof v === "string" && v.trim()) {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  }
+
+  function extractOrdersFromCostcoGraphql(payload) {
+    if (!payload || typeof payload !== "object") return [];
+    const go = payload.data && payload.data.getOnlineOrders;
+    if (!Array.isArray(go) || go.length === 0) return [];
+    const first = go[0] || {};
+    const orders = Array.isArray(first.bcOrders) ? first.bcOrders : [];
+    return orders;
+  }
+
+  const orders = extractOrdersFromCostcoGraphql(graphqlPayload);
+  const capturedAt = new Date().toISOString();
+  const normalized = [];
+
+  const externalUrl =
+    sourceUrl ||
+    (typeof document !== "undefined"
+      ? document.location && document.location.href
+      : null) ||
+    null;
+
+  for (let oi = 0; oi < orders.length; oi++) {
+    const o = orders[oi] || {};
+    const orderNumber = coerceString(o.orderNumber);
+    if (!orderNumber || !orderNumber.trim()) continue;
+
+    const orderPlacedDate = normalizeIsoOrNull(o.orderPlacedDate);
+    const status = coerceString(o.status);
+    const orderTotal = safeNumber(o.orderTotal);
+
+    const shipmentsById = {};
+    const shipmentsList = [];
+    const itemsList = [];
+
+    const lineItems = Array.isArray(o.orderLineItems) ? o.orderLineItems : [];
+    for (let li = 0; li < lineItems.length; li++) {
+      const item = lineItems[li] || {};
+      const itemName =
+        coerceString(item.itemDescription) ||
+        coerceString(item.itemNumber) ||
+        "Item";
+      const logicalItemId =
+        coerceString(item.orderLineItemId) ||
+        (item.lineNumber != null ? String(item.lineNumber) : null) ||
+        null;
+
+      const shipmentSlices = [];
+      const shipments = Array.isArray(item.shipment) ? item.shipment : [];
+      for (let si = 0; si < shipments.length; si++) {
+        const s = shipments[si] || {};
+        const shipmentId =
+          coerceString(s.shipmentId) ||
+          coerceString(s.packageNumber) ||
+          coerceString(s.trackingNumber);
+        if (!shipmentId) continue;
+
+        const trackingNumber = coerceString(s.trackingNumber);
+        const trackingUrl = coerceString(s.trackingSiteUrl);
+
+        const deliveredDate = normalizeIsoOrNull(s.deliveredDate);
+        const estimatedArrivalDate = normalizeIsoOrNull(s.estimatedArrivalDate);
+        const deliveryDate =
+          deliveredDate || estimatedArrivalDate || normalizeIsoOrNull(item.deliveryDate);
+
+        const shipmentStatus =
+          coerceString(s.status) || coerceString(item.status) || null;
+
+        if (!shipmentsById[shipmentId]) {
+          shipmentsById[shipmentId] = {
+            shipmentId,
+            trackingNumber: trackingNumber || null,
+            trackingUrl: trackingUrl || null,
+            deliveryDate: deliveryDate || null,
+            status: {
+              rawStatusType: shipmentStatus,
+              message: shipmentStatus,
+            },
+          };
+        }
+
+        shipmentSlices.push({ shipmentId, quantity: 1 });
+      }
+
+      itemsList.push({
+        logicalItemId,
+        externalSku: coerceString(item.itemNumber) || coerceString(item.itemId) || null,
+        name: itemName || null,
+        productUrl: null,
+        imageUrl: null,
+        variants: [],
+        quantities: { ordered: 1 },
+        pricing: {
+          unitPrice: null,
+          linePrice: null,
+          lineTotal: null,
+          strikethroughPrice: null,
+          discounts: [],
+        },
+        status: {
+          rawStatusCode: coerceString(item.status) || null,
+          normalizedStatus: null,
+        },
+        shipments: shipmentSlices,
+        returnability: {
+          isReturnable: !!item.orderReturnAllowed,
+          returnEligibilityMessage: null,
+        },
+      });
+    }
+
+    for (const sid in shipmentsById) {
+      shipmentsList.push(shipmentsById[sid]);
+    }
+
+    normalized.push({
+      store: "costco",
+      source: "browser-extension",
+      capturedAt,
+      externalOrder: {
+        id: String(orderNumber).trim(),
+        orderDate: orderPlacedDate,
+        url: externalUrl,
+        statusType: status || null,
+      },
+      customer: {
+        email: coerceString(o.emailAddress) || null,
+        firstName: null,
+        lastName: null,
+      },
+      shippingAddress: null,
+      shipments: shipmentsList,
+      paymentMethods: [],
+      items: itemsList,
+      cancellations: {
+        orderLevel: [],
+        itemLevelReasons: [],
+      },
+      totals: {
+        grandTotal: orderTotal,
+      },
+    });
+  }
+
+  return normalized;
 }
 
 function normalizeWalmartOrderDetailPayloadFallback(payload, sourceUrl) {
@@ -462,6 +665,42 @@ async function waitForWalmartDetail(orderNumber, timeoutMs) {
   throw new Error("Timed out waiting for Walmart order detail payload for " + String(orderNumber));
 }
 
+async function clearCostcoDetailStorage() {
+  await new Promise((resolve) => {
+    try {
+      chrome.storage.local.remove(COSTCO_ORDER_DETAIL_STORAGE_KEY, () => resolve(null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function waitForCostcoDetail(orderHeaderId, timeoutMs) {
+  const start = Date.now();
+  const target = String(orderHeaderId || "").trim();
+  const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 25000;
+
+  while (Date.now() - start < t) {
+    const current = await new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(COSTCO_ORDER_DETAIL_STORAGE_KEY, (s) => {
+          resolve(s && s[COSTCO_ORDER_DETAIL_STORAGE_KEY] ? s[COSTCO_ORDER_DETAIL_STORAGE_KEY] : null);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+
+    if (current && current.payload) {
+      const id = current.orderHeaderId != null ? String(current.orderHeaderId).trim() : "";
+      if (!target || id === target) return current;
+    }
+    await sleep(500);
+  }
+
+  throw new Error("Timed out waiting for Costco order detail payload for " + String(orderHeaderId));
+}
+
 async function ensureTabExists(tabId) {
   return await new Promise((resolve) => {
     try {
@@ -504,6 +743,30 @@ async function createWalmartScrapeTab(cookieStoreId) {
   });
 }
 
+async function createCostcoScrapeTab(cookieStoreId) {
+  return await new Promise((resolve, reject) => {
+    try {
+      const createProps = { url: "https://www.costco.com/myaccount/", active: false };
+      if (cookieStoreId) {
+        createProps.cookieStoreId = String(cookieStoreId);
+      }
+      chrome.tabs.create(createProps, (tab) => {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || "Could not create Costco tab."));
+          return;
+        }
+        if (!tab || typeof tab.id !== "number") {
+          reject(new Error("Could not create Costco tab."));
+          return;
+        }
+        resolve(tab.id);
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 async function closeTab(tabId) {
   if (typeof tabId !== "number") return;
   try {
@@ -521,6 +784,32 @@ async function navigateTab(tabId, url) {
       resolve(null);
     }
   });
+}
+
+async function getCostcoOrderDetailsUrlFromTab(tabId, orderHeaderId) {
+  const resp = await new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(
+        tabId,
+        { store: "costco", type: "costcoGetOrderDetailsUrl", orderHeaderId: String(orderHeaderId) },
+        (r) => {
+          if (chrome.runtime && chrome.runtime.lastError) {
+            resolve({ success: false, error: chrome.runtime.lastError.message || "Unknown communication error." });
+            return;
+          }
+          resolve(r || { success: false, error: "No response" });
+        }
+      );
+    } catch (e) {
+      resolve({ success: false, error: String(e && e.message ? e.message : e) });
+    }
+  });
+
+  if (!resp || resp.success !== true) {
+    throw new Error(resp && resp.error ? String(resp.error) : "Could not locate Costco order details URL.");
+  }
+  if (!resp.url) throw new Error("Missing Costco order details URL.");
+  return String(resp.url);
 }
 
 async function postBulkSession(baseUrl, orders) {
@@ -777,7 +1066,7 @@ if (chrome && chrome.runtime && chrome.runtime.onConnect) {
 // Receive per-page collection progress from the Walmart orders list content script bridge
 // and forward to the bulk progress tab.
 if (chrome && chrome.runtime && chrome.runtime.onMessage) {
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     try {
       if (!msg || msg.store !== "walmart") return;
       if (msg.type !== "walmartCollectOrdersProgress") return;
@@ -790,6 +1079,301 @@ if (chrome && chrome.runtime && chrome.runtime.onMessage) {
         pagesCollected: msg.pagesCollected,
         maxPages: msg.maxPages,
       });
+    } catch {
+      // ignore
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Single import -> bulk review bridge
+// ---------------------------------------------------------------------------
+
+if (chrome && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    try {
+      if (!msg || typeof msg !== "object") return;
+      if (msg.type !== "openBulkReview") return;
+
+      (async () => {
+        try {
+          const orders = Array.isArray(msg.orders) ? msg.orders : [];
+          if (orders.length === 0) throw new Error("At least one order payload is required.");
+
+          const baseUrl = await getOrderManagerApiBaseUrlAsync();
+          if (!baseUrl) {
+            throw new Error("Order Manager base URL is not configured. Configure it in Settings first.");
+          }
+
+          const { appBase, token } = await postBulkSession(baseUrl, orders);
+          const bulkUrl = appBase + "/import-review/bulk?token=" + encodeURIComponent(token);
+          await openReviewTab(bulkUrl);
+          try {
+            sendResponse({ success: true, url: bulkUrl });
+          } catch {
+            // ignore
+          }
+        } catch (e) {
+          try {
+            sendResponse({
+              success: false,
+              error: String(e && e.message ? e.message : e),
+            });
+          } catch {
+            // ignore
+          }
+        }
+      })();
+
+      // Async response
+      return true;
+    } catch {
+      // ignore
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Costco bulk import job controller (single-page GraphQL capture)
+// ---------------------------------------------------------------------------
+
+async function getCostcoOrdersGraphqlFromTab(tabId) {
+  const resp = await new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(
+        tabId,
+        { store: "costco", type: "costcoGetOrdersGraphql" },
+        (r) => {
+          if (chrome.runtime && chrome.runtime.lastError) {
+            resolve({
+              success: false,
+              error: chrome.runtime.lastError.message || "Unknown communication error.",
+            });
+            return;
+          }
+          resolve(r || { success: false, error: "No response" });
+        }
+      );
+    } catch (e) {
+      resolve({ success: false, error: String(e && e.message ? e.message : e) });
+    }
+  });
+
+  if (!resp || resp.success !== true) {
+    throw new Error(resp && resp.error ? String(resp.error) : "Could not read Costco GraphQL payload.");
+  }
+  if (!resp.payload) {
+    throw new Error("Missing Costco GraphQL payload.");
+  }
+  return {
+    url: resp.url || null,
+    payload: resp.payload,
+    capturedAt: resp.capturedAt || null,
+    cached: !!resp.cached,
+  };
+}
+
+function extractCostcoOrderHeaderIdsFromOrdersListGraphql(payload) {
+  try {
+    const go = payload && payload.data && payload.data.getOnlineOrders;
+    if (!Array.isArray(go) || go.length === 0) return [];
+    const first = go[0] || {};
+    const orders = Array.isArray(first.bcOrders) ? first.bcOrders : [];
+    return orders
+      .map((o) => {
+        const orderNumber = o && o.orderNumber != null ? String(o.orderNumber).trim() : "";
+        const orderHeaderId = o && o.orderHeaderId != null ? String(o.orderHeaderId).trim() : "";
+        if (!orderNumber || !orderHeaderId) return null;
+        return { orderNumber, orderHeaderId };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// (Costco) Order details are collected Walmart-style in a separate tab; see attachCostcoBulkPortHandlers.
+
+function attachCostcoBulkPortHandlers(port) {
+  let running = false;
+  let cancelled = false;
+  let scrapeTabId = null;
+
+  port.onMessage.addListener(async (msg) => {
+    if (!msg || typeof msg !== "object") return;
+    if (msg.store !== "costco") return;
+
+    if (msg.type === "cancel") {
+      cancelled = true;
+      try {
+        port.postMessage({ type: "jobCancelled" });
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    if (msg.type !== "start") return;
+    if (running) return;
+    running = true;
+
+    const baseUrl = await getOrderManagerApiBaseUrlAsync();
+    if (!baseUrl) {
+      port.postMessage({
+        type: "jobError",
+        error: "Order Manager base URL is not configured. Configure it in Settings first.",
+      });
+      return;
+    }
+
+    if (typeof msg.sourceTabId !== "number") {
+      port.postMessage({ type: "jobError", error: "Missing source tab id (Costco orders tab)." });
+      return;
+    }
+
+    port.postMessage({ type: "jobStarted" });
+
+    try {
+      port.postMessage({ type: "extracting" });
+
+      const captured = await getCostcoOrdersGraphqlFromTab(msg.sourceTabId);
+      if (cancelled) {
+        port.postMessage({ type: "jobCancelled" });
+        return;
+      }
+
+      port.postMessage({ type: "normalizing", cached: captured.cached });
+
+      const orders = normalizeCostcoOrdersGraphqlPayloadSafe(captured.payload, captured.url);
+      if (!Array.isArray(orders) || orders.length === 0) {
+        port.postMessage({ type: "jobError", error: "No orders found in the captured Costco GraphQL payload." });
+        return;
+      }
+
+      // Enrich orders with quantities/prices by opening order details in a NEW TAB (Walmart-style)
+      // and monitoring the order-detail GraphQL response captured by the content script.
+      const pairs = extractCostcoOrderHeaderIdsFromOrdersListGraphql(captured.payload);
+      const detailsByOrderNumber = {};
+
+      port.postMessage({ type: "enriching", total: pairs.length });
+
+      // Firefox container support: open in same container as source tab.
+      let cookieStoreId = null;
+      try {
+        const t = await ensureTabExists(msg.sourceTabId);
+        if (t && t.cookieStoreId) cookieStoreId = String(t.cookieStoreId);
+      } catch {
+        cookieStoreId = null;
+      }
+
+      try {
+        scrapeTabId = await createCostcoScrapeTab(cookieStoreId);
+        port.postMessage({ type: "enrichingTabReady" });
+      } catch (e) {
+        port.postMessage({
+          type: "enrichingTabError",
+          error: String(e && e.message ? e.message : e),
+        });
+        scrapeTabId = null;
+      }
+
+      for (let i = 0; i < pairs.length; i++) {
+        if (cancelled) {
+          port.postMessage({ type: "jobCancelled" });
+          return;
+        }
+        const p = pairs[i];
+        try {
+          port.postMessage({
+            type: "orderDetailsStatus",
+            status: "pending",
+            orderNumber: p.orderNumber,
+            orderHeaderId: p.orderHeaderId,
+          });
+
+          const detailUrl = await getCostcoOrderDetailsUrlFromTab(msg.sourceTabId, p.orderHeaderId);
+          await clearCostcoDetailStorage();
+          if (scrapeTabId != null) {
+            await navigateTab(scrapeTabId, detailUrl);
+          } else {
+            throw new Error("Costco scrape tab was not created.");
+          }
+          const capturedDetail = await waitForCostcoDetail(p.orderHeaderId, 25000);
+          if (capturedDetail && capturedDetail.payload) {
+            detailsByOrderNumber[p.orderNumber] = capturedDetail.payload;
+          }
+          port.postMessage({
+            type: "orderDetailsStatus",
+            status: "ok",
+            orderNumber: p.orderNumber,
+            orderHeaderId: p.orderHeaderId,
+          });
+          await sleep(400);
+        } catch (e) {
+          port.postMessage({
+            type: "orderDetailsStatus",
+            status: "error",
+            orderNumber: p.orderNumber,
+            orderHeaderId: p.orderHeaderId,
+            error: String(e && e.message ? e.message : e),
+          });
+        }
+      }
+
+      try {
+        const c = globalThis.OrderManagerCostco;
+        if (c && typeof c.mergeCostcoOrderDetailsIntoNormalizedOrders === "function") {
+          c.mergeCostcoOrderDetailsIntoNormalizedOrders(orders, detailsByOrderNumber);
+        }
+      } catch {
+        // ignore
+      }
+
+      port.postMessage({ type: "creatingSession", total: orders.length });
+
+      const { appBase, token } = await postBulkSession(baseUrl, orders);
+      const bulkUrl = appBase + "/import-review/bulk?token=" + encodeURIComponent(token);
+      await openReviewTab(bulkUrl);
+      port.postMessage({ type: "reviewReady", url: bulkUrl });
+
+      port.postMessage({ type: "jobDone" });
+    } catch (e) {
+      if (cancelled) {
+        try {
+          port.postMessage({ type: "jobCancelled" });
+        } catch {
+          // ignore
+        }
+      } else {
+        port.postMessage({ type: "jobError", error: String(e && e.message ? e.message : e) });
+      }
+    } finally {
+      await closeTab(scrapeTabId);
+    }
+  });
+}
+
+if (chrome && chrome.runtime && chrome.runtime.onConnect) {
+  chrome.runtime.onConnect.addListener((port) => {
+    try {
+      if (!port || port.name !== "costcoBulkImport") return;
+      try {
+        COSTCO_BULK_PORTS.add(port);
+      } catch {
+        // ignore
+      }
+      try {
+        port.onDisconnect.addListener(() => {
+          try {
+            COSTCO_BULK_PORTS.delete(port);
+          } catch {
+            // ignore
+          }
+        });
+      } catch {
+        // ignore
+      }
+      attachCostcoBulkPortHandlers(port);
     } catch {
       // ignore
     }

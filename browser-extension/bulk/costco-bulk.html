@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Costco bulk import</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --panel: rgba(255, 255, 255, 0.06);
+        --text: rgba(255, 255, 255, 0.92);
+        --muted: rgba(255, 255, 255, 0.68);
+        --ok: #34d399;
+        --warn: #f59e0b;
+        --err: #fb7185;
+        --line: rgba(255, 255, 255, 0.12);
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+        background: radial-gradient(1200px 800px at 15% 10%, rgba(56, 189, 248, 0.16), transparent 55%),
+          radial-gradient(1000px 700px at 90% 25%, rgba(168, 85, 247, 0.16), transparent 60%), var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 28px 22px 40px;
+      }
+      header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 14px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0;
+        letter-spacing: 0.2px;
+      }
+      .sub {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.05);
+        font-size: 12px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--warn);
+        box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.15);
+      }
+      .dot.ok {
+        background: var(--ok);
+        box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.16);
+      }
+      .dot.err {
+        background: var(--err);
+        box-shadow: 0 0 0 4px rgba(251, 113, 133, 0.16);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 360px;
+        gap: 14px;
+        margin-top: 14px;
+      }
+      @media (max-width: 920px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      .panel {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .panel .hd {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .panel .hd .title {
+        font-size: 12px;
+        color: var(--muted);
+        letter-spacing: 0.2px;
+      }
+      .panel .bd {
+        padding: 14px;
+      }
+      .log {
+        max-height: 520px;
+        overflow: auto;
+        padding: 0;
+      }
+      .logRow {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--line);
+        display: grid;
+        grid-template-columns: 18px 1fr;
+        gap: 10px;
+        align-items: start;
+      }
+      .logRow:last-child {
+        border-bottom: none;
+      }
+      .badge {
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+        margin-top: 2px;
+        background: rgba(245, 158, 11, 0.95);
+      }
+      .badge.ok {
+        background: rgba(52, 211, 153, 0.95);
+      }
+      .badge.err {
+        background: rgba(251, 113, 133, 0.95);
+      }
+      .msg {
+        font-size: 12px;
+        color: var(--text);
+        line-height: 1.35;
+      }
+      .msg .meta {
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 3px;
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      button {
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        padding: 8px 10px;
+        border-radius: 10px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      button:hover {
+        background: rgba(255, 255, 255, 0.09);
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      a.link {
+        color: rgba(56, 189, 248, 0.95);
+        text-decoration: none;
+        font-size: 12px;
+      }
+      a.link:hover {
+        text-decoration: underline;
+      }
+      .statRow {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .stat {
+        padding: 12px 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.2);
+      }
+      .stat .k {
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+      .stat .v {
+        font-size: 16px;
+        font-weight: 650;
+      }
+      .hint {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div>
+          <h1>Costco bulk import</h1>
+          <div class="sub">
+            Uses the Costco orders page’s existing GraphQL response (no page navigation yet). This tab can be closed when finished.
+          </div>
+        </div>
+        <div class="pill">
+          <span id="statusDot" class="dot"></span>
+          <span id="statusText">Preparing…</span>
+        </div>
+      </header>
+
+      <div class="grid">
+        <div class="panel">
+          <div class="hd">
+            <div class="title">Progress log</div>
+            <div class="actions">
+              <button id="cancelBtn">Cancel</button>
+              <button id="closeBtn" disabled>Close</button>
+            </div>
+          </div>
+          <div id="log" class="log"></div>
+        </div>
+
+        <div class="panel">
+          <div class="hd">
+            <div class="title">Summary</div>
+            <div>
+              <a id="reviewLink" class="link" href="#" target="_blank" style="display:none;">Open review</a>
+            </div>
+          </div>
+          <div class="bd">
+            <div class="statRow">
+              <div class="stat">
+                <div class="k">Orders</div>
+                <div id="statOrders" class="v">—</div>
+              </div>
+              <div class="stat">
+                <div class="k">Captured</div>
+                <div id="statCaptured" class="v">—</div>
+              </div>
+            </div>
+            <div class="hint">
+              If this says “No payload captured”, refresh the Costco orders page and retry.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="costco-bulk.js"></script>
+  </body>
+</html>
+

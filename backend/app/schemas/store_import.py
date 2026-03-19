@@ -26,6 +26,10 @@ class StoreOrderImportPayload(BaseModel):
     cancellations: dict[str, Any] | None = None
     totals: dict[str, Any] | None = None
     paymentMethods: list[dict[str, Any]] | None = None
+    orderDiscount: float | None = Field(
+        default=None,
+        description="Order-level discount amount (positive number).",
+    )
 
 
 class StoreOrderDiffResponse(BaseModel):

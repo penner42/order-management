@@ -166,6 +166,24 @@
     </button>
     <div id="walmartBulkResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
   </div>
+  <div id="costcoBulkSection" style="display: none; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+    <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #333;">
+      Costco bulk import (this page)
+    </div>
+    <button id="costcoStartBulk" style="margin-top: 4px;">
+      Start bulk import
+    </button>
+    <div id="costcoBulkResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
+  </div>
+  <div id="costcoOrderDetailSection" style="display: none; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+    <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #333;">
+      Costco single import (order detail)
+    </div>
+    <button id="costcoImportThisOrder" style="margin-top: 4px;">
+      Import this order
+    </button>
+    <div id="costcoOrderDetailResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
+  </div>
   <div id="walmartOrderSection" style="display: none;">
     <button id="getOrderDetails">
       Get Order Details
@@ -190,6 +208,7 @@
     <pre id="bgResults" style="display: none;"></pre>
   </div>
   <script src="../lib/walmart.js"></script>
+  <script src="../lib/costco.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

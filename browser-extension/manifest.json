@@ -5,6 +5,7 @@
   "description": "Integrate order data from store order pages into Order Manager.",
   "permissions": ["activeTab", "storage", "tabs", "cookies"],
   "host_permissions": [
+    "https://ecom-api.costco.com/*",
     "https://api.usabuying.group/*",
     "https://api.prod.buyinggroup.com/*",
     "http://localhost/*",
@@ -23,6 +24,11 @@
     "open_in_tab": true
   },
   "content_scripts": [
+    {
+      "matches": ["https://www.costco.com/myaccount/*"],
+      "js": ["stores/costco/bulk_capture.js"],
+      "run_at": "document_start"
+    },
     {
       "matches": ["https://www.costco.com/myaccount/*"],
       "js": ["stores/costco/orders.js"],
@@ -66,6 +72,12 @@
       ],
       "js": ["buying_groups/bg/bridge.js"],
       "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["stores/costco/bulk_capture_injected.js"],
+      "matches": ["https://www.costco.com/*"]
     }
   ]
 }

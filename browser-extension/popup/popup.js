@@ -2,7 +2,9 @@
 let lastOrderDetails = null;
 
 const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
+const COSTCO_ORDER_DETAIL_STORAGE_KEY = "costcoOrderDetailsGraphqlCapture";
 const WALMART_BULK_JOB_STORAGE_KEY = "walmartBulkJob";
+const COSTCO_BULK_JOB_STORAGE_KEY = "costcoBulkJob";
 const ORDER_MANAGER_API_BASE_URL_STORAGE_KEY_LEGACY = "orderManagerApiBaseUrl";
 const ORDER_MANAGER_PROD_API_BASE_URL_STORAGE_KEY = "orderManagerProdApiBaseUrl";
 const ORDER_MANAGER_DEV_API_BASE_URL_STORAGE_KEY = "orderManagerDevApiBaseUrl";
@@ -36,6 +38,30 @@ function isWalmartOrdersListUrl(url) {
     if (u.hostname !== "www.walmart.com") return false;
     const path = u.pathname || "";
     return path === "/orders";
+  } catch {
+    return false;
+  }
+}
+
+function isCostcoOrdersAndPurchasesUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "www.costco.com") return false;
+    if (!u.pathname.startsWith("/myaccount")) return false;
+    return /#\/app\/[^/]+\/ordersandpurchases/.test(u.hash || "");
+  } catch {
+    return false;
+  }
+}
+
+function isCostcoOrderDetailsUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "www.costco.com") return false;
+    if (!u.pathname.startsWith("/myaccount")) return false;
+    return /#\/app\/[^/]+\/orderdetails/.test(u.hash || "");
   } catch {
     return false;
   }
@@ -700,22 +726,10 @@ function renderOrderDetails(payload, resultsEl) {
                 }
 
                 try {
-                  const json = JSON.stringify(body);
-                  const hash = btoa(unescape(encodeURIComponent(json)));
-                  let reviewUrl = baseUrl;
-                  if (reviewUrl.endsWith("/")) reviewUrl = reviewUrl.slice(0, -1);
-                  reviewUrl += "/import-review#" + hash;
-                  chrome.tabs.create({ url: reviewUrl });
-                  try {
-                    window.close();
-                  } catch {
-                    // ignore (best-effort; some browsers may block programmatic close)
-                  }
-                  resultsEl.innerHTML =
-                    "<span>Opened Order Manager for review.</span>";
+                  openBulkReviewForOrders([body], resultsEl);
                 } catch (e) {
                   resultsEl.innerHTML =
-                    '<span class="error">Error encoding order data: ' +
+                    '<span class="error">Could not start bulk import review: ' +
                     escapeHtml(String(e && e.message ? e.message : e)) +
                     "</span>";
                 }
@@ -837,6 +851,182 @@ function renderOrderDetails(payload, resultsEl) {
   });
 })();
 
+(function setupCostcoBulkSection() {
+  const section = document.getElementById("costcoBulkSection");
+  const startBtn = document.getElementById("costcoStartBulk");
+  const resultsEl = document.getElementById("costcoBulkResults");
+
+  if (!section || !startBtn || !resultsEl || !chrome.tabs) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0];
+    const url = tab && tab.url ? String(tab.url) : "";
+    const onCostcoOrders = isCostcoOrdersAndPurchasesUrl(url);
+
+    section.style.display = onCostcoOrders ? "block" : "none";
+    if (!onCostcoOrders || !tab || typeof tab.id !== "number") {
+      resultsEl.style.display = "none";
+      return;
+    }
+
+    function appendStatusRow(text, status) {
+      if (!resultsEl) return;
+      const row = document.createElement("div");
+      row.textContent = text;
+      if (status === "error") {
+        row.style.color = "#c00";
+      } else if (status === "ok") {
+        row.style.color = "#065f46";
+      } else if (status === "pending") {
+        row.style.color = "#555";
+      }
+      resultsEl.appendChild(row);
+    }
+
+    async function startBulkInExtensionTab() {
+      resultsEl.style.display = "block";
+      resultsEl.innerHTML = "";
+      appendStatusRow("Opening bulk import tab…", "pending");
+
+      try {
+        await new Promise((resolve) => {
+          chrome.storage.local.set(
+            {
+              [COSTCO_BULK_JOB_STORAGE_KEY]: {
+                store: "costco",
+                createdAt: Date.now(),
+                sourceTabId: tab.id,
+              },
+            },
+            () => resolve(null)
+          );
+        });
+      } catch (e) {
+        appendStatusRow(
+          "Could not start bulk import (" + String(e && e.message ? e.message : e) + ")",
+          "error"
+        );
+        return;
+      }
+
+      try {
+        const url = chrome.runtime.getURL("bulk/costco-bulk.html");
+        chrome.tabs.create({ url, active: true });
+        try {
+          window.close();
+        } catch {
+          // ignore
+        }
+        appendStatusRow("Started. Continue in the bulk import tab.", "ok");
+      } catch (e) {
+        appendStatusRow(
+          "Could not open bulk import tab (" + String(e && e.message ? e.message : e) + ")",
+          "error"
+        );
+      }
+    }
+
+    startBtn.addEventListener("click", () => {
+      resultsEl.style.display = "block";
+      resultsEl.innerHTML = '<div class="loading">Starting…</div>';
+      startBulkInExtensionTab();
+    });
+  });
+})();
+
+(function setupCostcoSingleOrderDetailSection() {
+  const section = document.getElementById("costcoOrderDetailSection");
+  const importBtn = document.getElementById("costcoImportThisOrder");
+  const resultsEl = document.getElementById("costcoOrderDetailResults");
+
+  if (!section || !importBtn || !resultsEl || !chrome.tabs) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0];
+    const url = tab && tab.url ? String(tab.url) : "";
+    const onCostcoOrderDetail = isCostcoOrderDetailsUrl(url);
+
+    section.style.display = onCostcoOrderDetail ? "block" : "none";
+    if (!onCostcoOrderDetail) return;
+
+    function appendRow(text, status) {
+      const row = document.createElement("div");
+      row.textContent = text;
+      if (status === "error") row.style.color = "#c00";
+      else if (status === "ok") row.style.color = "#065f46";
+      else row.style.color = "#555";
+      resultsEl.appendChild(row);
+    }
+
+    importBtn.addEventListener("click", () => {
+      resultsEl.style.display = "block";
+      resultsEl.innerHTML = "";
+      appendRow("Reading captured GraphQL order details…", "pending");
+
+      chrome.storage.local.get(COSTCO_ORDER_DETAIL_STORAGE_KEY, (s) => {
+        const captured = s && s[COSTCO_ORDER_DETAIL_STORAGE_KEY] ? s[COSTCO_ORDER_DETAIL_STORAGE_KEY] : null;
+        if (!captured || !captured.payload) {
+          resultsEl.innerHTML =
+            '<span class="error">No saved Costco order details captured yet. Refresh this order detail page and try again.</span>';
+          return;
+        }
+
+        appendRow("Preparing import review…", "pending");
+
+        getOrderManagerApiBaseUrl((baseUrl) => {
+          if (!baseUrl) {
+            resultsEl.innerHTML =
+              '<div class="error">Order Manager base URL is not configured.</div>' +
+              '<div style="margin-top: 8px;">' +
+              '  <button id="openSettingsCostcoSingle" style="width: auto; padding: 8px 10px; font-size: 13px;">Open settings</button>' +
+              "</div>";
+            const btn = document.getElementById("openSettingsCostcoSingle");
+            if (btn) {
+              btn.addEventListener("click", () => {
+                const ok = openExtensionOptionsPage();
+                if (!ok) {
+                  resultsEl.innerHTML =
+                    '<span class="error">Could not open settings. Please open the extension details and choose “Extension options”.</span>';
+                }
+              });
+            }
+            return;
+          }
+
+          let body;
+          try {
+            if (
+              !globalThis.OrderManagerCostco ||
+              typeof globalThis.OrderManagerCostco.normalizeCostcoOrderDetailsGraphqlPayload !== "function"
+            ) {
+              throw new Error("Costco normalizer is not available.");
+            }
+            body = globalThis.OrderManagerCostco.normalizeCostcoOrderDetailsGraphqlPayload(
+              captured.payload,
+              url
+            );
+          } catch (e) {
+            resultsEl.innerHTML =
+              '<span class="error">Could not normalize Costco order detail data: ' +
+              escapeHtml(String(e && e.message ? e.message : e)) +
+              "</span>";
+            return;
+          }
+
+          try {
+            openBulkReviewForOrders([body], resultsEl);
+          } catch (e) {
+            resultsEl.innerHTML =
+              '<span class="error">Could not start bulk import review: ' +
+              escapeHtml(String(e && e.message ? e.message : e)) +
+              "</span>";
+          }
+        });
+      });
+    });
+  });
+})();
+
 const USABG_API_URL =
   "https://api.usabuying.group/buyers/pos?limit=20&start=0";
 const BG_ORDERS_URL = "https://api.prod.buyinggroup.com/v1/receipt/get_analytics";
@@ -846,6 +1036,48 @@ function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+function openBulkReviewForOrders(orders, resultsEl) {
+  if (!chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== "function") {
+    if (resultsEl) {
+      resultsEl.innerHTML =
+        '<span class="error">Extension messaging is not available in this browser context.</span>';
+    }
+    return;
+  }
+
+  chrome.runtime.sendMessage({ type: "openBulkReview", orders }, (resp) => {
+    if (chrome.runtime && chrome.runtime.lastError) {
+      if (resultsEl) {
+        resultsEl.innerHTML =
+          '<span class="error">Could not start import review: ' +
+          escapeHtml(String(chrome.runtime.lastError.message || "Unknown error")) +
+          "</span>";
+      }
+      return;
+    }
+
+    if (!resp || resp.success !== true) {
+      if (resultsEl) {
+        resultsEl.innerHTML =
+          '<span class="error">Could not start import review: ' +
+          escapeHtml(String(resp && resp.error ? resp.error : "Unknown error")) +
+          "</span>";
+      }
+      return;
+    }
+
+    try {
+      window.close();
+    } catch {
+      // ignore
+    }
+
+    if (resultsEl) {
+      resultsEl.innerHTML = "<span>Opened bulk import review in Order Manager.</span>";
+    }
+  });
 }
 
 /** Parse price string to number for display-only totals (not saved). */

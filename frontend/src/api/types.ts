@@ -130,6 +130,7 @@ export interface Order {
   purchase_date: string | null
   shipping: string | null
   sales_tax: string | null
+  order_discount: string
   notes: string | null
   created_at: string
   updated_at?: string

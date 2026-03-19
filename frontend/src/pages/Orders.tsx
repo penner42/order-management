@@ -237,7 +237,7 @@ export default function Orders() {
   const [stores, setStores] = useState<Store[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
-  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; purchase_date?: string }>>({})
+  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; purchase_date?: string; order_discount?: string }>>({})
   const [savingOrderId, setSavingOrderId] = useState<number | null>(null)
   const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus }>>({})
   const [paymentEdits, setPaymentEdits] = useState<Record<number, { payment_method_id: number; amount: string }[]>>({})
@@ -2312,6 +2312,33 @@ export default function Orders() {
                       disabled={savingOrderId === o.id}
                     />
                     </div>
+                    <label className="text-xs text-ink-muted shrink-0">Discount</label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={orderEdits[o.id]?.order_discount ?? (o.order_discount ?? '0')}
+                      onChange={(e) =>
+                        setOrderEdits((prev) => ({ ...prev, [o.id]: { ...prev[o.id], order_discount: e.target.value } }))
+                      }
+                      onBlur={(e) => {
+                        const raw = e.target.value.trim()
+                        const parsed = raw === '' || raw === '.' ? 0 : parseDecimal(raw)
+                        const nextValue = Number.isFinite(parsed) ? parsed.toFixed(2) : '0.00'
+                        const current = parseDecimal(o.order_discount ?? '0')
+                        if (Math.abs(parsed - current) >= 0.005) updateOrder(o.id, { order_discount: nextValue })
+                        setOrderEdits((prev) => {
+                          const next = { ...prev }
+                          if (next[o.id]) {
+                            delete next[o.id].order_discount
+                            if (Object.keys(next[o.id]).length === 0) delete next[o.id]
+                          }
+                          return next
+                        })
+                      }}
+                      disabled={savingOrderId === o.id}
+                      className="w-24 h-6 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80 shrink-0 disabled:opacity-60"
+                    />
                   </div>
                   <div className="space-y-1">
                     {(() => {

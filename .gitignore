@@ -35,3 +35,8 @@ browser-extension/stores/walmart/sample.json
 browser-extension/order.json
 .cursor/graphqldata
 .cursor/nextdata
+.cursor/costco-graphql
+.cursor/costco-orderdetail-graphql
+.cursor/costco-orderdetail-page
+.cursor/walmart-nextdata
+.cursor/walmat-graphqldata

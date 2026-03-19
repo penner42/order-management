@@ -9,7 +9,7 @@ URL hash.  The frontend calls these endpoints:
 from datetime import datetime, timezone
 from typing import Any, Dict
 import secrets
-
+import math
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
@@ -424,6 +424,17 @@ def _build_order_diff(
             "incoming": incoming_date_raw,
         }
 
+    incoming_discount = normalized.get("orderDiscount")
+    incoming_discount_num: float | None = None
+    if isinstance(incoming_discount, (int, float)) and math.isfinite(incoming_discount):
+        incoming_discount_num = float(incoming_discount)
+    existing_discount_num = float(linked_order.order_discount) if linked_order.order_discount is not None else 0.0
+    if incoming_discount_num is not None and abs(existing_discount_num - incoming_discount_num) >= 0.005:
+        order_changes["order_discount"] = {
+            "current": existing_discount_num,
+            "incoming": incoming_discount_num,
+        }
+
     has_changes = bool(
         order_changes
         or any(m["changes"] for m in matched_items)
@@ -483,6 +494,11 @@ def _create_or_find_order(
 
     store = _get_or_create_store(db, _resolve_store_name(store_name), current_user.id)
 
+    incoming_discount = normalized.get("orderDiscount")
+    order_discount: float = 0.0
+    if isinstance(incoming_discount, (int, float)) and math.isfinite(incoming_discount):
+        order_discount = float(incoming_discount)
+
     order = Order(
         user_id=current_user.id,
         store_id=store.id,
@@ -493,6 +509,7 @@ def _create_or_find_order(
         purchase_date=purchase_date,
         shipping=None,
         sales_tax=None,
+        order_discount=order_discount,
         notes="Imported from external store payload.",
     )
     db.add(order)
@@ -891,6 +908,10 @@ def apply_store_order_direct(
     )
     if buying_group_id is not None:
         order.buying_group_id = buying_group_id
+
+    incoming_discount = normalized.get("orderDiscount")
+    if isinstance(incoming_discount, (int, float)) and math.isfinite(incoming_discount):
+        order.order_discount = float(incoming_discount)
 
     _apply_items_and_shipments(
         db, normalized, payload.store, order, body.item_payouts, external_order_id
