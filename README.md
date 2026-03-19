@@ -1,3 +1,6 @@
+# WARNING
+## This whole thing is AI slop. Do not make it accessible from the internet. Do not trust any of the security features. Only run it on your local LAN and if possible, restrict access to it even there.
+
 # Order Management System
 
 A full-stack order management system for reselling: track orders (with store and optional store account), items (purchase/sell price, buying group, status workflow), multiple payment methods per order, payments with line items, shipments (items from one or more orders can ship together), and rewards. Supports importing orders from store order pages via a browser extension.
