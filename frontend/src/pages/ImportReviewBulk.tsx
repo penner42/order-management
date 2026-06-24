@@ -547,9 +547,8 @@ export default function ImportReviewBulk() {
               : 0
           const applying = applyingByIndex[idx] === true
           const applied = appliedByIndex[idx] === true
-          const hasVisibleChanges =
-            !isExisting || itemChangesCount > 0 || shipmentChangesCount > 0
-          const hasNoChanges = isExisting && !hasVisibleChanges
+          const hasTrackingUpdates = shipmentChangesCount > 0
+          const hasNoChanges = isExisting && !hasTrackingUpdates
           const applyError = applyErrorByIndex[idx] || null
           const collapsed = collapsedByIndex[idx] === true
 
@@ -631,9 +630,9 @@ export default function ImportReviewBulk() {
                     </div>
                     <div className="text-xs text-ink-muted dark:text-gray-400">
                       {isExisting
-                        ? hasVisibleChanges
-                          ? 'Existing order with differences'
-                          : 'Existing order with no visible differences'
+                        ? hasTrackingUpdates
+                          ? 'Existing order — tracking updates available'
+                          : 'Existing order — no tracking updates'
                         : 'New order'}
                     </div>
                     {(itemChangesCount > 0 || shipmentChangesCount > 0) && (
@@ -683,12 +682,10 @@ export default function ImportReviewBulk() {
                         ? 'Saving…'
                         : applied
                           ? isExisting
-                            ? 'Update Complete'
+                            ? 'Tracking updated'
                             : 'Import Complete'
                           : isExisting
-                            ? hasNoChanges
-                              ? 'Update order'
-                              : 'Update order'
+                            ? 'Update tracking'
                             : 'Import order'}
                     </button>
                   </div>

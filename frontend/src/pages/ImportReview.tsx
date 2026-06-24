@@ -467,6 +467,12 @@ export default function ImportReview() {
     }
   }
 
+  const shipmentChangesCount = Array.from(shipmentDiffMap.values()).filter(
+    (s) => s.status === 'new' || s.status === 'changed'
+  ).length
+  const hasTrackingUpdates = shipmentChangesCount > 0
+  const cannotApplyExisting = isExistingOrder && !hasTrackingUpdates
+
   return (
     <div>
       <div className="flex items-center justify-between gap-4 mb-6">
@@ -711,10 +717,14 @@ export default function ImportReview() {
               <button
                 type="button"
                 onClick={handleApply}
-                disabled={applying}
+                disabled={applying || cannotApplyExisting}
                 className="inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-md bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {applying ? 'Saving…' : isExistingOrder ? 'Update order' : 'Import order'}
+                {applying
+                  ? 'Saving…'
+                  : isExistingOrder
+                    ? 'Update tracking'
+                    : 'Import order'}
               </button>
             </div>
           </div>

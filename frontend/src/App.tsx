@@ -17,6 +17,7 @@ import ImportReviewBulk from './pages/ImportReviewBulk'
 import ImportedOrders from './pages/ImportedOrders'
 import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
+import Reports from './pages/Reports'
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -73,6 +74,7 @@ function AppShell() {
     }
     return [
       { to: '/', label: 'Orders' },
+      { to: '/reports', label: 'Reports' },
       { to: '/buying-groups', label: 'Buying Groups' },
       { to: '/rewards', label: 'Rewards' },
       { to: '/payment-methods', label: 'Payment Methods' },
@@ -220,6 +222,7 @@ function AppShell() {
       <main className="flex-1 w-full mx-auto px-3 sm:px-4 md:px-12 lg:px-12 py-4 md:py-8">
         <Routes>
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
+          <Route path="/reports" element={<Reports />} />
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
