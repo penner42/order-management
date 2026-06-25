@@ -256,6 +256,13 @@ function countNewTrackingNumbers(diff: OrderDiff | null): number {
   return diff.shipments.added.filter((a) => a.tracking_number).length
 }
 
+function countShipmentChanges(diff: OrderDiff | null): number {
+  if (!diff?.shipments) return 0
+  const added = diff.shipments.added.filter((a) => a.tracking_number).length
+  const changed = diff.shipments.matched.filter((m) => (m.changes?.length ?? 0) > 0).length
+  return added + changed
+}
+
 export default function ImportReviewBulk() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token') || ''
@@ -572,6 +579,7 @@ export default function ImportReviewBulk() {
           const storeAccounts = store ? (accountsByStore[store.id] ?? []) : []
           const itemChangesCount = countActionableItemChanges(diff)
           const newTrackingCount = countNewTrackingNumbers(diff)
+          const shipmentChangesCount = countShipmentChanges(diff)
           const hasBuyingGroupChange =
             isExisting &&
             selectionDiffersFromCurrent(
@@ -587,7 +595,7 @@ export default function ImportReviewBulk() {
           const hasActionableUpdates =
             !isExisting ||
             itemChangesCount > 0 ||
-            newTrackingCount > 0 ||
+            shipmentChangesCount > 0 ||
             hasBuyingGroupChange ||
             hasSubaccountChange
           const applying = applyingByIndex[idx] === true
@@ -629,9 +637,28 @@ export default function ImportReviewBulk() {
           >()
           if (isExisting && diff?.shipments) {
             for (const m of diff.shipments.matched) {
+              const payloadShipment = shipments.find(
+                (s) => (s.trackingNumber ?? '') && s.trackingNumber === m.tracking_number
+              )
+              const hasDeliveryDate = !!payloadShipment?.deliveryDate
+
+              const rawDetailed = m.detailed_changes ?? []
+              const rawChanges = m.changes ?? []
+
+              const effectiveDetailed = hasDeliveryDate
+                ? rawDetailed.filter((c) => c.field !== 'status')
+                : rawDetailed
+              const effectiveChanges = hasDeliveryDate
+                ? rawChanges.filter((name) => name !== 'status')
+                : rawChanges
+
+              const status: 'new' | 'unchanged' | 'changed' =
+                effectiveChanges.length > 0 || effectiveDetailed.length > 0 ? 'changed' : 'unchanged'
+
               shipmentDiffMap.set(m.tracking_number, {
-                status: 'unchanged',
-                changes: [],
+                status,
+                changes: effectiveChanges,
+                detailedChanges: effectiveDetailed,
               })
             }
             for (const a of diff.shipments.added) {
@@ -684,9 +711,14 @@ export default function ImportReviewBulk() {
                             {itemChangesCount} item change(s)
                           </span>
                         )}
-                        {newTrackingCount > 0 && (
+                        {shipmentChangesCount > 0 && newTrackingCount > 0 && (
                           <span className="text-amber-700 dark:text-amber-300">
                             {newTrackingCount} new tracking number(s)
+                          </span>
+                        )}
+                        {shipmentChangesCount > 0 && newTrackingCount === 0 && (
+                          <span className="text-amber-700 dark:text-amber-300">
+                            {shipmentChangesCount} shipment update(s)
                           </span>
                         )}
                         {hasBuyingGroupChange && (
