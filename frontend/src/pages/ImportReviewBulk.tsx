@@ -357,11 +357,6 @@ export default function ImportReviewBulk() {
         if (next[i] != null) continue
 
         const payload = payloads[i]
-        const storeName = String((payload as any)?.store ?? '')
-          .trim()
-          .toLowerCase()
-        if (storeName !== 'costco') continue
-
         const last4 = extractLast4FromOrderPaymentMethods(payload)
         if (!last4) continue
 
