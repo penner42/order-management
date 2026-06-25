@@ -491,6 +491,10 @@ def _build_order_diff(
     return {
         "is_existing_order": True,
         "has_changes": has_changes,
+        "current_order": {
+            "buying_group_id": linked_order.buying_group_id,
+            "store_account_id": linked_order.store_account_id,
+        },
         "order": order_changes,
         "items": {
             "matched": matched_items,

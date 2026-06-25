@@ -39,6 +39,10 @@ interface NormalizedShipment {
 interface OrderDiff {
   is_existing_order: boolean
   has_changes?: boolean
+  current_order?: {
+    buying_group_id: number | null
+    store_account_id: number | null
+  }
   order?: Record<string, { current: string | null; incoming: string | null }>
   items?: {
     matched: Array<{
@@ -227,6 +231,29 @@ function findStoreForPayload(p: NormalizedPayload, stores: Store[]): Store | nul
   const storeName: string = p.store || ''
   const name = storeName.trim().toLowerCase()
   return stores.find((s) => s.name.toLowerCase() === name) ?? null
+}
+
+function normalizeNullableId(id: number | null | undefined): number | null {
+  return id ?? null
+}
+
+function selectionDiffersFromCurrent(
+  current: number | null | undefined,
+  selected: number | null | undefined
+): boolean {
+  return normalizeNullableId(current) !== normalizeNullableId(selected)
+}
+
+function countActionableItemChanges(diff: OrderDiff | null): number {
+  if (!diff?.items) return 0
+  return (
+    diff.items.matched.filter((m) => m.changes.length > 0).length + (diff.items.added.length || 0)
+  )
+}
+
+function countNewTrackingNumbers(diff: OrderDiff | null): number {
+  if (!diff?.shipments?.added) return 0
+  return diff.shipments.added.filter((a) => a.tracking_number).length
 }
 
 export default function ImportReviewBulk() {
@@ -543,20 +570,28 @@ export default function ImportReviewBulk() {
           const isExisting = diff && diff.is_existing_order === true
           const store = findStoreForPayload(p, stores)
           const storeAccounts = store ? (accountsByStore[store.id] ?? []) : []
-          const itemChangesCount =
-            diff && diff.items
-              ? (diff.items.matched.filter((m) => m.changes.length > 0).length || 0) +
-                (diff.items.added.length || 0)
-              : 0
-          const shipmentChangesCount =
-            diff && diff.shipments
-              ? (diff.shipments.matched.filter((m) => m.changes.length > 0).length || 0) +
-                (diff.shipments.added.length || 0)
-              : 0
+          const itemChangesCount = countActionableItemChanges(diff)
+          const newTrackingCount = countNewTrackingNumbers(diff)
+          const hasBuyingGroupChange =
+            isExisting &&
+            selectionDiffersFromCurrent(
+              diff?.current_order?.buying_group_id,
+              selectedBuyingGroupIdByIndex[idx]
+            )
+          const hasSubaccountChange =
+            isExisting &&
+            selectionDiffersFromCurrent(
+              diff?.current_order?.store_account_id,
+              selectedAccountIdByIndex[idx]
+            )
+          const hasActionableUpdates =
+            !isExisting ||
+            itemChangesCount > 0 ||
+            newTrackingCount > 0 ||
+            hasBuyingGroupChange ||
+            hasSubaccountChange
           const applying = applyingByIndex[idx] === true
           const applied = appliedByIndex[idx] === true
-          const hasTrackingUpdates = shipmentChangesCount > 0
-          const hasNoChanges = isExisting && !hasTrackingUpdates
           const applyError = applyErrorByIndex[idx] || null
           const collapsed = collapsedByIndex[idx] === true
 
@@ -595,9 +630,8 @@ export default function ImportReviewBulk() {
           if (isExisting && diff?.shipments) {
             for (const m of diff.shipments.matched) {
               shipmentDiffMap.set(m.tracking_number, {
-                status: m.changes.length > 0 ? 'changed' : 'unchanged',
-                changes: m.changes,
-                detailedChanges: m.detailed_changes,
+                status: 'unchanged',
+                changes: [],
               })
             }
             for (const a of diff.shipments.added) {
@@ -638,21 +672,31 @@ export default function ImportReviewBulk() {
                     </div>
                     <div className="text-xs text-ink-muted dark:text-gray-400">
                       {isExisting
-                        ? hasTrackingUpdates
-                          ? 'Existing order — tracking updates available'
-                          : 'Existing order — no tracking updates'
+                        ? hasActionableUpdates
+                          ? 'Existing order — updates available'
+                          : 'Existing order — no updates needed'
                         : 'New order'}
                     </div>
-                    {(itemChangesCount > 0 || shipmentChangesCount > 0) && (
+                    {hasActionableUpdates && isExisting && (
                       <div className="flex flex-wrap gap-3 text-[11px] mt-1">
                         {itemChangesCount > 0 && (
                           <span className="text-amber-700 dark:text-amber-300">
                             {itemChangesCount} item change(s)
                           </span>
                         )}
-                        {shipmentChangesCount > 0 && (
+                        {newTrackingCount > 0 && (
                           <span className="text-amber-700 dark:text-amber-300">
-                            {shipmentChangesCount} shipment change(s)
+                            {newTrackingCount} new tracking number(s)
+                          </span>
+                        )}
+                        {hasBuyingGroupChange && (
+                          <span className="text-amber-700 dark:text-amber-300">
+                            Buying group changed
+                          </span>
+                        )}
+                        {hasSubaccountChange && (
+                          <span className="text-amber-700 dark:text-amber-300">
+                            Subaccount changed
                           </span>
                         )}
                       </div>
@@ -677,11 +721,11 @@ export default function ImportReviewBulk() {
                     <button
                       type="button"
                       onClick={() => handleApplySingle(idx)}
-                      disabled={Boolean(applying || applied || hasNoChanges)}
+                      disabled={Boolean(applying || applied || (isExisting && !hasActionableUpdates))}
                       className={`inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-md ${
                         applied
                           ? 'bg-gray-300 text-gray-600 dark:bg-gray-700 dark:text-gray-300 cursor-default'
-                          : hasNoChanges
+                          : isExisting && !hasActionableUpdates
                             ? 'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400 cursor-not-allowed'
                             : 'bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed'
                       }`}
@@ -690,10 +734,10 @@ export default function ImportReviewBulk() {
                         ? 'Saving…'
                         : applied
                           ? isExisting
-                            ? 'Tracking updated'
+                            ? 'Updated'
                             : 'Import Complete'
                           : isExisting
-                            ? 'Update tracking'
+                            ? 'Update order'
                             : 'Import order'}
                     </button>
                   </div>
