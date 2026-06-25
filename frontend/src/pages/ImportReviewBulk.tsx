@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { BuyingGroup, PaymentMethod, Store } from '../api/types'
 import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
+import { getDefaultItemPayout, getDefaultOrderTotal } from '../utils/importDefaults'
 
 type NormalizedPayload = any
 
@@ -434,12 +435,18 @@ export default function ImportReviewBulk() {
     try {
       const buyingGroupId = selectedBuyingGroupIdByIndex[index] ?? null
       const paymentMethodId = selectedPaymentMethodIdByIndex[index] ?? null
+      const items = Array.isArray((payload as any).items) ? ((payload as any).items as NormalizedItem[]) : []
+      const itemPayouts = items.map((item) => getDefaultItemPayout(item))
+      const orderTotal = getDefaultOrderTotal(payload)
       await api.post('/integrations/stores/orders/apply', {
         payload,
         store_account_id: null,
         buying_group_id: buyingGroupId,
-        item_payouts: null,
-        payment_methods: paymentMethodId != null ? [{ payment_method_id: paymentMethodId, amount: null }] : null,
+        item_payouts: itemPayouts,
+        payment_methods:
+          paymentMethodId != null
+            ? [{ payment_method_id: paymentMethodId, amount: orderTotal }]
+            : null,
       })
       setAppliedByIndex((prev) => ({ ...prev, [index]: true }))
     } catch (err) {

@@ -8,6 +8,11 @@ import type {
   PaymentMethod,
 } from '../api/types'
 import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
+import {
+  formatImportDefaultAmount,
+  getDefaultItemPayout,
+  getDefaultOrderTotal,
+} from '../utils/importDefaults'
 
 interface NormalizedItem {
   logicalItemId?: string | null
@@ -227,7 +232,12 @@ export default function ImportReview() {
         )
         setAccountsByStore(byStore)
         const items = payload.items ?? []
-        setItemPayouts(items.map(() => ''))
+        setItemPayouts(
+          items.map((item) => {
+            const payout = getDefaultItemPayout(item)
+            return payout != null ? formatImportDefaultAmount(payout) : ''
+          })
+        )
       })
       .catch((err: unknown) => {
         console.error(err)
@@ -266,21 +276,9 @@ export default function ImportReview() {
   useEffect(() => {
     if (!payload) return
     if (paymentAmount.trim()) return
-    const items = payload.items ?? []
-    let total = payload.totals?.grandTotal ?? payload.totals?.subtotal ?? null
-    if (total == null && items.length > 0) {
-      total = items.reduce((sum, item) => {
-        const qty = item.quantities?.ordered ?? 1
-        const price =
-          item.pricing?.lineTotal ??
-          item.pricing?.linePrice ??
-          item.pricing?.unitPrice ??
-          0
-        return sum + (price ?? 0) * (qty ?? 1)
-      }, 0)
-    }
-    if (typeof total === 'number' && total > 0) {
-      setPaymentAmount(total.toFixed(2))
+    const total = getDefaultOrderTotal(payload)
+    if (total != null) {
+      setPaymentAmount(formatImportDefaultAmount(total))
     }
   }, [payload, paymentAmount])
 
