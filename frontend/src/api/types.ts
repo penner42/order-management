@@ -29,6 +29,7 @@ export interface BuyingGroup {
   id: number
   user_id: number | null
   name: string
+  aliases: string[]
 }
 
 export interface Reward {

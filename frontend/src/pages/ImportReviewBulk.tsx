@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { BuyingGroup, PaymentMethod, Store } from '../api/types'
+import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
 
 type NormalizedPayload = any
 
@@ -169,37 +170,6 @@ function extractLast4FromOrderPaymentMethods(orderPayload: NormalizedPayload): s
   }
 
   return null
-}
-
-function normalizeNameForMatching(v: unknown): string {
-  if (typeof v !== 'string') return ''
-  return v.trim().toLowerCase().replace(/\s+/g, ' ')
-}
-
-function autoMatchBuyingGroupIdForCostcoOrder(
-  payload: NormalizedPayload,
-  groups: BuyingGroup[]
-): number | null {
-  if (!payload || !Array.isArray(groups) || groups.length === 0) return null
-  const storeName = String((payload as any)?.store ?? '')
-    .trim()
-    .toLowerCase()
-  if (storeName !== 'costco') return null
-
-  const shippingAddress = ((payload as any)?.shippingAddress ?? null) as any
-  const firstName = normalizeNameForMatching(shippingAddress?.firstName)
-  const lastName = normalizeNameForMatching(shippingAddress?.lastName)
-  const fullName = normalizeNameForMatching(shippingAddress?.fullName)
-
-  if (!firstName && !lastName && !fullName) return null
-
-  return (
-    groups.find((g) => {
-      const groupName = normalizeNameForMatching(g?.name)
-      if (!groupName) return false
-      return groupName === firstName || groupName === lastName || groupName === fullName
-    })?.id ?? null
-  )
 }
 
 function coerceStatusText(v: unknown): string {
@@ -418,7 +388,7 @@ export default function ImportReviewBulk() {
 
       for (let i = 0; i < payloads.length; i++) {
         if (next[i] != null) continue
-        const matchId = autoMatchBuyingGroupIdForCostcoOrder(payloads[i], buyingGroups)
+        const matchId = autoMatchBuyingGroupIdForImport(payloads[i], buyingGroups)
         if (matchId == null) continue
         next[i] = matchId
         changed = true

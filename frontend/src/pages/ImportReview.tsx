@@ -7,6 +7,7 @@ import type {
   StoreAccount,
   PaymentMethod,
 } from '../api/types'
+import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
 
 interface NormalizedItem {
   logicalItemId?: string | null
@@ -313,22 +314,11 @@ export default function ImportReview() {
     }
   }, [payload, flattenedPaymentMethods, paymentAmount])
 
-  // Auto-match buying group by address name
+  // Auto-match buying group by address name or alias
   useEffect(() => {
     if (!payload || buyingGroups.length === 0) return
-    const addressName = payload.shippingAddress?.fullName?.trim()
-    if (!addressName) return
-    const addressNameLower = addressName.toLowerCase()
-    const matching = buyingGroups.filter((g) => {
-      const groupName = g.name.trim()
-      if (!groupName) return false
-      return addressNameLower.includes(groupName.toLowerCase())
-    })
-    if (matching.length === 0) return
-    const best = matching.reduce((a, b) =>
-      (a.name.length >= b.name.length ? a : b)
-    )
-    setSelectedBuyingGroupId(best.id)
+    const matchId = autoMatchBuyingGroupIdForImport(payload, buyingGroups)
+    if (matchId != null) setSelectedBuyingGroupId(matchId)
   }, [payload, buyingGroups])
 
   async function handleApply() {
