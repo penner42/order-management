@@ -182,6 +182,48 @@ def _normalize_tracking_for_store(
     return tracking_trimmed, None
 
 
+def _walmart_tracking_from_notes(notes: str | None) -> str | None:
+    if not notes:
+        return None
+    prefix = "Walmart tracking: "
+    for line in notes.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            value = stripped[len(prefix) :].strip()
+            return value or None
+    return None
+
+
+def _slice_lookup_key(
+    store_name: str,
+    external_order_id: str | None,
+    tracking_raw: Any,
+    shipment_id: str | None = None,
+) -> tuple[str | None, str | None, str]:
+    """Return canonical tracking, optional Walmart original, and a unique slice key."""
+    tracking_key, walmart_original = _normalize_tracking_for_store(
+        store_name, external_order_id, tracking_raw
+    )
+    if walmart_original:
+        return tracking_key, walmart_original, walmart_original
+    if shipment_id:
+        return tracking_key, walmart_original, shipment_id
+    return tracking_key, walmart_original, tracking_key or ""
+
+
+def _shipments_by_lookup_key(shipments: list[Shipment]) -> dict[str, Shipment]:
+    by_key: dict[str, Shipment] = {}
+    for shipment in shipments:
+        walmart_original = _walmart_tracking_from_notes(shipment.notes)
+        if walmart_original:
+            by_key[walmart_original] = shipment
+            continue
+        tracking = (shipment.tracking_number or "").strip()
+        if tracking and tracking not in by_key:
+            by_key[tracking] = shipment
+    return by_key
+
+
 def _build_order_diff(
     db: Session,
     linked_order: Order | None,
@@ -307,16 +349,13 @@ def _build_order_diff(
         for desc, data in existing_by_desc.items()
     ]
 
-    # --- Shipment comparison (match by tracking number) ---
-    existing_shipments_by_tracking: dict[str, Shipment] = {}
-    for s in existing_shipments:
-        if s.tracking_number:
-            existing_shipments_by_tracking[s.tracking_number] = s
+    # --- Shipment comparison (match by Walmart original tracking or tracking number) ---
+    existing_shipments_by_lookup_key = _shipments_by_lookup_key(existing_shipments)
 
     incoming_shipments = normalized.get("shipments") or []
     matched_shipments: list[dict[str, Any]] = []
     added_shipments: list[dict[str, Any]] = []
-    used_existing_tracking: set[str] = set()
+    used_existing_lookup_keys: set[str] = set()
 
     store_name = (normalized.get("store") or "").strip()
     incoming_ext = normalized.get("externalOrder") or {}
@@ -324,8 +363,10 @@ def _build_order_diff(
 
     for inc_ship in incoming_shipments:
         tracking_raw = inc_ship.get("trackingNumber")
-        tracking_key, _ = _normalize_tracking_for_store(
-            store_name, external_order_id, tracking_raw
+        shipment_id_raw = inc_ship.get("shipmentId")
+        shipment_id = shipment_id_raw if isinstance(shipment_id_raw, str) else None
+        _, _, lookup_key = _slice_lookup_key(
+            store_name, external_order_id, tracking_raw, shipment_id
         )
 
         tracking_display = tracking_raw if isinstance(tracking_raw, str) else None
@@ -334,9 +375,9 @@ def _build_order_diff(
         status_msg = status_info.get("message")
         incoming_status_raw = status_info.get("rawStatusType")
 
-        if tracking_key and tracking_key in existing_shipments_by_tracking:
-            existing_s = existing_shipments_by_tracking[tracking_key]
-            used_existing_tracking.add(tracking_key)
+        if lookup_key and lookup_key in existing_shipments_by_lookup_key:
+            existing_s = existing_shipments_by_lookup_key[lookup_key]
+            used_existing_lookup_keys.add(lookup_key)
             ship_changes: list[str] = []
             detailed_ship_changes: list[dict[str, Any]] = []
             existing_delivered_raw = (
@@ -400,14 +441,17 @@ def _build_order_diff(
                 }
             )
 
-    unmatched_existing_shipments = [
-        {
-            "tracking_number": tracking,
-            "delivered_at": s.delivered_at.isoformat() if s.delivered_at else None,
-        }
-        for tracking, s in existing_shipments_by_tracking.items()
-        if tracking not in used_existing_tracking
-    ]
+    unmatched_existing_shipments = []
+    for s in existing_shipments:
+        walmart_original = _walmart_tracking_from_notes(s.notes)
+        lookup_key = walmart_original or ((s.tracking_number or "").strip())
+        if lookup_key and lookup_key not in used_existing_lookup_keys:
+            unmatched_existing_shipments.append(
+                {
+                    "tracking_number": s.tracking_number,
+                    "delivered_at": s.delivered_at.isoformat() if s.delivered_at else None,
+                }
+            )
 
     # --- Order-level comparison ---
     order_changes: dict[str, Any] = {}
@@ -529,8 +573,9 @@ def _apply_items_and_shipments(
 ) -> None:
     """Create items and shipments from a normalized payload, skipping duplicates.
 
-    When *existing_order* is True, only shipment tracking/status is updated and
-    tracking is attached to existing line items — no new items or order fields.
+    When *existing_order* is True, shipment tracking/status is updated and
+    tracking is attached to existing line items — splitting lines when a
+    shipment slice quantity is less than the matched item quantity.
     """
     items = normalized.get("items") or []
     payouts = item_payouts or []
@@ -561,21 +606,25 @@ def _apply_items_and_shipments(
         s.id: s for s in existing_shipments
     }
 
-    existing_item_keys: set[tuple[str, str | None]] = set()
+    existing_item_keys: set[tuple[str, str]] = set()
     for ei in existing_items:
         desc = (ei.description or "").strip()
         if not ei.shipment_items:
-            existing_item_keys.add((desc, None))
+            existing_item_keys.add((desc, ""))
             continue
         for si in ei.shipment_items:
             s = existing_shipments_by_id.get(si.shipment_id)
-            tracking = s.tracking_number if s and s.tracking_number else None
-            existing_item_keys.add((desc, tracking))
+            if not s:
+                existing_item_keys.add((desc, ""))
+                continue
+            walmart_original = _walmart_tracking_from_notes(s.notes)
+            if walmart_original:
+                existing_item_keys.add((desc, walmart_original))
+            else:
+                tracking = (s.tracking_number or "").strip() if s.tracking_number else ""
+                existing_item_keys.add((desc, tracking))
 
-    existing_shipments_by_tracking: dict[str, Shipment] = {}
-    for s in existing_shipments:
-        if s.tracking_number:
-            existing_shipments_by_tracking[s.tracking_number] = s
+    existing_shipments_by_lookup_key = _shipments_by_lookup_key(existing_shipments)
 
     shipments_by_id: dict[str, dict[str, Any]] = {}
     for s in shipments:
@@ -586,18 +635,25 @@ def _apply_items_and_shipments(
     shipments_created: dict[str, Shipment] = {}
     used_existing_item_ids: set[int] = set()
 
-    def item_tracking_keys(item: Item) -> set[str | None]:
+    def item_tracking_keys(item: Item) -> set[str]:
         if not item.shipment_items:
-            return {None}
-        keys: set[str | None] = set()
+            return {""}
+        keys: set[str] = set()
         for si in item.shipment_items:
             s = existing_shipments_by_id.get(si.shipment_id)
-            tracking = (s.tracking_number or "").strip() if s and s.tracking_number else None
-            keys.add(tracking or None)
+            if not s:
+                keys.add("")
+                continue
+            walmart_original = _walmart_tracking_from_notes(s.notes)
+            if walmart_original:
+                keys.add(walmart_original)
+                continue
+            tracking = (s.tracking_number or "").strip() if s.tracking_number else ""
+            keys.add(tracking)
         return keys
 
     def find_existing_item_for_tracking(
-        name: str, tracking_key: str | None
+        name: str, lookup_key: str
     ) -> Item | None:
         candidates = [
             ei
@@ -608,9 +664,9 @@ def _apply_items_and_shipments(
         if not candidates:
             return None
 
-        if tracking_key:
+        if lookup_key:
             for ei in candidates:
-                if tracking_key in item_tracking_keys(ei):
+                if lookup_key in item_tracking_keys(ei):
                     used_existing_item_ids.add(ei.id)
                     return ei
 
@@ -626,13 +682,36 @@ def _apply_items_and_shipments(
                     used_existing_item_ids.add(ei.id)
                     return ei
 
-        if tracking_key:
+        if lookup_key:
             for ei in candidates:
-                if tracking_key not in item_tracking_keys(ei):
+                if lookup_key not in item_tracking_keys(ei):
                     used_existing_item_ids.add(ei.id)
                     return ei
 
         return None
+
+    def allocate_item_for_slice(item: Item, slice_qty: int, item_name: str) -> Item:
+        """Keep *slice_qty* units on *item*; peel the rest into a new unlinked line."""
+        qty = item.quantity or 1
+        keep = min(max(slice_qty, 1), qty)
+        if qty <= keep:
+            return item
+        item.quantity = keep
+        remainder = Item(
+            order_id=item.order_id,
+            price_paid=item.price_paid,
+            price_sold=item.price_sold,
+            status=item.status,
+            quantity=qty - keep,
+            description=item.description,
+            shipping=item.shipping,
+            sales_tax=item.sales_tax,
+        )
+        db.add(remainder)
+        db.flush()
+        existing_items.append(remainder)
+        existing_item_keys.add((item_name, ""))
+        return item
 
     def link_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
         already_linked = any(si.shipment_id == shipment.id for si in item.shipment_items)
@@ -652,7 +731,9 @@ def _apply_items_and_shipments(
     ) -> None:
         if tracking_key and not (shipment.tracking_number or "").strip():
             shipment.tracking_number = tracking_key
-            existing_shipments_by_tracking[tracking_key] = shipment
+        lookup_reg = walmart_original or tracking_key
+        if lookup_reg:
+            existing_shipments_by_lookup_key[lookup_reg] = shipment
         if delivered_at is not None:
             old_key = _shipment_delivery_calendar_key(
                 shipment.delivered_at.isoformat() if shipment.delivered_at else None
@@ -716,11 +797,10 @@ def _apply_items_and_shipments(
                     )
                     return s
 
-        # If we already have a shipment for this tracking number, update its
-        # delivery timestamp (so future diffs don't keep flagging a change) and
-        # append any Walmart tracking metadata if needed.
-        if tracking_key and tracking_key in existing_shipments_by_tracking:
-            shipment = existing_shipments_by_tracking[tracking_key]
+        # If we already have a shipment for this slice, update its fields.
+        lookup_reg = walmart_original or tracking_key
+        if lookup_reg and lookup_reg in existing_shipments_by_lookup_key:
+            shipment = existing_shipments_by_lookup_key[lookup_reg]
             _apply_shipment_fields(
                 shipment,
                 tracking_key=tracking_key,
@@ -746,8 +826,9 @@ def _apply_items_and_shipments(
         db.add(shipment)
         db.flush()
         shipments_created[shipment_id] = shipment
-        if tracking_key:
-            existing_shipments_by_tracking[tracking_key] = shipment
+        lookup_reg = walmart_original or tracking_key
+        if lookup_reg:
+            existing_shipments_by_lookup_key[lookup_reg] = shipment
         return shipment
 
     for item_index, item_data in enumerate(items):
@@ -772,7 +853,7 @@ def _apply_items_and_shipments(
         status = ItemStatus.SHIPPED if has_tracking else ItemStatus.PURCHASED
 
         if not shipments_slices:
-            if (name, None) in existing_item_keys:
+            if (name, "") in existing_item_keys:
                 continue
             if existing_order:
                 continue
@@ -789,50 +870,52 @@ def _apply_items_and_shipments(
             )
             db.add(item)
             existing_items.append(item)
-            existing_item_keys.add((name, None))
+            existing_item_keys.add((name, ""))
             continue
 
         for slice_data in shipments_slices:
             shipment_id = slice_data.get("shipmentId")
-            src = {}
-            if isinstance(shipment_id, str):
-                src = shipments_by_id.get(shipment_id) or {}
+            sid = shipment_id if isinstance(shipment_id, str) else None
+            src = shipments_by_id.get(sid) or {} if sid else {}
             tracking_for_slice = src.get("trackingNumber")
-            tracking_key, _ = _normalize_tracking_for_store(
-                store_name, external_order_id, tracking_for_slice
+            tracking_key, walmart_original, lookup_key = _slice_lookup_key(
+                store_name, external_order_id, tracking_for_slice, sid
             )
 
-            key = (name, tracking_key)
+            key = (name, lookup_key)
             if key in existing_item_keys:
-                get_or_create_shipment_for_slice(
-                    shipment_id if isinstance(shipment_id, str) else None
-                )
+                get_or_create_shipment_for_slice(sid)
                 continue
 
-            existing_item = find_existing_item_for_tracking(name, tracking_key)
+            slice_qty = slice_data.get("quantity") or 1
+
+            existing_item = find_existing_item_for_tracking(name, lookup_key)
             if existing_item:
-                if tracking_key and tracking_key in item_tracking_keys(existing_item):
+                if lookup_key and lookup_key in item_tracking_keys(existing_item):
                     get_or_create_shipment_for_slice(
-                        shipment_id if isinstance(shipment_id, str) else None,
+                        sid,
                         item_to_link=existing_item,
                     )
                     existing_item_keys.add(key)
                     continue
 
+                allocated_item = allocate_item_for_slice(
+                    existing_item, slice_qty, name
+                )
                 shipment = get_or_create_shipment_for_slice(
-                    shipment_id if isinstance(shipment_id, str) else None,
-                    item_to_link=existing_item,
+                    sid,
+                    item_to_link=allocated_item,
                 )
                 if shipment:
-                    link_item_to_shipment(existing_item, shipment, shipped=has_tracking)
-                existing_item_keys.discard((name, None))
+                    link_item_to_shipment(
+                        allocated_item, shipment, shipped=has_tracking
+                    )
+                existing_item_keys.discard((name, ""))
                 existing_item_keys.add(key)
                 continue
 
             if existing_order:
-                get_or_create_shipment_for_slice(
-                    shipment_id if isinstance(shipment_id, str) else None
-                )
+                get_or_create_shipment_for_slice(sid)
                 continue
 
             quantity = slice_data.get("quantity") or 1
@@ -850,7 +933,7 @@ def _apply_items_and_shipments(
             db.flush()
             existing_items.append(item)
             shipment = get_or_create_shipment_for_slice(
-                shipment_id if isinstance(shipment_id, str) else None,
+                sid,
                 item_to_link=item,
             )
             if shipment:
@@ -870,10 +953,10 @@ def _apply_items_and_shipments(
             get_or_create_shipment_for_slice(sid)
 
         tracking_raw = src.get("trackingNumber")
-        tracking_key, walmart_original = _normalize_tracking_for_store(
-            store_name, external_order_id, tracking_raw
+        tracking_key, walmart_original, lookup_key = _slice_lookup_key(
+            store_name, external_order_id, tracking_raw, sid
         )
-        if not tracking_key or tracking_key not in existing_shipments_by_tracking:
+        if not lookup_key or lookup_key not in existing_shipments_by_lookup_key:
             # Do not create new shipments here; creation still happens via
             # get_or_create_shipment_for_slice when new items are imported.
             continue
@@ -894,7 +977,7 @@ def _apply_items_and_shipments(
         elif isinstance(status_type, str) and status_type.strip():
             normalized_status = status_type.strip()
 
-        shipment = existing_shipments_by_tracking[tracking_key]
+        shipment = existing_shipments_by_lookup_key[lookup_key]
         _apply_shipment_fields(
             shipment,
             tracking_key=tracking_key,
