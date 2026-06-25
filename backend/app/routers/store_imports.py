@@ -520,6 +520,8 @@ def _create_or_find_order(
         .first()
     )
     if existing:
+        if store_account_id is not None and existing.store_account_id is None:
+            existing.store_account_id = store_account_id
         return existing
 
     external_order = normalized.get("externalOrder") or {}

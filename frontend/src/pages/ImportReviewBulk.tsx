@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
-import type { BuyingGroup, PaymentMethod, Store } from '../api/types'
+import type { BuyingGroup, PaymentMethod, Store, StoreAccount } from '../api/types'
 import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
+import { matchStoreAccountIdForImport } from '../utils/storeAccountMatch'
 import { getDefaultItemPayout, getDefaultOrderTotal } from '../utils/importDefaults'
 
 type NormalizedPayload = any
@@ -222,11 +223,18 @@ function isCanceledOrderPayload(p: NormalizedPayload): boolean {
   return false
 }
 
+function findStoreForPayload(p: NormalizedPayload, stores: Store[]): Store | null {
+  const storeName: string = p.store || ''
+  const name = storeName.trim().toLowerCase()
+  return stores.find((s) => s.name.toLowerCase() === name) ?? null
+}
+
 export default function ImportReviewBulk() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token') || ''
   const [payloads, setPayloads] = useState<NormalizedPayload[]>([])
   const [stores, setStores] = useState<Store[]>([])
+  const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
   const [buyingGroups, setBuyingGroups] = useState<BuyingGroup[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
   const [diffs, setDiffs] = useState<Record<number, OrderDiff | null>>({})
@@ -237,6 +245,7 @@ export default function ImportReviewBulk() {
   const [applyErrorByIndex, setApplyErrorByIndex] = useState<Record<number, string | null>>({})
   const [collapsedByIndex, setCollapsedByIndex] = useState<Record<number, boolean>>({})
   const [selectedBuyingGroupIdByIndex, setSelectedBuyingGroupIdByIndex] = useState<Record<number, number | null>>({})
+  const [selectedAccountIdByIndex, setSelectedAccountIdByIndex] = useState<Record<number, number | null>>({})
   const [selectedPaymentMethodIdByIndex, setSelectedPaymentMethodIdByIndex] = useState<Record<number, number | null>>({})
 
   useEffect(() => {
@@ -265,6 +274,15 @@ export default function ImportReviewBulk() {
           setStores(storesList)
           setBuyingGroups(groups)
           setPaymentMethods(methods)
+          const byStore: Record<number, StoreAccount[]> = {}
+          await Promise.all(
+            storesList.map((s) =>
+              api.get<StoreAccount[]>(`/stores/${s.id}/accounts`).then((list) => {
+                byStore[s.id] = list
+              })
+            )
+          )
+          setAccountsByStore(byStore)
           const nextDiffs: Record<number, OrderDiff | null> = {}
           const diffsArr = Array.isArray(diffRes.diffs) ? diffRes.diffs : []
           for (let i = 0; i < orders.length; i++) {
@@ -394,6 +412,28 @@ export default function ImportReviewBulk() {
     })
   }, [payloads, buyingGroups])
 
+  useEffect(() => {
+    if (!payloads.length || stores.length === 0) return
+
+    setSelectedAccountIdByIndex((prev) => {
+      let changed = false
+      const next = { ...prev }
+
+      for (let i = 0; i < payloads.length; i++) {
+        if (next[i] != null) continue
+        const store = findStoreForPayload(payloads[i], stores)
+        if (!store) continue
+        const storeAccounts = accountsByStore[store.id] ?? []
+        const matchId = matchStoreAccountIdForImport(payloads[i], storeAccounts)
+        if (matchId == null) continue
+        next[i] = matchId
+        changed = true
+      }
+
+      return changed ? next : prev
+    })
+  }, [payloads, stores, accountsByStore])
+
   if (!token || payloads.length === 0) {
     return (
       <div className="max-w-2xl mx-auto">
@@ -421,12 +461,6 @@ export default function ImportReviewBulk() {
     )
   }
 
-  function findStoreForPayload(p: NormalizedPayload): Store | null {
-    const storeName: string = p.store || ''
-    const name = storeName.trim().toLowerCase()
-    return stores.find((s) => s.name.toLowerCase() === name) ?? null
-  }
-
   async function handleApplySingle(index: number) {
     const payload = payloads[index]
     if (!payload || applyingByIndex[index] || appliedByIndex[index]) return
@@ -434,13 +468,14 @@ export default function ImportReviewBulk() {
     setApplyErrorByIndex((prev) => ({ ...prev, [index]: null }))
     try {
       const buyingGroupId = selectedBuyingGroupIdByIndex[index] ?? null
+      const storeAccountId = selectedAccountIdByIndex[index] ?? null
       const paymentMethodId = selectedPaymentMethodIdByIndex[index] ?? null
       const items = Array.isArray((payload as any).items) ? ((payload as any).items as NormalizedItem[]) : []
       const itemPayouts = items.map((item) => getDefaultItemPayout(item))
       const orderTotal = getDefaultOrderTotal(payload)
       await api.post('/integrations/stores/orders/apply', {
         payload,
-        store_account_id: null,
+        store_account_id: storeAccountId,
         buying_group_id: buyingGroupId,
         item_payouts: itemPayouts,
         payment_methods:
@@ -506,7 +541,8 @@ export default function ImportReviewBulk() {
           const storeName: string = p.store || ''
           const orderId: string = externalOrder.id || ''
           const isExisting = diff && diff.is_existing_order === true
-          const store = findStoreForPayload(p)
+          const store = findStoreForPayload(p, stores)
+          const storeAccounts = store ? (accountsByStore[store.id] ?? []) : []
           const itemChangesCount =
             diff && diff.items
               ? (diff.items.matched.filter((m) => m.changes.length > 0).length || 0) +
@@ -684,6 +720,28 @@ export default function ImportReviewBulk() {
                           {buyingGroups.map((g) => (
                             <option key={g.id} value={g.id}>
                               {g.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    {storeAccounts.length > 0 && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-ink-muted shrink-0 w-16">Subaccount</span>
+                        <select
+                          value={selectedAccountIdByIndex[idx] ?? ''}
+                          onChange={(e) =>
+                            setSelectedAccountIdByIndex((prev) => ({
+                              ...prev,
+                              [idx]: e.target.value ? Number(e.target.value) : null,
+                            }))
+                          }
+                          className="text-sm rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 text-ink dark:text-gray-200 min-w-0"
+                        >
+                          <option value="">None</option>
+                          {storeAccounts.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.name}
                             </option>
                           ))}
                         </select>

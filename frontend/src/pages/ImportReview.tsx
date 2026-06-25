@@ -8,6 +8,7 @@ import type {
   PaymentMethod,
 } from '../api/types'
 import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
+import { matchStoreAccountIdForImport } from '../utils/storeAccountMatch'
 import {
   formatImportDefaultAmount,
   getDefaultItemPayout,
@@ -263,11 +264,9 @@ export default function ImportReview() {
   // Auto-match account by email
   useEffect(() => {
     if (!payload || storeAccounts.length === 0) return
-    const email = payload.customer?.email?.trim().toLowerCase()
-    if (!email) return
-    const match = storeAccounts.find((a) => a.name.trim().toLowerCase() === email)
-    if (match) {
-      setSelectedAccountId(match.id)
+    const matchId = matchStoreAccountIdForImport(payload, storeAccounts)
+    if (matchId != null) {
+      setSelectedAccountId(matchId)
       setAccountAutoMatched(true)
     }
   }, [payload, storeAccounts])
