@@ -262,6 +262,56 @@ def _shipments_by_lookup_key(shipments: list[Shipment]) -> dict[str, Shipment]:
     return by_key
 
 
+def _normalize_price_for_diff(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    try:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _prices_differ_for_diff(a: float | None, b: float | None) -> bool:
+    if a is None and b is None:
+        return False
+    if a is None or b is None:
+        return True
+    return abs(a - b) >= 0.005
+
+
+def _aggregate_incoming_items_by_name(
+    incoming_items: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Collapse duplicate line items (e.g. one per Walmart shipment group) by name."""
+    by_name: dict[str, dict[str, Any]] = {}
+    for inc_item in incoming_items:
+        name = (inc_item.get("name") or "").strip()
+        if not name:
+            continue
+        pricing = inc_item.get("pricing") or {}
+        quantities = inc_item.get("quantities") or {}
+        inc_qty = quantities.get("ordered") or 1
+        inc_price = _normalize_price_for_diff(pricing.get("unitPrice"))
+        inc_line_total = _normalize_price_for_diff(pricing.get("lineTotal"))
+
+        if name not in by_name:
+            by_name[name] = {
+                "total_quantity": 0,
+                "unit_price": inc_price,
+                "line_total": 0.0 if inc_line_total is not None else None,
+            }
+        by_name[name]["total_quantity"] += inc_qty
+        if inc_line_total is not None:
+            current_total = by_name[name]["line_total"]
+            by_name[name]["line_total"] = (
+                inc_line_total if current_total is None else current_total + inc_line_total
+            )
+    return by_name
+
+
 def _build_order_diff(
     db: Session,
     linked_order: Order | None,
@@ -305,7 +355,7 @@ def _build_order_diff(
         if desc not in existing_by_desc:
             existing_by_desc[desc] = {
                 "total_quantity": 0,
-                "price_paid": float(item.price_paid) if item.price_paid is not None else None,
+                "price_paid": _normalize_price_for_diff(item.price_paid),
                 "statuses": set(),
             }
         existing_by_desc[desc]["total_quantity"] += item.quantity
@@ -314,24 +364,21 @@ def _build_order_diff(
                 item.status.value if hasattr(item.status, "value") else str(item.status)
             )
 
-    incoming_items = normalized.get("items") or []
+    incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
     matched_items: list[dict[str, Any]] = []
     added_items: list[dict[str, Any]] = []
 
-    for inc_item in incoming_items:
-        name = (inc_item.get("name") or "").strip()
-        pricing = inc_item.get("pricing") or {}
-        quantities = inc_item.get("quantities") or {}
-        inc_qty = quantities.get("ordered") or 1
-        inc_price = pricing.get("unitPrice")
-        inc_line_total = pricing.get("lineTotal")
+    for name, incoming in incoming_by_name.items():
+        inc_qty = incoming["total_quantity"]
+        inc_price = incoming["unit_price"]
+        inc_line_total = incoming["line_total"]
 
         if name in existing_by_desc:
             existing = existing_by_desc.pop(name)
             changes: list[str] = []
             detailed_changes: list[dict[str, Any]] = []
 
-            if existing["price_paid"] != inc_price:
+            if _prices_differ_for_diff(existing["price_paid"], inc_price):
                 changes.append("price")
                 detailed_changes.append(
                     {
