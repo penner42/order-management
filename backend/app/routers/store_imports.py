@@ -123,6 +123,29 @@ def _delivery_string_to_utc_datetime(value: str | None) -> datetime | None:
     return datetime.strptime(key, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
+def _incoming_shipment_status(status_info: dict[str, Any] | None) -> str | None:
+    """Extract the status string we would persist from a normalized shipment slice."""
+    if not status_info:
+        return None
+    status_message = status_info.get("message")
+    status_type = status_info.get("statusType") or status_info.get("rawStatusType")
+    if isinstance(status_message, str) and status_message.strip():
+        return status_message.strip()
+    if isinstance(status_type, str) and status_type.strip():
+        return status_type.strip()
+    return None
+
+
+def _shipment_statuses_differ_for_diff(
+    existing_status: str | None,
+    incoming_status: str | None,
+) -> bool:
+    if not incoming_status:
+        return False
+    existing_norm = (existing_status or "").strip()
+    return existing_norm != incoming_status
+
+
 def _get_or_create_store(db: Session, store_name: str, user_id: int | None) -> Store:
     store = db.query(Store).filter(Store.name == store_name).first()
     if store:
@@ -441,6 +464,7 @@ def _build_order_diff(
     matched_shipments: list[dict[str, Any]] = []
     added_shipments: list[dict[str, Any]] = []
     used_existing_lookup_keys: set[str] = set()
+    used_existing_shipment_ids: set[int] = set()
 
     store_name = (normalized.get("store") or "").strip()
     incoming_ext = normalized.get("externalOrder") or {}
@@ -455,8 +479,7 @@ def _build_order_diff(
         tracking_display = tracking_raw if isinstance(tracking_raw, str) else None
         delivery = inc_ship.get("deliveryDate")
         status_info = inc_ship.get("status") or {}
-        status_msg = status_info.get("message")
-        incoming_status_raw = status_info.get("rawStatusType")
+        incoming_status = _incoming_shipment_status(status_info)
 
         existing_s = _find_existing_shipment(
             existing_shipments_by_lookup_key,
@@ -464,6 +487,9 @@ def _build_order_diff(
             tracking_key=tracking_key,
         )
         if existing_s is not None:
+            if existing_s.id in used_existing_shipment_ids:
+                continue
+            used_existing_shipment_ids.add(existing_s.id)
             for matched_key in _shipment_db_keys(existing_s):
                 used_existing_lookup_keys.add(matched_key)
             ship_changes: list[str] = []
@@ -476,9 +502,13 @@ def _build_order_diff(
                 delivery if isinstance(delivery, str) else None
             )
 
-            # Only treat delivery_date as changed when the *calendar date*
-            # differs, ignoring time-of-day / timezone formatting differences.
-            delivery_changed = existing_delivered_date != incoming_delivered_date
+            # Only flag delivery when the import supplies a parseable date that
+            # differs from what we already have. Missing incoming dates should
+            # not look like a change once delivered_at is already stored.
+            delivery_changed = (
+                incoming_delivered_date is not None
+                and existing_delivered_date != incoming_delivered_date
+            )
             if delivery_changed:
                 ship_changes.append("delivery_date")
                 detailed_ship_changes.append(
@@ -489,31 +519,40 @@ def _build_order_diff(
                     }
                 )
 
-            # We only have incoming status information. Treat it as a change
-            # while the shipment is still in-flight (no delivered_at yet), but
-            # once the delivery date is locked in we avoid repeatedly flagging
-            # the same "Delivered on X" status on every subsequent import.
-            status_changed = False
-            if status_msg or incoming_status_raw:
-                if existing_delivered_date is None or existing_delivered_date != incoming_delivered_date:
-                    status_changed = True
-                    ship_changes.append("status")
-                    detailed_ship_changes.append(
-                        {
-                            "field": "status",
-                            "before": None,
-                            "after": status_msg or incoming_status_raw,
-                        }
-                    )
+            delivery_dates_locked = (
+                existing_delivered_date is not None
+                and incoming_delivered_date is not None
+                and existing_delivered_date == incoming_delivered_date
+            )
+            status_changed = (
+                not delivery_dates_locked
+                and _shipment_statuses_differ_for_diff(
+                    existing_s.status,
+                    incoming_status,
+                )
+            )
+            if status_changed:
+                ship_changes.append("status")
+                detailed_ship_changes.append(
+                    {
+                        "field": "status",
+                        "before": existing_s.status,
+                        "after": incoming_status,
+                    }
+                )
 
             matched_shipments.append(
                 {
                     "tracking_number": tracking_display,
-                    "current": {"delivered_at": existing_delivered_raw},
+                    "current": {
+                        "delivered_at": existing_delivered_raw,
+                        "status": existing_s.status,
+                    },
                     "incoming": {
                         "delivery_date": delivery,
-                        "status_message": status_msg,
-                        "status_code": incoming_status_raw,
+                        "status_message": status_info.get("message"),
+                        "status_code": status_info.get("rawStatusType")
+                        or status_info.get("statusType"),
                     },
                     "changes": ship_changes,
                     "detailed_changes": detailed_ship_changes,
@@ -524,8 +563,9 @@ def _build_order_diff(
                 {
                     "tracking_number": tracking_display,
                     "delivery_date": delivery,
-                    "status_message": status_msg,
-                    "status_code": incoming_status_raw,
+                    "status_message": status_info.get("message"),
+                    "status_code": status_info.get("rawStatusType")
+                    or status_info.get("statusType"),
                 }
             )
 
@@ -863,13 +903,7 @@ def _apply_items_and_shipments(
         )
 
         status_info = src.get("status") or {}
-        status_message = status_info.get("message")
-        status_type = status_info.get("statusType")
-        normalized_status: str | None = None
-        if isinstance(status_message, str) and status_message.strip():
-            normalized_status = status_message.strip()
-        elif isinstance(status_type, str) and status_type.strip():
-            normalized_status = status_type.strip()
+        normalized_status = _incoming_shipment_status(status_info)
 
         if item_to_link:
             for si in item_to_link.shipment_items:
@@ -1074,13 +1108,7 @@ def _apply_items_and_shipments(
         )
 
         status_info = src.get("status") or {}
-        status_message = status_info.get("message")
-        status_type = status_info.get("statusType")
-        normalized_status: str | None = None
-        if isinstance(status_message, str) and status_message.strip():
-            normalized_status = status_message.strip()
-        elif isinstance(status_type, str) and status_type.strip():
-            normalized_status = status_type.strip()
+        normalized_status = _incoming_shipment_status(status_info)
 
         _apply_shipment_fields(
             existing_shipment,
