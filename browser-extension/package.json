@@ -1,0 +1,15 @@
+{
+  "name": "order-manager-browser-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate-key": "node scripts/generate-chrome-key.mjs",
+    "sign:chrome": "node scripts/sign-chrome.mjs",
+    "sign:firefox": "web-ext sign --source-dir=. --artifacts-dir=./dist --channel=unlisted",
+    "sign": "npm run sign:chrome && npm run sign:firefox"
+  },
+  "devDependencies": {
+    "crx3": "^1.1.3",
+    "web-ext": "^8.9.0"
+  }
+}

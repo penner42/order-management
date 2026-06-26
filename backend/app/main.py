@@ -18,6 +18,7 @@ from app.routers import (
     shipments,
     portals,
     store_imports,
+    browser_extension,
 )
 from app.admin_bootstrap import ensure_admin_user
 
@@ -34,11 +35,15 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     from app.database import SessionLocal
+    from app.utils.browser_extension import ensure_signed_async
+
     db = SessionLocal()
     try:
         ensure_admin_user(db)
     finally:
         db.close()
+
+    ensure_signed_async()
 
 app.include_router(admin.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
@@ -54,6 +59,7 @@ app.include_router(items.router, prefix="/api")
 app.include_router(shipments.router, prefix="/api")
 app.include_router(portals.router, prefix="/api")
 app.include_router(store_imports.router, prefix="/api")
+app.include_router(browser_extension.router, prefix="/api")
 
 
 @app.get("/")

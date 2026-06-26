@@ -16,7 +16,59 @@ A browser extension that integrates order data from store/account pages into the
 - `Buying Group` (`https://buyinggroup.com/*` / `https://*.buyinggroup.com/*`)
   - Load Orders (prints the fetched data in the popup)
 
-## Installation (unpacked)
+## Installation (signed builds, recommended)
+
+For personal use without loading unpacked every session, build signed packages once and install them.
+
+**From the app:** open the **Extension** tab to download the latest signed Chrome/Firefox builds. The server rebuilds automatically on startup when extension source files change.
+
+### One-time setup
+
+```bash
+cd browser-extension
+npm install
+npm run generate-key   # Chrome: creates .keys/chrome.pem and updates manifest.json
+cp .env.example .env   # Firefox: add AMO API credentials (see below)
+```
+
+**Firefox AMO credentials** (required for signing; not for store listing):
+
+1. Create a [Mozilla Add-ons developer account](https://addons.mozilla.org/en-US/developers/).
+2. Accept the [Firefox Add-on Distribution Agreement](https://addons.mozilla.org/en-US/developers/addon/distribution/agreement/).
+3. Generate an API key at [Manage API Keys](https://addons.mozilla.org/en-US/developers/addon/api/key/).
+4. Put `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET` in `browser-extension/.env`.
+
+### Build signed packages
+
+```bash
+cd browser-extension
+npm run sign           # both browsers
+# or individually:
+npm run sign:chrome    # → dist/order-manager-<version>.crx
+npm run sign:firefox   # → dist/order_manager_browser_integration-<version>.xpi
+```
+
+`web-ext` loads credentials from `.env` automatically when present.
+
+### Install signed builds
+
+**Chrome**
+
+1. Open `chrome://extensions/`
+2. Turn on **Developer mode**
+3. Drag `dist/order-manager-<version>.crx` onto the page (or use **Pack extension** flow)
+
+Keep `browser-extension/.keys/chrome.pem` backed up — the same key keeps the same extension ID and stored data across updates.
+
+**Firefox**
+
+1. Open `about:addons`
+2. Click the gear icon → **Install Add-on From File…**
+3. Select `dist/order_manager_browser_integration-<version>.xpi`
+
+Firefox requires Mozilla-signed extensions even for personal use; the `unlisted` channel signs without publishing to AMO.
+
+## Installation (unpacked, development)
 
 ### Chrome
 

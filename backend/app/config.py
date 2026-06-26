@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "admin"
 
+    # Browser extension signing (optional; auto-detects repo browser-extension/ if unset)
+    browser_extension_dir: str = ""
+    web_ext_api_key: str = ""
+    web_ext_api_secret: str = ""
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

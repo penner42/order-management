@@ -18,6 +18,7 @@ import ImportedOrders from './pages/ImportedOrders'
 import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
 import Reports from './pages/Reports'
+import BrowserExtension from './pages/BrowserExtension'
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -70,7 +71,10 @@ function AppShell() {
   const navItems = useMemo(() => {
     if (!user) return []
     if (user.role === 'admin') {
-      return [{ to: '/admin', label: 'Admin' }]
+      return [
+        { to: '/admin', label: 'Admin' },
+        { to: '/extension', label: 'Extension' },
+      ]
     }
     return [
       { to: '/', label: 'Orders' },
@@ -83,6 +87,7 @@ function AppShell() {
       { to: '/stores', label: 'Stores' },
       { to: '/portals', label: 'Portals' },
       { to: '/imported-orders', label: 'Imported Orders' },
+      { to: '/extension', label: 'Extension' },
     ]
   }, [user])
 
@@ -234,6 +239,7 @@ function AppShell() {
           <Route path="/shipments" element={<Shipments />} />
           <Route path="/stores" element={<Stores />} />
           <Route path="/portals" element={<Portals />} />
+          <Route path="/extension" element={<BrowserExtension />} />
           <Route path="/profile" element={<Profile />} />
           {user.role === 'admin' && <Route path="/admin" element={<Admin />} />}
           <Route path="*" element={<Navigate to={user.role === 'admin' ? '/admin' : '/'} replace />} />

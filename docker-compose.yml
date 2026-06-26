@@ -25,6 +25,11 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/order_management
       ADMIN_USERNAME: ${ADMIN_USERNAME}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      BROWSER_EXTENSION_DIR: /browser-extension
+      WEB_EXT_API_KEY: ${WEB_EXT_API_KEY:-}
+      WEB_EXT_API_SECRET: ${WEB_EXT_API_SECRET:-}
+    volumes:
+      - ./browser-extension:/browser-extension
     depends_on:
       db:
         condition: service_healthy

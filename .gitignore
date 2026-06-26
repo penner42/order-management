@@ -40,3 +40,11 @@ browser-extension/order.json
 .cursor/costco-orderdetail-page
 .cursor/walmart-nextdata
 .cursor/walmat-graphqldata
+
+# Browser extension signing
+browser-extension/node_modules/
+browser-extension/dist/
+browser-extension/.keys/
+browser-extension/.env
+browser-extension/*.crx
+browser-extension/*.xpi

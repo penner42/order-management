@@ -190,3 +190,24 @@ export interface Payment {
   buying_group?: BuyingGroup | null
   line_items: PaymentLineItem[]
 }
+
+export interface BrowserExtensionArtifact {
+  filename: string
+  size_bytes: number
+  updated_at: string
+}
+
+export interface BrowserExtensionMeta {
+  version: string
+  fingerprint: string
+  built_at: string
+  chrome?: BrowserExtensionArtifact | null
+  firefox?: BrowserExtensionArtifact | null
+}
+
+export interface BrowserExtensionStatus {
+  status: string
+  error?: string | null
+  available: boolean
+  meta?: BrowserExtensionMeta | null
+}

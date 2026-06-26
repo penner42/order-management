@@ -3,7 +3,12 @@
   "name": "Order Manager Browser Integration",
   "version": "0.1.0",
   "description": "Integrate order data from store order pages into Order Manager.",
-  "permissions": ["activeTab", "storage", "tabs", "cookies"],
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabs",
+    "cookies"
+  ],
   "host_permissions": [
     "https://ecom-api.costco.com/*",
     "https://api.usabuying.group/*",
@@ -13,11 +18,13 @@
     "https://localhost/*"
   ],
   "background": {
-    "scripts": ["background.js"],
+    "scripts": [
+      "background.js"
+    ],
     "service_worker": "background.js"
   },
   "action": {
-  "default_popup": "popup/popup.html"
+    "default_popup": "popup/popup.html"
   },
   "options_ui": {
     "page": "options/options.html",
@@ -25,35 +32,59 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.costco.com/myaccount/*"],
-      "js": ["stores/costco/bulk_capture.js"],
+      "matches": [
+        "https://www.costco.com/myaccount/*"
+      ],
+      "js": [
+        "stores/costco/bulk_capture.js"
+      ],
       "run_at": "document_start"
     },
     {
-      "matches": ["https://www.costco.com/myaccount/*"],
-      "js": ["stores/costco/orders.js"],
+      "matches": [
+        "https://www.costco.com/myaccount/*"
+      ],
+      "js": [
+        "stores/costco/orders.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://www.walmart.com/*"],
-      "js": ["stores/walmart/orders.js"],
+      "matches": [
+        "https://www.walmart.com/*"
+      ],
+      "js": [
+        "stores/walmart/orders.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://www.walmart.com/*"],
-      "js": ["stores/walmart/bridge.js"],
+      "matches": [
+        "https://www.walmart.com/*"
+      ],
+      "js": [
+        "stores/walmart/bridge.js"
+      ],
       "run_at": "document_start"
     },
     {
-      "matches": ["https://*.usabuying.group/*"],
-      "js": ["buying_groups/usabg/auth.js"],
+      "matches": [
+        "https://*.usabuying.group/*"
+      ],
+      "js": [
+        "buying_groups/usabg/auth.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://*.usabuying.group/*"],
-      "js": ["buying_groups/usabg/bridge.js"],
+      "matches": [
+        "https://*.usabuying.group/*"
+      ],
+      "js": [
+        "buying_groups/usabg/bridge.js"
+      ],
       "run_at": "document_start"
     },
     {
@@ -61,7 +92,9 @@
         "https://buyinggroup.com/*",
         "https://*.buyinggroup.com/*"
       ],
-      "js": ["buying_groups/bg/auth.js"],
+      "js": [
+        "buying_groups/bg/auth.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
@@ -70,14 +103,27 @@
         "https://buyinggroup.com/*",
         "https://*.buyinggroup.com/*"
       ],
-      "js": ["buying_groups/bg/bridge.js"],
+      "js": [
+        "buying_groups/bg/bridge.js"
+      ],
       "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["stores/costco/bulk_capture_injected.js"],
-      "matches": ["https://www.costco.com/*"]
+      "resources": [
+        "stores/costco/bulk_capture_injected.js"
+      ],
+      "matches": [
+        "https://www.costco.com/*"
+      ]
     }
-  ]
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "order-manager@order-management.local",
+      "strict_min_version": "109.0"
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkPAmk+Z5GJdk2lfhZKTmhfJM43DsMzkxAjOcyHMHEHcfD1fkNmByoeZIBmyezf2BESd4l+yOhme3fHJZ/3xB0rKK5pSzsBydcJV7KBYr+9oQiOgskVIx5LG3reijbZApYG//K5yGMa5+zxAtXRkZsvGU2K1fL5zQoJPzz58A8ruDWgNaEdS2gPOfblt7+2xIYuDUf7vKzR+j5UHppHj2wzM/+1aHaGlByYlF/le0BRR6nFl6Lmjw/xpL99dBWABfW5n2acg94mi+S6fsZU3tWGLU5p2SBFh6JpJcWLXky6QY6+OMDgttiYZklF+kUUgLF4vOOZeA8N5Y4lb4AU67owIDAQAB"
 }
