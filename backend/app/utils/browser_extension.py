@@ -18,7 +18,15 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _SKIP_DIR_NAMES = {".git", "node_modules", "dist", ".keys"}
-_SKIP_FILE_NAMES = {".env", ".env.example", ".webignore", "package.json", "package-lock.json", "README.md"}
+_SKIP_FILE_NAMES = {
+    ".build-meta.json",
+    ".env",
+    ".env.example",
+    ".webignore",
+    "package.json",
+    "package-lock.json",
+    "README.md",
+}
 _SKIP_FILE_GLOBS = ("*.crx", "*.xpi")
 
 _lock = threading.Lock()
@@ -74,17 +82,22 @@ def _read_manifest_version(ext_dir: Path) -> str:
 
 
 def _meta_path(ext_dir: Path) -> Path:
+    return ext_dir / ".build-meta.json"
+
+
+def _legacy_meta_path(ext_dir: Path) -> Path:
     return ext_dir / "dist" / ".build-meta.json"
 
 
 def _load_meta(ext_dir: Path) -> dict[str, Any] | None:
-    path = _meta_path(ext_dir)
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
+    for path in (_meta_path(ext_dir), _legacy_meta_path(ext_dir)):
+        if not path.is_file():
+            continue
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 def _artifact_info(ext_dir: Path, filename: str | None) -> dict[str, Any] | None:
@@ -109,21 +122,25 @@ def _write_meta(ext_dir: Path, fingerprint: str, chrome_file: str | None, firefo
         "chrome_filename": chrome_file,
         "firefox_filename": firefox_file,
     }
-    dist = ext_dir / "dist"
-    dist.mkdir(parents=True, exist_ok=True)
+    (ext_dir / "dist").mkdir(parents=True, exist_ok=True)
     _meta_path(ext_dir).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    legacy = _legacy_meta_path(ext_dir)
+    if legacy.is_file():
+        legacy.unlink()
     return meta
 
 
 def _public_meta(ext_dir: Path, meta: dict[str, Any] | None) -> dict[str, Any] | None:
     if not meta:
         return None
+    chrome_file = _resolve_chrome_filename(ext_dir, meta)
+    firefox_file = _resolve_firefox_filename(ext_dir, meta)
     return {
         "version": meta.get("version"),
         "fingerprint": meta.get("fingerprint"),
         "built_at": meta.get("built_at"),
-        "chrome": _artifact_info(ext_dir, meta.get("chrome_filename")),
-        "firefox": _artifact_info(ext_dir, meta.get("firefox_filename")),
+        "chrome": _artifact_info(ext_dir, chrome_file),
+        "firefox": _artifact_info(ext_dir, firefox_file),
     }
 
 
@@ -133,8 +150,17 @@ def get_status() -> dict[str, Any]:
         status = _state["status"]
         error = _state["error"]
         meta = _state["meta"]
-    if meta is None and ext_dir is not None:
-        meta = _load_meta(ext_dir)
+
+    if ext_dir is not None:
+        current, disk_meta = _build_is_current(ext_dir)
+        if current:
+            meta = disk_meta
+            if status in {"idle", "signing"}:
+                status = "ready"
+                error = None
+        elif meta is None:
+            meta = _load_meta(ext_dir)
+
     return {
         "status": status,
         "error": error,
@@ -187,7 +213,21 @@ def _find_firefox_artifact(ext_dir: Path) -> str | None:
 
 
 def _firefox_signing_enabled() -> bool:
-    return bool(settings.web_ext_api_key and settings.web_ext_api_secret)
+    return bool(settings.web_ext_api_key.strip() and settings.web_ext_api_secret.strip())
+
+
+def _resolve_chrome_filename(ext_dir: Path, meta: dict[str, Any] | None) -> str | None:
+    filename = (meta or {}).get("chrome_filename")
+    if filename and (ext_dir / "dist" / filename).is_file():
+        return filename
+    return _find_chrome_artifact(ext_dir)
+
+
+def _resolve_firefox_filename(ext_dir: Path, meta: dict[str, Any] | None) -> str | None:
+    filename = (meta or {}).get("firefox_filename")
+    if filename and (ext_dir / "dist" / filename).is_file():
+        return filename
+    return _find_firefox_artifact(ext_dir)
 
 
 def _artifact_status(
@@ -197,9 +237,37 @@ def _artifact_status(
 ) -> tuple[bool, bool]:
     if not meta or meta.get("fingerprint") != fingerprint:
         return False, False
-    chrome_ok = _artifact_info(ext_dir, meta.get("chrome_filename")) is not None
-    firefox_ok = _artifact_info(ext_dir, meta.get("firefox_filename")) is not None
+    chrome_ok = _resolve_chrome_filename(ext_dir, meta) is not None
+    firefox_ok = _resolve_firefox_filename(ext_dir, meta) is not None
     return chrome_ok, firefox_ok
+
+
+def _build_is_current(ext_dir: Path) -> tuple[bool, dict[str, Any] | None]:
+    meta = _load_meta(ext_dir)
+    if not meta:
+        return False, None
+
+    fingerprint = source_fingerprint(ext_dir)
+    if meta.get("fingerprint") != fingerprint:
+        return False, meta
+
+    chrome_file = _resolve_chrome_filename(ext_dir, meta)
+    if not chrome_file:
+        return False, meta
+
+    firefox_needed = _firefox_signing_enabled()
+    firefox_file = _resolve_firefox_filename(ext_dir, meta) if firefox_needed else None
+    if firefox_needed and not firefox_file:
+        return False, meta
+
+    if (
+        chrome_file != meta.get("chrome_filename")
+        or firefox_file != meta.get("firefox_filename")
+        or _legacy_meta_path(ext_dir).is_file()
+    ):
+        meta = _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
+
+    return True, meta
 
 
 def _npm_env() -> dict[str, str]:
@@ -265,10 +333,8 @@ def ensure_signed(*, force: bool = False) -> None:
         return
 
     if not force:
-        fingerprint = source_fingerprint(ext_dir)
-        existing = _load_meta(ext_dir)
-        chrome_ok, firefox_ok = _artifact_status(ext_dir, existing, fingerprint)
-        if existing and chrome_ok and (firefox_ok or not _firefox_signing_enabled()):
+        current, existing = _build_is_current(ext_dir)
+        if current and existing:
             with _lock:
                 _state["status"] = "ready"
                 _state["meta"] = existing
@@ -312,10 +378,11 @@ def artifact_path(browser: str) -> Path | None:
     if ext_dir is None:
         return None
     meta = _load_meta(ext_dir) or _state.get("meta")
-    if not meta:
-        return None
-    key = "chrome_filename" if browser == "chrome" else "firefox_filename"
-    filename = meta.get(key)
+    filename = (
+        _resolve_chrome_filename(ext_dir, meta)
+        if browser == "chrome"
+        else _resolve_firefox_filename(ext_dir, meta)
+    )
     if not filename:
         return None
     path = ext_dir / "dist" / filename

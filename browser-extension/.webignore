@@ -3,6 +3,7 @@ dist/
 .keys/
 .env
 .env.example
+.build-meta.json
 package.json
 package-lock.json
 scripts/

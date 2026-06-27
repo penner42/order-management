@@ -44,6 +44,7 @@ browser-extension/order.json
 # Browser extension signing
 browser-extension/node_modules/
 browser-extension/dist/
+browser-extension/.build-meta.json
 browser-extension/.keys/
 browser-extension/.env
 browser-extension/*.crx
