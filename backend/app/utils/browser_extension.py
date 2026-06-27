@@ -65,6 +65,15 @@ def _is_source_file(ext_dir: Path, path: Path) -> bool:
     return True
 
 
+def _file_bytes_for_fingerprint(path: Path) -> bytes:
+    if path.name == "manifest.json":
+        # Derived from .keys/chrome.pem; excluding avoids false fingerprint drift.
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest.pop("key", None)
+        return json.dumps(manifest, sort_keys=True).encode("utf-8")
+    return path.read_bytes()
+
+
 def source_fingerprint(ext_dir: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(ext_dir.rglob("*")):
@@ -72,7 +81,7 @@ def source_fingerprint(ext_dir: Path) -> str:
             continue
         rel = path.relative_to(ext_dir).as_posix()
         digest.update(rel.encode("utf-8"))
-        digest.update(path.read_bytes())
+        digest.update(_file_bytes_for_fingerprint(path))
     return digest.hexdigest()
 
 
@@ -198,16 +207,39 @@ def _ensure_chrome_key(ext_dir: Path) -> None:
     _run([npm, "run", "generate-key"], cwd=ext_dir)
 
 
-def _find_chrome_artifact(ext_dir: Path) -> str | None:
+def _chrome_artifact_for_version(ext_dir: Path) -> str | None:
     version = _read_manifest_version(ext_dir)
-    preferred = ext_dir / "dist" / f"order-manager-{version}.crx"
-    if preferred.is_file():
-        return preferred.name
+    filename = f"order-manager-{version}.crx"
+    return filename if (ext_dir / "dist" / filename).is_file() else None
+
+
+def _firefox_artifact_for_version(ext_dir: Path) -> str | None:
+    version = _read_manifest_version(ext_dir)
+    preferred = f"order_manager_browser_integration-{version}.xpi"
+    if (ext_dir / "dist" / preferred).is_file():
+        return preferred
+    for path in sorted(ext_dir.glob("dist/*.xpi")):
+        if f"-{version}.xpi" in path.name or path.name.endswith(f"{version}.xpi"):
+            return path.name
+    return None
+
+
+def _artifacts_for_current_version(ext_dir: Path) -> tuple[str | None, str | None]:
+    return _chrome_artifact_for_version(ext_dir), _firefox_artifact_for_version(ext_dir)
+
+
+def _find_chrome_artifact(ext_dir: Path) -> str | None:
+    found = _chrome_artifact_for_version(ext_dir)
+    if found:
+        return found
     matches = sorted(ext_dir.glob("dist/order-manager-*.crx"))
     return matches[-1].name if matches else None
 
 
 def _find_firefox_artifact(ext_dir: Path) -> str | None:
+    found = _firefox_artifact_for_version(ext_dir)
+    if found:
+        return found
     matches = sorted(ext_dir.glob("dist/*.xpi"))
     return matches[-1].name if matches else None
 
@@ -217,6 +249,9 @@ def _firefox_signing_enabled() -> bool:
 
 
 def _resolve_chrome_filename(ext_dir: Path, meta: dict[str, Any] | None) -> str | None:
+    found = _chrome_artifact_for_version(ext_dir)
+    if found:
+        return found
     filename = (meta or {}).get("chrome_filename")
     if filename and (ext_dir / "dist" / filename).is_file():
         return filename
@@ -224,49 +259,28 @@ def _resolve_chrome_filename(ext_dir: Path, meta: dict[str, Any] | None) -> str 
 
 
 def _resolve_firefox_filename(ext_dir: Path, meta: dict[str, Any] | None) -> str | None:
+    found = _firefox_artifact_for_version(ext_dir)
+    if found:
+        return found
     filename = (meta or {}).get("firefox_filename")
     if filename and (ext_dir / "dist" / filename).is_file():
         return filename
     return _find_firefox_artifact(ext_dir)
 
 
-def _artifact_status(
-    ext_dir: Path,
-    meta: dict[str, Any] | None,
-    fingerprint: str,
-) -> tuple[bool, bool]:
-    if not meta or meta.get("fingerprint") != fingerprint:
-        return False, False
-    chrome_ok = _resolve_chrome_filename(ext_dir, meta) is not None
-    firefox_ok = _resolve_firefox_filename(ext_dir, meta) is not None
-    return chrome_ok, firefox_ok
-
-
 def _build_is_current(ext_dir: Path) -> tuple[bool, dict[str, Any] | None]:
+    """True when signed artifacts for the current manifest version already exist on disk."""
     meta = _load_meta(ext_dir)
-    if not meta:
-        return False, None
-
     fingerprint = source_fingerprint(ext_dir)
-    if meta.get("fingerprint") != fingerprint:
-        return False, meta
+    chrome_file, firefox_file = _artifacts_for_current_version(ext_dir)
+    firefox_needed = _firefox_signing_enabled()
 
-    chrome_file = _resolve_chrome_filename(ext_dir, meta)
     if not chrome_file:
         return False, meta
-
-    firefox_needed = _firefox_signing_enabled()
-    firefox_file = _resolve_firefox_filename(ext_dir, meta) if firefox_needed else None
     if firefox_needed and not firefox_file:
         return False, meta
 
-    if (
-        chrome_file != meta.get("chrome_filename")
-        or firefox_file != meta.get("firefox_filename")
-        or _legacy_meta_path(ext_dir).is_file()
-    ):
-        meta = _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
-
+    meta = _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
     return True, meta
 
 
@@ -281,13 +295,15 @@ def _npm_env() -> dict[str, str]:
 
 def _sign_extension(ext_dir: Path, *, force: bool = False) -> dict[str, Any]:
     fingerprint = source_fingerprint(ext_dir)
-    existing = _load_meta(ext_dir)
-    chrome_ok, firefox_ok = _artifact_status(ext_dir, existing, fingerprint)
+    chrome_file, firefox_file = _artifacts_for_current_version(ext_dir)
     firefox_needed = _firefox_signing_enabled()
+
+    chrome_ok = chrome_file is not None
+    firefox_ok = firefox_file is not None
 
     if not force and chrome_ok and (firefox_ok or not firefox_needed):
         logger.info("Browser extension unchanged; using existing signed artifacts")
-        return existing
+        return _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
 
     _ensure_npm_deps(ext_dir)
 
@@ -296,28 +312,25 @@ def _sign_extension(ext_dir: Path, *, force: bool = False) -> dict[str, Any]:
         raise RuntimeError("npm is not installed; cannot sign browser extension")
 
     env = _npm_env()
-    chrome_file = existing.get("chrome_filename") if existing else None
-    firefox_file = existing.get("firefox_filename") if existing else None
 
     if force or not chrome_ok:
         _ensure_chrome_key(ext_dir)
         _run([npm, "run", "sign:chrome"], cwd=ext_dir, env=env)
-        chrome_file = _find_chrome_artifact(ext_dir)
+        chrome_file = _chrome_artifact_for_version(ext_dir) or _find_chrome_artifact(ext_dir)
     else:
         logger.info("Chrome extension unchanged; reusing existing signed artifact")
 
     if firefox_needed:
         if force or not firefox_ok:
             _run([npm, "run", "sign:firefox"], cwd=ext_dir, env=env)
-            firefox_file = _find_firefox_artifact(ext_dir)
+            firefox_file = _firefox_artifact_for_version(ext_dir) or _find_firefox_artifact(ext_dir)
         else:
             logger.info("Firefox extension unchanged; reusing existing signed artifact")
     else:
         firefox_file = None
-        if not firefox_ok:
-            logger.warning(
-                "Skipping Firefox signing: set WEB_EXT_API_KEY and WEB_EXT_API_SECRET to enable"
-            )
+
+    if not chrome_file:
+        raise RuntimeError("Chrome signing did not produce an artifact")
 
     meta = _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
     logger.info("Browser extension signed (version %s)", meta.get("version"))
