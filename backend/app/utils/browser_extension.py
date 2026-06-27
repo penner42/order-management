@@ -186,45 +186,72 @@ def _find_firefox_artifact(ext_dir: Path) -> str | None:
     return matches[-1].name if matches else None
 
 
-def _sign_extension(ext_dir: Path, *, force: bool = False) -> dict[str, Any]:
-    fingerprint = source_fingerprint(ext_dir)
-    existing = _load_meta(ext_dir)
-    if not force and existing:
-        if existing.get("fingerprint") == fingerprint:
-            chrome = _artifact_info(ext_dir, existing.get("chrome_filename"))
-            firefox = _artifact_info(ext_dir, existing.get("firefox_filename"))
-            if chrome and (firefox or not settings.web_ext_api_key or not settings.web_ext_api_secret):
-                logger.info("Browser extension unchanged; using existing signed artifacts")
-                return existing
+def _firefox_signing_enabled() -> bool:
+    return bool(settings.web_ext_api_key and settings.web_ext_api_secret)
 
-    _ensure_npm_deps(ext_dir)
-    _ensure_chrome_key(ext_dir)
 
-    npm = shutil.which("npm")
-    if not npm:
-        raise RuntimeError("npm is not installed; cannot sign browser extension")
+def _artifact_status(
+    ext_dir: Path,
+    meta: dict[str, Any] | None,
+    fingerprint: str,
+) -> tuple[bool, bool]:
+    if not meta or meta.get("fingerprint") != fingerprint:
+        return False, False
+    chrome_ok = _artifact_info(ext_dir, meta.get("chrome_filename")) is not None
+    firefox_ok = _artifact_info(ext_dir, meta.get("firefox_filename")) is not None
+    return chrome_ok, firefox_ok
 
+
+def _npm_env() -> dict[str, str]:
     env = os.environ.copy()
     if settings.web_ext_api_key:
         env["WEB_EXT_API_KEY"] = settings.web_ext_api_key
     if settings.web_ext_api_secret:
         env["WEB_EXT_API_SECRET"] = settings.web_ext_api_secret
+    return env
 
-    _run([npm, "run", "sign:chrome"], cwd=ext_dir, env=env)
 
-    if settings.web_ext_api_key and settings.web_ext_api_secret:
-        _run([npm, "run", "sign:firefox"], cwd=ext_dir, env=env)
+def _sign_extension(ext_dir: Path, *, force: bool = False) -> dict[str, Any]:
+    fingerprint = source_fingerprint(ext_dir)
+    existing = _load_meta(ext_dir)
+    chrome_ok, firefox_ok = _artifact_status(ext_dir, existing, fingerprint)
+    firefox_needed = _firefox_signing_enabled()
+
+    if not force and chrome_ok and (firefox_ok or not firefox_needed):
+        logger.info("Browser extension unchanged; using existing signed artifacts")
+        return existing
+
+    _ensure_npm_deps(ext_dir)
+
+    npm = shutil.which("npm")
+    if not npm:
+        raise RuntimeError("npm is not installed; cannot sign browser extension")
+
+    env = _npm_env()
+    chrome_file = existing.get("chrome_filename") if existing else None
+    firefox_file = existing.get("firefox_filename") if existing else None
+
+    if force or not chrome_ok:
+        _ensure_chrome_key(ext_dir)
+        _run([npm, "run", "sign:chrome"], cwd=ext_dir, env=env)
+        chrome_file = _find_chrome_artifact(ext_dir)
     else:
-        logger.warning(
-            "Skipping Firefox signing: set WEB_EXT_API_KEY and WEB_EXT_API_SECRET to enable"
-        )
+        logger.info("Chrome extension unchanged; reusing existing signed artifact")
 
-    meta = _write_meta(
-        ext_dir,
-        fingerprint,
-        _find_chrome_artifact(ext_dir),
-        _find_firefox_artifact(ext_dir) if settings.web_ext_api_key and settings.web_ext_api_secret else None,
-    )
+    if firefox_needed:
+        if force or not firefox_ok:
+            _run([npm, "run", "sign:firefox"], cwd=ext_dir, env=env)
+            firefox_file = _find_firefox_artifact(ext_dir)
+        else:
+            logger.info("Firefox extension unchanged; reusing existing signed artifact")
+    else:
+        firefox_file = None
+        if not firefox_ok:
+            logger.warning(
+                "Skipping Firefox signing: set WEB_EXT_API_KEY and WEB_EXT_API_SECRET to enable"
+            )
+
+    meta = _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
     logger.info("Browser extension signed (version %s)", meta.get("version"))
     return meta
 
@@ -236,6 +263,18 @@ def ensure_signed(*, force: bool = False) -> None:
             _state["status"] = "unavailable"
             _state["error"] = "Browser extension directory not found"
         return
+
+    if not force:
+        fingerprint = source_fingerprint(ext_dir)
+        existing = _load_meta(ext_dir)
+        chrome_ok, firefox_ok = _artifact_status(ext_dir, existing, fingerprint)
+        if existing and chrome_ok and (firefox_ok or not _firefox_signing_enabled()):
+            with _lock:
+                _state["status"] = "ready"
+                _state["meta"] = existing
+                _state["error"] = None
+            logger.info("Browser extension unchanged; using existing signed artifacts")
+            return
 
     with _lock:
         if _state["status"] == "signing":
