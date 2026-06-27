@@ -403,12 +403,18 @@ export default function ImportReviewBulk() {
     setCollapsedByIndex((prev) => {
       const next = { ...prev }
       for (let i = 0; i < payloads.length; i++) {
+        const isExisting = diffs[i]?.is_existing_order === true
+        const isCanceled = isCanceledOrderPayload(payloads[i])
+        if (isExisting && isCanceled) {
+          next[i] = false
+          continue
+        }
         if (typeof next[i] === 'boolean') continue
-        next[i] = isCanceledOrderPayload(payloads[i]) === true
+        next[i] = isCanceled && !isExisting
       }
       return next
     })
-  }, [payloads])
+  }, [payloads, diffs])
 
   useEffect(() => {
     if (!payloads || payloads.length === 0 || flattenedPaymentMethods.length === 0) return
@@ -547,11 +553,18 @@ export default function ImportReviewBulk() {
   }))
 
   const sortedPayloads = [...indexedPayloads].sort((a, b) => {
-    if (a.isCanceled === b.isCanceled) return 0
-    return a.isCanceled ? 1 : -1
+    const aExisting = diffs[a.index]?.is_existing_order === true
+    const bExisting = diffs[b.index]?.is_existing_order === true
+    const aNewCanceled = a.isCanceled && !aExisting
+    const bNewCanceled = b.isCanceled && !bExisting
+    if (aNewCanceled === bNewCanceled) return a.index - b.index
+    return aNewCanceled ? 1 : -1
   })
 
-  const firstCanceledIndex = sortedPayloads.findIndex((x) => x.isCanceled)
+  const firstCanceledIndex = sortedPayloads.findIndex((x) => {
+    const isExisting = diffs[x.index]?.is_existing_order === true
+    return x.isCanceled && !isExisting
+  })
 
   return (
     <div>
@@ -586,6 +599,7 @@ export default function ImportReviewBulk() {
           const storeName: string = p.store || ''
           const orderId: string = externalOrder.id || ''
           const isExisting = diff && diff.is_existing_order === true
+          const showAsNewCanceled = isCanceled && !isExisting
           const store = findStoreForPayload(p, stores)
           const storeAccounts = store ? (accountsByStore[store.id] ?? []) : []
           const itemChangesCount = countActionableItemChanges(diff)
@@ -698,7 +712,7 @@ export default function ImportReviewBulk() {
                       <div className="text-sm font-semibold text-ink dark:text-gray-100">
                         {storeName} #{orderId}
                       </div>
-                      {isCanceled && (
+                      {showAsNewCanceled && (
                         <span className="inline-flex items-center rounded-full bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 px-2 py-0.5 text-[11px]">
                           Canceled
                         </span>
@@ -721,12 +735,6 @@ export default function ImportReviewBulk() {
                         {itemChangesCount > 0 && (
                           <span className="text-amber-700 dark:text-amber-300">
                             {itemChangesCount} item change(s)
-                          </span>
-                        )}
-                        {itemChangesCount > 0 &&
-                          (diff?.items?.matched.some((m) => m.changes.includes('status')) ?? false) && (
-                          <span className="text-amber-700 dark:text-amber-300">
-                            Mark canceled
                           </span>
                         )}
                         {shipmentChangesCount > 0 && newTrackingCount > 0 && (
