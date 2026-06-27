@@ -305,6 +305,102 @@ def _prices_differ_for_diff(a: float | None, b: float | None) -> bool:
     return abs(a - b) >= 0.005
 
 
+def _coerce_status_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, dict):
+        for key in ("status", "state", "code", "type", "normalizedStatus", "rawStatusCode"):
+            nested = value.get(key)
+            if isinstance(nested, str):
+                return nested
+            if isinstance(nested, (int, float, bool)):
+                return str(nested)
+    return ""
+
+
+def _status_text_indicates_canceled(value: Any) -> bool:
+    s = _coerce_status_text(value).strip().lower()
+    return bool(s) and ("canceled" in s or "cancelled" in s)
+
+
+def _incoming_item_is_canceled(item_data: dict[str, Any]) -> bool:
+    status = item_data.get("status")
+    if isinstance(status, dict):
+        if _status_text_indicates_canceled(status.get("normalizedStatus")):
+            return True
+        if _status_text_indicates_canceled(status.get("rawStatusCode")):
+            return True
+    elif _status_text_indicates_canceled(status):
+        return True
+    return False
+
+
+def _normalized_payload_is_canceled(normalized: dict[str, Any]) -> bool:
+    candidates: list[Any] = [
+        normalized.get("status"),
+        normalized.get("orderStatus"),
+    ]
+    external = normalized.get("externalOrder") or {}
+    if isinstance(external, dict):
+        candidates.extend(
+            [
+                external.get("status"),
+                external.get("orderStatus"),
+                external.get("fulfillmentStatus"),
+                external.get("state"),
+                external.get("statusType"),
+            ]
+        )
+
+    for candidate in candidates:
+        if _status_text_indicates_canceled(candidate):
+            return True
+
+    for shipment in normalized.get("shipments") or []:
+        if not isinstance(shipment, dict):
+            continue
+        status_info = shipment.get("status") or {}
+        if isinstance(status_info, dict):
+            for key in ("normalizedStatus", "rawStatusType", "message"):
+                if _status_text_indicates_canceled(status_info.get(key)):
+                    return True
+
+    for item in normalized.get("items") or []:
+        if isinstance(item, dict) and _incoming_item_is_canceled(item):
+            return True
+
+    return False
+
+
+def _mark_item_canceled(item: Item) -> None:
+    if item.status == ItemStatus.CANCELED:
+        return
+    item.status = ItemStatus.CANCELED
+    if item.canceled_at is None:
+        item.canceled_at = datetime.now(timezone.utc)
+
+
+def _apply_canceled_statuses(
+    existing_items: list[Item],
+    normalized: dict[str, Any],
+    incoming_by_name: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    order_canceled = _normalized_payload_is_canceled(normalized)
+    if incoming_by_name is None:
+        incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
+
+    for item in existing_items:
+        desc = (item.description or "").strip()
+        incoming = incoming_by_name.get(desc)
+        item_incoming_canceled = bool(incoming and incoming.get("is_canceled"))
+        if order_canceled or item_incoming_canceled:
+            _mark_item_canceled(item)
+
+
 def _aggregate_incoming_items_by_name(
     incoming_items: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -325,8 +421,11 @@ def _aggregate_incoming_items_by_name(
                 "total_quantity": 0,
                 "unit_price": inc_price,
                 "line_total": 0.0 if inc_line_total is not None else None,
+                "is_canceled": False,
             }
         by_name[name]["total_quantity"] += inc_qty
+        if _incoming_item_is_canceled(inc_item):
+            by_name[name]["is_canceled"] = True
         if inc_line_total is not None:
             current_total = by_name[name]["line_total"]
             by_name[name]["line_total"] = (
@@ -388,6 +487,7 @@ def _build_order_diff(
             )
 
     incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
+    order_is_canceled = _normalized_payload_is_canceled(normalized)
     matched_items: list[dict[str, Any]] = []
     added_items: list[dict[str, Any]] = []
 
@@ -417,6 +517,18 @@ def _build_order_diff(
                         "field": "quantity",
                         "before": existing["total_quantity"],
                         "after": inc_qty,
+                    }
+                )
+
+            incoming_canceled = order_is_canceled or incoming.get("is_canceled", False)
+            non_canceled_statuses = existing["statuses"] - {"canceled"}
+            if incoming_canceled and non_canceled_statuses:
+                changes.append("status")
+                detailed_changes.append(
+                    {
+                        "field": "status",
+                        "before": sorted(existing["statuses"]),
+                        "after": ["canceled"],
                     }
                 )
 
@@ -456,6 +568,11 @@ def _build_order_diff(
         }
         for desc, data in existing_by_desc.items()
     ]
+
+    if order_is_canceled:
+        for entry in unmatched_existing:
+            if set(entry["statuses"]) - {"canceled"}:
+                entry["changes"] = ["status"]
 
     # --- Shipment comparison (match by Walmart original tracking or tracking number) ---
     existing_shipments_by_lookup_key = _shipments_by_lookup_key(existing_shipments)
@@ -1118,6 +1235,9 @@ def _apply_items_and_shipments(
             normalized_status=normalized_status,
             walmart_original=walmart_original,
         )
+
+    if existing_order:
+        _apply_canceled_statuses(existing_items, normalized)
 
 # ---------------------------------------------------------------------------
 # Endpoints

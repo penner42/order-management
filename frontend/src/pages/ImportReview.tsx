@@ -458,7 +458,10 @@ export default function ImportReview() {
     (s) => s.status === 'new' || s.status === 'changed'
   ).length
   const hasTrackingUpdates = shipmentChangesCount > 0
-  const cannotApplyExisting = isExistingOrder && !hasTrackingUpdates
+  const hasItemStatusChanges =
+    diff?.items?.matched.some((m) => m.changes.includes('status')) ?? false
+  const canApplyExisting = hasTrackingUpdates || hasItemStatusChanges
+  const cannotApplyExisting = isExistingOrder && !canApplyExisting
 
   return (
     <div>

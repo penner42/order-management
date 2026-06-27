@@ -263,6 +263,17 @@ function countShipmentChanges(diff: OrderDiff | null): number {
   return added + changed
 }
 
+function orderNeedsCancelUpdate(diff: OrderDiff | null, isCanceled: boolean): boolean {
+  if (!isCanceled || !diff?.items) return false
+  const hasNonCanceled = (statuses: string[]) => statuses.some((s) => s !== 'canceled')
+  if (diff.items.matched.some((m) => m.changes.includes('status'))) return true
+  if (diff.items.matched.some((m) => hasNonCanceled(m.current.statuses ?? []))) return true
+  if ((diff.items.unmatched_existing ?? []).some((u) => hasNonCanceled(u.statuses ?? []))) {
+    return true
+  }
+  return false
+}
+
 export default function ImportReviewBulk() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token') || ''
@@ -597,7 +608,8 @@ export default function ImportReviewBulk() {
             itemChangesCount > 0 ||
             shipmentChangesCount > 0 ||
             hasBuyingGroupChange ||
-            hasSubaccountChange
+            hasSubaccountChange ||
+            orderNeedsCancelUpdate(diff, isCanceled)
           const applying = applyingByIndex[idx] === true
           const applied = appliedByIndex[idx] === true
           const applyError = applyErrorByIndex[idx] || null
@@ -709,6 +721,12 @@ export default function ImportReviewBulk() {
                         {itemChangesCount > 0 && (
                           <span className="text-amber-700 dark:text-amber-300">
                             {itemChangesCount} item change(s)
+                          </span>
+                        )}
+                        {itemChangesCount > 0 &&
+                          (diff?.items?.matched.some((m) => m.changes.includes('status')) ?? false) && (
+                          <span className="text-amber-700 dark:text-amber-300">
+                            Mark canceled
                           </span>
                         )}
                         {shipmentChangesCount > 0 && newTrackingCount > 0 && (
