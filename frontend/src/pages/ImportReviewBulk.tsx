@@ -274,6 +274,46 @@ function orderNeedsCancelUpdate(diff: OrderDiff | null, isCanceled: boolean): bo
   return false
 }
 
+type BulkImportSortGroup = 'changes' | 'unchanged' | 'canceled'
+
+const BULK_IMPORT_SORT_GROUP_ORDER: Record<BulkImportSortGroup, number> = {
+  changes: 0,
+  unchanged: 1,
+  canceled: 2,
+}
+
+function existingOrderHasActionableUpdates(
+  diff: OrderDiff | null,
+  isCanceled: boolean,
+  selectedBuyingGroupId: number | null | undefined,
+  selectedAccountId: number | null | undefined
+): boolean {
+  return (
+    countActionableItemChanges(diff) > 0 ||
+    countShipmentChanges(diff) > 0 ||
+    selectionDiffersFromCurrent(diff?.current_order?.buying_group_id, selectedBuyingGroupId) ||
+    selectionDiffersFromCurrent(diff?.current_order?.store_account_id, selectedAccountId) ||
+    orderNeedsCancelUpdate(diff, isCanceled)
+  )
+}
+
+function getBulkImportSortGroup(
+  diff: OrderDiff | null | undefined,
+  isCanceled: boolean,
+  selectedBuyingGroupId: number | null | undefined,
+  selectedAccountId: number | null | undefined
+): BulkImportSortGroup {
+  const isExisting = diff?.is_existing_order === true
+  if (isCanceled && !isExisting) return 'canceled'
+  if (
+    !isExisting ||
+    existingOrderHasActionableUpdates(diff ?? null, isCanceled, selectedBuyingGroupId, selectedAccountId)
+  ) {
+    return 'changes'
+  }
+  return 'unchanged'
+}
+
 export default function ImportReviewBulk() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token') || ''
@@ -552,19 +592,26 @@ export default function ImportReviewBulk() {
     isCanceled: isCanceledOrderPayload(p),
   }))
 
+  const sortGroupForEntry = (entry: (typeof indexedPayloads)[number]) =>
+    getBulkImportSortGroup(
+      diffs[entry.index],
+      entry.isCanceled,
+      selectedBuyingGroupIdByIndex[entry.index],
+      selectedAccountIdByIndex[entry.index]
+    )
+
   const sortedPayloads = [...indexedPayloads].sort((a, b) => {
-    const aExisting = diffs[a.index]?.is_existing_order === true
-    const bExisting = diffs[b.index]?.is_existing_order === true
-    const aNewCanceled = a.isCanceled && !aExisting
-    const bNewCanceled = b.isCanceled && !bExisting
-    if (aNewCanceled === bNewCanceled) return a.index - b.index
-    return aNewCanceled ? 1 : -1
+    const groupCmp =
+      BULK_IMPORT_SORT_GROUP_ORDER[sortGroupForEntry(a)] -
+      BULK_IMPORT_SORT_GROUP_ORDER[sortGroupForEntry(b)]
+    if (groupCmp !== 0) return groupCmp
+    return a.index - b.index
   })
 
-  const firstCanceledIndex = sortedPayloads.findIndex((x) => {
-    const isExisting = diffs[x.index]?.is_existing_order === true
-    return x.isCanceled && !isExisting
-  })
+  const firstUnchangedIndex = sortedPayloads.findIndex(
+    (x) => sortGroupForEntry(x) === 'unchanged'
+  )
+  const firstCanceledIndex = sortedPayloads.findIndex((x) => sortGroupForEntry(x) === 'canceled')
 
   return (
     <div>
@@ -619,11 +666,12 @@ export default function ImportReviewBulk() {
             )
           const hasActionableUpdates =
             !isExisting ||
-            itemChangesCount > 0 ||
-            shipmentChangesCount > 0 ||
-            hasBuyingGroupChange ||
-            hasSubaccountChange ||
-            orderNeedsCancelUpdate(diff, isCanceled)
+            existingOrderHasActionableUpdates(
+              diff,
+              isCanceled,
+              selectedBuyingGroupIdByIndex[idx],
+              selectedAccountIdByIndex[idx]
+            )
           const applying = applyingByIndex[idx] === true
           const applied = appliedByIndex[idx] === true
           const applyError = applyErrorByIndex[idx] || null
@@ -635,6 +683,7 @@ export default function ImportReviewBulk() {
           const customer = p.customer
           const address = p.shippingAddress
 
+          const showUnchangedSeparator = firstUnchangedIndex >= 0 && renderIdx === firstUnchangedIndex
           const showCanceledSeparator = firstCanceledIndex >= 0 && renderIdx === firstCanceledIndex
 
           const itemDiffMap = new Map<string, ItemDiffInfo>()
@@ -696,6 +745,11 @@ export default function ImportReviewBulk() {
 
           return (
             <>
+              {showUnchangedSeparator && (
+                <div className="pt-2 border-t border-dashed border-brand-200 dark:border-gray-700 text-xs text-ink-muted dark:text-gray-400">
+                  Existing orders — no updates needed
+                </div>
+              )}
               {showCanceledSeparator && (
                 <div className="pt-2 border-t border-dashed border-brand-200 dark:border-gray-700 text-xs text-ink-muted dark:text-gray-400">
                   Canceled orders
