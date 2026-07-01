@@ -2,6 +2,17 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../api/client'
 import type { Shipment, Item } from '../api/types'
 
+function toYyyyMmDd(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function dateInputToNoonUtcIso(dateStr: string): string {
+  return `${dateStr.trim()}T12:00:00.000Z`
+}
+
 const STATUS_LABELS: Record<string, string> = {
   purchased: 'Purchased',
   shipped: 'Shipped',
@@ -28,10 +39,11 @@ function MarkScannedModal({
   onClose,
 }: {
   item: Item
-  onApply: (receiptId: string) => Promise<void>
+  onApply: (receiptId: string, date: string) => Promise<void>
   onClose: () => void
 }) {
   const [receiptId, setReceiptId] = useState(item.receipt_id ?? '')
+  const [date, setDate] = useState(() => toYyyyMmDd(new Date()))
   const [applying, setApplying] = useState(false)
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
@@ -40,7 +52,17 @@ function MarkScannedModal({
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="text-lg font-medium text-ink mb-2">Mark as Scanned</h3>
-        <p className="text-sm text-ink-muted mb-2">{item.description || 'Item'}</p>
+        <p className="text-sm text-ink-muted mb-4">{item.description || 'Item'}</p>
+        <label htmlFor="shipment-scan-date" className="block text-sm font-medium text-ink mb-1">
+          Date
+        </label>
+        <input
+          id="shipment-scan-date"
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-ink mb-4"
+        />
         <label className="block text-sm font-medium text-ink mb-2">Receipt ID (optional)</label>
         <input
           type="text"
@@ -58,12 +80,12 @@ function MarkScannedModal({
             onClick={async () => {
               setApplying(true)
               try {
-                await onApply(receiptId)
+                await onApply(receiptId, date)
               } finally {
                 setApplying(false)
               }
             }}
-            disabled={applying}
+            disabled={applying || !date.trim()}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >
             {applying ? 'Applying…' : 'Apply'}
@@ -88,11 +110,11 @@ export default function Shipments() {
     api.get<Shipment[]>('/shipments').then(setShipments).catch(console.error).finally(() => setLoading(false))
   }, [])
 
-  const markItemScanned = async (item: Item, receiptId: string) => {
-    const now = new Date().toISOString().slice(0, 19)
+  const markItemScanned = async (item: Item, receiptId: string, date: string) => {
+    if (!date.trim()) return
     await api.patch<Item>(`/items/${item.id}`, {
       status: 'scanned',
-      scanned_at: now,
+      scanned_at: dateInputToNoonUtcIso(date),
       receipt_id: receiptId.trim() || null,
     })
     setScanItemModal(null)
@@ -187,7 +209,7 @@ export default function Shipments() {
       {scanItemModal && (
         <MarkScannedModal
           item={scanItemModal}
-          onApply={(receiptId) => markItemScanned(scanItemModal, receiptId)}
+          onApply={(receiptId, date) => markItemScanned(scanItemModal, receiptId, date)}
           onClose={() => setScanItemModal(null)}
         />
       )}

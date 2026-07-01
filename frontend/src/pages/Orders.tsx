@@ -24,6 +24,17 @@ import type {
 import { getTrackingInfoBulk } from '../utils/tracking'
 import type { TrackingInfo } from '../utils/tracking'
 
+function toYyyyMmDd(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function dateInputToNoonUtcIso(dateStr: string): string {
+  return `${dateStr.trim()}T12:00:00.000Z`
+}
+
 /** Format UTC ISO date string for datetime-local input in the user's local timezone. */
 function toLocalDatetimeLocal(iso: string | null | undefined): string {
   if (!iso) return ''
@@ -1048,8 +1059,9 @@ export default function Orders() {
     )
   }
 
-  const applySubmitShipment = async (group: { key: string; items: Item[] }, submissionId: string) => {
-    const now = new Date().toISOString().slice(0, 19)
+  const applySubmitShipment = async (group: { key: string; items: Item[] }, submissionId: string, date: string) => {
+    if (!date.trim()) return
+    const submittedAt = dateInputToNoonUtcIso(date)
     const toUpdate = group.items.filter((item) => getNextStatus(getEffectiveItemStatus(item)) === 'submitted')
     if (toUpdate.length === 0) return
     setAdvancingGroupKey(group.key)
@@ -1058,7 +1070,7 @@ export default function Orders() {
         updates: toUpdate.map((item) => ({
           item_id: item.id,
           status: 'submitted',
-          submitted_at: now,
+          submitted_at: submittedAt,
           submission_id: submissionId.trim() || null,
         })),
       })
@@ -1071,8 +1083,9 @@ export default function Orders() {
     }
   }
 
-  const applyScanShipment = async (group: { key: string; items: Item[] }, receiptIds: Record<number, string>) => {
-    const now = new Date().toISOString().slice(0, 19)
+  const applyScanShipment = async (group: { key: string; items: Item[] }, receiptIds: Record<number, string>, date: string) => {
+    if (!date.trim()) return
+    const scannedAt = dateInputToNoonUtcIso(date)
     const toUpdate = group.items.filter((item) => getNextStatus(getEffectiveItemStatus(item)) === 'scanned')
     if (toUpdate.length === 0) return
     setAdvancingGroupKey(group.key)
@@ -1081,7 +1094,7 @@ export default function Orders() {
         updates: toUpdate.map((item) => ({
           item_id: item.id,
           status: 'scanned',
-          scanned_at: now,
+          scanned_at: scannedAt,
           receipt_id: (receiptIds[item.id] ?? '').trim() || null,
         })),
       })
@@ -1114,14 +1127,15 @@ export default function Orders() {
     }
   }
 
-  const applyBulkScanned = async (itemIds: number[], receiptIds: Record<number, string>) => {
-    const now = new Date().toISOString().slice(0, 19)
+  const applyBulkScanned = async (itemIds: number[], receiptIds: Record<number, string>, date: string) => {
+    if (!date.trim()) return
+    const scannedAt = dateInputToNoonUtcIso(date)
     try {
       const res = await api.post<{ items: Item[] }>('/items/bulk-update', {
         updates: itemIds.map((itemId) => ({
           item_id: itemId,
           status: 'scanned',
-          scanned_at: now,
+          scanned_at: scannedAt,
           receipt_id: (receiptIds[itemId] ?? '').trim() || null,
         })),
       })
@@ -3258,18 +3272,18 @@ export default function Orders() {
         <BulkScanModal
           order={bulkScanModal.order}
           itemIds={bulkScanModal.itemIds}
-          onApply={(receiptIds) => applyBulkScanned(Object.keys(receiptIds).map(Number), receiptIds)}
+          onApply={(receiptIds, date) => applyBulkScanned(Object.keys(receiptIds).map(Number), receiptIds, date)}
           onClose={() => setBulkScanModal(null)}
         />
       )}
       {scanSingleItemModal && (
         <ScanSingleItemModal
           item={scanSingleItemModal}
-          onApply={async (receiptId) => {
-            const now = new Date().toISOString().slice(0, 19)
+          onApply={async (receiptId, date) => {
+            if (!date.trim()) return
             await updateItem(scanSingleItemModal.id, {
               status: 'scanned',
-              scanned_at: now,
+              scanned_at: dateInputToNoonUtcIso(date),
               receipt_id: receiptId.trim() || null,
             })
             setScanSingleItemModal(null)
@@ -3280,7 +3294,7 @@ export default function Orders() {
       {scanReceiptModal && (
         <ScanReceiptModal
           group={scanReceiptModal.group}
-          onApply={(receiptIds) => applyScanShipment(scanReceiptModal.group, receiptIds)}
+          onApply={(receiptIds, date) => applyScanShipment(scanReceiptModal.group, receiptIds, date)}
           onClose={() => setScanReceiptModal(null)}
           applying={advancingGroupKey === scanReceiptModal.group.key}
         />
@@ -3288,7 +3302,7 @@ export default function Orders() {
       {submitShipmentModal && (
         <SubmitShipmentModal
           group={submitShipmentModal.group}
-          onApply={(submissionId) => applySubmitShipment(submitShipmentModal.group, submissionId)}
+          onApply={(submissionId, date) => applySubmitShipment(submitShipmentModal.group, submissionId, date)}
           onClose={() => setSubmitShipmentModal(null)}
           applying={advancingGroupKey === submitShipmentModal.group.key}
         />
@@ -3411,10 +3425,11 @@ function ScanSingleItemModal({
   onClose,
 }: {
   item: Item
-  onApply: (receiptId: string) => Promise<void>
+  onApply: (receiptId: string, date: string) => Promise<void>
   onClose: () => void
 }) {
   const [receiptId, setReceiptId] = useState(item.receipt_id ?? '')
+  const [date, setDate] = useState(() => toYyyyMmDd(new Date()))
   const [applying, setApplying] = useState(false)
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
@@ -3423,7 +3438,17 @@ function ScanSingleItemModal({
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="text-lg font-medium text-ink mb-2">Mark as Scanned</h3>
-        <p className="text-sm text-ink-muted mb-2">{item.description || 'Item'}</p>
+        <p className="text-sm text-ink-muted mb-4">{item.description || 'Item'}</p>
+        <label htmlFor="scan-single-date" className="block text-sm font-medium text-ink mb-1">
+          Date
+        </label>
+        <input
+          id="scan-single-date"
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-ink mb-4"
+        />
         <label className="block text-sm font-medium text-ink mb-2">Receipt ID (optional)</label>
         <input
           type="text"
@@ -3441,12 +3466,12 @@ function ScanSingleItemModal({
             onClick={async () => {
               setApplying(true)
               try {
-                await onApply(receiptId)
+                await onApply(receiptId, date)
               } finally {
                 setApplying(false)
               }
             }}
-            disabled={applying}
+            disabled={applying || !date.trim()}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >
             {applying ? 'Applying…' : 'Apply'}
@@ -3465,7 +3490,7 @@ function BulkScanModal({
 }: {
   order: Order
   itemIds: number[]
-  onApply: (receiptIds: Record<number, string>) => Promise<void>
+  onApply: (receiptIds: Record<number, string>, date: string) => Promise<void>
   onClose: () => void
 }) {
   const items = (order.items ?? []).filter((i) => itemIds.includes(i.id) && getNextStatus(getEffectiveItemStatus(i)) === 'scanned')
@@ -3475,6 +3500,7 @@ function BulkScanModal({
       return acc
     }, {})
   )
+  const [date, setDate] = useState(() => toYyyyMmDd(new Date()))
   const [applying, setApplying] = useState(false)
   if (items.length === 0) {
     return (
@@ -3503,6 +3529,16 @@ function BulkScanModal({
         <h3 className="text-lg font-medium text-ink mb-4">
           Mark {items.length} item{items.length !== 1 ? 's' : ''} as Scanned
         </h3>
+        <label htmlFor="bulk-scan-date" className="block text-sm font-medium text-ink mb-1">
+          Date
+        </label>
+        <input
+          id="bulk-scan-date"
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-ink mb-4"
+        />
         <div className="overflow-auto flex-1 min-h-0">
           <table className="w-full text-sm">
             <thead>
@@ -3540,12 +3576,12 @@ function BulkScanModal({
             onClick={async () => {
               setApplying(true)
               try {
-                await onApply(receiptIds)
+                await onApply(receiptIds, date)
               } finally {
                 setApplying(false)
               }
             }}
-            disabled={applying}
+            disabled={applying || !date.trim()}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >
             {applying ? 'Applying…' : 'Apply'}
@@ -3644,7 +3680,7 @@ function ScanReceiptModal({
   applying,
 }: {
   group: { key: string; label: string; trackingNumber: string | null; items: Item[] }
-  onApply: (receiptIds: Record<number, string>) => Promise<void>
+  onApply: (receiptIds: Record<number, string>, date: string) => Promise<void>
   onClose: () => void
   applying: boolean
 }) {
@@ -3655,6 +3691,7 @@ function ScanReceiptModal({
       return acc
     }, {})
   )
+  const [date, setDate] = useState(() => toYyyyMmDd(new Date()))
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
       <div
@@ -3666,6 +3703,16 @@ function ScanReceiptModal({
           {toUpdate.length} item{toUpdate.length !== 1 ? 's' : ''} in this shipment
           {group.trackingNumber && <span className="ml-1 font-mono text-ink">({group.trackingNumber})</span>}
         </p>
+        <label htmlFor="scan-receipt-date" className="block text-sm font-medium text-ink mb-1">
+          Date
+        </label>
+        <input
+          id="scan-receipt-date"
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-ink mb-4"
+        />
         <div className="overflow-auto flex-1 min-h-0">
           <table className="w-full text-sm">
             <thead>
@@ -3700,8 +3747,8 @@ function ScanReceiptModal({
           </button>
           <button
             type="button"
-            onClick={async () => await onApply(receiptIds)}
-            disabled={applying}
+            onClick={async () => await onApply(receiptIds, date)}
+            disabled={applying || !date.trim()}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >
             {applying ? 'Applying…' : 'Apply'}
@@ -3719,11 +3766,12 @@ function SubmitShipmentModal({
   applying,
 }: {
   group: { key: string; label: string; trackingNumber: string | null; items: Item[] }
-  onApply: (submissionId: string) => Promise<void>
+  onApply: (submissionId: string, date: string) => Promise<void>
   onClose: () => void
   applying: boolean
 }) {
   const [submissionId, setSubmissionId] = useState('')
+  const [date, setDate] = useState(() => toYyyyMmDd(new Date()))
   const itemCount = group.items.length
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
@@ -3736,6 +3784,16 @@ function SubmitShipmentModal({
           {itemCount} item{itemCount !== 1 ? 's' : ''} in this shipment
           {group.trackingNumber && <span className="ml-1 font-mono text-ink">({group.trackingNumber})</span>}
         </p>
+        <label htmlFor="submit-shipment-date" className="block text-sm font-medium text-ink mb-1">
+          Date
+        </label>
+        <input
+          id="submit-shipment-date"
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-ink mb-4"
+        />
         <label className="block text-sm font-medium text-ink mb-2">Submission ID (optional)</label>
         <input
           type="text"
@@ -3750,8 +3808,8 @@ function SubmitShipmentModal({
           </button>
           <button
             type="button"
-            onClick={async () => await onApply(submissionId)}
-            disabled={applying}
+            onClick={async () => await onApply(submissionId, date)}
+            disabled={applying || !date.trim()}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >
             {applying ? 'Applying…' : 'Apply'}
