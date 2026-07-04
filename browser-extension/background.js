@@ -1068,7 +1068,7 @@ async function waitForAmazonContentScript(tabId, timeoutMs, port) {
     if (injectAttempts < 4 && isAmazonContentScriptConnectionError(ping)) {
       injectAttempts++;
       await ensureAmazonContentScripts(tabId);
-      await sleep(300);
+      await sleep(600);
       continue;
     }
     touchServiceWorker();
@@ -1079,26 +1079,16 @@ async function waitForAmazonContentScript(tabId, timeoutMs, port) {
         // ignore
       }
     }
-    await sleep(200);
+    await sleep(400);
   }
   return false;
 }
 
-async function requestAmazonDetailFromTab(tabId, orderId, detailUrl, timeoutMs, port, listSummary, options) {
-  const opts = options && typeof options === "object" ? options : {};
+async function requestAmazonDetailFromTab(tabId, orderId, detailUrl, timeoutMs, port, listSummary) {
   const deadline = Date.now() + (typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 45000);
   let lastError = null;
 
-  if (!opts.contentScriptReady) {
-    const scriptReady = await waitForAmazonContentScript(
-      tabId,
-      Math.min(8000, timeoutMs || 45000),
-      port
-    );
-    if (!scriptReady) {
-      throw new Error("Amazon order page is not ready.");
-    }
-  }
+  await waitForAmazonContentScript(tabId, Math.min(15000, timeoutMs || 45000));
 
   while (Date.now() < deadline) {
     const detailMsg = await sendAmazonTabMessage(tabId, {
@@ -1120,7 +1110,7 @@ async function requestAmazonDetailFromTab(tabId, orderId, detailUrl, timeoutMs, 
       }
     }
 
-    await keepaliveSleep(250, port, { orderNumber: orderId || null });
+    await keepaliveSleep(600, port, { orderNumber: orderId || null });
   }
 
   try {
@@ -1209,18 +1199,17 @@ async function waitForTabComplete(tabId, timeoutMs, port) {
         // ignore
       }
     }
-    await sleep(200);
+    await sleep(400);
   }
   throw new Error("Timed out waiting for tab to finish loading.");
 }
 
-async function createAmazonScrapeTab(initialUrl, cookieStoreId, options) {
-  const opts = options && typeof options === "object" ? options : {};
+async function createAmazonScrapeTab(initialUrl, cookieStoreId) {
   return await new Promise((resolve, reject) => {
     try {
       const createProps = {
         url: initialUrl || "https://www.amazon.com/your-orders/orders",
-        active: opts.active === true,
+        active: true,
       };
       if (cookieStoreId) createProps.cookieStoreId = String(cookieStoreId);
       chrome.tabs.create(createProps, (tab) => {
@@ -2043,7 +2032,7 @@ function attachAmazonBulkPortHandlers(port) {
 
         await activateTab(msg.sourceTabId);
 
-        const listReady = await waitForAmazonContentScript(msg.sourceTabId, 5000, port);
+        const listReady = await waitForAmazonContentScript(msg.sourceTabId, 15000, port);
         if (!listReady) {
           throw new Error("Amazon order list page is not ready.");
         }
@@ -2094,10 +2083,8 @@ function attachAmazonBulkPortHandlers(port) {
             const scrapeUrl = withAmazonDisableCsdUrl(detailUrl);
             await navigateTab(scrapeTabId, scrapeUrl, { active: true });
             await waitForTabComplete(scrapeTabId, 60000, port);
-            const scriptReady = await waitForAmazonContentScript(scrapeTabId, 8000, port);
-            if (!scriptReady) {
-              throw new Error("Amazon order detail page is not ready.");
-            }
+            await ensureAmazonContentScripts(scrapeTabId);
+            await keepaliveSleep(2500, port, { orderNumber: orderId });
 
             const payloadObj = await requestAmazonDetailFromTab(
               scrapeTabId,
@@ -2105,8 +2092,7 @@ function attachAmazonBulkPortHandlers(port) {
               scrapeUrl,
               45000,
               port,
-              summary,
-              { contentScriptReady: true }
+              summary
             );
 
             if (!accountEmail) accountEmail = await getAmazonAccountEmailAsync();
@@ -2136,7 +2122,7 @@ function attachAmazonBulkPortHandlers(port) {
             err: ordersErr,
           });
 
-          if (oi < pageOrders.length - 1) await keepaliveSleep(300, port);
+          if (oi < pageOrders.length - 1) await keepaliveSleep(1500, port);
         }
 
         if (pageIndex + 1 >= maxPages) break;
@@ -2155,7 +2141,7 @@ function attachAmazonBulkPortHandlers(port) {
 
         await navigateTab(msg.sourceTabId, nextUrl, { active: true });
         await waitForTabComplete(msg.sourceTabId, 35000, port);
-        await keepaliveSleep(300, port);
+        await keepaliveSleep(1500, port);
         port.postMessage({ type: "pageStatus", status: "ok", page: pageIndex + 1, maxPages });
       }
 

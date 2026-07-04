@@ -1018,7 +1018,7 @@
           observer.disconnect()
           reject(new Error('Timed out waiting for Amazon page content to decrypt.'))
         }
-      }, 200)
+      }, 400)
     })
   }
 

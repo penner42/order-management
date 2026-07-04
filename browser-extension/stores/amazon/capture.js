@@ -75,6 +75,7 @@
     if (!d) throw new Error('Amazon DOM helpers not loaded.')
 
     await d.waitForOrderDetailReady(35000)
+    await sleep(500)
     const parsed = d.parseOrderDetailPage()
 
     if (!parsed || !parsed.orderId) {
@@ -111,6 +112,7 @@
     const d = dom()
     if (!d) throw new Error('Amazon DOM helpers not loaded.')
     await d.waitForOrderListReady()
+    await sleep(500)
     return d.parseOrderListPage()
   }
 
