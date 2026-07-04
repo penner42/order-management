@@ -5,6 +5,9 @@ const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
 const COSTCO_ORDER_DETAIL_STORAGE_KEY = "costcoOrderDetailsGraphqlCapture";
 const WALMART_BULK_JOB_STORAGE_KEY = "walmartBulkJob";
 const COSTCO_BULK_JOB_STORAGE_KEY = "costcoBulkJob";
+const AMAZON_BULK_JOB_STORAGE_KEY = "amazonBulkJob";
+const AMAZON_ORDER_DETAIL_STORAGE_KEY = "amazonOrderDetail";
+const AMAZON_ACCOUNT_EMAIL_STORAGE_KEY = "amazonAccountEmail";
 const ORDER_MANAGER_API_BASE_URL_STORAGE_KEY_LEGACY = "orderManagerApiBaseUrl";
 const ORDER_MANAGER_PROD_API_BASE_URL_STORAGE_KEY = "orderManagerProdApiBaseUrl";
 const ORDER_MANAGER_DEV_API_BASE_URL_STORAGE_KEY = "orderManagerDevApiBaseUrl";
@@ -65,6 +68,42 @@ function isCostcoOrderDetailsUrl(url) {
   } catch {
     return false;
   }
+}
+
+function isAmazonOrdersListUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "www.amazon.com") return false;
+    const path = u.pathname || "";
+    return (
+      path.includes("/your-orders") ||
+      path.includes("/gp/css/order-history") ||
+      path.includes("order-history")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isAmazonOrderDetailUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "www.amazon.com") return false;
+    const href = u.href || "";
+    return pathIncludesOrderDetail(u.pathname || "", href);
+  } catch {
+    return false;
+  }
+}
+
+function pathIncludesOrderDetail(path, href) {
+  return (
+    path.includes("order-details") ||
+    href.includes("order-details") ||
+    /orderI[Dd]=/.test(href)
+  );
 }
 
 function getOrderManagerActiveServer(callback) {
@@ -736,6 +775,154 @@ function renderOrderDetails(payload, resultsEl) {
               });
             }
           );
+        });
+      }
+    });
+  });
+})();
+
+(function setupAmazonBulkSection() {
+  const section = document.getElementById("amazonBulkSection");
+  const pagesInput = document.getElementById("amazonBulkPages");
+  const startBtn = document.getElementById("amazonStartBulk");
+  const resultsEl = document.getElementById("amazonBulkResults");
+
+  if (!section || !pagesInput || !startBtn || !resultsEl || !chrome.tabs) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0];
+    const url = tab && tab.url ? String(tab.url) : "";
+    const onAmazonOrdersList = isAmazonOrdersListUrl(url);
+
+    section.style.display = onAmazonOrdersList ? "block" : "none";
+    if (!onAmazonOrdersList || !tab || typeof tab.id !== "number") {
+      resultsEl.style.display = "none";
+      return;
+    }
+
+    startBtn.addEventListener("click", () => {
+      let pages = parseInt(String(pagesInput.value || "1"), 10);
+      if (!Number.isFinite(pages) || pages <= 0) pages = 1;
+      if (pages > 50) pages = 50;
+      pagesInput.value = String(pages);
+
+      resultsEl.style.display = "block";
+      resultsEl.innerHTML = '<div class="loading">Starting…</div>';
+
+      chrome.storage.local.set(
+        {
+          [AMAZON_BULK_JOB_STORAGE_KEY]: {
+            store: "amazon",
+            createdAt: Date.now(),
+            sourceTabId: tab.id,
+            maxPages: pages,
+          },
+        },
+        () => {
+          try {
+            const bulkUrl = chrome.runtime.getURL("bulk/amazon-bulk.html");
+            chrome.tabs.create({ url: bulkUrl, active: true });
+            try {
+              window.close();
+            } catch {
+              // ignore
+            }
+          } catch (e) {
+            resultsEl.innerHTML =
+              '<span class="error">Could not open bulk import tab: ' +
+              escapeHtml(String(e && e.message ? e.message : e)) +
+              "</span>";
+          }
+        }
+      );
+    });
+  });
+})();
+
+(function setupAmazonOrderDetailSection() {
+  const section = document.getElementById("amazonOrderDetailSection");
+  const importBtn = document.getElementById("amazonImportThisOrder");
+  const resultsEl = document.getElementById("amazonOrderDetailResults");
+
+  if (!section || !importBtn || !resultsEl || !chrome.tabs) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0];
+    const url = tab && tab.url ? String(tab.url) : "";
+    const onDetail = isAmazonOrderDetailUrl(url);
+
+    section.style.display = onDetail ? "block" : "none";
+    if (!onDetail) return;
+
+    importBtn.addEventListener("click", () => {
+      resultsEl.style.display = "block";
+      resultsEl.innerHTML = '<div class="loading">Reading order…</div>';
+
+      function finishImport(captured) {
+        if (!captured || !captured.payload) {
+          resultsEl.innerHTML =
+            '<span class="error">No order data captured yet. Wait for the page to finish loading, or refresh and try again.</span>';
+          return;
+        }
+
+        chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (emailData) => {
+          const emailRow =
+            emailData && emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
+              ? emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
+              : null;
+          const accountEmail = emailRow && emailRow.email ? String(emailRow.email) : null;
+
+          getOrderManagerApiBaseUrl((baseUrl) => {
+            if (!baseUrl) {
+              resultsEl.innerHTML =
+                '<div class="error">Order Manager base URL is not configured.</div>';
+              return;
+            }
+
+            let body;
+            try {
+              if (
+                !globalThis.OrderManagerAmazon ||
+                typeof globalThis.OrderManagerAmazon.normalizeAmazonOrderPayload !== "function"
+              ) {
+                throw new Error("Amazon normalizer is not available.");
+              }
+              body = globalThis.OrderManagerAmazon.normalizeAmazonOrderPayload(
+                captured.payload,
+                captured.url || url,
+                accountEmail
+              );
+            } catch (e) {
+              resultsEl.innerHTML =
+                '<span class="error">Could not normalize Amazon order: ' +
+                escapeHtml(String(e && e.message ? e.message : e)) +
+                "</span>";
+              return;
+            }
+
+            openBulkReviewForOrders([body], resultsEl);
+          });
+        });
+      }
+
+      if (tab && typeof tab.id === "number") {
+        chrome.tabs.sendMessage(
+          tab.id,
+          { store: "amazon", type: "amazonParseCurrentDetailPage" },
+          (resp) => {
+            if (resp && resp.success === true && resp.order) {
+              finishImport({ url, payload: resp.order });
+              return;
+            }
+            chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
+              const captured = s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY];
+              finishImport(captured);
+            });
+          }
+        );
+      } else {
+        chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
+          finishImport(s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY]);
         });
       }
     });

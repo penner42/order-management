@@ -4,6 +4,10 @@ A browser extension that integrates order data from store/account pages into the
 
 ## Supported stores
 
+- `Amazon` (`https://www.amazon.com/*` — order history and order detail pages)
+  - Single-order import from an order detail page
+  - Bulk import from the order history page (imports forward from the **current** page, then advances page-by-page)
+  - Store Accounts in Order Manager should be named with your Amazon login email for auto-matching
 - `Walmart` (`https://www.walmart.com/*`)
   - Order details import (single order)
   - Bulk import from the orders list page (multiple orders)
@@ -96,6 +100,25 @@ Note: Bulk import flows open an Order Manager “bulk import review” page afte
 
 ## Usage
 
+### Amazon
+
+Prerequisite: In Order Manager, create a Store named **Amazon** and Store Accounts named with each Amazon login email (e.g. personal and business).
+
+Single-order import (order detail):
+
+1. Log into the Amazon account you want to import from.
+2. Open an order detail page (URL contains `order-details` or `orderID=`).
+3. Wait for the page to finish loading.
+4. Click **Import this order** in the extension popup.
+
+Bulk import (order history, page-at-a-time):
+
+1. Log into the desired Amazon account.
+2. Open the order history page and navigate to the page where you want to **start** (e.g. page 3 of this year’s orders).
+3. In the popup, choose **Pages to import forward (1–50)**.
+4. Click **Start bulk import**.
+5. The extension imports all orders on the current page, then advances to the next page until done.
+
 ### Walmart
 
 Order details (single order):
@@ -145,6 +168,6 @@ If it says no BG token is found, visit the BG site and refresh, then try again.
 
 ## Troubleshooting
 
-- **Popup sections not showing**: open the correct page type (Walmart order detail vs Walmart orders list vs Costco route) while you’re logged in.
+- **Popup sections not showing**: open the correct page type (Amazon order history vs order detail, Walmart order detail vs orders list, Costco route) while you’re logged in.
 - **Bulk import fails with missing config**: ensure **Production server base URL** is set and you’ve clicked **Login** in extension **Settings**.
 - **Firefox issues**: the extension uses a page/extension messaging bridge. If something doesn’t work, try reloading the store page and re-opening the popup.

@@ -93,5 +93,12 @@ export function autoMatchBuyingGroupIdForImport(
     )
   }
 
+  if (storeName === 'amazon') {
+    return matchBuyingGroupByAddressName(
+      shippingAddress?.fullName as string | null | undefined,
+      groups
+    )
+  }
+
   return null
 }

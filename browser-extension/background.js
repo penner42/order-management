@@ -20,6 +20,12 @@ try {
 } catch {
   // ignore (Firefox may not support importScripts in some contexts)
 }
+try {
+  // eslint-disable-next-line no-undef
+  importScripts("lib/amazon.js");
+} catch {
+  // ignore (Firefox may not support importScripts in some contexts)
+}
 
 function normalizeBaseUrl(s) {
   const v = String(s || "").trim();
@@ -106,6 +112,10 @@ const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
 const COSTCO_ORDER_DETAIL_STORAGE_KEY = "costcoOrderDetailsGraphqlCapture";
 const WALMART_BULK_PORTS = new Set();
 const COSTCO_BULK_PORTS = new Set();
+const AMAZON_BULK_PORTS = new Set();
+
+const AMAZON_ORDER_DETAIL_STORAGE_KEY = "amazonOrderDetail";
+const AMAZON_ACCOUNT_EMAIL_STORAGE_KEY = "amazonAccountEmail";
 
 function broadcastToBulkPorts(message) {
   WALMART_BULK_PORTS.forEach((port) => {
@@ -213,6 +223,14 @@ function normalizeCostcoOrdersGraphqlPayloadSafe(payload, sourceUrl) {
   }
   // Fallback: keep background self-sufficient even if importScripts fails.
   return normalizeCostcoOrdersGraphqlPayloadFallback(payload, sourceUrl);
+}
+
+function normalizeAmazonOrderPayloadSafe(payload, sourceUrl, accountEmail) {
+  const am = globalThis.OrderManagerAmazon;
+  if (am && typeof am.normalizeAmazonOrderPayload === "function") {
+    return am.normalizeAmazonOrderPayload(payload, sourceUrl, accountEmail);
+  }
+  throw new Error("Amazon normalizer is not available.");
 }
 
 function normalizeCostcoOrdersGraphqlPayloadFallback(graphqlPayload, sourceUrl) {
@@ -699,6 +717,130 @@ async function waitForCostcoDetail(orderHeaderId, timeoutMs) {
   }
 
   throw new Error("Timed out waiting for Costco order detail payload for " + String(orderHeaderId));
+}
+
+async function clearAmazonDetailStorage() {
+  await new Promise((resolve) => {
+    try {
+      chrome.storage.local.remove(AMAZON_ORDER_DETAIL_STORAGE_KEY, () => resolve(null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function getAmazonAccountEmailAsync() {
+  return await new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (s) => {
+        const row = s && s[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY];
+        const email = row && row.email ? String(row.email).trim() : "";
+        resolve(email || null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function waitForAmazonDetail(orderId, timeoutMs) {
+  const start = Date.now();
+  const target = String(orderId || "").trim();
+  const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 25000;
+
+  while (Date.now() - start < t) {
+    const current = await new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
+          resolve(s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY] ? s[AMAZON_ORDER_DETAIL_STORAGE_KEY] : null);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+
+    if (current && current.payload) {
+      const id =
+        current.payload.orderId != null
+          ? String(current.payload.orderId).trim()
+          : extractAmazonOrderIdFromPayload(current.payload);
+      if (!target || id === target) return current;
+    }
+    await sleep(500);
+  }
+
+  throw new Error("Timed out waiting for Amazon order detail payload for " + String(orderId));
+}
+
+function extractAmazonOrderIdFromPayload(payload) {
+  if (!payload) return "";
+  if (payload.orderId) return String(payload.orderId).trim();
+  return "";
+}
+
+async function sendAmazonTabMessage(tabId, message) {
+  return await new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(tabId, message, (r) => {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          resolve({
+            success: false,
+            error: chrome.runtime.lastError.message || "Unknown communication error.",
+          });
+          return;
+        }
+        resolve(r || { success: false, error: "No response" });
+      });
+    } catch (e) {
+      resolve({ success: false, error: String(e && e.message ? e.message : e) });
+    }
+  });
+}
+
+async function waitForTabComplete(tabId, timeoutMs) {
+  const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 30000;
+  const start = Date.now();
+  while (Date.now() - start < t) {
+    const tab = await ensureTabExists(tabId);
+    if (tab && tab.status === "complete") return tab;
+    await sleep(400);
+  }
+  throw new Error("Timed out waiting for tab to finish loading.");
+}
+
+async function createAmazonScrapeTab(initialUrl, cookieStoreId) {
+  return await new Promise((resolve, reject) => {
+    try {
+      const createProps = {
+        url: initialUrl || "https://www.amazon.com/your-orders/orders",
+        active: false,
+      };
+      if (cookieStoreId) createProps.cookieStoreId = String(cookieStoreId);
+      chrome.tabs.create(createProps, (tab) => {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || "Could not create Amazon tab."));
+          return;
+        }
+        if (!tab || typeof tab.id !== "number") {
+          reject(new Error("Could not create Amazon tab."));
+          return;
+        }
+        resolve(tab.id);
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+function broadcastToAmazonBulkPorts(message) {
+  AMAZON_BULK_PORTS.forEach((port) => {
+    try {
+      port.postMessage(message);
+    } catch {
+      // ignore
+    }
+  });
 }
 
 async function ensureTabExists(tabId) {
@@ -1374,6 +1516,258 @@ if (chrome && chrome.runtime && chrome.runtime.onConnect) {
         // ignore
       }
       attachCostcoBulkPortHandlers(port);
+    } catch {
+      // ignore
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Amazon bulk import job controller (page-at-a-time)
+// ---------------------------------------------------------------------------
+
+function attachAmazonBulkPortHandlers(port) {
+  let running = false;
+  let cancelled = false;
+  let scrapeTabId = null;
+
+  port.onMessage.addListener(async (msg) => {
+    if (!msg || typeof msg !== "object") return;
+    if (msg.store !== "amazon") return;
+
+    if (msg.type === "cancel") {
+      cancelled = true;
+      try {
+        await closeTab(scrapeTabId);
+      } catch {
+        // ignore
+      }
+      try {
+        port.postMessage({ type: "jobCancelled" });
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    if (msg.type !== "start") return;
+    if (running) return;
+    running = true;
+
+    const maxPagesRaw =
+      typeof msg.maxPages === "number" ? msg.maxPages : parseInt(String(msg.maxPages || "1"), 10);
+    const maxPages = Number.isFinite(maxPagesRaw) && maxPagesRaw > 0 ? Math.min(Math.floor(maxPagesRaw), 50) : 1;
+
+    const baseUrl = await getOrderManagerApiBaseUrlAsync();
+    if (!baseUrl) {
+      port.postMessage({
+        type: "jobError",
+        error: "Order Manager base URL is not configured. Configure it in Settings first.",
+      });
+      return;
+    }
+
+    if (typeof msg.sourceTabId !== "number") {
+      port.postMessage({ type: "jobError", error: "Missing source tab id (Amazon order history tab)." });
+      return;
+    }
+
+    const sourceTab = await ensureTabExists(msg.sourceTabId);
+    if (!sourceTab) {
+      port.postMessage({ type: "jobError", error: "Amazon order history tab is no longer available." });
+      return;
+    }
+
+    let cookieStoreId = sourceTab.cookieStoreId ? String(sourceTab.cookieStoreId) : null;
+
+    port.postMessage({ type: "jobStarted" });
+
+    try {
+      await sendAmazonTabMessage(msg.sourceTabId, { store: "amazon", type: "amazonFetchAccountEmail" });
+      let accountEmail = await getAmazonAccountEmailAsync();
+
+      const collectedPayloads = [];
+      let ordersDone = 0;
+      let ordersOk = 0;
+      let ordersErr = 0;
+
+      scrapeTabId = await createAmazonScrapeTab("about:blank", cookieStoreId);
+
+      for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+        if (cancelled) {
+          port.postMessage({ type: "jobCancelled" });
+          return;
+        }
+
+        port.postMessage({
+          type: "pageStatus",
+          status: "pending",
+          page: pageIndex + 1,
+          maxPages,
+        });
+
+        const listResp = await sendAmazonTabMessage(msg.sourceTabId, {
+          store: "amazon",
+          type: "amazonParseCurrentListPage",
+        });
+
+        if (!listResp || listResp.success !== true) {
+          throw new Error(
+            listResp && listResp.error
+              ? String(listResp.error)
+              : "Could not parse Amazon order list page."
+          );
+        }
+
+        const pageOrders = Array.isArray(listResp.orders) ? listResp.orders : [];
+        port.postMessage({
+          type: "pageOrdersReady",
+          page: pageIndex + 1,
+          maxPages,
+          count: pageOrders.length,
+        });
+
+        for (let oi = 0; oi < pageOrders.length; oi++) {
+          if (cancelled) {
+            port.postMessage({ type: "jobCancelled" });
+            return;
+          }
+
+          const summary = pageOrders[oi] || {};
+          const orderId = summary.orderId ? String(summary.orderId) : "";
+          const detailUrl = summary.detailUrl ? String(summary.detailUrl) : "";
+          if (!orderId || !detailUrl) continue;
+
+          ordersDone++;
+          port.postMessage({
+            type: "orderStatus",
+            status: "pending",
+            orderNumber: orderId,
+            page: pageIndex + 1,
+            maxPages,
+          });
+
+          try {
+            await clearAmazonDetailStorage();
+            await navigateTab(scrapeTabId, detailUrl);
+            await waitForTabComplete(scrapeTabId, 30000);
+            await sleep(1200);
+
+            const detailMsg = await sendAmazonTabMessage(scrapeTabId, {
+              store: "amazon",
+              type: "amazonParseCurrentDetailPage",
+            });
+
+            let payloadObj = null;
+            if (detailMsg && detailMsg.success === true && detailMsg.order) {
+              payloadObj = { url: detailUrl, payload: detailMsg.order };
+            } else {
+              payloadObj = await waitForAmazonDetail(orderId, 15000);
+            }
+
+            if (!accountEmail) accountEmail = await getAmazonAccountEmailAsync();
+            const body = normalizeAmazonOrderPayloadSafe(
+              payloadObj.payload,
+              payloadObj.url || detailUrl,
+              accountEmail
+            );
+            collectedPayloads.push(body);
+            ordersOk++;
+            port.postMessage({ type: "orderStatus", status: "ok", orderNumber: orderId });
+          } catch (e) {
+            ordersErr++;
+            port.postMessage({
+              type: "orderStatus",
+              status: "error",
+              orderNumber: orderId,
+              error: String(e && e.message ? e.message : e),
+            });
+          }
+
+          port.postMessage({
+            type: "counts",
+            total: ordersDone,
+            done: ordersDone,
+            ok: ordersOk,
+            err: ordersErr,
+          });
+
+          if (oi < pageOrders.length - 1) await sleep(1500);
+        }
+
+        if (pageIndex + 1 >= maxPages) break;
+
+        const nextResp = await sendAmazonTabMessage(msg.sourceTabId, {
+          store: "amazon",
+          type: "amazonGetNextPageUrl",
+        });
+
+        const nextUrl =
+          nextResp && nextResp.success === true && nextResp.url ? String(nextResp.url) : null;
+        if (!nextUrl) {
+          port.postMessage({ type: "pageStatus", status: "done", page: pageIndex + 1, maxPages, noMore: true });
+          break;
+        }
+
+        await navigateTab(msg.sourceTabId, nextUrl);
+        await waitForTabComplete(msg.sourceTabId, 35000);
+        await sleep(1500);
+        port.postMessage({ type: "pageStatus", status: "ok", page: pageIndex + 1, maxPages });
+      }
+
+      if (cancelled) {
+        port.postMessage({ type: "jobCancelled" });
+        return;
+      }
+
+      if (collectedPayloads.length > 0) {
+        const { appBase, token } = await postBulkSession(baseUrl, collectedPayloads);
+        const bulkUrl = appBase + "/import-review/bulk?token=" + encodeURIComponent(token);
+        await openReviewTab(bulkUrl);
+        port.postMessage({ type: "reviewReady", url: bulkUrl });
+      } else {
+        port.postMessage({ type: "jobError", error: "No orders were successfully collected." });
+        return;
+      }
+
+      port.postMessage({ type: "jobDone" });
+    } catch (e) {
+      if (cancelled) {
+        try {
+          port.postMessage({ type: "jobCancelled" });
+        } catch {
+          // ignore
+        }
+      } else {
+        port.postMessage({ type: "jobError", error: String(e && e.message ? e.message : e) });
+      }
+    } finally {
+      await closeTab(scrapeTabId);
+    }
+  });
+}
+
+if (chrome && chrome.runtime && chrome.runtime.onConnect) {
+  chrome.runtime.onConnect.addListener((port) => {
+    try {
+      if (!port || port.name !== "amazonBulkImport") return;
+      try {
+        AMAZON_BULK_PORTS.add(port);
+      } catch {
+        // ignore
+      }
+      try {
+        port.onDisconnect.addListener(() => {
+          try {
+            AMAZON_BULK_PORTS.delete(port);
+          } catch {
+            // ignore
+          }
+        });
+      } catch {
+        // ignore
+      }
+      attachAmazonBulkPortHandlers(port);
     } catch {
       // ignore
     }

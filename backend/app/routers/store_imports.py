@@ -176,6 +176,8 @@ def _resolve_store_name(store_raw: str) -> str:
     name = store_raw.strip()
     if name.lower() == "walmart":
         name = "Walmart"
+    elif name.lower() == "amazon":
+        name = "Amazon"
     return name
 
 

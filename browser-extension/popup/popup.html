@@ -155,6 +155,26 @@
     </button>
     <div id="orderManagerStatus" style="margin-top: 6px; font-size: 12px; color: #555;"></div>
   </div>
+  <div id="amazonBulkSection" style="display: none; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+    <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #333;">
+      Amazon bulk import (from this page)
+    </div>
+    <label for="amazonBulkPages">Pages to import forward (1–50)</label>
+    <input id="amazonBulkPages" type="number" min="1" max="50" value="1" />
+    <button id="amazonStartBulk" style="margin-top: 4px;">
+      Start bulk import
+    </button>
+    <div id="amazonBulkResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
+  </div>
+  <div id="amazonOrderDetailSection" style="display: none; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+    <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #333;">
+      Amazon single import (order detail)
+    </div>
+    <button id="amazonImportThisOrder" style="margin-top: 4px;">
+      Import this order
+    </button>
+    <div id="amazonOrderDetailResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
+  </div>
   <div id="walmartBulkSection" style="display: none; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
     <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #333;">
       Walmart bulk import (orders list)
@@ -209,6 +229,7 @@
   </div>
   <script src="../lib/walmart.js"></script>
   <script src="../lib/costco.js"></script>
+  <script src="../lib/amazon.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
