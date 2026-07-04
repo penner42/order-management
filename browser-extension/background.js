@@ -1668,7 +1668,7 @@ async function createAmazonScrapeTab(initialUrl, cookieStoreId) {
     try {
       const createProps = {
         url: initialUrl || "https://www.amazon.com/your-orders/orders",
-        active: true,
+        active: false,
       };
       if (cookieStoreId) createProps.cookieStoreId = String(cookieStoreId);
       chrome.tabs.create(createProps, (tab) => {
@@ -1780,16 +1780,6 @@ async function navigateTab(tabId, url, options) {
       const updateProps = { url };
       if (opts.active === true) updateProps.active = true;
       chrome.tabs.update(tabId, updateProps, () => resolve(null));
-    } catch {
-      resolve(null);
-    }
-  });
-}
-
-async function activateTab(tabId) {
-  await new Promise((resolve) => {
-    try {
-      chrome.tabs.update(tabId, { active: true }, () => resolve(null));
     } catch {
       resolve(null);
     }
@@ -2500,8 +2490,6 @@ function attachAmazonBulkPortHandlers(port) {
           maxPages,
         });
 
-        await activateTab(msg.sourceTabId);
-
         const listReady = await waitForAmazonContentScript(msg.sourceTabId, 15000, port);
         if (!listReady) {
           throw new Error("Amazon order list page is not ready.");
@@ -2571,14 +2559,13 @@ function attachAmazonBulkPortHandlers(port) {
               store: "amazon",
               type: "amazonCaptureOrderDetailFromUrl",
               detailUrl,
-              skipTrackingEnrichment: true,
             });
 
             let payload = null;
             if (detailMsg && detailMsg.success === true && detailMsg.order && detailMsg.order.orderId) {
               payload = detailMsg.order;
-            } else if (listSummary && listSummary.orderId) {
-              const merged = mergeAmazonListSummary({ orderId: String(listSummary.orderId) }, listSummary);
+            } else if (summary && summary.orderId) {
+              const merged = mergeAmazonListSummary({ orderId: String(summary.orderId) }, summary);
               if (merged && merged.orderId) payload = merged;
             }
 
@@ -2627,7 +2614,7 @@ function attachAmazonBulkPortHandlers(port) {
           break;
         }
 
-        await navigateTab(msg.sourceTabId, nextListPageUrl, { active: true });
+        await navigateTab(msg.sourceTabId, nextListPageUrl);
         await waitForTabComplete(msg.sourceTabId, 35000, port, {
           urlHint: nextListPageUrl,
           requireNavigation: true,
