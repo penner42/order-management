@@ -116,6 +116,12 @@ const AMAZON_BULK_PORTS = new Set();
 
 const AMAZON_ORDER_DETAIL_STORAGE_KEY = "amazonOrderDetail";
 const AMAZON_ACCOUNT_EMAIL_STORAGE_KEY = "amazonAccountEmail";
+const AMAZON_CONTENT_SCRIPT_FILES = [
+  "lib/amazon.js",
+  "stores/amazon/selectors.js",
+  "stores/amazon/dom.js",
+  "stores/amazon/capture.js",
+];
 
 function broadcastToBulkPorts(message) {
   WALMART_BULK_PORTS.forEach((port) => {
@@ -225,12 +231,185 @@ function normalizeCostcoOrdersGraphqlPayloadSafe(payload, sourceUrl) {
   return normalizeCostcoOrdersGraphqlPayloadFallback(payload, sourceUrl);
 }
 
-function normalizeAmazonOrderPayloadSafe(payload, sourceUrl, accountEmail) {
-  const am = globalThis.OrderManagerAmazon;
-  if (am && typeof am.normalizeAmazonOrderPayload === "function") {
-    return am.normalizeAmazonOrderPayload(payload, sourceUrl, accountEmail);
+function normalizeAmazonOrderPayloadFallback(raw, sourceUrl, accountEmail) {
+  function coerceString(v) {
+    if (v == null) return null;
+    if (typeof v === "string") return v.trim() || null;
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    return null;
   }
-  throw new Error("Amazon normalizer is not available.");
+
+  if (!raw || typeof raw !== "object") {
+    throw new Error("Missing Amazon order payload.");
+  }
+
+  const orderId = coerceString(raw.orderId);
+  if (!orderId) {
+    throw new Error("Amazon order structure not recognized (missing order id).");
+  }
+
+  const items = [];
+  const rawItems = Array.isArray(raw.items) ? raw.items : [];
+  for (let i = 0; i < rawItems.length; i++) {
+    const it = rawItems[i] || {};
+    const qty = typeof it.quantity === "number" && it.quantity > 0 ? it.quantity : 1;
+    const unitPrice = typeof it.unitPrice === "number" ? it.unitPrice : null;
+    const lineTotal =
+      typeof it.lineTotal === "number" ? it.lineTotal : unitPrice != null ? unitPrice * qty : null;
+    const itemShipmentId = coerceString(it.shipmentId);
+    const shipmentSlices = itemShipmentId
+      ? [{ shipmentId: itemShipmentId, quantity: qty, normalizedStatus: null }]
+      : [];
+
+    items.push({
+      logicalItemId: coerceString(it.asin) || null,
+      externalSku: coerceString(it.asin) || null,
+      name: coerceString(it.name) || null,
+      productUrl: coerceString(it.productUrl) || null,
+      imageUrl: coerceString(it.imageUrl) || null,
+      variants: [],
+      quantities: { ordered: qty },
+      pricing: {
+        unitPrice,
+        linePrice: lineTotal,
+        lineTotal,
+        strikethroughPrice: null,
+        discounts: [],
+      },
+      status: {
+        rawStatusCode: null,
+        normalizedStatus: coerceString(raw.status) || null,
+      },
+      shipments: shipmentSlices,
+      returnability: {
+        isReturnable: false,
+        returnEligibilityMessage: null,
+      },
+    });
+  }
+
+  const shipments = [];
+  const rawShipments = Array.isArray(raw.shipments) ? raw.shipments : [];
+  for (let si = 0; si < rawShipments.length; si++) {
+    const s = rawShipments[si] || {};
+    const st = s.status || {};
+    const shipmentId =
+      coerceString(s.shipmentId) || coerceString(s.trackingNumber) || "shipment-" + String(si);
+    shipments.push({
+      shipmentId,
+      trackingNumber: coerceString(s.trackingNumber) || null,
+      trackingUrl: coerceString(s.trackingUrl) || null,
+      deliveryDate: coerceString(s.deliveryDate) || null,
+      status: {
+        rawStatusType: coerceString(st.rawStatusType) || coerceString(raw.status) || null,
+        normalizedStatus: coerceString(st.message) || coerceString(st.rawStatusType) || null,
+        message: coerceString(st.message) || null,
+      },
+    });
+  }
+
+  if (
+    shipments.length === 1 &&
+    shipments[0].shipmentId &&
+    items.length > 0 &&
+    items.every((item) => !item.shipments || item.shipments.length === 0)
+  ) {
+    const fallbackId = shipments[0].shipmentId;
+    for (let i = 0; i < items.length; i++) {
+      const qty = items[i].quantities && items[i].quantities.ordered ? items[i].quantities.ordered : 1;
+      items[i].shipments = [{ shipmentId: fallbackId, quantity: qty, normalizedStatus: null }];
+    }
+  }
+
+  const addr = raw.shippingAddress && typeof raw.shippingAddress === "object" ? raw.shippingAddress : null;
+  const shippingAddress = addr
+    ? {
+        fullName: coerceString(addr.fullName) || null,
+        addressLine1: coerceString(addr.addressLine1) || null,
+        addressLine2: coerceString(addr.addressLine2) || null,
+        city: coerceString(addr.city) || null,
+        state: coerceString(addr.state) || null,
+        postalCode: coerceString(addr.postalCode) || null,
+        country: coerceString(addr.country) || null,
+        phoneNumber: null,
+      }
+    : null;
+
+  const totalsRaw = raw.totals && typeof raw.totals === "object" ? raw.totals : {};
+  const totals = {
+    subtotal: typeof totalsRaw.subtotal === "number" ? totalsRaw.subtotal : null,
+    grandTotal:
+      typeof totalsRaw.grandTotal === "number"
+        ? totalsRaw.grandTotal
+        : typeof raw.totalAmount === "number"
+          ? raw.totalAmount
+          : null,
+  };
+
+  const paymentMethods = [];
+  const rawPm = Array.isArray(raw.paymentMethods) ? raw.paymentMethods : [];
+  for (let pi = 0; pi < rawPm.length; pi++) {
+    const pm = rawPm[pi] || {};
+    paymentMethods.push({
+      description: coerceString(pm.description) || null,
+      cardType: coerceString(pm.cardType) || null,
+      paymentType: null,
+      last4: coerceString(pm.last4) || null,
+    });
+  }
+
+  const payload = {
+    store: "amazon",
+    source: "browser-extension",
+    capturedAt: new Date().toISOString(),
+    externalOrder: {
+      id: orderId,
+      orderDate: coerceString(raw.orderDate) || null,
+      url: sourceUrl || coerceString(raw.detailUrl) || null,
+      statusType: coerceString(raw.status) || null,
+    },
+    customer: {
+      email: coerceString(accountEmail) || null,
+    },
+    shippingAddress,
+    shipments,
+    items,
+    paymentMethods,
+    totals,
+  };
+
+  if (typeof totalsRaw.orderDiscount === "number" && totalsRaw.orderDiscount > 0) {
+    payload.orderDiscount = totalsRaw.orderDiscount;
+  }
+
+  return payload;
+}
+
+function ensureAmazonLibLoaded() {
+  const am = globalThis.OrderManagerAmazon;
+  if (am && typeof am.normalizeAmazonOrderPayload === "function") return true;
+  try {
+    // eslint-disable-next-line no-undef
+    importScripts("lib/amazon.js");
+  } catch {
+    try {
+      if (chrome.runtime && typeof chrome.runtime.getURL === "function") {
+        // eslint-disable-next-line no-undef
+        importScripts(chrome.runtime.getURL("lib/amazon.js"));
+      }
+    } catch {
+      // ignore
+    }
+  }
+  const loaded = globalThis.OrderManagerAmazon;
+  return !!(loaded && typeof loaded.normalizeAmazonOrderPayload === "function");
+}
+
+function normalizeAmazonOrderPayloadSafe(payload, sourceUrl, accountEmail) {
+  if (ensureAmazonLibLoaded()) {
+    return globalThis.OrderManagerAmazon.normalizeAmazonOrderPayload(payload, sourceUrl, accountEmail);
+  }
+  return normalizeAmazonOrderPayloadFallback(payload, sourceUrl, accountEmail);
 }
 
 function normalizeCostcoOrdersGraphqlPayloadFallback(graphqlPayload, sourceUrl) {
@@ -743,33 +922,252 @@ async function getAmazonAccountEmailAsync() {
   });
 }
 
-async function waitForAmazonDetail(orderId, timeoutMs) {
+function touchServiceWorker() {
+  try {
+    if (chrome.runtime && typeof chrome.runtime.getPlatformInfo === "function") {
+      chrome.runtime.getPlatformInfo(() => {});
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function keepaliveSleep(ms, port, meta) {
+  const end = Date.now() + (typeof ms === "number" && ms > 0 ? ms : 0);
+  while (Date.now() < end) {
+    touchServiceWorker();
+    if (port) {
+      try {
+        port.postMessage({ type: "heartbeat", ...(meta && typeof meta === "object" ? meta : {}) });
+      } catch {
+        // ignore
+      }
+    }
+    await sleep(Math.min(4000, Math.max(0, end - Date.now())));
+  }
+}
+
+async function waitForAmazonDetail(orderId, timeoutMs, lastError, port) {
   const start = Date.now();
   const target = String(orderId || "").trim();
   const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 25000;
 
   while (Date.now() - start < t) {
-    const current = await new Promise((resolve) => {
-      try {
-        chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
-          resolve(s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY] ? s[AMAZON_ORDER_DETAIL_STORAGE_KEY] : null);
-        });
-      } catch {
-        resolve(null);
-      }
-    });
+    const current = await readAmazonDetailFromStorage(orderId);
+    if (current) return current;
 
-    if (current && current.payload) {
-      const id =
-        current.payload.orderId != null
-          ? String(current.payload.orderId).trim()
-          : extractAmazonOrderIdFromPayload(current.payload);
-      if (!target || id === target) return current;
+    touchServiceWorker();
+    if (port) {
+      try {
+        port.postMessage({ type: "heartbeat", orderNumber: target || null });
+      } catch {
+        // ignore
+      }
     }
     await sleep(500);
   }
 
-  throw new Error("Timed out waiting for Amazon order detail payload for " + String(orderId));
+  throw new Error(
+    "Timed out waiting for Amazon order detail payload for " +
+      String(orderId) +
+      (lastError ? " (" + lastError + ")" : "")
+  );
+}
+
+function withAmazonDisableCsdUrl(url) {
+  const am = globalThis.OrderManagerAmazon;
+  if (am && typeof am.withDisableCsdParam === "function") {
+    return am.withDisableCsdParam(url);
+  }
+  try {
+    const u = new URL(String(url));
+    if (!u.searchParams.has("disableCsd")) {
+      u.searchParams.set("disableCsd", "missing-library");
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+async function ensureAmazonCsdDisabledCookie(origin, cookieStoreId) {
+  if (!chrome.cookies || typeof chrome.cookies.set !== "function") return;
+  const base = String(origin || "https://www.amazon.com").replace(/\/$/, "");
+  await new Promise((resolve) => {
+    try {
+      const details = {
+        url: base + "/",
+        name: "csd-key",
+        value: "disabled",
+        path: "/",
+      };
+      if (cookieStoreId) details.cookieStoreId = String(cookieStoreId);
+      chrome.cookies.set(details, () => resolve(null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function isAmazonContentScriptConnectionError(resp) {
+  if (!resp || typeof resp !== "object") return true;
+  if (resp.success === true) return false;
+  const err = String(resp.error || "").toLowerCase();
+  return (
+    err.includes("receiving end does not exist") ||
+    err.includes("could not establish connection") ||
+    err.includes("message port closed")
+  );
+}
+
+async function ensureAmazonContentScripts(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    return false;
+  }
+  const tab = await ensureTabExists(tabId);
+  if (!tab || !tab.url || !/^https:\/\/(.*\.)?amazon\.com/i.test(String(tab.url))) {
+    return false;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: AMAZON_CONTENT_SCRIPT_FILES,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readAmazonDetailFromStorage(orderId) {
+  const target = String(orderId || "").trim();
+  const current = await new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
+        resolve(s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY] ? s[AMAZON_ORDER_DETAIL_STORAGE_KEY] : null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+  if (!current || !current.payload) return null;
+  const id =
+    current.payload.orderId != null
+      ? String(current.payload.orderId).trim()
+      : extractAmazonOrderIdFromPayload(current.payload);
+  if (target && id !== target) return null;
+  return current;
+}
+
+async function waitForAmazonContentScript(tabId, timeoutMs, port) {
+  const deadline = Date.now() + (typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 15000);
+  let injectAttempts = 0;
+  while (Date.now() < deadline) {
+    const ping = await sendAmazonTabMessage(tabId, { store: "amazon", type: "amazonPing" });
+    if (ping && ping.success === true) return true;
+    if (injectAttempts < 4 && isAmazonContentScriptConnectionError(ping)) {
+      injectAttempts++;
+      await ensureAmazonContentScripts(tabId);
+      await sleep(300);
+      continue;
+    }
+    touchServiceWorker();
+    if (port) {
+      try {
+        port.postMessage({ type: "heartbeat" });
+      } catch {
+        // ignore
+      }
+    }
+    await sleep(200);
+  }
+  return false;
+}
+
+async function requestAmazonDetailFromTab(tabId, orderId, detailUrl, timeoutMs, port, listSummary, options) {
+  const opts = options && typeof options === "object" ? options : {};
+  const deadline = Date.now() + (typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 45000);
+  let lastError = null;
+
+  if (!opts.contentScriptReady) {
+    const scriptReady = await waitForAmazonContentScript(
+      tabId,
+      Math.min(8000, timeoutMs || 45000),
+      port
+    );
+    if (!scriptReady) {
+      throw new Error("Amazon order page is not ready.");
+    }
+  }
+
+  while (Date.now() < deadline) {
+    const detailMsg = await sendAmazonTabMessage(tabId, {
+      store: "amazon",
+      type: "amazonParseCurrentDetailPage",
+    });
+
+    if (detailMsg && detailMsg.success === true && detailMsg.order && detailMsg.order.orderId) {
+      const id = String(detailMsg.order.orderId).trim();
+      if (!orderId || id === String(orderId).trim()) {
+        return { url: detailUrl, payload: detailMsg.order };
+      }
+    }
+
+    if (detailMsg && detailMsg.error) {
+      lastError = String(detailMsg.error);
+      if (!isAmazonContentScriptConnectionError(detailMsg)) {
+        break;
+      }
+    }
+
+    await keepaliveSleep(250, port, { orderNumber: orderId || null });
+  }
+
+  try {
+    const remaining = Math.max(8000, deadline - Date.now());
+    const stored = await waitForAmazonDetail(orderId, remaining, lastError, port);
+    return { url: stored.url || detailUrl, payload: stored.payload };
+  } catch (e) {
+    if (listSummary && listSummary.orderId) {
+      const merged = mergeAmazonListSummary({ orderId: String(listSummary.orderId) }, listSummary);
+      if (merged && merged.orderId) {
+        return { url: detailUrl, payload: merged };
+      }
+    }
+    throw e;
+  }
+}
+
+function mergeAmazonListSummary(detailPayload, listSummary) {
+  const detail =
+    detailPayload && typeof detailPayload === "object" ? { ...detailPayload } : { orderId: null };
+  const summary = listSummary && typeof listSummary === "object" ? listSummary : null;
+  if (!summary) return detail;
+
+  if (!detail.orderId && summary.orderId) detail.orderId = String(summary.orderId);
+  if (!detail.orderDate && summary.orderDate) detail.orderDate = summary.orderDate;
+  if (!detail.status && summary.status) detail.status = summary.status;
+  if (!detail.detailUrl && summary.detailUrl) detail.detailUrl = summary.detailUrl;
+
+  if ((!detail.items || detail.items.length === 0) && Array.isArray(summary.items) && summary.items.length > 0) {
+    detail.items = summary.items.map((it) => ({
+      asin: it && it.asin ? String(it.asin) : null,
+      name: it && it.name ? String(it.name) : null,
+      productUrl: it && it.productUrl ? String(it.productUrl) : null,
+      quantity: 1,
+      unitPrice: null,
+      lineTotal: null,
+    }));
+  }
+
+  if (detail.totals == null || typeof detail.totals !== "object") {
+    detail.totals = { subtotal: null, grandTotal: null, orderDiscount: null };
+  }
+  if (detail.totals.grandTotal == null && summary.totalAmount != null) {
+    detail.totals.grandTotal = summary.totalAmount;
+  }
+
+  return detail;
 }
 
 function extractAmazonOrderIdFromPayload(payload) {
@@ -797,23 +1195,32 @@ async function sendAmazonTabMessage(tabId, message) {
   });
 }
 
-async function waitForTabComplete(tabId, timeoutMs) {
+async function waitForTabComplete(tabId, timeoutMs, port) {
   const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 30000;
   const start = Date.now();
   while (Date.now() - start < t) {
     const tab = await ensureTabExists(tabId);
     if (tab && tab.status === "complete") return tab;
-    await sleep(400);
+    touchServiceWorker();
+    if (port) {
+      try {
+        port.postMessage({ type: "heartbeat" });
+      } catch {
+        // ignore
+      }
+    }
+    await sleep(200);
   }
   throw new Error("Timed out waiting for tab to finish loading.");
 }
 
-async function createAmazonScrapeTab(initialUrl, cookieStoreId) {
+async function createAmazonScrapeTab(initialUrl, cookieStoreId, options) {
+  const opts = options && typeof options === "object" ? options : {};
   return await new Promise((resolve, reject) => {
     try {
       const createProps = {
         url: initialUrl || "https://www.amazon.com/your-orders/orders",
-        active: false,
+        active: opts.active === true,
       };
       if (cookieStoreId) createProps.cookieStoreId = String(cookieStoreId);
       chrome.tabs.create(createProps, (tab) => {
@@ -918,10 +1325,23 @@ async function closeTab(tabId) {
   }
 }
 
-async function navigateTab(tabId, url) {
+async function navigateTab(tabId, url, options) {
+  const opts = options && typeof options === "object" ? options : {};
   await new Promise((resolve) => {
     try {
-      chrome.tabs.update(tabId, { url }, () => resolve(null));
+      const updateProps = { url };
+      if (opts.active === true) updateProps.active = true;
+      chrome.tabs.update(tabId, updateProps, () => resolve(null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function activateTab(tabId) {
+  await new Promise((resolve) => {
+    try {
+      chrome.tabs.update(tabId, { active: true }, () => resolve(null));
     } catch {
       resolve(null);
     }
@@ -1586,6 +2006,21 @@ function attachAmazonBulkPortHandlers(port) {
       await sendAmazonTabMessage(msg.sourceTabId, { store: "amazon", type: "amazonFetchAccountEmail" });
       let accountEmail = await getAmazonAccountEmailAsync();
 
+      const sourceOrigin = (() => {
+        try {
+          if (sourceTab.url) {
+            const am = globalThis.OrderManagerAmazon;
+            if (am && typeof am.originFromUrl === "function") return am.originFromUrl(sourceTab.url);
+            return new URL(sourceTab.url).origin;
+          }
+        } catch {
+          // ignore
+        }
+        return "https://www.amazon.com";
+      })();
+
+      await ensureAmazonCsdDisabledCookie(sourceOrigin, cookieStoreId);
+
       const collectedPayloads = [];
       let ordersDone = 0;
       let ordersOk = 0;
@@ -1605,6 +2040,13 @@ function attachAmazonBulkPortHandlers(port) {
           page: pageIndex + 1,
           maxPages,
         });
+
+        await activateTab(msg.sourceTabId);
+
+        const listReady = await waitForAmazonContentScript(msg.sourceTabId, 5000, port);
+        if (!listReady) {
+          throw new Error("Amazon order list page is not ready.");
+        }
 
         const listResp = await sendAmazonTabMessage(msg.sourceTabId, {
           store: "amazon",
@@ -1649,21 +2091,23 @@ function attachAmazonBulkPortHandlers(port) {
 
           try {
             await clearAmazonDetailStorage();
-            await navigateTab(scrapeTabId, detailUrl);
-            await waitForTabComplete(scrapeTabId, 30000);
-            await sleep(1200);
-
-            const detailMsg = await sendAmazonTabMessage(scrapeTabId, {
-              store: "amazon",
-              type: "amazonParseCurrentDetailPage",
-            });
-
-            let payloadObj = null;
-            if (detailMsg && detailMsg.success === true && detailMsg.order) {
-              payloadObj = { url: detailUrl, payload: detailMsg.order };
-            } else {
-              payloadObj = await waitForAmazonDetail(orderId, 15000);
+            const scrapeUrl = withAmazonDisableCsdUrl(detailUrl);
+            await navigateTab(scrapeTabId, scrapeUrl, { active: true });
+            await waitForTabComplete(scrapeTabId, 60000, port);
+            const scriptReady = await waitForAmazonContentScript(scrapeTabId, 8000, port);
+            if (!scriptReady) {
+              throw new Error("Amazon order detail page is not ready.");
             }
+
+            const payloadObj = await requestAmazonDetailFromTab(
+              scrapeTabId,
+              orderId,
+              scrapeUrl,
+              45000,
+              port,
+              summary,
+              { contentScriptReady: true }
+            );
 
             if (!accountEmail) accountEmail = await getAmazonAccountEmailAsync();
             const body = normalizeAmazonOrderPayloadSafe(
@@ -1692,7 +2136,7 @@ function attachAmazonBulkPortHandlers(port) {
             err: ordersErr,
           });
 
-          if (oi < pageOrders.length - 1) await sleep(1500);
+          if (oi < pageOrders.length - 1) await keepaliveSleep(300, port);
         }
 
         if (pageIndex + 1 >= maxPages) break;
@@ -1709,9 +2153,9 @@ function attachAmazonBulkPortHandlers(port) {
           break;
         }
 
-        await navigateTab(msg.sourceTabId, nextUrl);
-        await waitForTabComplete(msg.sourceTabId, 35000);
-        await sleep(1500);
+        await navigateTab(msg.sourceTabId, nextUrl, { active: true });
+        await waitForTabComplete(msg.sourceTabId, 35000, port);
+        await keepaliveSleep(300, port);
         port.postMessage({ type: "pageStatus", status: "ok", page: pageIndex + 1, maxPages });
       }
 

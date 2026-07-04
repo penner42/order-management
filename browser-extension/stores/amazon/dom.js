@@ -260,7 +260,77 @@
     return orders
   }
 
+  function splitHtmlLines(el) {
+    if (!el) return []
+    const html = el.innerHTML || ''
+    if (!html || !/<br/i.test(html)) {
+      const t = textOf(el)
+      return t ? [t] : []
+    }
+    return html
+      .split(/<br\s*\/?>/gi)
+      .map((part) => {
+        const tmp = document.createElement('div')
+        tmp.innerHTML = part
+        return textOf(tmp)
+      })
+      .filter(Boolean)
+  }
+
+  function parseAddressFromHorizonteComponent(root) {
+    const addrRoot = root.querySelector('[data-component="shippingAddress"]')
+    if (!addrRoot) return null
+
+    const listItems = addrRoot.querySelectorAll('ul li')
+    if (listItems.length < 2) return null
+
+    const fullName = textOf(listItems[0].querySelector('.a-list-item') || listItems[0])
+    const addrLines = splitHtmlLines(
+      listItems[1].querySelector('.a-list-item') || listItems[1]
+    )
+    const country =
+      listItems.length > 2
+        ? textOf(listItems[2].querySelector('.a-list-item') || listItems[2])
+        : null
+
+    if (!fullName && addrLines.length === 0) return null
+
+    let city = null
+    let state = null
+    let postalCode = null
+    let line1 = null
+    let line2 = null
+
+    const cityIdx = addrLines.findIndex((line) => /,\s*[A-Z]{2}\s+\d{5}/.test(line))
+    if (cityIdx >= 0) {
+      const m = /^(.+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/.exec(addrLines[cityIdx])
+      if (m) {
+        city = m[1].trim()
+        state = m[2]
+        postalCode = m[3]
+      }
+      line1 = addrLines[0] || null
+      if (cityIdx > 1) {
+        line2 = addrLines.slice(1, cityIdx).join(', ') || null
+      }
+    } else if (addrLines.length > 0) {
+      line1 = addrLines[0]
+      line2 = addrLines.length > 1 ? addrLines.slice(1).join(', ') : null
+    }
+
+    return {
+      fullName: fullName || null,
+      addressLine1: line1,
+      addressLine2: line2,
+      city,
+      state,
+      postalCode,
+      country: country || null,
+    }
+  }
+
   function parseAddressRoot(root) {
+    if (!root) return null
     const sel = getSelectors()
     const addrRoot = queryFirst(root, sel.SHIPPING_ADDRESS) || root
     const fullName = textOf(queryFirst(addrRoot, sel.ADDRESS_NAME))
@@ -295,11 +365,135 @@
     }
   }
 
-  function parseDetailItems(root) {
+  function parseAddressFromPopover(root) {
     const sel = getSelectors()
-    const itemEls = queryAllFirst(root, sel.ITEM_ROOT)
+    const popoverEls = queryAllFirst(root, sel.ADDRESS_POPOVER)
+    for (let i = 0; i < popoverEls.length; i++) {
+      const raw = popoverEls[i].getAttribute('data-a-popover')
+      if (!raw) continue
+      try {
+        const data = JSON.parse(raw)
+        const html = data.inlineContent || data.content || ''
+        if (!html) continue
+        const doc = new DOMParser().parseFromString(html, 'text/html')
+        const parsed = parseAddressRoot(doc.body)
+        if (parsed && (parsed.fullName || parsed.addressLine1)) return parsed
+      } catch {
+        // ignore malformed popover JSON
+      }
+    }
+    return null
+  }
+
+  function parseAddressFromShipToScript(root) {
+    const scripts = root.querySelectorAll('script[id^="shipToData"]')
+    for (let i = 0; i < scripts.length; i++) {
+      const html = scripts[i].textContent || scripts[i].innerHTML || ''
+      if (!html.trim()) continue
+      try {
+        const doc = new DOMParser().parseFromString(html, 'text/html')
+        const parsed = parseAddressRoot(doc.body)
+        if (parsed && (parsed.fullName || parsed.addressLine1)) return parsed
+      } catch {
+        // ignore
+      }
+    }
+    return null
+  }
+
+  function parseAddressFromRecipientText(root) {
+    const horizonte = parseAddressFromHorizonteComponent(root)
+    if (horizonte) return horizonte
+
+    const recipient = root.querySelector('div.recipient, [data-component="shippingAddress"]')
+    if (!recipient) return null
+    const lines = (recipient.innerText || recipient.textContent || '')
+      .split(/\n/)
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+    while (lines.length > 0 && /^ship\s*to$/i.test(lines[0])) {
+      lines.shift()
+    }
+    if (lines.length < 2) return null
+
+    const cityLine = lines.find((line) => /,\s*[A-Z]{2}\s+\d{5}/.test(line))
+    let city = null
+    let state = null
+    let postalCode = null
+    if (cityLine) {
+      const m = /^(.+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/.exec(cityLine)
+      if (m) {
+        city = m[1].trim()
+        state = m[2]
+        postalCode = m[3]
+      }
+    }
+
+    const cityIdx = cityLine ? lines.indexOf(cityLine) : -1
+    const name = lines[0]
+    const line1 = lines.length > 1 ? lines[1] : null
+    const line2 = cityIdx > 2 ? lines.slice(2, cityIdx).join(', ') || null : null
+    const country = cityIdx >= 0 && cityIdx < lines.length - 1 ? lines[lines.length - 1] : null
+
+    if (!name && !line1) return null
+    return {
+      fullName: name || null,
+      addressLine1: line1 || null,
+      addressLine2: line2,
+      city,
+      state,
+      postalCode,
+      country,
+    }
+  }
+
+  function resolveShippingAddress(root) {
+    let addr = parseAddressFromHorizonteComponent(root)
+    if (addr && (addr.fullName || addr.addressLine1)) return addr
+    addr = parseAddressRoot(root)
+    if (addr && (addr.fullName || addr.addressLine1)) return addr
+    addr = parseAddressFromPopover(root)
+    if (addr) return addr
+    addr = parseAddressFromShipToScript(root)
+    if (addr) return addr
+    return parseAddressFromRecipientText(root)
+  }
+
+  function findDetailItemContainers(root) {
+    const sel = getSelectors()
+    let containers = queryAllFirst(root, sel.ITEM_ROOT)
+
+    if (containers.length === 1) {
+      const only = containers[0]
+      const inner = only.querySelectorAll('.yohtmlc-item, .item-box, .a-fixed-left-grid')
+      if (inner.length > 1) containers = Array.from(inner)
+    }
+
+    containers = containers.filter(
+      (el, _idx, arr) => !arr.some((other) => other !== el && other.contains(el))
+    )
+
+    if (containers.length === 0) {
+      const seen = new Set()
+      root.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]').forEach((link) => {
+        let parent = link.closest('.yohtmlc-item, .item-box, .a-fixed-left-grid, .a-row')
+        if (!parent) parent = link.parentElement
+        if (parent && !seen.has(parent)) {
+          seen.add(parent)
+          containers.push(parent)
+        }
+      })
+    }
+
+    return containers
+  }
+
+  function parseDetailItems(root, seen, itemCounter) {
+    const sel = getSelectors()
+    const itemContainers = findDetailItemContainers(root)
     const items = []
-    const seen = new Set()
+    const seenKeys = seen || new Set()
+    const counter = itemCounter || { n: 0 }
 
     function pushItem(container) {
       const link =
@@ -307,15 +501,18 @@
         queryFirst(container, sel.ITEM_TITLE)
       const href = link ? link.getAttribute('href') || '' : ''
       const asin = extractAsinFromUrl(href)
-      const key = asin || textOf(link)
-      if (!key || seen.has(key)) return
-      seen.add(key)
 
       let name = textOf(queryFirst(container, sel.ITEM_TITLE)) || textOf(link)
       if (!name || name.length < 3) {
         const img = container.querySelector('img')
         if (img && img.alt) name = img.alt.trim()
       }
+
+      const index = counter.n
+      const key = asin ? `${asin}:${index}` : `${name || 'item'}:${index}`
+      if ((!asin && (!name || name.length < 3)) || seenKeys.has(key)) return
+      seenKeys.add(key)
+      counter.n += 1
 
       let qty = 1
       const qtyEl = queryFirst(container, sel.ITEM_QTY)
@@ -327,7 +524,8 @@
         if (qm) qty = parseInt(qm[1], 10) || 1
       }
 
-      const unitPrice = extractPriceFromText(textOf(queryFirst(container, sel.ITEM_PRICE))) ||
+      const unitPrice =
+        extractPriceFromText(textOf(queryFirst(container, sel.ITEM_PRICE))) ||
         extractPriceFromText(textOf(container))
 
       items.push({
@@ -341,60 +539,325 @@
       })
     }
 
-    if (itemEls.length === 0) {
-      root.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]').forEach((link) => {
-        let parent = link.closest('.a-fixed-left-grid, .yohtmlc-item, .item-box, .a-row')
-        if (!parent) parent = link.parentElement
-        if (parent) pushItem(parent)
-      })
-    } else {
-      itemEls.forEach((el) => pushItem(el))
+    if (itemContainers.length > 0) {
+      itemContainers.forEach((container) => pushItem(container))
     }
 
     return items
   }
 
-  function parseShipments(root) {
-    const sel = getSelectors()
-    const shipments = []
-    const trackingLinks = []
-    queryAllFirst(root, sel.TRACKING_LINK).forEach((a) => trackingLinks.push(a))
-    if (trackingLinks.length === 0) {
-      root.querySelectorAll('a[href*="ship-track"], a[href*="progress/tracker"]').forEach((a) => {
-        trackingLinks.push(a)
+  function parseDetailItemsFromProductLinks(root, seenKeys) {
+    const items = []
+    const seen = seenKeys || new Set()
+    const scope = root && root.querySelectorAll ? root : document
+    scope.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]').forEach((link) => {
+      const href = link.getAttribute('href') || ''
+      const asin = extractAsinFromUrl(href)
+      if (!asin || seen.has(asin)) return
+      seen.add(asin)
+      let name = textOf(link)
+      if (!name || name.length < 3) {
+        const img = link.querySelector('img')
+        if (img && img.alt) name = img.alt.trim()
+      }
+      if (!name || name.length < 3) {
+        const row = link.closest('.yohtmlc-item, .item-box, .a-fixed-left-grid, .a-row, [data-component="itemTitle"]')
+        if (row) name = textOf(row.querySelector('[data-component="itemTitle"]')) || textOf(row)
+      }
+      items.push({
+        asin,
+        name: name || null,
+        productUrl: absoluteUrl(href),
+        imageUrl: (link.querySelector('img') || {}).src || null,
+        quantity: 1,
+        unitPrice: null,
+        lineTotal: null,
       })
+    })
+    return items
+  }
+
+  function withDisableCsdUrl(url) {
+    const am = globalThis.OrderManagerAmazon
+    if (am && typeof am.withDisableCsdParam === 'function') {
+      return am.withDisableCsdParam(url)
+    }
+    try {
+      const u = new URL(String(url))
+      if (!u.searchParams.has('disableCsd')) {
+        u.searchParams.set('disableCsd', 'missing-library')
+      }
+      return u.toString()
+    } catch {
+      return url
+    }
+  }
+
+  function isLikelyCarrierTrackingNumber(id) {
+    const s = coerceString(id)
+    if (!s) return false
+    if (/^TBA\d/i.test(s)) return true
+    if (/^1Z[A-Z0-9]{10,}$/i.test(s)) return true
+    if (/^\d{10,22}$/.test(s)) return true
+    if (/^[A-Z]{2}\d{9}[A-Z]{2}$/i.test(s)) return true
+    if (s.length >= 12 && /\d/.test(s) && /[A-Za-z]/.test(s)) return true
+    if (s.length <= 12 && /^[A-Za-z0-9]+$/.test(s) && !/^\d+$/.test(s)) return false
+    return s.length >= 10
+  }
+
+  function isAmazonTrackingPageUrl(url) {
+    if (!url) return false
+    return /ship-track|progress\/tracker|track\.amazon/i.test(String(url))
+  }
+
+  function needsTrackingPageLookup(shipment) {
+    if (!shipment || !shipment.trackingUrl) return false
+    if (!isAmazonTrackingPageUrl(shipment.trackingUrl)) return false
+    if (!shipment.trackingNumber) return true
+    return !isLikelyCarrierTrackingNumber(shipment.trackingNumber)
+  }
+
+  function extractTrackingFromUrl(url) {
+    if (!url) return null
+    const trackingIdMatch = /[?&]trackingId=([^&]+)/i.exec(String(url))
+    if (trackingIdMatch && trackingIdMatch[1]) {
+      const id = decodeURIComponent(trackingIdMatch[1])
+      if (isLikelyCarrierTrackingNumber(id)) return id
+    }
+    const trackerMatch = /tracker\/([^/?]+)/i.exec(String(url))
+    if (trackerMatch && trackerMatch[1]) {
+      const id = decodeURIComponent(trackerMatch[1])
+      if (isLikelyCarrierTrackingNumber(id)) return id
+    }
+    return null
+  }
+
+  function extractCarrierFromTrackingRoot(root) {
+    const sel = getSelectors()
+    const carrierEl = queryFirst(root, sel.TRACKING_PAGE_CARRIER)
+    if (carrierEl) {
+      const m = /Shipped with\s+(.+)/i.exec(textOf(carrierEl))
+      if (m && m[1]) return m[1].trim()
+    }
+    return null
+  }
+
+  function parseTrackingPageHtml(html) {
+    if (!html) return null
+
+    const jsonMatch = /"trackingId"\s*:\s*"([^"]+)"/.exec(html)
+    if (jsonMatch && jsonMatch[1] && isLikelyCarrierTrackingNumber(jsonMatch[1])) {
+      return {
+        trackingNumber: jsonMatch[1],
+        carrier: null,
+      }
     }
 
-    const status = textOf(queryFirst(root, sel.ORDER_STATUS))
+    try {
+      const doc = new DOMParser().parseFromString(html, 'text/html')
+      const sel = getSelectors()
+      const idEl = queryFirst(doc, sel.TRACKING_PAGE_ID)
+      if (idEl) {
+        const m = /Tracking\s*ID\s*:\s*(\S+)/i.exec(textOf(idEl))
+        if (m && m[1] && isLikelyCarrierTrackingNumber(m[1])) {
+          return {
+            trackingNumber: m[1],
+            carrier: extractCarrierFromTrackingRoot(doc),
+          }
+        }
+      }
 
-    if (trackingLinks.length === 0) {
-      if (status) {
-        shipments.push({
+      const bodyText = doc.body ? doc.body.textContent || '' : html
+      const textMatch = /Tracking\s*ID\s*:\s*(\S+)/i.exec(bodyText)
+      if (textMatch && textMatch[1] && isLikelyCarrierTrackingNumber(textMatch[1])) {
+        return {
+          trackingNumber: textMatch[1].trim(),
+          carrier: extractCarrierFromTrackingRoot(doc),
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return null
+  }
+
+  async function fetchTrackingPageDetails(trackingUrl, baseOrigin) {
+    const origin = baseOrigin || window.location.origin
+    let url = coerceString(trackingUrl)
+    if (!url) return null
+    if (url.startsWith('/')) url = origin + url
+    url = withDisableCsdUrl(url)
+
+    try {
+      const resp = await fetch(url, { credentials: 'include' })
+      if (!resp.ok) return null
+      const html = await resp.text()
+      return parseTrackingPageHtml(html)
+    } catch {
+      return null
+    }
+  }
+
+  async function enrichShipmentsWithTracking(shipments, baseOrigin) {
+    if (!Array.isArray(shipments) || shipments.length === 0) return shipments
+    const origin = baseOrigin || window.location.origin
+    const cache = new Map()
+
+    for (let i = 0; i < shipments.length; i++) {
+      const shipment = shipments[i]
+      if (!needsTrackingPageLookup(shipment)) continue
+
+      const cacheKey = String(shipment.trackingUrl)
+      let details = cache.get(cacheKey)
+      if (details === undefined) {
+        details = await fetchTrackingPageDetails(shipment.trackingUrl, origin)
+        cache.set(cacheKey, details)
+      }
+
+      if (details && details.trackingNumber) {
+        shipment.trackingNumber = details.trackingNumber
+      }
+    }
+
+    return shipments
+  }
+
+  function parseTrackingFromBlock(block) {
+    const sel = getSelectors()
+    const links = []
+    queryAllFirst(block, sel.TRACKING_LINK).forEach((a) => links.push(a))
+    block
+      .querySelectorAll(
+        'a[href*="ship-track"], a[href*="progress/tracker"], a[href*="trackingId="], a[href*="track.amazon"]'
+      )
+      .forEach((a) => {
+        if (!links.includes(a)) links.push(a)
+      })
+
+    const results = []
+    const seen = new Set()
+    links.forEach((a) => {
+      const url = absoluteUrl(a.getAttribute('href'))
+      if (!url || seen.has(url)) return
+      seen.add(url)
+
+      let trackingNumber = extractTrackingFromUrl(url)
+      if (!trackingNumber) {
+        const tn = /\b(\d{9,22})\b/.exec(textOf(a))
+        if (tn) trackingNumber = tn[1]
+      }
+
+      results.push({ trackingNumber, trackingUrl: url })
+    })
+    return results
+  }
+
+  function extractShipmentIdFromUrl(url) {
+    if (!url) return null
+    const m = /[?&]shipmentId=([^&]+)/i.exec(String(url))
+    return m && m[1] ? decodeURIComponent(m[1]) : null
+  }
+
+  function buildShipmentId(entry, index) {
+    const fromUrl = extractShipmentIdFromUrl(entry && entry.trackingUrl)
+    if (fromUrl) return fromUrl
+    const tracking = coerceString(entry && entry.trackingNumber)
+    if (tracking) return `track:${tracking}`
+    return `shipment-${index}`
+  }
+
+  function parseShipmentBlock(block, seenItemKeys, itemCounter, blockIndex) {
+    const sel = getSelectors()
+    const entries = parseShipmentEntries(block)
+    const blockItems = parseDetailItems(block, seenItemKeys, itemCounter)
+    if (entries.length === 0 && blockItems.length === 0) return null
+
+    const entry = entries[0] || {
+      trackingNumber: null,
+      trackingUrl: null,
+      deliveryDate: null,
+      status: {
+        rawStatusType: textOf(queryFirst(block, sel.ORDER_STATUS)),
+        message: textOf(queryFirst(block, sel.ORDER_STATUS)),
+      },
+    }
+    const shipmentId = buildShipmentId(entry, blockIndex)
+
+    return {
+      shipment: {
+        shipmentId,
+        trackingNumber: entry.trackingNumber,
+        trackingUrl: entry.trackingUrl,
+        deliveryDate: entry.deliveryDate,
+        status: entry.status,
+      },
+      items: blockItems.map((item) => ({
+        ...item,
+        shipmentId,
+      })),
+    }
+  }
+
+  function parseShipmentEntries(block) {
+    const sel = getSelectors()
+    const status = textOf(queryFirst(block, sel.ORDER_STATUS))
+    const tracking = parseTrackingFromBlock(block)
+
+    if (tracking.length > 0) {
+      return tracking.map((t) => ({
+        trackingNumber: t.trackingNumber,
+        trackingUrl: t.trackingUrl,
+        deliveryDate: null,
+        status: { rawStatusType: status, message: status },
+      }))
+    }
+
+    if (status) {
+      return [
+        {
           trackingNumber: null,
           trackingUrl: null,
           deliveryDate: null,
           status: { rawStatusType: status, message: status },
-        })
-      }
-      return shipments
+        },
+      ]
     }
+    return []
+  }
 
+  function findShipmentRoots(root) {
+    const sel = getSelectors()
+    const blocks = queryAllFirst(root, sel.SHIPMENT_ROOT)
+    if (blocks.length > 0) return blocks
+    return [root]
+  }
+
+  function dedupeShipments(shipments) {
+    const out = []
     const seen = new Set()
-    trackingLinks.forEach((a) => {
-      const url = absoluteUrl(a.getAttribute('href'))
-      if (!url || seen.has(url)) return
-      seen.add(url)
-      let trackingNumber = null
-      const tm = /trackingId=([^&]+)/i.exec(url) || /tracker\/([^/?]+)/i.exec(url)
-      if (tm) trackingNumber = decodeURIComponent(tm[1])
-      shipments.push({
-        trackingNumber,
-        trackingUrl: url,
-        deliveryDate: null,
-        status: { rawStatusType: status, message: status },
-      })
+    shipments.forEach((s, idx) => {
+      const key =
+        s.trackingUrl ||
+        s.trackingNumber ||
+        `idx:${idx}:${JSON.stringify(s.status || {})}`
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push(s)
     })
-    return shipments
+    return out
+  }
+
+  function parseShipments(root) {
+    const shipmentRoots = findShipmentRoots(root)
+    const all = []
+    shipmentRoots.forEach((block) => {
+      parseShipmentEntries(block).forEach((entry) => all.push(entry))
+    })
+    if (all.length === 0) {
+      parseShipmentEntries(root).forEach((entry) => all.push(entry))
+    }
+    return dedupeShipments(all)
   }
 
   function parsePaymentMethods(root) {
@@ -454,9 +917,36 @@
     const orderDate =
       parseOrderDate(textOf(queryFirst(root, sel.ORDER_DATE))) || parseOrderDate(rootText)
     const status = textOf(queryFirst(root, sel.ORDER_STATUS))
-    const items = parseDetailItems(root)
-    const shippingAddress = parseAddressRoot(root)
-    const shipments = parseShipments(root)
+    const seenItemKeys = new Set()
+    const itemCounter = { n: 0 }
+    const shipmentRoots = findShipmentRoots(root)
+    const items = []
+    const shipments = []
+    let blockIndex = 0
+
+    shipmentRoots.forEach((block) => {
+      const parsedBlock = parseShipmentBlock(block, seenItemKeys, itemCounter, blockIndex)
+      if (!parsedBlock) return
+      blockIndex += 1
+      shipments.push(parsedBlock.shipment)
+      parsedBlock.items.forEach((item) => items.push(item))
+    })
+
+    if (items.length === 0) {
+      parseDetailItems(root, seenItemKeys, itemCounter).forEach((item) => items.push(item))
+    }
+    if (items.length === 0) {
+      parseDetailItemsFromProductLinks(root, seenItemKeys).forEach((item) => items.push(item))
+    }
+    if (shipments.length === 0) {
+      parseShipments(root).forEach((entry, idx) => {
+        shipments.push({
+          shipmentId: buildShipmentId(entry, idx),
+          ...entry,
+        })
+      })
+    }
+    const shippingAddress = resolveShippingAddress(root)
     const paymentMethods = parsePaymentMethods(root)
     const totals = parseTotals(root)
 
@@ -528,7 +1018,7 @@
           observer.disconnect()
           reject(new Error('Timed out waiting for Amazon page content to decrypt.'))
         }
-      }, 400)
+      }, 200)
     })
   }
 
@@ -543,11 +1033,47 @@
     })
   }
 
-  function waitForOrderDetailReady() {
+  function orderDetailHasDecryptedContent(root) {
+    if (!root) return false
+    const sel = getSelectors()
+
+    const orderIdEl = queryFirst(root, sel.ORDER_ID)
+    if (!orderIdEl || !ORDER_ID_RE.test(textOf(orderIdEl))) {
+      if (!ORDER_ID_RE.test(textOf(root))) return false
+    }
+
+    const horizonteAddr = parseAddressFromHorizonteComponent(root)
+    if (horizonteAddr && (horizonteAddr.fullName || horizonteAddr.addressLine1)) return true
+
+    const addr = parseAddressRoot(root)
+    if (addr && (addr.fullName || addr.addressLine1)) return true
+
+    if (root.querySelector('script[id^="shipToData"]')) return true
+
+    const itemContainers = findDetailItemContainers(root)
+    for (let i = 0; i < itemContainers.length; i++) {
+      const link = itemContainers[i].querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')
+      if (link && extractAsinFromUrl(link.getAttribute('href'))) return true
+    }
+
+    if (queryAllFirst(root, sel.SUBTOTAL_ROWS).length > 0) {
+      const subtotalText = queryAllFirst(root, sel.SUBTOTAL_ROWS)
+        .map((row) => textOf(row))
+        .join(' ')
+      if (extractPriceFromText(subtotalText) != null) return true
+    }
+
+    return false
+  }
+
+  function waitForOrderDetailReady(timeoutMs) {
+    const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 35000
     return waitForDecryptedContent(() => {
+      const root = queryFirst(document, getSelectors().ORDER_DETAILS_ROOT) || document.body
       const parsed = parseOrderDetailPage()
-      return !!(parsed && parsed.orderId)
-    })
+      if (!parsed || !parsed.orderId) return false
+      return orderDetailHasDecryptedContent(root)
+    }, timeout)
   }
 
   function parseEmailFromAccountHtml(html) {
@@ -599,6 +1125,9 @@
     fetchAccountEmail,
     parseEmailFromAccountHtml,
     extractOrderIdFromUrl,
+    enrichShipmentsWithTracking,
+    parseTrackingPageHtml,
+    isLikelyCarrierTrackingNumber,
   }
 
   if (typeof globalThis !== 'undefined') {

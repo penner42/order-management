@@ -8,6 +8,9 @@
     return
   }
 
+  if (globalThis.__OrderManagerAmazonCaptureInitialized) return
+  globalThis.__OrderManagerAmazonCaptureInitialized = true
+
   function dom() {
     return typeof globalThis !== 'undefined' && globalThis.OrderManagerAmazonDom
       ? globalThis.OrderManagerAmazonDom
@@ -65,40 +68,50 @@
     })
   }
 
-  async function captureCurrentDetailPage() {
+  async function captureCurrentDetailPage(options) {
+    const opts = options && typeof options === 'object' ? options : {}
+    const skipTracking = !!opts.skipTrackingEnrichment
     const d = dom()
     if (!d) throw new Error('Amazon DOM helpers not loaded.')
-    await d.waitForOrderDetailReady()
-    await sleep(500)
+
+    await d.waitForOrderDetailReady(35000)
     const parsed = d.parseOrderDetailPage()
+
     if (!parsed || !parsed.orderId) {
       throw new Error('Could not parse Amazon order detail page.')
     }
+    if (!skipTracking && typeof d.enrichShipmentsWithTracking === 'function') {
+      await d.enrichShipmentsWithTracking(parsed.shipments, window.location.origin)
+    }
     await persistOrderDetail(parsed, window.location.href)
     return parsed
+  }
+
+  function scheduleAutoCaptureDetail() {
+    const d = dom()
+    if (!d || !d.isAmazonOrderDetailPage()) return
+
+    function run() {
+      setTimeout(() => {
+        captureCurrentDetailPage().catch(() => {
+          // best-effort; popup/background also request capture explicitly
+        })
+      }, 1500)
+    }
+
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      run()
+    } else {
+      window.addEventListener('DOMContentLoaded', run, { once: true })
+      window.addEventListener('load', run, { once: true })
+    }
   }
 
   async function captureCurrentListPage() {
     const d = dom()
     if (!d) throw new Error('Amazon DOM helpers not loaded.')
     await d.waitForOrderListReady()
-    await sleep(500)
     return d.parseOrderListPage()
-  }
-
-  // Auto-capture when user lands on order detail page
-  if (dom() && dom().isAmazonOrderDetailPage()) {
-    window.addEventListener(
-      'load',
-      () => {
-        setTimeout(() => {
-          captureCurrentDetailPage().catch(() => {
-            // best-effort
-          })
-        }, 1200)
-      },
-      { once: true }
-    )
   }
 
   if (chrome.runtime && chrome.runtime.onMessage) {
@@ -125,7 +138,9 @@
         ;(async () => {
           try {
             await ensureAccountEmailCached()
-            const parsed = await captureCurrentDetailPage()
+            const parsed = await captureCurrentDetailPage({
+              skipTrackingEnrichment: !!message.skipTrackingEnrichment,
+            })
             sendResponse({ success: true, order: parsed })
           } catch (e) {
             sendResponse({
@@ -170,7 +185,14 @@
         return true
       }
 
+      if (message.type === 'amazonPing') {
+        sendResponse({ success: true, ready: true })
+        return true
+      }
+
       return undefined
     })
   }
+
+  scheduleAutoCaptureDetail()
 })()

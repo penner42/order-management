@@ -113,6 +113,58 @@ function isAmazonPageUrl(url) {
   }
 }
 
+function withAmazonDisableCsdUrl(url) {
+  if (globalThis.OrderManagerAmazon && typeof globalThis.OrderManagerAmazon.withDisableCsdParam === "function") {
+    return globalThis.OrderManagerAmazon.withDisableCsdParam(url);
+  }
+  try {
+    const u = new URL(String(url));
+    if (!u.searchParams.has("disableCsd")) {
+      u.searchParams.set("disableCsd", "missing-library");
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+function waitForAmazonTabReady(tabId, callback, timeoutMs) {
+  const deadline = Date.now() + (typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 45000);
+  let done = false;
+
+  function finish() {
+    if (done) return;
+    done = true;
+    try {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+    } catch {
+      // ignore
+    }
+    setTimeout(callback, 1500);
+  }
+
+  function onUpdated(id, info) {
+    if (id !== tabId || info.status !== "complete") return;
+    finish();
+  }
+
+  try {
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime && chrome.runtime.lastError) {
+        finish();
+        return;
+      }
+      if (tab && tab.status === "complete") finish();
+    });
+  } catch {
+    finish();
+    return;
+  }
+
+  setTimeout(finish, Math.max(0, deadline - Date.now()));
+}
+
 function getOrderManagerActiveServer(callback) {
   if (!chrome || !chrome.storage || !chrome.storage.local) {
     callback("prod");
@@ -878,7 +930,7 @@ function renderOrderDetails(payload, resultsEl) {
       resultsEl.style.display = "block";
       resultsEl.innerHTML = '<div class="loading">Reading order…</div>';
 
-      function finishImport(captured) {
+      function finishImport(captured, pageUrl) {
         if (!captured || !captured.payload) {
           resultsEl.innerHTML =
             '<span class="error">No order data captured yet. Wait for the page to finish loading, or refresh and try again.</span>';
@@ -909,7 +961,7 @@ function renderOrderDetails(payload, resultsEl) {
               }
               body = globalThis.OrderManagerAmazon.normalizeAmazonOrderPayload(
                 captured.payload,
-                captured.url || url,
+                captured.url || pageUrl || url,
                 accountEmail
               );
             } catch (e) {
@@ -925,26 +977,39 @@ function renderOrderDetails(payload, resultsEl) {
         });
       }
 
-      if (tab && typeof tab.id === "number") {
-        chrome.tabs.sendMessage(
-          tab.id,
-          { store: "amazon", type: "amazonParseCurrentDetailPage" },
-          (resp) => {
-            if (resp && resp.success === true && resp.order) {
-              finishImport({ url, payload: resp.order });
-              return;
+      function requestParsedOrder(pageUrl) {
+        if (tab && typeof tab.id === "number") {
+          chrome.tabs.sendMessage(
+            tab.id,
+            { store: "amazon", type: "amazonParseCurrentDetailPage" },
+            (resp) => {
+              if (resp && resp.success === true && resp.order) {
+                finishImport({ url: pageUrl, payload: resp.order }, pageUrl);
+                return;
+              }
+              chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
+                const captured = s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY];
+                finishImport(captured, pageUrl);
+              });
             }
-            chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
-              const captured = s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY];
-              finishImport(captured);
-            });
-          }
-        );
-      } else {
-        chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
-          finishImport(s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY]);
-        });
+          );
+        } else {
+          chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
+            finishImport(s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY], pageUrl);
+          });
+        }
       }
+
+      const detailUrl = withAmazonDisableCsdUrl(url);
+      if (detailUrl !== url && tab && typeof tab.id === "number") {
+        resultsEl.innerHTML = '<div class="loading">Loading full order details…</div>';
+        chrome.tabs.update(tab.id, { url: detailUrl }, () => {
+          waitForAmazonTabReady(tab.id, () => requestParsedOrder(detailUrl));
+        });
+        return;
+      }
+
+      requestParsedOrder(url);
     });
   });
 })();

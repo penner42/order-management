@@ -35,6 +35,11 @@
             ? unitPrice * qty
             : null
 
+      const itemShipmentId = coerceString(it.shipmentId)
+      const shipmentSlices = itemShipmentId
+        ? [{ shipmentId: itemShipmentId, quantity: qty, normalizedStatus: null }]
+        : []
+
       items.push({
         logicalItemId: coerceString(it.asin) || null,
         externalSku: coerceString(it.asin) || null,
@@ -54,7 +59,7 @@
           rawStatusCode: null,
           normalizedStatus: coerceString(raw.status) || null,
         },
-        shipments: [],
+        shipments: shipmentSlices,
         returnability: {
           isReturnable: false,
           returnEligibilityMessage: null,
@@ -67,8 +72,12 @@
     for (let si = 0; si < rawShipments.length; si++) {
       const s = rawShipments[si] || {}
       const st = s.status || {}
+      const shipmentId =
+        coerceString(s.shipmentId) ||
+        coerceString(s.trackingNumber) ||
+        `shipment-${si}`
       shipments.push({
-        shipmentId: null,
+        shipmentId,
         trackingNumber: coerceString(s.trackingNumber) || null,
         trackingUrl: coerceString(s.trackingUrl) || null,
         deliveryDate: coerceString(s.deliveryDate) || null,
@@ -78,6 +87,19 @@
           message: coerceString(st.message) || null,
         },
       })
+    }
+
+    if (
+      shipments.length === 1 &&
+      shipments[0].shipmentId &&
+      items.length > 0 &&
+      items.every((item) => !item.shipments || item.shipments.length === 0)
+    ) {
+      const fallbackId = shipments[0].shipmentId
+      for (let i = 0; i < items.length; i++) {
+        const qty = items[i].quantities?.ordered || 1
+        items[i].shipments = [{ shipmentId: fallbackId, quantity: qty, normalizedStatus: null }]
+      }
     }
 
     const addr = raw.shippingAddress && typeof raw.shippingAddress === 'object' ? raw.shippingAddress : null
@@ -199,6 +221,26 @@
     return !!(u && isAmazonHostname(u.hostname))
   }
 
+  function withDisableCsdParam(url) {
+    try {
+      const u = new URL(String(url))
+      if (!u.searchParams.has('disableCsd')) {
+        u.searchParams.set('disableCsd', 'missing-library')
+      }
+      return u.toString()
+    } catch {
+      return url
+    }
+  }
+
+  function originFromUrl(url) {
+    try {
+      return new URL(String(url)).origin
+    } catch {
+      return null
+    }
+  }
+
   if (typeof globalThis !== 'undefined') {
     globalThis.OrderManagerAmazon = {
       normalizeAmazonOrderPayload,
@@ -206,6 +248,8 @@
       isAmazonOrderDetailUrl,
       isAmazonOrdersListUrl,
       isAmazonPageUrl,
+      withDisableCsdParam,
+      originFromUrl,
     }
   }
 })()

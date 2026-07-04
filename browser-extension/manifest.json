@@ -1,18 +1,21 @@
 {
   "manifest_version": 3,
   "name": "Order Manager Browser Integration",
-  "version": "0.1.5",
+  "version": "0.1.14",
   "description": "Integrate order data from store order pages into Order Manager.",
   "permissions": [
     "activeTab",
     "storage",
     "tabs",
-    "cookies"
+    "cookies",
+    "scripting"
   ],
   "host_permissions": [
     "https://ecom-api.costco.com/*",
     "https://api.usabuying.group/*",
     "https://api.prod.buyinggroup.com/*",
+    "https://amazon.com/*",
+    "https://*.amazon.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://localhost/*"
@@ -121,7 +124,7 @@
         "stores/amazon/dom.js",
         "stores/amazon/capture.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_end"
     }
   ],
   "web_accessible_resources": [

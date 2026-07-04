@@ -144,6 +144,10 @@ async function clearJob() {
   port.onMessage.addListener((msg) => {
     if (!msg || typeof msg !== "object") return;
 
+    if (msg.type === "heartbeat") {
+      return;
+    }
+
     if (msg.type === "jobStarted") {
       setStatus("pending", "Running…");
       appendLog("Import started.", "pending");
@@ -238,8 +242,13 @@ async function clearJob() {
   });
 
   port.onDisconnect.addListener(() => {
+    if (ok > 0 || err > 0) return;
     setStatus("err", "Disconnected");
-    appendLog("Disconnected from background worker.", "err");
+    appendLog(
+      "Disconnected from background worker.",
+      "err",
+      "Reload the extension and try again. If this keeps happening, keep the bulk import tab focused."
+    );
     if (closeBtn) closeBtn.disabled = false;
   });
 
