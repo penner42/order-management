@@ -3,6 +3,8 @@
 ;(function () {
   'use strict'
 
+  const ORDER_ID_IN_URL_RE = /orderI[Dd]=\d{3}-\d{7}-\d{7}/i
+
   function coerceString(v) {
     if (v == null) return null
     if (typeof v === 'string') return v.trim() || null
@@ -145,9 +147,65 @@
     return payload
   }
 
+  function isAmazonHostname(hostname) {
+    if (!hostname) return false
+    const h = String(hostname).toLowerCase()
+    if (h === 'amazon.com') return true
+    if (!h.endsWith('.amazon.com')) return false
+    const blocked = ['aws.', 'developer.', 'advertising.', 'music.', 'video.', 'photos.']
+    for (let i = 0; i < blocked.length; i++) {
+      if (h.startsWith(blocked[i])) return false
+    }
+    return true
+  }
+
+  function parseAmazonUrl(url) {
+    try {
+      return new URL(String(url))
+    } catch {
+      return null
+    }
+  }
+
+  function isAmazonOrderDetailUrl(url) {
+    if (!url) return false
+    const u = parseAmazonUrl(url)
+    if (!u || !isAmazonHostname(u.hostname)) return false
+    const path = (u.pathname || '').toLowerCase()
+    const href = u.href || ''
+    if (ORDER_ID_IN_URL_RE.test(href)) return true
+    if (path.includes('order-details') || path.includes('orderdetails')) return true
+    if (path.includes('/gp/css/summary/print') && /orderid=/i.test(href)) return true
+    return false
+  }
+
+  function isAmazonOrdersListUrl(url) {
+    if (!url) return false
+    if (isAmazonOrderDetailUrl(url)) return false
+    const u = parseAmazonUrl(url)
+    if (!u || !isAmazonHostname(u.hostname)) return false
+    const path = (u.pathname || '').toLowerCase()
+    const hash = u.hash || ''
+    if (path.includes('order-history')) return true
+    if (path.includes('/your-orders')) return true
+    if (path.includes('/gp/your-account/order')) return true
+    if (/^#time\//i.test(hash) || hash.includes('/pagination/')) return true
+    return false
+  }
+
+  function isAmazonPageUrl(url) {
+    if (!url) return false
+    const u = parseAmazonUrl(url)
+    return !!(u && isAmazonHostname(u.hostname))
+  }
+
   if (typeof globalThis !== 'undefined') {
     globalThis.OrderManagerAmazon = {
       normalizeAmazonOrderPayload,
+      isAmazonHostname,
+      isAmazonOrderDetailUrl,
+      isAmazonOrdersListUrl,
+      isAmazonPageUrl,
     }
   }
 })()

@@ -71,39 +71,46 @@ function isCostcoOrderDetailsUrl(url) {
 }
 
 function isAmazonOrdersListUrl(url) {
+  if (globalThis.OrderManagerAmazon && typeof globalThis.OrderManagerAmazon.isAmazonOrdersListUrl === "function") {
+    return globalThis.OrderManagerAmazon.isAmazonOrdersListUrl(url);
+  }
   if (!url || typeof url !== "string") return false;
   try {
     const u = new URL(url);
-    if (u.hostname !== "www.amazon.com") return false;
+    const host = (u.hostname || "").toLowerCase();
+    if (host !== "www.amazon.com" && host !== "amazon.com") return false;
     const path = u.pathname || "";
-    return (
-      path.includes("/your-orders") ||
-      path.includes("/gp/css/order-history") ||
-      path.includes("order-history")
-    );
+    return path.includes("/your-orders") || path.includes("order-history");
   } catch {
     return false;
   }
 }
 
 function isAmazonOrderDetailUrl(url) {
+  if (globalThis.OrderManagerAmazon && typeof globalThis.OrderManagerAmazon.isAmazonOrderDetailUrl === "function") {
+    return globalThis.OrderManagerAmazon.isAmazonOrderDetailUrl(url);
+  }
   if (!url || typeof url !== "string") return false;
   try {
     const u = new URL(url);
-    if (u.hostname !== "www.amazon.com") return false;
-    const href = u.href || "";
-    return pathIncludesOrderDetail(u.pathname || "", href);
+    if (u.hostname !== "www.amazon.com" && u.hostname !== "amazon.com") return false;
+    return /order-details|orderI[Dd]=/.test(u.href || "");
   } catch {
     return false;
   }
 }
 
-function pathIncludesOrderDetail(path, href) {
-  return (
-    path.includes("order-details") ||
-    href.includes("order-details") ||
-    /orderI[Dd]=/.test(href)
-  );
+function isAmazonPageUrl(url) {
+  if (globalThis.OrderManagerAmazon && typeof globalThis.OrderManagerAmazon.isAmazonPageUrl === "function") {
+    return globalThis.OrderManagerAmazon.isAmazonPageUrl(url);
+  }
+  if (!url || typeof url !== "string") return false;
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "www.amazon.com" || h === "amazon.com" || h.endsWith(".amazon.com");
+  } catch {
+    return false;
+  }
 }
 
 function getOrderManagerActiveServer(callback) {
@@ -778,6 +785,19 @@ function renderOrderDetails(payload, resultsEl) {
         });
       }
     });
+  });
+})();
+
+(function setupAmazonUnsupportedSection() {
+  const section = document.getElementById("amazonUnsupportedSection");
+  if (!section || !chrome.tabs) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const url = tabs && tabs[0] && tabs[0].url ? String(tabs[0].url) : "";
+    const onAmazon = isAmazonPageUrl(url);
+    const onList = isAmazonOrdersListUrl(url);
+    const onDetail = isAmazonOrderDetailUrl(url);
+    section.style.display = onAmazon && !onList && !onDetail ? "block" : "none";
   });
 })();
 

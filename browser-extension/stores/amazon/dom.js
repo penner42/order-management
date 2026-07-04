@@ -122,29 +122,27 @@
   }
 
   function isAmazonOrderListPage() {
+    const am = typeof globalThis !== 'undefined' ? globalThis.OrderManagerAmazon : null
+    if (am && typeof am.isAmazonOrdersListUrl === 'function') {
+      return am.isAmazonOrdersListUrl(window.location.href)
+    }
     try {
       const path = window.location.pathname || ''
       const href = window.location.href || ''
-      return (
-        path.includes('/your-orders') ||
-        path.includes('/gp/css/order-history') ||
-        href.includes('/your-orders/') ||
-        href.includes('order-history')
-      )
+      return path.includes('/your-orders') || path.includes('order-history')
     } catch {
       return false
     }
   }
 
   function isAmazonOrderDetailPage() {
+    const am = typeof globalThis !== 'undefined' ? globalThis.OrderManagerAmazon : null
+    if (am && typeof am.isAmazonOrderDetailUrl === 'function') {
+      return am.isAmazonOrderDetailUrl(window.location.href)
+    }
     try {
       const href = window.location.href || ''
-      const path = window.location.pathname || ''
-      return (
-        path.includes('order-details') ||
-        href.includes('order-details') ||
-        /orderI[Dd]=/.test(href)
-      )
+      return /order-details|orderI[Dd]=/.test(href)
     } catch {
       return false
     }
