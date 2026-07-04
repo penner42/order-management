@@ -8,17 +8,19 @@
     return
   }
 
-  if (globalThis.__OrderManagerAmazonCaptureInitialized) return
-  globalThis.__OrderManagerAmazonCaptureInitialized = true
-
   function dom() {
     return typeof globalThis !== 'undefined' && globalThis.OrderManagerAmazonDom
       ? globalThis.OrderManagerAmazonDom
       : null
   }
 
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms))
+  function notifyBackground(type, extra) {
+    try {
+      if (!chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') return
+      chrome.runtime.sendMessage({ store: 'amazon', type, ...(extra || {}) })
+    } catch {
+      // ignore
+    }
   }
 
   async function ensureAccountEmailCached() {
@@ -63,7 +65,14 @@
             payload: raw,
           },
         },
-        () => resolve(null)
+        () => {
+          notifyBackground('amazonDetailCaptured', {
+            orderId: raw && raw.orderId != null ? String(raw.orderId) : null,
+            url: url || window.location.href,
+            payload: raw,
+          })
+          resolve(null)
+        }
       )
     })
   }
@@ -71,11 +80,13 @@
   async function captureCurrentDetailPage(options) {
     const opts = options && typeof options === 'object' ? options : {}
     const skipTracking = !!opts.skipTrackingEnrichment
+    const pageAlreadyReady = !!opts.pageAlreadyReady
     const d = dom()
     if (!d) throw new Error('Amazon DOM helpers not loaded.')
 
-    await d.waitForOrderDetailReady(35000)
-    await sleep(500)
+    if (!pageAlreadyReady) {
+      await d.waitForOrderDetailReady(35000)
+    }
     const parsed = d.parseOrderDetailPage()
 
     if (!parsed || !parsed.orderId) {
@@ -108,15 +119,134 @@
     }
   }
 
-  async function captureCurrentListPage() {
+  async function captureCurrentListPage(options) {
+    const opts = options && typeof options === 'object' ? options : {}
+    const pageAlreadyReady = !!opts.pageAlreadyReady
     const d = dom()
     if (!d) throw new Error('Amazon DOM helpers not loaded.')
-    await d.waitForOrderListReady()
-    await sleep(500)
+    if (!pageAlreadyReady) {
+      await d.waitForOrderListReady()
+    }
     return d.parseOrderListPage()
   }
 
-  if (chrome.runtime && chrome.runtime.onMessage) {
+  function withDisableCsdUrl(url) {
+    const am = typeof globalThis !== 'undefined' ? globalThis.OrderManagerAmazon : null
+    if (am && typeof am.withDisableCsdParam === 'function') return am.withDisableCsdParam(url)
+    try {
+      const u = new URL(String(url), window.location.origin)
+      if (!u.searchParams.has('disableCsd')) {
+        u.searchParams.set('disableCsd', 'missing-library')
+      }
+      return u.toString()
+    } catch {
+      return url
+    }
+  }
+
+  async function captureOrderDetailFromUrl(detailUrl, options) {
+    const opts = options && typeof options === 'object' ? options : {}
+    const skipTracking = !!opts.skipTrackingEnrichment
+    const d = dom()
+    if (!d) throw new Error('Amazon DOM helpers not loaded.')
+    if (!detailUrl) throw new Error('Missing Amazon order detail URL.')
+
+    const url = withDisableCsdUrl(detailUrl)
+
+    return await new Promise((resolve, reject) => {
+      const iframe = document.createElement('iframe')
+      iframe.style.cssText =
+        'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:0;border:0;'
+      iframe.setAttribute('aria-hidden', 'true')
+
+      let settled = false
+      const cleanup = () => {
+        try {
+          iframe.remove()
+        } catch {
+          // ignore
+        }
+      }
+      const finish = (fn) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        fn()
+      }
+
+      const timeoutTimer = setTimeout(() => {
+        finish(() => reject(new Error('Timed out loading Amazon order detail page.')))
+      }, 45000)
+
+      iframe.addEventListener('load', () => {
+        ;(async () => {
+          try {
+            const frameDoc = iframe.contentDocument
+            const frameWin = iframe.contentWindow
+            if (!frameDoc) throw new Error('Could not access order detail frame.')
+            const frameUrl =
+              frameWin && frameWin.location && frameWin.location.href
+                ? frameWin.location.href
+                : url
+
+            if (typeof d.waitForOrderDetailReadyInDocument === 'function') {
+              await d.waitForOrderDetailReadyInDocument(frameDoc, frameUrl, 35000)
+            }
+
+            const parsed = d.parseOrderDetailPage(frameDoc, frameUrl)
+            if (!parsed || !parsed.orderId) {
+              throw new Error('Could not parse Amazon order detail page.')
+            }
+
+            if (!skipTracking && typeof d.enrichShipmentsWithTracking === 'function') {
+              await d.enrichShipmentsWithTracking(parsed.shipments, window.location.origin)
+            }
+
+            await persistOrderDetail(parsed, frameUrl)
+            clearTimeout(timeoutTimer)
+            finish(() => resolve(parsed))
+          } catch (e) {
+            clearTimeout(timeoutTimer)
+            finish(() => reject(e))
+          }
+        })()
+      })
+
+      iframe.addEventListener('error', () => {
+        clearTimeout(timeoutTimer)
+        finish(() => reject(new Error('Failed to load Amazon order detail page.')))
+      })
+
+      document.documentElement.appendChild(iframe)
+      iframe.src = url
+    })
+  }
+
+  function schedulePageReadyNotification() {
+    const d = dom()
+    if (!d) return
+
+    ;(async () => {
+      try {
+        if (typeof d.isAmazonOrderListPage === 'function' && d.isAmazonOrderListPage()) {
+          await d.waitForOrderListReady()
+          notifyBackground('amazonPageReady', { pageKind: 'list', url: window.location.href })
+        } else if (typeof d.isAmazonOrderDetailPage === 'function' && d.isAmazonOrderDetailPage()) {
+          await d.waitForOrderDetailReady(35000)
+          notifyBackground('amazonPageReady', { pageKind: 'detail', url: window.location.href })
+        }
+      } catch {
+        // ignore
+      }
+    })()
+  }
+
+  function registerMessageListener() {
+    if (globalThis.__OrderManagerAmazonCaptureListener) return
+    globalThis.__OrderManagerAmazonCaptureListener = true
+
+    if (!chrome.runtime || !chrome.runtime.onMessage) return
+
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!message || message.store !== 'amazon') return undefined
 
@@ -124,7 +254,9 @@
         ;(async () => {
           try {
             await ensureAccountEmailCached()
-            const orders = await captureCurrentListPage()
+            const orders = await captureCurrentListPage({
+              pageAlreadyReady: !!message.pageAlreadyReady,
+            })
             sendResponse({ success: true, orders })
           } catch (e) {
             sendResponse({
@@ -141,6 +273,25 @@
           try {
             await ensureAccountEmailCached()
             const parsed = await captureCurrentDetailPage({
+              skipTrackingEnrichment: !!message.skipTrackingEnrichment,
+              pageAlreadyReady: !!message.pageAlreadyReady,
+            })
+            sendResponse({ success: true, order: parsed })
+          } catch (e) {
+            sendResponse({
+              success: false,
+              error: String(e && e.message ? e.message : e),
+            })
+          }
+        })()
+        return true
+      }
+
+      if (message.type === 'amazonCaptureOrderDetailFromUrl') {
+        ;(async () => {
+          try {
+            await ensureAccountEmailCached()
+            const parsed = await captureOrderDetailFromUrl(message.detailUrl, {
               skipTrackingEnrichment: !!message.skipTrackingEnrichment,
             })
             sendResponse({ success: true, order: parsed })
@@ -196,5 +347,13 @@
     })
   }
 
-  scheduleAutoCaptureDetail()
+  registerMessageListener()
+
+  const pageKey = window.location.href
+  if (globalThis.__OrderManagerAmazonCapturePageKey !== pageKey) {
+    globalThis.__OrderManagerAmazonCapturePageKey = pageKey
+    notifyBackground('amazonContentScriptReady', { url: pageKey })
+    schedulePageReadyNotification()
+    scheduleAutoCaptureDetail()
+  }
 })()

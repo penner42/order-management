@@ -17,12 +17,15 @@
       '[data-component="orderDetails"]',
       '[data-component="orderCard"]',
       'div.od-content',
+      '[data-testid="orderDetailsPage"]',
       'main',
     ],
     ORDER_ID: [
       '[data-component="orderId"]',
+      '[data-testid="orderId"]',
       '.yohtmlc-order-id :is(bdi, span)[dir="ltr"]',
       '.order-date-invoice-item :is(bdi, span)[dir="ltr"]',
+      'span[data-testid="order-id"]',
     ],
     ORDER_DATE: [
       '[data-component="orderDate"]',

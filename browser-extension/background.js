@@ -123,6 +123,157 @@ const AMAZON_CONTENT_SCRIPT_FILES = [
   "stores/amazon/capture.js",
 ];
 
+/** @type {Map<number, { script: boolean, list: boolean, detail: boolean, url: string | null }>} */
+const AMAZON_TAB_READY_STATE = new Map();
+
+/** @type {Map<number, { script: Set<(ok: boolean) => void>, list: Set<(ok: boolean) => void>, detail: Set<(ok: boolean) => void> }>} */
+const AMAZON_TAB_SIGNAL_WAITERS = new Map();
+
+/** @type {Map<string, Set<(record: { url: string | null, payload: object } | null) => void>>} */
+const AMAZON_DETAIL_CAPTURE_WAITERS = new Map();
+
+function clearAmazonTabSignals(tabId) {
+  AMAZON_TAB_READY_STATE.delete(tabId);
+  AMAZON_TAB_SIGNAL_WAITERS.delete(tabId);
+}
+
+function resolveAmazonTabSignalWaiters(tabId, signal, ok) {
+  const waiters = AMAZON_TAB_SIGNAL_WAITERS.get(tabId);
+  if (!waiters || !waiters[signal]) return;
+  waiters[signal].forEach((resolve) => resolve(ok));
+  waiters[signal].clear();
+}
+
+function markAmazonTabSignal(tabId, signal, url) {
+  let state = AMAZON_TAB_READY_STATE.get(tabId);
+  if (!state) {
+    state = { script: false, list: false, detail: false, url: null };
+    AMAZON_TAB_READY_STATE.set(tabId, state);
+  }
+  state[signal] = true;
+  if (url) state.url = url;
+  resolveAmazonTabSignalWaiters(tabId, signal, true);
+}
+
+function waitForAmazonTabSignal(tabId, signal, timeoutMs, port) {
+  const state = AMAZON_TAB_READY_STATE.get(tabId);
+  if (state && state[signal]) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    let waiters = AMAZON_TAB_SIGNAL_WAITERS.get(tabId);
+    if (!waiters) {
+      waiters = { script: new Set(), list: new Set(), detail: new Set() };
+      AMAZON_TAB_SIGNAL_WAITERS.set(tabId, waiters);
+    }
+
+    let settled = false;
+    let heartbeatTimer = null;
+    let timeoutTimer = null;
+
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      waiters[signal].delete(done);
+      if (heartbeatTimer != null) clearInterval(heartbeatTimer);
+      if (timeoutTimer != null) clearTimeout(timeoutTimer);
+      resolve(!!ok);
+    };
+    waiters[signal].add(done);
+
+    if (port) {
+      heartbeatTimer = setInterval(() => {
+        touchServiceWorker();
+        try {
+          port.postMessage({ type: "heartbeat" });
+        } catch {
+          // ignore
+        }
+      }, 4000);
+    }
+
+    const timeout = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 15000;
+    timeoutTimer = setTimeout(() => done(false), timeout);
+  });
+}
+
+function resolveAmazonDetailCaptureWaiters(orderId, record) {
+  const target = String(orderId || "").trim();
+  if (!target) return;
+  const waiters = AMAZON_DETAIL_CAPTURE_WAITERS.get(target);
+  if (!waiters) return;
+  waiters.forEach((resolve) => {
+    try {
+      resolve(record);
+    } catch {
+      // ignore
+    }
+  });
+  AMAZON_DETAIL_CAPTURE_WAITERS.delete(target);
+}
+
+function handleAmazonContentScriptSignal(msg, sender) {
+  const tabId = sender && sender.tab && sender.tab.id != null ? sender.tab.id : null;
+
+  if (msg.type === "amazonContentScriptReady") {
+    if (tabId == null) return;
+    markAmazonTabSignal(tabId, "script", msg.url ? String(msg.url) : null);
+    return;
+  }
+
+  if (msg.type === "amazonPageReady") {
+    if (tabId == null) return;
+    const kind = msg.pageKind ? String(msg.pageKind) : "";
+    if (kind === "list") {
+      markAmazonTabSignal(tabId, "list", msg.url ? String(msg.url) : null);
+    } else if (kind === "detail") {
+      markAmazonTabSignal(tabId, "detail", msg.url ? String(msg.url) : null);
+    }
+    return;
+  }
+
+  if (msg.type === "amazonDetailCaptured") {
+    const payload = msg.payload && typeof msg.payload === "object" ? msg.payload : null;
+    const orderId =
+      msg.orderId != null
+        ? String(msg.orderId).trim()
+        : payload && payload.orderId != null
+          ? String(payload.orderId).trim()
+          : "";
+    if (!orderId || !payload) return;
+
+    const record = {
+      url: msg.url ? String(msg.url) : null,
+      payload,
+    };
+    resolveAmazonDetailCaptureWaiters(orderId, record);
+    if (tabId != null) {
+      markAmazonTabSignal(tabId, "detail", record.url);
+    }
+  }
+}
+
+if (chrome && chrome.tabs && chrome.tabs.onUpdated) {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    try {
+      if (changeInfo && changeInfo.status === "loading") {
+        clearAmazonTabSignals(tabId);
+      }
+    } catch {
+      // ignore
+    }
+  });
+}
+
+if (chrome && chrome.tabs && chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    try {
+      clearAmazonTabSignals(tabId);
+    } catch {
+      // ignore
+    }
+  });
+}
+
 function broadcastToBulkPorts(message) {
   WALMART_BULK_PORTS.forEach((port) => {
     try {
@@ -947,31 +1098,93 @@ async function keepaliveSleep(ms, port, meta) {
   }
 }
 
-async function waitForAmazonDetail(orderId, timeoutMs, lastError, port) {
-  const start = Date.now();
+async function waitForAmazonDetailCaptured(orderId, timeoutMs, port, lastError) {
   const target = String(orderId || "").trim();
   const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 25000;
 
-  while (Date.now() - start < t) {
-    const current = await readAmazonDetailFromStorage(orderId);
-    if (current) return current;
+  const existing = await readAmazonDetailFromStorage(orderId);
+  if (existing) return existing;
 
-    touchServiceWorker();
-    if (port) {
-      try {
-        port.postMessage({ type: "heartbeat", orderNumber: target || null });
-      } catch {
-        // ignore
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let heartbeatTimer = null;
+    let timeoutTimer = null;
+    let storageListener = null;
+
+    const cleanup = () => {
+      if (storageListener && chrome.storage && chrome.storage.onChanged) {
+        try {
+          chrome.storage.onChanged.removeListener(storageListener);
+        } catch {
+          // ignore
+        }
       }
-    }
-    await sleep(500);
-  }
+      const waiters = AMAZON_DETAIL_CAPTURE_WAITERS.get(target);
+      if (waiters) {
+        waiters.delete(onCaptured);
+        if (waiters.size === 0) AMAZON_DETAIL_CAPTURE_WAITERS.delete(target);
+      }
+      if (heartbeatTimer != null) clearInterval(heartbeatTimer);
+      if (timeoutTimer != null) clearTimeout(timeoutTimer);
+    };
 
-  throw new Error(
-    "Timed out waiting for Amazon order detail payload for " +
-      String(orderId) +
-      (lastError ? " (" + lastError + ")" : "")
-  );
+    const finishOk = (record) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(record);
+    };
+
+    const finishErr = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(
+        new Error(
+          "Timed out waiting for Amazon order detail payload for " +
+            target +
+            (lastError ? " (" + lastError + ")" : "")
+        )
+      );
+    };
+
+    const onCaptured = (record) => {
+      if (!record || !record.payload) return;
+      const id = extractAmazonOrderIdFromPayload(record.payload);
+      if (target && id !== target) return;
+      finishOk(record);
+    };
+
+    let waiters = AMAZON_DETAIL_CAPTURE_WAITERS.get(target);
+    if (!waiters) {
+      waiters = new Set();
+      AMAZON_DETAIL_CAPTURE_WAITERS.set(target, waiters);
+    }
+    waiters.add(onCaptured);
+
+    if (chrome.storage && chrome.storage.onChanged) {
+      storageListener = (changes, area) => {
+        if (area !== "local" || !changes[AMAZON_ORDER_DETAIL_STORAGE_KEY]) return;
+        readAmazonDetailFromStorage(orderId).then((current) => {
+          if (current) finishOk(current);
+        });
+      };
+      chrome.storage.onChanged.addListener(storageListener);
+    }
+
+    if (port) {
+      heartbeatTimer = setInterval(() => {
+        touchServiceWorker();
+        try {
+          port.postMessage({ type: "heartbeat", orderNumber: target || null });
+        } catch {
+          // ignore
+        }
+      }, 4000);
+    }
+
+    timeoutTimer = setTimeout(finishErr, t);
+  });
 }
 
 function withAmazonDisableCsdUrl(url) {
@@ -1020,22 +1233,36 @@ function isAmazonContentScriptConnectionError(resp) {
   );
 }
 
+const AMAZON_PROGRAMMATIC_INJECT_BLOCKED = new Set();
+
+function isAmazonProgrammaticInjectBlockedError(error) {
+  const err = String(error || "").toLowerCase();
+  return err.includes("missing host permission");
+}
+
 async function ensureAmazonContentScripts(tabId) {
+  if (AMAZON_PROGRAMMATIC_INJECT_BLOCKED.has(tabId)) {
+    return { ok: false, error: "programmatic inject skipped (container tab)", skipped: true };
+  }
   if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
-    return false;
+    return { ok: false, error: "scripting API unavailable" };
   }
   const tab = await ensureTabExists(tabId);
   if (!tab || !tab.url || !/^https:\/\/(.*\.)?amazon\.com/i.test(String(tab.url))) {
-    return false;
+    return { ok: false, error: tab && tab.url ? "tab is not an Amazon URL: " + String(tab.url) : "tab missing" };
   }
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
       files: AMAZON_CONTENT_SCRIPT_FILES,
     });
-    return true;
-  } catch {
-    return false;
+    return { ok: true, url: tab.url };
+  } catch (e) {
+    const error = String(e && e.message ? e.message : e);
+    if (isAmazonProgrammaticInjectBlockedError(error)) {
+      AMAZON_PROGRAMMATIC_INJECT_BLOCKED.add(tabId);
+    }
+    return { ok: false, error, url: tab.url };
   }
 }
 
@@ -1059,18 +1286,37 @@ async function readAmazonDetailFromStorage(orderId) {
   return current;
 }
 
+async function pingAmazonContentScript(tabId) {
+  const ping = await sendAmazonTabMessage(tabId, { store: "amazon", type: "amazonPing" });
+  return !!(ping && ping.success === true);
+}
+
 async function waitForAmazonContentScript(tabId, timeoutMs, port) {
-  const deadline = Date.now() + (typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 15000);
-  let injectAttempts = 0;
+  const timeout = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 15000;
+  const deadline = Date.now() + timeout;
+
+  if (await pingAmazonContentScript(tabId)) {
+    markAmazonTabSignal(tabId, "script", null);
+    return true;
+  }
+
   while (Date.now() < deadline) {
-    const ping = await sendAmazonTabMessage(tabId, { store: "amazon", type: "amazonPing" });
-    if (ping && ping.success === true) return true;
-    if (injectAttempts < 4 && isAmazonContentScriptConnectionError(ping)) {
-      injectAttempts++;
-      await ensureAmazonContentScripts(tabId);
-      await sleep(600);
-      continue;
+    await ensureAmazonContentScripts(tabId);
+
+    if (await pingAmazonContentScript(tabId)) {
+      markAmazonTabSignal(tabId, "script", null);
+      return true;
     }
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+
+    await waitForAmazonTabSignal(tabId, "script", Math.min(400, remaining), port);
+    if (await pingAmazonContentScript(tabId)) {
+      markAmazonTabSignal(tabId, "script", null);
+      return true;
+    }
+
     touchServiceWorker();
     if (port) {
       try {
@@ -1079,21 +1325,140 @@ async function waitForAmazonContentScript(tabId, timeoutMs, port) {
         // ignore
       }
     }
-    await sleep(400);
   }
+
   return false;
 }
 
-async function requestAmazonDetailFromTab(tabId, orderId, detailUrl, timeoutMs, port, listSummary) {
+async function waitForAmazonDetailOutcome(tabId, orderId, timeoutMs, port) {
+  const stored = await readAmazonDetailFromStorage(orderId);
+  if (stored && stored.payload) {
+    return { kind: "capture", record: stored };
+  }
+
+  const timeout = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 35000;
+  const target = String(orderId || "").trim();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let heartbeatTimer = null;
+    let timeoutTimer = null;
+    let storageListener = null;
+    let captureWaiter = null;
+
+    const cleanup = () => {
+      if (storageListener && chrome.storage && chrome.storage.onChanged) {
+        try {
+          chrome.storage.onChanged.removeListener(storageListener);
+        } catch {
+          // ignore
+        }
+      }
+      if (captureWaiter) {
+        const waiters = AMAZON_DETAIL_CAPTURE_WAITERS.get(target);
+        if (waiters) {
+          waiters.delete(captureWaiter);
+          if (waiters.size === 0) AMAZON_DETAIL_CAPTURE_WAITERS.delete(target);
+        }
+      }
+      if (heartbeatTimer != null) clearInterval(heartbeatTimer);
+      if (timeoutTimer != null) clearTimeout(timeoutTimer);
+    };
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    captureWaiter = (record) => {
+      if (!record || !record.payload) return;
+      const id = extractAmazonOrderIdFromPayload(record.payload);
+      if (target && id !== target) return;
+      finish({ kind: "capture", record });
+    };
+
+    let captureWaiters = AMAZON_DETAIL_CAPTURE_WAITERS.get(target);
+    if (!captureWaiters) {
+      captureWaiters = new Set();
+      AMAZON_DETAIL_CAPTURE_WAITERS.set(target, captureWaiters);
+    }
+    captureWaiters.add(captureWaiter);
+
+    if (chrome.storage && chrome.storage.onChanged) {
+      storageListener = (_changes, area) => {
+        if (area !== "local") return;
+        readAmazonDetailFromStorage(orderId).then((current) => {
+          if (current && current.payload) finish({ kind: "capture", record: current });
+        });
+      };
+      chrome.storage.onChanged.addListener(storageListener);
+    }
+
+    waitForAmazonTabSignal(tabId, "detail", timeout, port).then((ready) => {
+      finish({ kind: "pageReady", ready: !!ready });
+    });
+
+    if (port) {
+      heartbeatTimer = setInterval(() => {
+        touchServiceWorker();
+        try {
+          port.postMessage({ type: "heartbeat", orderNumber: target || null });
+        } catch {
+          // ignore
+        }
+      }, 4000);
+    }
+
+    timeoutTimer = setTimeout(() => {
+      finish({ kind: "timeout", ready: false });
+    }, timeout);
+  });
+}
+
+async function requestAmazonDetailFromTab(
+  tabId,
+  orderId,
+  detailUrl,
+  timeoutMs,
+  port,
+  listSummary,
+  options
+) {
+  const opts = options && typeof options === "object" ? options : {};
   const deadline = Date.now() + (typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 45000);
   let lastError = null;
 
-  await waitForAmazonContentScript(tabId, Math.min(15000, timeoutMs || 45000));
+  const scriptReady = await waitForAmazonContentScript(tabId, Math.min(30000, timeoutMs || 45000));
 
-  while (Date.now() < deadline) {
+  if (!scriptReady || !(await pingAmazonContentScript(tabId))) {
+    throw new Error("Amazon content script is not reachable on the order detail tab.");
+  }
+
+  let detailReady = !!(AMAZON_TAB_READY_STATE.get(tabId) && AMAZON_TAB_READY_STATE.get(tabId).detail);
+  if (!detailReady) {
+    const detailWaitMs = Math.min(3000, Math.max(0, deadline - Date.now()));
+    if (detailWaitMs > 0) {
+      await waitForAmazonTabSignal(tabId, "detail", detailWaitMs, port);
+      detailReady = !!(AMAZON_TAB_READY_STATE.get(tabId) && AMAZON_TAB_READY_STATE.get(tabId).detail);
+    }
+  }
+
+  const storedEarly = await readAmazonDetailFromStorage(orderId);
+  if (storedEarly && storedEarly.payload) {
+    const storedId = extractAmazonOrderIdFromPayload(storedEarly.payload);
+    if (!orderId || storedId === String(orderId).trim()) {
+      return { url: storedEarly.url || detailUrl, payload: storedEarly.payload };
+    }
+  }
+
+  for (let attempt = 0; attempt < 2 && Date.now() < deadline; attempt++) {
     const detailMsg = await sendAmazonTabMessage(tabId, {
       store: "amazon",
       type: "amazonParseCurrentDetailPage",
+      skipTrackingEnrichment: !!opts.skipTrackingEnrichment,
+      pageAlreadyReady: detailReady,
     });
 
     if (detailMsg && detailMsg.success === true && detailMsg.order && detailMsg.order.orderId) {
@@ -1108,14 +1473,17 @@ async function requestAmazonDetailFromTab(tabId, orderId, detailUrl, timeoutMs, 
       if (!isAmazonContentScriptConnectionError(detailMsg)) {
         break;
       }
+      await waitForAmazonContentScript(tabId, Math.min(5000, deadline - Date.now()), port);
+      detailReady = false;
+      continue;
     }
 
-    await keepaliveSleep(600, port, { orderNumber: orderId || null });
+    break;
   }
 
   try {
-    const remaining = Math.max(8000, deadline - Date.now());
-    const stored = await waitForAmazonDetail(orderId, remaining, lastError, port);
+    const remaining = Math.max(0, deadline - Date.now());
+    const stored = await waitForAmazonDetailCaptured(orderId, Math.max(8000, remaining), port, lastError);
     return { url: stored.url || detailUrl, payload: stored.payload };
   } catch (e) {
     if (listSummary && listSummary.orderId) {
@@ -1185,23 +1553,114 @@ async function sendAmazonTabMessage(tabId, message) {
   });
 }
 
-async function waitForTabComplete(tabId, timeoutMs, port) {
-  const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 30000;
-  const start = Date.now();
-  while (Date.now() - start < t) {
-    const tab = await ensureTabExists(tabId);
-    if (tab && tab.status === "complete") return tab;
-    touchServiceWorker();
-    if (port) {
-      try {
-        port.postMessage({ type: "heartbeat" });
-      } catch {
-        // ignore
-      }
-    }
-    await sleep(400);
+function tabUrlMatchesWaitHint(tabUrl, urlHint) {
+  if (!urlHint) {
+    return !!tabUrl && /^https:\/\/(.*\.)?amazon\.com/i.test(String(tabUrl));
   }
-  throw new Error("Timed out waiting for tab to finish loading.");
+  if (!tabUrl) return false;
+  try {
+    const actual = new URL(String(tabUrl));
+    const expected = new URL(String(urlHint));
+    if (actual.hostname.replace(/^www\./, "") !== expected.hostname.replace(/^www\./, "")) {
+      return false;
+    }
+    const expectedOrderId = expected.searchParams.get("orderID");
+    if (expectedOrderId) {
+      return actual.searchParams.get("orderID") === expectedOrderId;
+    }
+    return actual.pathname === expected.pathname;
+  } catch {
+    return String(tabUrl).split("?")[0] === String(urlHint).split("?")[0];
+  }
+}
+
+async function waitForTabComplete(tabId, timeoutMs, port, options) {
+  const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 30000;
+  const opts = options && typeof options === "object" ? options : {};
+  const urlHint = opts.urlHint ? String(opts.urlHint) : null;
+  const requireNavigation = opts.requireNavigation === true;
+
+  const isReadyTab = (tab) => {
+    if (!tab || tab.status !== "complete") return false;
+    if (urlHint) return tabUrlMatchesWaitHint(tab.url, urlHint);
+    return true;
+  };
+
+  const existing = await ensureTabExists(tabId);
+  if (isReadyTab(existing) && !requireNavigation) return existing;
+
+  const urlBeforeWait = existing && existing.url ? String(existing.url) : null;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let heartbeatTimer = null;
+    let timeoutTimer = null;
+    let sawLoading = !requireNavigation;
+
+    const noteNavigationProgress = (tab, changeInfo) => {
+      if (changeInfo && changeInfo.status === "loading") sawLoading = true;
+      const nextUrl = tab && tab.url ? String(tab.url) : changeInfo && changeInfo.url ? String(changeInfo.url) : null;
+      if (nextUrl && urlBeforeWait && nextUrl !== urlBeforeWait) sawLoading = true;
+    };
+
+    const cleanup = () => {
+      if (chrome.tabs && chrome.tabs.onUpdated) {
+        try {
+          chrome.tabs.onUpdated.removeListener(onUpdated);
+        } catch {
+          // ignore
+        }
+      }
+      if (heartbeatTimer != null) clearInterval(heartbeatTimer);
+      if (timeoutTimer != null) clearTimeout(timeoutTimer);
+    };
+
+    const finishOk = (tab) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(tab);
+    };
+
+    const finishErr = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
+    function onUpdated(id, changeInfo, tab) {
+      if (id !== tabId || !changeInfo) return;
+      noteNavigationProgress(tab, changeInfo);
+      if (changeInfo.status !== "complete") return;
+      if (requireNavigation && !sawLoading) return;
+      if (isReadyTab(tab)) finishOk(tab || { id: tabId, status: "complete" });
+    }
+
+    if (chrome.tabs && chrome.tabs.onUpdated) {
+      chrome.tabs.onUpdated.addListener(onUpdated);
+    }
+
+    ensureTabExists(tabId).then((tab) => {
+      noteNavigationProgress(tab, null);
+      if (isReadyTab(tab) && (!requireNavigation || sawLoading)) finishOk(tab);
+    });
+
+    if (port) {
+      heartbeatTimer = setInterval(() => {
+        touchServiceWorker();
+        try {
+          port.postMessage({ type: "heartbeat" });
+        } catch {
+          // ignore
+        }
+      }, 4000);
+    }
+
+    timeoutTimer = setTimeout(() => {
+      finishErr(new Error("Timed out waiting for tab to finish loading."));
+    }, t);
+  });
 }
 
 async function createAmazonScrapeTab(initialUrl, cookieStoreId) {
@@ -1617,6 +2076,18 @@ if (chrome && chrome.runtime && chrome.runtime.onConnect) {
 // Receive per-page collection progress from the Walmart orders list content script bridge
 // and forward to the bulk progress tab.
 if (chrome && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    try {
+      if (!msg || msg.store !== "amazon") return;
+      if (msg.type !== "amazonContentScriptReady" && msg.type !== "amazonPageReady" && msg.type !== "amazonDetailCaptured") return;
+      handleAmazonContentScriptSignal(msg, sender);
+    } catch {
+      // ignore
+    }
+  });
+}
+
+if (chrome && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     try {
       if (!msg || msg.store !== "walmart") return;
@@ -2014,8 +2485,7 @@ function attachAmazonBulkPortHandlers(port) {
       let ordersDone = 0;
       let ordersOk = 0;
       let ordersErr = 0;
-
-      scrapeTabId = await createAmazonScrapeTab("about:blank", cookieStoreId);
+      const detailTabId = msg.sourceTabId;
 
       for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
         if (cancelled) {
@@ -2037,9 +2507,12 @@ function attachAmazonBulkPortHandlers(port) {
           throw new Error("Amazon order list page is not ready.");
         }
 
+        const listPageReady = await waitForAmazonTabSignal(msg.sourceTabId, "list", 30000, port);
+
         const listResp = await sendAmazonTabMessage(msg.sourceTabId, {
           store: "amazon",
           type: "amazonParseCurrentListPage",
+          pageAlreadyReady: listPageReady,
         });
 
         if (!listResp || listResp.success !== true) {
@@ -2057,6 +2530,13 @@ function attachAmazonBulkPortHandlers(port) {
           maxPages,
           count: pageOrders.length,
         });
+
+        const nextResp = await sendAmazonTabMessage(msg.sourceTabId, {
+          store: "amazon",
+          type: "amazonGetNextPageUrl",
+        });
+        const nextListPageUrl =
+          nextResp && nextResp.success === true && nextResp.url ? String(nextResp.url) : null;
 
         for (let oi = 0; oi < pageOrders.length; oi++) {
           if (cancelled) {
@@ -2080,25 +2560,40 @@ function attachAmazonBulkPortHandlers(port) {
 
           try {
             await clearAmazonDetailStorage();
-            const scrapeUrl = withAmazonDisableCsdUrl(detailUrl);
-            await navigateTab(scrapeTabId, scrapeUrl, { active: true });
-            await waitForTabComplete(scrapeTabId, 60000, port);
-            await ensureAmazonContentScripts(scrapeTabId);
-            await keepaliveSleep(2500, port, { orderNumber: orderId });
+            await ensureAmazonCsdDisabledCookie(sourceOrigin, cookieStoreId);
 
-            const payloadObj = await requestAmazonDetailFromTab(
-              scrapeTabId,
-              orderId,
-              scrapeUrl,
-              45000,
-              port,
-              summary
-            );
+            const listScriptReady = await waitForAmazonContentScript(detailTabId, 15000, port);
+            if (!listScriptReady) {
+              throw new Error("Amazon content script is not reachable on the order list tab.");
+            }
+
+            const detailMsg = await sendAmazonTabMessage(detailTabId, {
+              store: "amazon",
+              type: "amazonCaptureOrderDetailFromUrl",
+              detailUrl,
+              skipTrackingEnrichment: true,
+            });
+
+            let payload = null;
+            if (detailMsg && detailMsg.success === true && detailMsg.order && detailMsg.order.orderId) {
+              payload = detailMsg.order;
+            } else if (listSummary && listSummary.orderId) {
+              const merged = mergeAmazonListSummary({ orderId: String(listSummary.orderId) }, listSummary);
+              if (merged && merged.orderId) payload = merged;
+            }
+
+            if (!payload || !payload.orderId) {
+              throw new Error(
+                detailMsg && detailMsg.error
+                  ? String(detailMsg.error)
+                  : "Could not capture Amazon order detail."
+              );
+            }
 
             if (!accountEmail) accountEmail = await getAmazonAccountEmailAsync();
             const body = normalizeAmazonOrderPayloadSafe(
-              payloadObj.payload,
-              payloadObj.url || detailUrl,
+              payload,
+              detailUrl,
               accountEmail
             );
             collectedPayloads.push(body);
@@ -2122,26 +2617,22 @@ function attachAmazonBulkPortHandlers(port) {
             err: ordersErr,
           });
 
-          if (oi < pageOrders.length - 1) await keepaliveSleep(1500, port);
+          if (oi < pageOrders.length - 1) await keepaliveSleep(400, port);
         }
 
         if (pageIndex + 1 >= maxPages) break;
 
-        const nextResp = await sendAmazonTabMessage(msg.sourceTabId, {
-          store: "amazon",
-          type: "amazonGetNextPageUrl",
-        });
-
-        const nextUrl =
-          nextResp && nextResp.success === true && nextResp.url ? String(nextResp.url) : null;
-        if (!nextUrl) {
+        if (!nextListPageUrl) {
           port.postMessage({ type: "pageStatus", status: "done", page: pageIndex + 1, maxPages, noMore: true });
           break;
         }
 
-        await navigateTab(msg.sourceTabId, nextUrl, { active: true });
-        await waitForTabComplete(msg.sourceTabId, 35000, port);
-        await keepaliveSleep(1500, port);
+        await navigateTab(msg.sourceTabId, nextListPageUrl, { active: true });
+        await waitForTabComplete(msg.sourceTabId, 35000, port, {
+          urlHint: nextListPageUrl,
+          requireNavigation: true,
+        });
+        await keepaliveSleep(400, port);
         port.postMessage({ type: "pageStatus", status: "ok", page: pageIndex + 1, maxPages });
       }
 

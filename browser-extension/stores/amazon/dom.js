@@ -904,13 +904,25 @@
     return { subtotal, grandTotal, orderDiscount }
   }
 
-  function parseOrderDetailPage() {
+  function parseOrderDetailPage(scope, pageUrlOverride) {
     const sel = getSelectors()
-    const root = queryFirst(document, sel.ORDER_DETAILS_ROOT) || document.body
+    const doc =
+      scope && scope.nodeType === 9
+        ? scope
+        : scope && scope.ownerDocument
+          ? scope.ownerDocument
+          : document
+    const root =
+      scope && scope.nodeType === 1
+        ? scope
+        : queryFirst(doc, sel.ORDER_DETAILS_ROOT) || doc.body || doc.documentElement
+    const pageUrl =
+      pageUrlOverride ||
+      (doc.defaultView && doc.defaultView.location ? doc.defaultView.location.href : window.location.href)
     const rootText = textOf(root)
 
     let orderId = extractOrderIdFromText(textOf(queryFirst(root, sel.ORDER_ID)))
-    if (!orderId) orderId = extractOrderIdFromUrl(window.location.href)
+    if (!orderId) orderId = extractOrderIdFromUrl(pageUrl)
     if (!orderId) orderId = extractOrderIdFromText(rootText)
     if (!orderId) return null
 
@@ -958,7 +970,7 @@
       orderId,
       orderDate,
       status,
-      detailUrl: window.location.href,
+      detailUrl: pageUrl,
       items,
       shippingAddress,
       shipments,
@@ -980,15 +992,133 @@
     return absoluteUrl(next.getAttribute('href'))
   }
 
-  function waitForDecryptedContent(checkFn, timeoutMs) {
+  function findCsdEncryptedContainers(root) {
+    const scope = root && root.querySelectorAll ? root : document
+    const out = []
+    const seen = new Set()
+    scope.querySelectorAll('[class*="csd-encrypted"], [id*="csd-encrypted"]').forEach((el) => {
+      if (!seen.has(el)) {
+        seen.add(el)
+        out.push(el)
+      }
+    })
+    return out
+  }
+
+  function elementHasCsdDecryptScript(el) {
+    if (!el) return false
+    const scripts = el.querySelectorAll('script')
+    for (let i = 0; i < scripts.length; i++) {
+      const src = scripts[i].textContent || scripts[i].innerHTML || ''
+      if (/SiegeClientSideDecryption|decryptInElementWithId/i.test(src)) return true
+    }
+    return false
+  }
+
+  function hasPendingCsdEncryption(root) {
+    const containers = findCsdEncryptedContainers(root || document)
+    for (let i = 0; i < containers.length; i++) {
+      const el = containers[i]
+      if (!elementHasCsdDecryptScript(el)) continue
+
+      const text = textOf(el)
+      const hasOrderId = ORDER_ID_RE.test(text)
+      const hasProductLink = !!el.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')
+      const hasPrice = extractPriceFromText(text) != null
+      if (!hasOrderId && !hasProductLink && !hasPrice && text.length < 40) return true
+    }
+    return false
+  }
+
+  function orderIdVisibleInDom(root) {
+    const sel = getSelectors()
+    const scope = root && root.querySelectorAll ? root : document
+    const detailsRoot = queryFirst(scope, sel.ORDER_DETAILS_ROOT) || scope.body || scope
+    if (ORDER_ID_RE.test(textOf(queryFirst(detailsRoot, sel.ORDER_ID)))) return true
+    if (ORDER_ID_RE.test(textOf(detailsRoot))) return true
+    return false
+  }
+
+  function isOrderListContentReady() {
+    if (hasPendingCsdEncryption(document)) return false
+
+    const cards = findOrderCards()
+    if (cards.length === 0) return false
+
+    for (let i = 0; i < cards.length; i++) {
+      const card = cards[i]
+      const cardText = textOf(card)
+      if (!ORDER_ID_RE.test(cardText)) continue
+      if (card.querySelector('a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]')) {
+        return true
+      }
+      if (card.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) return true
+      if (extractPriceFromText(cardText) != null) return true
+      if (textOf(queryFirst(card, getSelectors().ORDER_STATUS)).length > 2) return true
+    }
+    return false
+  }
+
+  function isOrderDetailContentReadyInDocument(doc, pageUrl) {
+    if (!doc) return false
+    if (hasPendingCsdEncryption(doc)) return false
+
+    if (doc.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) {
+      const urlOrderId = extractOrderIdFromUrl(pageUrl || '')
+      if (urlOrderId && ORDER_ID_RE.test(urlOrderId)) return true
+    }
+
+    const parsed = parseOrderDetailPage(doc, pageUrl)
+    if (!parsed || !parsed.orderId) return false
+
+    if (parsed.items && parsed.items.some((it) => (it.name && it.name.length > 3) || it.asin)) {
+      return true
+    }
+    if (parsed.totals && (parsed.totals.grandTotal != null || parsed.totals.subtotal != null)) {
+      return true
+    }
+    if (
+      parsed.shippingAddress &&
+      (parsed.shippingAddress.fullName || parsed.shippingAddress.addressLine1)
+    ) {
+      return true
+    }
+    if (parsed.status && parsed.status.length > 2) return true
+    if (
+      parsed.shipments &&
+      parsed.shipments.some((s) => (s.status && s.status.message) || s.trackingUrl || s.trackingNumber)
+    ) {
+      return true
+    }
+    return orderIdVisibleInDom(doc)
+  }
+
+  function waitForDecryptedContentInDocument(doc, checkFn, timeoutMs) {
     const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 20000
     return new Promise((resolve, reject) => {
-      const start = Date.now()
+      const observers = []
+      let timeoutTimer = null
+      let settled = false
+
+      function finish(ok) {
+        if (settled) return
+        settled = true
+        observers.forEach((obs) => {
+          try {
+            obs.disconnect()
+          } catch {
+            // ignore
+          }
+        })
+        if (timeoutTimer != null) clearTimeout(timeoutTimer)
+        if (ok) resolve(true)
+        else reject(new Error('Timed out waiting for Amazon page content to decrypt.'))
+      }
 
       function check() {
         try {
           if (checkFn()) {
-            resolve(true)
+            finish(true)
             return true
           }
         } catch {
@@ -999,38 +1129,163 @@
 
       if (check()) return
 
-      const observer = new MutationObserver(() => {
-        if (check()) observer.disconnect()
-      })
-      observer.observe(document.documentElement || document.body, {
+      const observerOptions = {
         childList: true,
         subtree: true,
         characterData: true,
-      })
+        attributes: true,
+      }
 
-      const interval = setInterval(() => {
-        if (check()) {
-          clearInterval(interval)
-          return
+      const attachObserver = (target) => {
+        if (!target) return
+        const observer = new MutationObserver(() => {
+          check()
+        })
+        observer.observe(target, observerOptions)
+        observers.push(observer)
+      }
+
+      attachObserver(doc.documentElement || doc.body)
+      findCsdEncryptedContainers(doc).forEach((el) => attachObserver(el))
+
+      timeoutTimer = setTimeout(() => {
+        if (!settled) finish(false)
+      }, timeout)
+    })
+  }
+
+  function waitForOrderDetailReadyInDocument(doc, pageUrl, timeoutMs) {
+    const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 35000
+    return waitForDecryptedContentInDocument(
+      doc,
+      () => isOrderDetailContentReadyInDocument(doc, pageUrl),
+      timeout
+    )
+  }
+
+  function isOrderDetailContentReady() {
+    if (hasPendingCsdEncryption(document)) return false
+
+    if (document.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) {
+      const urlOrderId = extractOrderIdFromUrl(window.location.href)
+      if (urlOrderId && ORDER_ID_RE.test(urlOrderId)) return true
+    }
+
+    const parsed = parseOrderDetailPage()
+    if (!parsed || !parsed.orderId) return false
+
+    if (parsed.items && parsed.items.some((it) => (it.name && it.name.length > 3) || it.asin)) {
+      return true
+    }
+    if (parsed.totals && (parsed.totals.grandTotal != null || parsed.totals.subtotal != null)) {
+      return true
+    }
+    if (
+      parsed.shippingAddress &&
+      (parsed.shippingAddress.fullName || parsed.shippingAddress.addressLine1)
+    ) {
+      return true
+    }
+    if (parsed.status && parsed.status.length > 2) return true
+    if (
+      parsed.shipments &&
+      parsed.shipments.some((s) => (s.status && s.status.message) || s.trackingUrl || s.trackingNumber)
+    ) {
+      return true
+    }
+
+    const sel = getSelectors()
+    const root = queryFirst(document, sel.ORDER_DETAILS_ROOT) || document.body
+    if (root.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) return true
+    if (parsePaymentMethods(root).length > 0) return true
+
+    if (!orderIdVisibleInDom(document)) return false
+
+    return orderDetailHasDecryptedContent(root)
+  }
+
+  function diagnoseOrderDetailContentReady() {
+    const pendingCsd = hasPendingCsdEncryption(document)
+    const parsed = parseOrderDetailPage()
+    const sel = getSelectors()
+    const root = queryFirst(document, sel.ORDER_DETAILS_ROOT) || document.body
+    return {
+      pendingCsd,
+      csdContainerCount: findCsdEncryptedContainers(document).length,
+      hasParsedOrderId: !!(parsed && parsed.orderId),
+      itemCount: parsed && parsed.items ? parsed.items.length : 0,
+      hasGrandTotal: !!(parsed && parsed.totals && parsed.totals.grandTotal != null),
+      hasStatus: !!(parsed && parsed.status && parsed.status.length > 2),
+      hasProductLink: !!root.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]'),
+      orderIdInDom: orderIdVisibleInDom(document),
+      ready: isOrderDetailContentReady(),
+    }
+  }
+
+  function waitForDecryptedContent(checkFn, timeoutMs) {
+    const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 20000
+    return new Promise((resolve, reject) => {
+      const observers = []
+      let timeoutTimer = null
+      let settled = false
+
+      function finish(ok) {
+        if (settled) return
+        settled = true
+        observers.forEach((obs) => {
+          try {
+            obs.disconnect()
+          } catch {
+            // ignore
+          }
+        })
+        if (timeoutTimer != null) clearTimeout(timeoutTimer)
+        if (ok) resolve(true)
+        else reject(new Error('Timed out waiting for Amazon page content to decrypt.'))
+      }
+
+      function check() {
+        try {
+          if (checkFn()) {
+            finish(true)
+            return true
+          }
+        } catch {
+          // ignore
         }
-        if (Date.now() - start > timeout) {
-          clearInterval(interval)
-          observer.disconnect()
-          reject(new Error('Timed out waiting for Amazon page content to decrypt.'))
-        }
-      }, 400)
+        return false
+      }
+
+      if (check()) return
+
+      const observerOptions = {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+      }
+
+      const attachObserver = (target) => {
+        if (!target) return
+        const observer = new MutationObserver(() => {
+          check()
+        })
+        observer.observe(target, observerOptions)
+        observers.push(observer)
+      }
+
+      attachObserver(document.documentElement || document.body)
+
+      findCsdEncryptedContainers(document).forEach((el) => attachObserver(el))
+
+      timeoutTimer = setTimeout(() => {
+        if (!settled) finish(false)
+      }, timeout)
     })
   }
 
   function waitForOrderListReady() {
-    return waitForDecryptedContent(() => {
-      const cards = findOrderCards()
-      if (cards.length === 0) return false
-      for (let i = 0; i < cards.length; i++) {
-        if (ORDER_ID_RE.test(textOf(cards[i]))) return true
-      }
-      return false
-    })
+    return waitForDecryptedContent(isOrderListContentReady)
   }
 
   function orderDetailHasDecryptedContent(root) {
@@ -1068,12 +1323,7 @@
 
   function waitForOrderDetailReady(timeoutMs) {
     const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 35000
-    return waitForDecryptedContent(() => {
-      const root = queryFirst(document, getSelectors().ORDER_DETAILS_ROOT) || document.body
-      const parsed = parseOrderDetailPage()
-      if (!parsed || !parsed.orderId) return false
-      return orderDetailHasDecryptedContent(root)
-    }, timeout)
+    return waitForDecryptedContent(isOrderDetailContentReady, timeout)
   }
 
   function parseEmailFromAccountHtml(html) {
@@ -1122,6 +1372,10 @@
     getNextPageUrl,
     waitForOrderListReady,
     waitForOrderDetailReady,
+    waitForOrderDetailReadyInDocument,
+    isOrderDetailContentReady,
+    isOrderDetailContentReadyInDocument,
+    diagnoseOrderDetailContentReady,
     fetchAccountEmail,
     parseEmailFromAccountHtml,
     extractOrderIdFromUrl,
