@@ -139,17 +139,16 @@ def _write_meta(ext_dir: Path, fingerprint: str, chrome_file: str | None, firefo
     return meta
 
 
-def _public_meta(ext_dir: Path, meta: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not meta:
-        return None
-    chrome_file = _resolve_chrome_filename(ext_dir, meta)
-    firefox_file = _resolve_firefox_filename(ext_dir, meta)
+def _public_meta(ext_dir: Path, *, current: bool, meta: dict[str, Any] | None) -> dict[str, Any]:
+    version = _read_manifest_version(ext_dir)
+    fingerprint = source_fingerprint(ext_dir)
+    chrome_file, firefox_file = _artifacts_for_current_version(ext_dir)
     return {
-        "version": meta.get("version"),
-        "fingerprint": meta.get("fingerprint"),
-        "built_at": meta.get("built_at"),
-        "chrome": _artifact_info(ext_dir, chrome_file),
-        "firefox": _artifact_info(ext_dir, firefox_file),
+        "version": version,
+        "fingerprint": fingerprint,
+        "built_at": meta.get("built_at", "") if current and meta else "",
+        "chrome": _artifact_info(ext_dir, chrome_file) if current else None,
+        "firefox": _artifact_info(ext_dir, firefox_file) if current else None,
     }
 
 
@@ -158,23 +157,24 @@ def get_status() -> dict[str, Any]:
     with _lock:
         status = _state["status"]
         error = _state["error"]
-        meta = _state["meta"]
 
+    current = False
+    disk_meta: dict[str, Any] | None = None
     if ext_dir is not None:
         current, disk_meta = _build_is_current(ext_dir)
         if current:
-            meta = disk_meta
             if status in {"idle", "signing"}:
                 status = "ready"
                 error = None
-        elif meta is None:
-            meta = _load_meta(ext_dir)
+        elif status not in {"signing", "error"}:
+            ensure_signed_async()
+            status = "signing"
 
     return {
         "status": status,
         "error": error,
         "available": ext_dir is not None,
-        "meta": _public_meta(ext_dir, meta) if ext_dir and meta else None,
+        "meta": _public_meta(ext_dir, current=current, meta=disk_meta) if ext_dir else None,
     }
 
 
@@ -248,36 +248,19 @@ def _firefox_signing_enabled() -> bool:
     return bool(settings.web_ext_api_key.strip() and settings.web_ext_api_secret.strip())
 
 
-def _resolve_chrome_filename(ext_dir: Path, meta: dict[str, Any] | None) -> str | None:
-    found = _chrome_artifact_for_version(ext_dir)
-    if found:
-        return found
-    filename = (meta or {}).get("chrome_filename")
-    if filename and (ext_dir / "dist" / filename).is_file():
-        return filename
-    return _find_chrome_artifact(ext_dir)
-
-
-def _resolve_firefox_filename(ext_dir: Path, meta: dict[str, Any] | None) -> str | None:
-    found = _firefox_artifact_for_version(ext_dir)
-    if found:
-        return found
-    filename = (meta or {}).get("firefox_filename")
-    if filename and (ext_dir / "dist" / filename).is_file():
-        return filename
-    return _find_firefox_artifact(ext_dir)
-
-
 def _build_is_current(ext_dir: Path) -> tuple[bool, dict[str, Any] | None]:
-    """True when signed artifacts for the current manifest version already exist on disk."""
+    """True when signed artifacts match the current manifest version and source fingerprint."""
     meta = _load_meta(ext_dir)
     fingerprint = source_fingerprint(ext_dir)
+    version = _read_manifest_version(ext_dir)
     chrome_file, firefox_file = _artifacts_for_current_version(ext_dir)
     firefox_needed = _firefox_signing_enabled()
 
     if not chrome_file:
         return False, meta
     if firefox_needed and not firefox_file:
+        return False, meta
+    if meta and (meta.get("version") != version or meta.get("fingerprint") != fingerprint):
         return False, meta
 
     meta = _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
@@ -301,7 +284,17 @@ def _sign_extension(ext_dir: Path, *, force: bool = False) -> dict[str, Any]:
     chrome_ok = chrome_file is not None
     firefox_ok = firefox_file is not None
 
-    if not force and chrome_ok and (firefox_ok or not firefox_needed):
+    stored = _load_meta(ext_dir)
+    version = _read_manifest_version(ext_dir)
+    unchanged = (
+        not force
+        and chrome_ok
+        and (firefox_ok or not firefox_needed)
+        and stored
+        and stored.get("version") == version
+        and stored.get("fingerprint") == fingerprint
+    )
+    if unchanged:
         logger.info("Browser extension unchanged; using existing signed artifacts")
         return _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
 
@@ -363,7 +356,7 @@ def ensure_signed(*, force: bool = False) -> None:
 
     try:
         meta = _sign_extension(ext_dir, force=force)
-        public = _public_meta(ext_dir, meta)
+        public = _public_meta(ext_dir, current=True, meta=meta)
         with _lock:
             _state["status"] = "ready"
             _state["meta"] = meta
@@ -390,12 +383,11 @@ def artifact_path(browser: str) -> Path | None:
     ext_dir = extension_dir()
     if ext_dir is None:
         return None
-    meta = _load_meta(ext_dir) or _state.get("meta")
-    filename = (
-        _resolve_chrome_filename(ext_dir, meta)
-        if browser == "chrome"
-        else _resolve_firefox_filename(ext_dir, meta)
-    )
+    current, _ = _build_is_current(ext_dir)
+    if not current:
+        return None
+    chrome_file, firefox_file = _artifacts_for_current_version(ext_dir)
+    filename = chrome_file if browser == "chrome" else firefox_file
     if not filename:
         return None
     path = ext_dir / "dist" / filename
