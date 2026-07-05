@@ -896,6 +896,7 @@ def _apply_items_and_shipments(
 
     shipments_created: dict[str, Shipment] = {}
     used_existing_item_ids: set[int] = set()
+    linked_item_ids: set[int] = set()
 
     def item_tracking_keys(item: Item) -> set[str]:
         if not item.shipment_items:
@@ -929,7 +930,7 @@ def _apply_items_and_shipments(
                     return ei
 
         for ei in candidates:
-            if not ei.shipment_items:
+            if not ei.shipment_items and ei.id not in linked_item_ids:
                 used_existing_item_ids.add(ei.id)
                 return ei
 
@@ -974,7 +975,12 @@ def _apply_items_and_shipments(
     def link_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
         already_linked = any(si.shipment_id == shipment.id for si in item.shipment_items)
         if not already_linked:
-            db.add(ShipmentItem(shipment_id=shipment.id, item_id=item.id))
+            si = ShipmentItem(shipment_id=shipment.id, item_id=item.id)
+            db.add(si)
+            # Keep ORM collections in sync within this import transaction.
+            item.shipment_items.append(si)
+            existing_shipments_by_id[shipment.id] = shipment
+            linked_item_ids.add(item.id)
             if shipped:
                 item.status = ItemStatus.SHIPPED
 
@@ -1162,6 +1168,20 @@ def _apply_items_and_shipments(
                     existing_item_keys.add(key)
                     continue
 
+                incoming_keys = {k for k in (db_key, tracking_key) if k}
+                already_linked_elsewhere = (
+                    (bool(existing_item.shipment_items) or existing_item.id in linked_item_ids)
+                    and bool(incoming_keys)
+                    and incoming_keys.isdisjoint(item_keys)
+                )
+                if already_linked_elsewhere and (existing_item.quantity or 1) <= slice_qty:
+                    # Same product on separate shipment slices (e.g. two Amazon
+                    # line items with different tracking). Reusing the matched
+                    # row would violate shipment_items.item_id uniqueness.
+                    used_existing_item_ids.discard(existing_item.id)
+                    existing_item = None
+
+            if existing_item:
                 allocated_item = allocate_item_for_slice(
                     existing_item, slice_qty, name
                 )
