@@ -52,6 +52,26 @@ _bulk_sessions: Dict[str, list[StoreOrderImportPayload]] = {}
 # ---------------------------------------------------------------------------
 
 
+def _parse_order_date_str(value: str | None) -> datetime | None:
+    """Parse store orderDate into a timezone-aware datetime for Order.purchase_date."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        pass
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 def _normalize_iso_datetime_str(value: str | None) -> str | None:
     """Return a canonical ISO datetime string for comparison.
 
@@ -60,14 +80,10 @@ def _normalize_iso_datetime_str(value: str | None) -> str | None:
     """
     if not isinstance(value, str) or not value.strip():
         return None
-    raw = value.strip()
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return raw
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat()
+    dt = _parse_order_date_str(value)
+    if dt:
+        return dt.isoformat()
+    return value.strip()
 
 
 def _normalize_iso_date_str(value: str | None) -> str | None:
@@ -776,17 +792,11 @@ def _create_or_find_order(
 
     external_order = normalized.get("externalOrder") or {}
     order_date_raw = external_order.get("orderDate")
-
-    purchase_date: datetime | None = None
-    if isinstance(order_date_raw, str) and order_date_raw.strip():
-        try:
-            purchase_date = datetime.fromisoformat(
-                order_date_raw.replace("Z", "+00:00")
-            )
-        except ValueError:
-            purchase_date = None
-    if purchase_date and purchase_date.tzinfo is None:
-        purchase_date = purchase_date.replace(tzinfo=timezone.utc)
+    purchase_date = (
+        _parse_order_date_str(order_date_raw)
+        if isinstance(order_date_raw, str)
+        else None
+    )
 
     store = _get_or_create_store(db, _resolve_store_name(store_name), current_user.id)
 

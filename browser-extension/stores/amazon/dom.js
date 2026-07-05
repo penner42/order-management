@@ -148,10 +148,81 @@
     }
   }
 
+  function isOrderDetailListHref(href) {
+    if (!href) return false
+    const h = String(href)
+    if (!/order-details|orderID=|orderId=/i.test(h)) return false
+    if (/signin|openid\.return_to/i.test(h)) return false
+    return !!extractOrderIdFromUrl(h)
+  }
+
+  function isPlausibleOrderCard(el) {
+    if (!el || el.nodeType !== 1) return false
+    const cardText = textOf(el)
+    if (/^Test:\s*/i.test(cardText)) return false
+    if (ORDER_ID_RE.test(cardText)) return true
+
+    const detailLinks = el.querySelectorAll(
+      'a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]'
+    )
+    for (let i = 0; i < detailLinks.length; i++) {
+      if (isOrderDetailListHref(detailLinks[i].getAttribute('href'))) return true
+    }
+
+    if (el.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) {
+      return detailLinks.length > 0
+    }
+    return false
+  }
+
+  function findOrderCardsFromDetailLinks() {
+    const cards = new Set()
+    const links = document.querySelectorAll(
+      'a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]'
+    )
+    for (let i = 0; i < links.length; i++) {
+      const href = links[i].getAttribute('href') || ''
+      if (!isOrderDetailListHref(href)) continue
+
+      let parent = links[i]
+      for (let depth = 0; depth < 14 && parent && parent.parentElement; depth++) {
+        parent = parent.parentElement
+        if (
+          parent.classList.contains('a-box') ||
+          parent.classList.contains('a-box-group') ||
+          parent.classList.contains('order-card') ||
+          parent.classList.contains('js-order-card') ||
+          parent.getAttribute('data-component') === 'orderCard' ||
+          (parent.tagName === 'DIV' &&
+            parent.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]'))
+        ) {
+          if (isPlausibleOrderCard(parent)) {
+            cards.add(parent)
+            break
+          }
+        }
+      }
+    }
+    return Array.from(cards)
+  }
+
   function findOrderCards() {
     const sel = getSelectors()
-    const cards = queryAllFirst(document, sel.ORDER_CARD)
-    if (cards.length > 0) return cards
+    const list = Array.isArray(sel.ORDER_CARD) ? sel.ORDER_CARD : [sel.ORDER_CARD]
+    const fromSelectors = []
+    const seen = new Set()
+    for (let i = 0; i < list.length; i++) {
+      try {
+        document.querySelectorAll(list[i]).forEach((el) => {
+          if (!isPlausibleOrderCard(el) || seen.has(el)) return
+          seen.add(el)
+          fromSelectors.push(el)
+        })
+      } catch {
+        // ignore invalid selectors
+      }
+    }
+    if (fromSelectors.length > 0) return fromSelectors
 
     const potential = new Set()
     document.querySelectorAll('*').forEach((el) => {
@@ -165,12 +236,18 @@
           parent.classList.contains('order-card') ||
           (parent.tagName === 'DIV' && parent.children.length > 2)
         ) {
-          potential.add(parent)
+          if (isPlausibleOrderCard(parent)) potential.add(parent)
           break
         }
       }
     })
-    return Array.from(potential)
+    const fallbackCards = Array.from(potential)
+    if (fallbackCards.length > 0) return fallbackCards
+
+    const fromLinks = findOrderCardsFromDetailLinks()
+    if (fromLinks.length > 0) return fromLinks
+
+    return []
   }
 
   function isAdvertisementCard(summary) {
@@ -247,6 +324,64 @@
     return summary
   }
 
+  function parseOrderListFromDetailLinks() {
+    const sel = getSelectors()
+    const orders = []
+    const seen = new Set()
+    const links = document.querySelectorAll('a[href*="order-details"]')
+    for (let i = 0; i < links.length; i++) {
+      const href = links[i].getAttribute('href') || ''
+      if (!isOrderDetailListHref(href)) continue
+      const orderId = extractOrderIdFromUrl(href)
+      if (!orderId || seen.has(orderId)) continue
+      seen.add(orderId)
+
+      const detailUrl = absoluteUrl(href)
+      let container = links[i]
+      for (let d = 0; d < 14 && container.parentElement; d++) {
+        container = container.parentElement
+        if (container.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) break
+      }
+
+      const cardText = textOf(container)
+      const orderDate =
+        parseOrderDate(textOf(queryFirst(container, sel.ORDER_DATE))) || parseOrderDate(cardText)
+      const totalAmount =
+        extractPriceFromText(textOf(queryFirst(container, sel.ORDER_TOTAL))) ||
+        extractPriceFromText(cardText)
+      const status = textOf(queryFirst(container, sel.ORDER_STATUS))
+
+      const items = []
+      const seenAsins = new Set()
+      container.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]').forEach((link) => {
+        const productHref = link.getAttribute('href') || ''
+        const asin = extractAsinFromUrl(productHref)
+        if (!asin || seenAsins.has(asin)) return
+        seenAsins.add(asin)
+        let title = textOf(link)
+        if (!title || title.length < 3) {
+          const img = link.querySelector('img')
+          if (img && img.alt) title = img.alt.trim()
+        }
+        items.push({
+          asin,
+          name: title || null,
+          productUrl: absoluteUrl(productHref),
+        })
+      })
+
+      orders.push({
+        orderId,
+        orderDate: orderDate || null,
+        totalAmount,
+        status: status || null,
+        detailUrl,
+        items,
+      })
+    }
+    return orders
+  }
+
   function parseOrderListPage() {
     const cards = findOrderCards()
     const orders = []
@@ -257,6 +392,17 @@
       seen.add(parsed.orderId)
       orders.push(parsed)
     }
+
+    if (orders.length === 0) {
+      const fromLinks = parseOrderListFromDetailLinks()
+      for (let i = 0; i < fromLinks.length; i++) {
+        const summary = fromLinks[i]
+        if (!summary.orderId || seen.has(summary.orderId)) continue
+        seen.add(summary.orderId)
+        orders.push(summary)
+      }
+    }
+
     return orders
   }
 
@@ -1043,11 +1189,23 @@
     if (hasPendingCsdEncryption(document)) return false
 
     const cards = findOrderCards()
-    if (cards.length === 0) return false
+    if (cards.length === 0) {
+      const detailLinks = document.querySelectorAll(
+        'a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]'
+      )
+      for (let i = 0; i < detailLinks.length; i++) {
+        if (isOrderDetailListHref(detailLinks[i].getAttribute('href'))) return true
+      }
+      return false
+    }
 
     for (let i = 0; i < cards.length; i++) {
       const card = cards[i]
       const cardText = textOf(card)
+      if (!ORDER_ID_RE.test(cardText)) {
+        const detailLink = queryFirst(card, getSelectors().ORDER_DETAIL_LINK)
+        if (detailLink && isOrderDetailListHref(detailLink.getAttribute('href'))) return true
+      }
       if (!ORDER_ID_RE.test(cardText)) continue
       if (card.querySelector('a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]')) {
         return true

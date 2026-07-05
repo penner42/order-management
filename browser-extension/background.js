@@ -390,6 +390,19 @@ function normalizeAmazonOrderPayloadFallback(raw, sourceUrl, accountEmail) {
     return null;
   }
 
+  function normalizeOrderDateToIso(v) {
+    const s = coerceString(v);
+    if (!s) return null;
+    const isoPrefix = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+    if (isoPrefix) return isoPrefix[1] + "T00:00:00.000Z";
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return null;
+    const y = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return y + "-" + mo + "-" + day + "T00:00:00.000Z";
+  }
+
   if (!raw || typeof raw !== "object") {
     throw new Error("Missing Amazon order payload.");
   }
@@ -515,7 +528,7 @@ function normalizeAmazonOrderPayloadFallback(raw, sourceUrl, accountEmail) {
     capturedAt: new Date().toISOString(),
     externalOrder: {
       id: orderId,
-      orderDate: coerceString(raw.orderDate) || null,
+      orderDate: normalizeOrderDateToIso(raw.orderDate),
       url: sourceUrl || coerceString(raw.detailUrl) || null,
       statusType: coerceString(raw.status) || null,
     },
