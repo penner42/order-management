@@ -221,6 +221,7 @@
     if (!u || !isAmazonHostname(u.hostname)) return false
     const path = (u.pathname || '').toLowerCase()
     const hash = u.hash || ''
+    if (path.includes('/gp/css/order-history')) return true
     if (path.includes('order-history')) return true
     if (path.includes('/your-orders')) return true
     if (path.includes('/gp/your-account/order')) return true

@@ -2,7 +2,11 @@
   'use strict'
 
   const ORDER_ID_RE = /\d{3}-\d{7}-\d{7}/
-  const ASIN_RE = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i
+  const ASIN_RE = /\/(?:dp|gp\/product|gp\/aw\/d)\/([A-Z0-9]{10})/i
+  const PRODUCT_LINK_SELECTOR =
+    'a[href*="/dp/"], a[href*="/gp/product/"], a[href*="/gp/aw/d/"]'
+  const ORDER_DETAIL_LINK_SELECTOR =
+    'a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]'
   const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
   const ORDER_DATE_RE =
     /(?:ordered on|order placed|placed on)\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})/i
@@ -75,7 +79,51 @@
   function extractAsinFromUrl(href) {
     if (!href) return null
     const m = ASIN_RE.exec(String(href))
-    return m ? m[1].toUpperCase() : null
+    if (m) return m[1].toUpperCase()
+    const qm = /[?&](?:ASIN|asin)=([A-Z0-9]{10})/i.exec(String(href))
+    return qm ? qm[1].toUpperCase() : null
+  }
+
+  function queryProductLinks(root) {
+    const scope = root && root.querySelectorAll ? root : document
+    try {
+      return Array.from(scope.querySelectorAll(PRODUCT_LINK_SELECTOR))
+    } catch {
+      return []
+    }
+  }
+
+  function hasProductLinks(root) {
+    return queryProductLinks(root).length > 0
+  }
+
+  function queryOrderDetailLinks(root) {
+    const scope = root && root.querySelectorAll ? root : document
+    try {
+      return Array.from(scope.querySelectorAll(ORDER_DETAIL_LINK_SELECTOR))
+    } catch {
+      return []
+    }
+  }
+
+  function orderCardHasReadableContent(card) {
+    if (!card) return false
+    const cardText = textOf(card)
+    if (ORDER_ID_RE.test(cardText)) return true
+
+    const sel = getSelectors()
+    const orderIdEl = queryFirst(card, sel.ORDER_ID)
+    if (orderIdEl && ORDER_ID_RE.test(textOf(orderIdEl))) return true
+
+    const detailLinks = card.querySelectorAll(ORDER_DETAIL_LINK_SELECTOR)
+    for (let i = 0; i < detailLinks.length; i++) {
+      if (isOrderDetailListHref(detailLinks[i].getAttribute('href'))) return true
+    }
+
+    if (hasProductLinks(card)) return true
+    if (extractPriceFromText(cardText) != null) return true
+    if (textOf(queryFirst(card, sel.ORDER_STATUS)).length > 2) return true
+    return false
   }
 
   function parsePrice(text) {
@@ -162,14 +210,12 @@
     if (/^Test:\s*/i.test(cardText)) return false
     if (ORDER_ID_RE.test(cardText)) return true
 
-    const detailLinks = el.querySelectorAll(
-      'a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]'
-    )
+    const detailLinks = el.querySelectorAll(ORDER_DETAIL_LINK_SELECTOR)
     for (let i = 0; i < detailLinks.length; i++) {
       if (isOrderDetailListHref(detailLinks[i].getAttribute('href'))) return true
     }
 
-    if (el.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) {
+    if (hasProductLinks(el)) {
       return detailLinks.length > 0
     }
     return false
@@ -177,9 +223,7 @@
 
   function findOrderCardsFromDetailLinks() {
     const cards = new Set()
-    const links = document.querySelectorAll(
-      'a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]'
-    )
+    const links = queryOrderDetailLinks(document)
     for (let i = 0; i < links.length; i++) {
       const href = links[i].getAttribute('href') || ''
       if (!isOrderDetailListHref(href)) continue
@@ -193,8 +237,7 @@
           parent.classList.contains('order-card') ||
           parent.classList.contains('js-order-card') ||
           parent.getAttribute('data-component') === 'orderCard' ||
-          (parent.tagName === 'DIV' &&
-            parent.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]'))
+          (parent.tagName === 'DIV' && hasProductLinks(parent))
         ) {
           if (isPlausibleOrderCard(parent)) {
             cards.add(parent)
@@ -293,7 +336,7 @@
 
     const items = []
     const seenAsins = new Set()
-    card.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]').forEach((link) => {
+    queryProductLinks(card).forEach((link) => {
       const href = link.getAttribute('href') || ''
       const asin = extractAsinFromUrl(href)
       if (!asin || seenAsins.has(asin)) return
@@ -340,7 +383,7 @@
       let container = links[i]
       for (let d = 0; d < 14 && container.parentElement; d++) {
         container = container.parentElement
-        if (container.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) break
+        if (hasProductLinks(container)) break
       }
 
       const cardText = textOf(container)
@@ -353,7 +396,7 @@
 
       const items = []
       const seenAsins = new Set()
-      container.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]').forEach((link) => {
+      queryProductLinks(container).forEach((link) => {
         const productHref = link.getAttribute('href') || ''
         const asin = extractAsinFromUrl(productHref)
         if (!asin || seenAsins.has(asin)) return
@@ -621,7 +664,7 @@
 
     if (containers.length === 0) {
       const seen = new Set()
-      root.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]').forEach((link) => {
+      root.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"], a[href*="/gp/aw/d/"]').forEach((link) => {
         let parent = link.closest('.yohtmlc-item, .item-box, .a-fixed-left-grid, .a-row')
         if (!parent) parent = link.parentElement
         if (parent && !seen.has(parent)) {
@@ -642,9 +685,8 @@
     const counter = itemCounter || { n: 0 }
 
     function pushItem(container) {
-      const link =
-        container.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]') ||
-        queryFirst(container, sel.ITEM_TITLE)
+      const productLinks = queryProductLinks(container)
+      const link = productLinks[0] || queryFirst(container, sel.ITEM_TITLE)
       const href = link ? link.getAttribute('href') || '' : ''
       const asin = extractAsinFromUrl(href)
 
@@ -696,7 +738,7 @@
     const items = []
     const seen = seenKeys || new Set()
     const scope = root && root.querySelectorAll ? root : document
-    scope.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]').forEach((link) => {
+    queryProductLinks(scope).forEach((link) => {
       const href = link.getAttribute('href') || ''
       const asin = extractAsinFromUrl(href)
       if (!asin || seen.has(asin)) return
@@ -1161,15 +1203,50 @@
     return false
   }
 
+  function hasReadableOrderListContent(root) {
+    const scope = root && root.querySelectorAll ? root : document
+    const sel = getSelectors()
+
+    const orderIdEl = queryFirst(scope, sel.ORDER_ID)
+    if (orderIdEl && ORDER_ID_RE.test(textOf(orderIdEl))) return true
+
+    const detailLinks = queryOrderDetailLinks(scope)
+    for (let i = 0; i < detailLinks.length; i++) {
+      if (isOrderDetailListHref(detailLinks[i].getAttribute('href'))) return true
+    }
+
+    const listRoot = queryFirst(scope, sel.ORDER_LIST_ROOT)
+    if (listRoot) {
+      const orders = listRoot.querySelectorAll('.order, .order-card, .js-order-card')
+      for (let i = 0; i < orders.length; i++) {
+        if (orderCardHasReadableContent(orders[i])) return true
+      }
+    }
+
+    const cards = findOrderCards()
+    for (let i = 0; i < cards.length; i++) {
+      if (orderCardHasReadableContent(cards[i])) return true
+    }
+
+    return false
+  }
+
   function hasPendingCsdEncryption(root) {
-    const containers = findCsdEncryptedContainers(root || document)
+    const scope = root && root.querySelectorAll ? root : document
+
+    // Amazon Business / React order history can keep CSD widgets around even after
+    // the list is readable; don't block import when order cards are already visible.
+    if (hasReadableOrderListContent(scope)) return false
+    if (orderIdVisibleInDom(scope)) return false
+
+    const containers = findCsdEncryptedContainers(scope)
     for (let i = 0; i < containers.length; i++) {
       const el = containers[i]
       if (!elementHasCsdDecryptScript(el)) continue
 
       const text = textOf(el)
       const hasOrderId = ORDER_ID_RE.test(text)
-      const hasProductLink = !!el.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')
+      const hasProductLink = hasProductLinks(el)
       const hasPrice = extractPriceFromText(text) != null
       if (!hasOrderId && !hasProductLink && !hasPrice && text.length < 40) return true
     }
@@ -1187,41 +1264,14 @@
 
   function isOrderListContentReady() {
     if (hasPendingCsdEncryption(document)) return false
-
-    const cards = findOrderCards()
-    if (cards.length === 0) {
-      const detailLinks = document.querySelectorAll(
-        'a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]'
-      )
-      for (let i = 0; i < detailLinks.length; i++) {
-        if (isOrderDetailListHref(detailLinks[i].getAttribute('href'))) return true
-      }
-      return false
-    }
-
-    for (let i = 0; i < cards.length; i++) {
-      const card = cards[i]
-      const cardText = textOf(card)
-      if (!ORDER_ID_RE.test(cardText)) {
-        const detailLink = queryFirst(card, getSelectors().ORDER_DETAIL_LINK)
-        if (detailLink && isOrderDetailListHref(detailLink.getAttribute('href'))) return true
-      }
-      if (!ORDER_ID_RE.test(cardText)) continue
-      if (card.querySelector('a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]')) {
-        return true
-      }
-      if (card.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) return true
-      if (extractPriceFromText(cardText) != null) return true
-      if (textOf(queryFirst(card, getSelectors().ORDER_STATUS)).length > 2) return true
-    }
-    return false
+    return hasReadableOrderListContent(document)
   }
 
   function isOrderDetailContentReadyInDocument(doc, pageUrl) {
     if (!doc) return false
     if (hasPendingCsdEncryption(doc)) return false
 
-    if (doc.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) {
+    if (hasProductLinks(doc)) {
       const urlOrderId = extractOrderIdFromUrl(pageUrl || '')
       if (urlOrderId && ORDER_ID_RE.test(urlOrderId)) return true
     }
@@ -1248,6 +1298,7 @@
     ) {
       return true
     }
+    if (parsePaymentMethods(doc.body || doc.documentElement).length > 0) return true
     return orderIdVisibleInDom(doc)
   }
 
@@ -1324,7 +1375,7 @@
   function isOrderDetailContentReady() {
     if (hasPendingCsdEncryption(document)) return false
 
-    if (document.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) {
+    if (hasProductLinks(document)) {
       const urlOrderId = extractOrderIdFromUrl(window.location.href)
       if (urlOrderId && ORDER_ID_RE.test(urlOrderId)) return true
     }
@@ -1354,7 +1405,7 @@
 
     const sel = getSelectors()
     const root = queryFirst(document, sel.ORDER_DETAILS_ROOT) || document.body
-    if (root.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')) return true
+    if (hasProductLinks(root)) return true
     if (parsePaymentMethods(root).length > 0) return true
 
     if (!orderIdVisibleInDom(document)) return false
@@ -1374,7 +1425,7 @@
       itemCount: parsed && parsed.items ? parsed.items.length : 0,
       hasGrandTotal: !!(parsed && parsed.totals && parsed.totals.grandTotal != null),
       hasStatus: !!(parsed && parsed.status && parsed.status.length > 2),
-      hasProductLink: !!root.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]'),
+      hasProductLink: hasProductLinks(root),
       orderIdInDom: orderIdVisibleInDom(document),
       ready: isOrderDetailContentReady(),
     }
@@ -1465,7 +1516,7 @@
 
     const itemContainers = findDetailItemContainers(root)
     for (let i = 0; i < itemContainers.length; i++) {
-      const link = itemContainers[i].querySelector('a[href*="/dp/"], a[href*="/gp/product/"]')
+      const link = queryProductLinks(itemContainers[i])[0]
       if (link && extractAsinFromUrl(link.getAttribute('href'))) return true
     }
 

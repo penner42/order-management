@@ -9,6 +9,8 @@
       '[data-component="orderCard"]',
       '.a-box-group.order',
       '#ordersContainer .order-card',
+      '#ordersContainer > .order',
+      '#ordersContainer .order',
       '.js-order-card',
     ],
     ORDER_DETAILS_ROOT: [
@@ -24,15 +26,22 @@
       '[data-component="orderId"]',
       '[data-testid="orderId"]',
       '.yohtmlc-order-id :is(bdi, span)[dir="ltr"]',
+      '.yohtmlc-order-id .value',
       '.order-date-invoice-item :is(bdi, span)[dir="ltr"]',
       'span[data-testid="order-id"]',
+      'li.order-header__header-list-item .value',
     ],
     ORDER_DATE: [
       '[data-component="orderDate"]',
       'span.order-date-invoice-item',
       '[data-component="briefOrderInfo"] div.a-column',
+      'li.order-header__header-list-item',
     ],
-    ORDER_TOTAL: ['div.yohtmlc-order-total span.value', 'div.order-header div.a-col-left .a-span9'],
+    ORDER_TOTAL: [
+      'div.yohtmlc-order-total span.value',
+      'div.order-header div.a-col-left .a-span9',
+      'li.order-header__header-list-item .a-color-price',
+    ],
     ORDER_DETAIL_LINK: [
       'a.yohtmlc-order-details-link',
       'a[href*="order-details"]',
@@ -115,7 +124,15 @@
     NEXT_PAGE: [
       'ul.a-pagination li.a-last:not(.a-disabled) a',
       'a[aria-label*="Next"]',
+      'a[aria-label*="next"]',
       '.a-pagination li:last-child:not(.a-disabled) a',
+      '[data-component="pagination"] a[aria-label*="Next"]',
+      '[data-component="pagination"] a[aria-label*="next"]',
+    ],
+    ORDER_LIST_ROOT: [
+      '#ordersContainer',
+      '[data-component="ordersContainer"]',
+      '[data-testid="ordersContainer"]',
     ],
     CANCELLED: ['div.yohtmlc-shipment-status-primaryText'],
     TRACKING_PAGE_ID: [

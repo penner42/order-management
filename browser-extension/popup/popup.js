@@ -78,9 +78,14 @@ function isAmazonOrdersListUrl(url) {
   try {
     const u = new URL(url);
     const host = (u.hostname || "").toLowerCase();
-    if (host !== "www.amazon.com" && host !== "amazon.com") return false;
+    if (host !== "www.amazon.com" && host !== "amazon.com" && !host.endsWith(".amazon.com")) {
+      return false;
+    }
     const path = u.pathname || "";
-    return path.includes("/your-orders") || path.includes("order-history");
+    const hash = u.hash || "";
+    if (path.includes("/your-orders") || path.includes("order-history")) return true;
+    if (/^#time\//i.test(hash) || hash.includes("/pagination/")) return true;
+    return false;
   } catch {
     return false;
   }

@@ -2484,6 +2484,21 @@ function attachAmazonBulkPortHandlers(port) {
 
       await ensureAmazonCsdDisabledCookie(sourceOrigin, cookieStoreId);
 
+      // Force plain HTML on the list page (Amazon Business React SPA keeps CSD widgets
+      // that can block readiness detection even when orders are visible).
+      if (sourceTab.url) {
+        const listUrlWithCsdDisabled = withAmazonDisableCsdUrl(String(sourceTab.url));
+        if (listUrlWithCsdDisabled !== String(sourceTab.url)) {
+          clearAmazonTabSignals(msg.sourceTabId);
+          await navigateTab(msg.sourceTabId, listUrlWithCsdDisabled);
+          await waitForTabComplete(msg.sourceTabId, 35000, port, {
+            urlHint: listUrlWithCsdDisabled,
+            requireNavigation: true,
+          });
+          await keepaliveSleep(400, port);
+        }
+      }
+
       const collectedPayloads = [];
       let ordersDone = 0;
       let ordersOk = 0;
