@@ -127,6 +127,16 @@
     if (!pageAlreadyReady) {
       await d.waitForOrderListReady()
     }
+    // The "ready" signal can fire on an empty shell before the SPA injects the
+    // order list, so always wait until parseable order content exists (or a
+    // timeout proves the page is genuinely empty) before parsing.
+    if (typeof d.waitForParseableOrderList === 'function') {
+      try {
+        await d.waitForParseableOrderList(25000)
+      } catch {
+        // Timed out: page may genuinely have no orders; parse anyway.
+      }
+    }
     return d.parseOrderListPage()
   }
 
@@ -229,7 +239,7 @@
     ;(async () => {
       try {
         if (typeof d.isAmazonOrderListPage === 'function' && d.isAmazonOrderListPage()) {
-          await d.waitForOrderListReady()
+          await d.waitForParseableOrderList(25000)
           notifyBackground('amazonPageReady', { pageKind: 'list', url: window.location.href })
         } else if (typeof d.isAmazonOrderDetailPage === 'function' && d.isAmazonOrderDetailPage()) {
           await d.waitForOrderDetailReady(35000)

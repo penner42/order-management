@@ -886,7 +886,12 @@ function renderOrderDetails(payload, resultsEl) {
       resultsEl.style.display = "block";
       resultsEl.innerHTML = '<div class="loading">Starting…</div>';
 
-      chrome.storage.local.set(
+      // Firefox MV3 treats manifest host_permissions as optional; without the
+      // grant, content scripts stop working as soon as the extension navigates
+      // the tab (activeTab only covers the page the user was on). Request the
+      // permission here while we still have a user gesture.
+      const amazonOrigins = ["https://amazon.com/*", "https://*.amazon.com/*"];
+      const startJob = () => chrome.storage.local.set(
         {
           [AMAZON_BULK_JOB_STORAGE_KEY]: {
             store: "amazon",
@@ -912,6 +917,24 @@ function renderOrderDetails(payload, resultsEl) {
           }
         }
       );
+
+      try {
+        if (chrome.permissions && typeof chrome.permissions.request === "function") {
+          chrome.permissions.request({ origins: amazonOrigins }, (granted) => {
+            if (!granted) {
+              resultsEl.innerHTML =
+                '<span class="error">Amazon site permission is required for multi-page import. ' +
+                "Grant it in the browser prompt (or via the extension's Permissions settings) and try again.</span>";
+              return;
+            }
+            startJob();
+          });
+        } else {
+          startJob();
+        }
+      } catch {
+        startJob();
+      }
     });
   });
 })();

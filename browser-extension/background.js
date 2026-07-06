@@ -1216,6 +1216,15 @@ function withAmazonDisableCsdUrl(url) {
   }
 }
 
+function isAmazonSpaHashListUrl(url) {
+  try {
+    const hash = new URL(String(url)).hash || "";
+    return /#time\//i.test(hash) || /\/pagination\//i.test(hash);
+  } catch {
+    return false;
+  }
+}
+
 async function ensureAmazonCsdDisabledCookie(origin, cookieStoreId) {
   if (!chrome.cookies || typeof chrome.cookies.set !== "function") return;
   const base = String(origin || "https://www.amazon.com").replace(/\/$/, "");
@@ -1301,34 +1310,43 @@ async function readAmazonDetailFromStorage(orderId) {
 
 async function pingAmazonContentScript(tabId) {
   const ping = await sendAmazonTabMessage(tabId, { store: "amazon", type: "amazonPing" });
-  return !!(ping && ping.success === true);
+  return { ok: !!(ping && ping.success === true), raw: ping };
 }
 
 async function waitForAmazonContentScript(tabId, timeoutMs, port) {
   const timeout = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 15000;
   const deadline = Date.now() + timeout;
+  let attempts = 0;
+  let lastPingError = null;
 
-  if (await pingAmazonContentScript(tabId)) {
+  const first = await pingAmazonContentScript(tabId);
+  if (first.ok) {
     markAmazonTabSignal(tabId, "script", null);
     return true;
   }
+  lastPingError = first.raw && first.raw.error ? String(first.raw.error) : null;
 
   while (Date.now() < deadline) {
-    await ensureAmazonContentScripts(tabId);
+    attempts++;
+    const inject = await ensureAmazonContentScripts(tabId);
 
-    if (await pingAmazonContentScript(tabId)) {
+    const afterInject = await pingAmazonContentScript(tabId);
+    if (afterInject.ok) {
       markAmazonTabSignal(tabId, "script", null);
       return true;
     }
+    lastPingError = afterInject.raw && afterInject.raw.error ? String(afterInject.raw.error) : null;
 
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
 
     await waitForAmazonTabSignal(tabId, "script", Math.min(400, remaining), port);
-    if (await pingAmazonContentScript(tabId)) {
+    const afterSignal = await pingAmazonContentScript(tabId);
+    if (afterSignal.ok) {
       markAmazonTabSignal(tabId, "script", null);
       return true;
     }
+    lastPingError = afterSignal.raw && afterSignal.raw.error ? String(afterSignal.raw.error) : lastPingError;
 
     touchServiceWorker();
     if (port) {
@@ -1445,7 +1463,7 @@ async function requestAmazonDetailFromTab(
 
   const scriptReady = await waitForAmazonContentScript(tabId, Math.min(30000, timeoutMs || 45000));
 
-  if (!scriptReady || !(await pingAmazonContentScript(tabId))) {
+  if (!scriptReady || !(await pingAmazonContentScript(tabId)).ok) {
     throw new Error("Amazon content script is not reachable on the order detail tab.");
   }
 
@@ -1566,6 +1584,11 @@ async function sendAmazonTabMessage(tabId, message) {
   });
 }
 
+function parseAmazonHashPaginationPage(hash) {
+  const m = String(hash || "").match(/pagination\/(\d+)/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 function tabUrlMatchesWaitHint(tabUrl, urlHint) {
   if (!urlHint) {
     return !!tabUrl && /^https:\/\/(.*\.)?amazon\.com/i.test(String(tabUrl));
@@ -1581,6 +1604,34 @@ function tabUrlMatchesWaitHint(tabUrl, urlHint) {
     if (expectedOrderId) {
       return actual.searchParams.get("orderID") === expectedOrderId;
     }
+
+    const pathLower = (expected.pathname || "").toLowerCase();
+    const isAmazonListPage =
+      pathLower.includes("order-history") ||
+      pathLower.includes("/your-orders") ||
+      /^#time\//i.test(expected.hash || "") ||
+      String(expected.hash || "").includes("/pagination/") ||
+      /^#time\//i.test(actual.hash || "") ||
+      String(actual.hash || "").includes("/pagination/");
+
+    if (isAmazonListPage) {
+      const pathnameMatch = actual.pathname === expected.pathname;
+      const expectedPage = parseAmazonHashPaginationPage(expected.hash);
+      const actualPage = parseAmazonHashPaginationPage(actual.hash);
+
+      if (expectedPage != null) {
+        const pageMatch = actualPage === expectedPage;
+        const hashMatch = !expected.hash || actual.hash === expected.hash;
+        return pathnameMatch && pageMatch && hashMatch;
+      }
+
+      const actualStart = actual.searchParams.get("startIndex") || "0";
+      const expectedStart = expected.searchParams.get("startIndex") || "0";
+      const startIndexMatch = actualStart === expectedStart;
+      const hashMatch = !expected.hash || actual.hash === expected.hash;
+      return pathnameMatch && startIndexMatch && hashMatch;
+    }
+
     return actual.pathname === expected.pathname;
   } catch {
     return String(tabUrl).split("?")[0] === String(urlHint).split("?")[0];
@@ -2081,7 +2132,8 @@ if (chrome && chrome.runtime && chrome.runtime.onConnect) {
 if (chrome && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
-      if (!msg || msg.store !== "amazon") return;
+      if (!msg || typeof msg !== "object") return;
+      if (msg.store !== "amazon") return;
       if (msg.type !== "amazonContentScriptReady" && msg.type !== "amazonPageReady" && msg.type !== "amazonDetailCaptured") return;
       handleAmazonContentScriptSignal(msg, sender);
     } catch {
@@ -2486,9 +2538,12 @@ function attachAmazonBulkPortHandlers(port) {
 
       // Force plain HTML on the list page (Amazon Business React SPA keeps CSD widgets
       // that can block readiness detection even when orders are visible).
+      // Skip reload when the user is on a hash-routed SPA list (#time/…/pagination/…):
+      // adding disableCsd via navigation wipes the hydrated order list.
       if (sourceTab.url) {
         const listUrlWithCsdDisabled = withAmazonDisableCsdUrl(String(sourceTab.url));
-        if (listUrlWithCsdDisabled !== String(sourceTab.url)) {
+        const skipListNavForSpa = isAmazonSpaHashListUrl(sourceTab.url);
+        if (!skipListNavForSpa && listUrlWithCsdDisabled !== String(sourceTab.url)) {
           clearAmazonTabSignals(msg.sourceTabId);
           await navigateTab(msg.sourceTabId, listUrlWithCsdDisabled);
           await waitForTabComplete(msg.sourceTabId, 35000, port, {
@@ -2511,6 +2566,8 @@ function attachAmazonBulkPortHandlers(port) {
           return;
         }
 
+        await ensureTabExists(msg.sourceTabId);
+
         port.postMessage({
           type: "pageStatus",
           status: "pending",
@@ -2518,12 +2575,14 @@ function attachAmazonBulkPortHandlers(port) {
           maxPages,
         });
 
-        const listReady = await waitForAmazonContentScript(msg.sourceTabId, 15000, port);
+        const scriptTimeoutMs = pageIndex > 0 ? 35000 : 25000;
+        const listReady = await waitForAmazonContentScript(msg.sourceTabId, scriptTimeoutMs, port);
         if (!listReady) {
           throw new Error("Amazon order list page is not ready.");
         }
 
-        const listPageReady = await waitForAmazonTabSignal(msg.sourceTabId, "list", 30000, port);
+        const listSignalTimeoutMs = pageIndex > 0 ? 45000 : 30000;
+        const listPageReady = await waitForAmazonTabSignal(msg.sourceTabId, "list", listSignalTimeoutMs, port);
 
         const listResp = await sendAmazonTabMessage(msg.sourceTabId, {
           store: "amazon",
@@ -2594,7 +2653,9 @@ function attachAmazonBulkPortHandlers(port) {
               payload = detailMsg.order;
             } else if (summary && summary.orderId) {
               const merged = mergeAmazonListSummary({ orderId: String(summary.orderId) }, summary);
-              if (merged && merged.orderId) payload = merged;
+              if (merged && merged.orderId) {
+                payload = merged;
+              }
             }
 
             if (!payload || !payload.orderId) {
@@ -2611,7 +2672,20 @@ function attachAmazonBulkPortHandlers(port) {
               detailUrl,
               accountEmail
             );
-            collectedPayloads.push(body);
+            const payloadOrderId =
+              (body.externalOrder && body.externalOrder.id) ||
+              (payload && payload.orderId ? String(payload.orderId) : null) ||
+              orderId;
+            const alreadyHad = collectedPayloads.some(
+              (p) =>
+                p &&
+                p.externalOrder &&
+                payloadOrderId &&
+                String(p.externalOrder.id) === String(payloadOrderId)
+            );
+            if (!alreadyHad) {
+              collectedPayloads.push(body);
+            }
             ordersOk++;
             port.postMessage({ type: "orderStatus", status: "ok", orderNumber: orderId });
           } catch (e) {

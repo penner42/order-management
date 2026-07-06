@@ -163,7 +163,9 @@
   function absoluteUrl(href) {
     if (!href) return null
     try {
-      return new URL(href, window.location.origin).toString()
+      // Resolve against the full current URL (not just origin) so that
+      // relative and hash links keep the current pathname/query.
+      return new URL(href, window.location.href).toString()
     } catch {
       return null
     }
@@ -327,6 +329,30 @@
     const detailLink = queryFirst(card, sel.ORDER_DETAIL_LINK)
     let detailUrl = detailLink ? absoluteUrl(detailLink.getAttribute('href')) : null
     if (!orderId && detailUrl) orderId = extractOrderIdFromUrl(detailUrl)
+
+    // Overlapping/nested cards can pair a card with a neighbor's detail link.
+    // If the link's embedded order id disagrees with the card's own order id,
+    // find the matching link or synthesize the canonical detail URL.
+    if (orderId && detailUrl) {
+      const linkOrderId = extractOrderIdFromUrl(detailUrl)
+      if (linkOrderId && linkOrderId !== orderId) {
+        let matched = null
+        const links = card.querySelectorAll(ORDER_DETAIL_LINK_SELECTOR)
+        for (let i = 0; i < links.length; i++) {
+          const candidate = absoluteUrl(links[i].getAttribute('href'))
+          if (candidate && extractOrderIdFromUrl(candidate) === orderId) {
+            matched = candidate
+            break
+          }
+        }
+        const synthesized =
+          matched ||
+          window.location.origin +
+            '/your-orders/order-details?orderID=' +
+            encodeURIComponent(orderId)
+        detailUrl = synthesized
+      }
+    }
 
     const orderDate =
       parseOrderDate(textOf(queryFirst(card, sel.ORDER_DATE))) || parseOrderDate(cardText)
@@ -1173,11 +1199,194 @@
     return !!next
   }
 
+  function findNextPageUrlFromStartIndexLinks() {
+    let currentStart = 0
+    try {
+      const current = new URL(window.location.href)
+      currentStart = parseInt(current.searchParams.get('startIndex') || '0', 10)
+      if (!Number.isFinite(currentStart)) currentStart = 0
+    } catch {
+      currentStart = 0
+    }
+
+    let bestHref = null
+    let bestStart = null
+    const links = document.querySelectorAll('a[href*="startIndex"]')
+    for (let i = 0; i < links.length; i++) {
+      const href = links[i].getAttribute('href') || ''
+      if (!href) continue
+      try {
+        const u = new URL(href, window.location.origin)
+        const start = parseInt(u.searchParams.get('startIndex') || '0', 10)
+        if (!Number.isFinite(start) || start <= currentStart) continue
+        if (bestStart == null || start < bestStart) {
+          bestStart = start
+          bestHref = href
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return bestHref ? absoluteUrl(bestHref) : null
+  }
+
+  // The SPA hash (e.g. "#time/2026/pagination/1/") carries state that is NOT
+  // in the query string: the active time filter and the page currently shown.
+  function parseSpaHashState() {
+    const hash = window.location.hash || ''
+    const timeMatch = hash.match(/time\/([^/]+)/)
+    const pageMatch = hash.match(/pagination\/(\d+)/)
+    return {
+      timeToken: timeMatch ? timeMatch[1] : null,
+      pageNumber: pageMatch ? parseInt(pageMatch[1], 10) : null,
+    }
+  }
+
+  function hasHashPaginationLinks() {
+    try {
+      const links = document.querySelectorAll(
+        'ul.a-pagination a[href*="#pagination"], [data-component="pagination"] a[href*="#pagination"]'
+      )
+      return links.length > 0
+    } catch {
+      return false
+    }
+  }
+
+  function getCurrentSpaPageNumber() {
+    const spa = parseSpaHashState()
+    if (spa.pageNumber != null && Number.isFinite(spa.pageNumber)) return spa.pageNumber
+
+    try {
+      const selected = document.querySelector(
+        'ul.a-pagination li.a-selected a, [data-component="pagination"] .a-selected a, [data-component="pagination"] a[aria-current="page"]'
+      )
+      if (selected) {
+        const href = selected.getAttribute('href') || ''
+        const m = href.match(/pagination\/(\d+)/i)
+        if (m) return parseInt(m[1], 10)
+      }
+    } catch {
+      // ignore
+    }
+
+    if (hasHashPaginationLinks()) return 1
+    return null
+  }
+
+  function synthesizeNextSpaHashPageUrl() {
+    try {
+      const url = new URL(window.location.href)
+      const spa = parseSpaHashState()
+      const currentPage = getCurrentSpaPageNumber()
+      if (currentPage == null || !Number.isFinite(currentPage)) return null
+
+      const nextPage = currentPage + 1
+      let hasNextPage = false
+      document.querySelectorAll('ul.a-pagination a, [data-component="pagination"] a').forEach((a) => {
+        const href = a.getAttribute('href') || ''
+        if (/pagination\/next/i.test(href)) hasNextPage = true
+        const m = href.match(/pagination\/(\d+)/i)
+        if (m && parseInt(m[1], 10) === nextPage) hasNextPage = true
+      })
+      if (!hasNextPage) return null
+
+      let timeToken = spa.timeToken
+      if (!timeToken) {
+        const tf = url.searchParams.get('timeFilter') || ''
+        const yearMatch = tf.match(/year-(\d{4})/i)
+        if (yearMatch) timeToken = yearMatch[1]
+      }
+
+      url.hash = timeToken
+        ? '#time/' + timeToken + '/pagination/' + nextPage + '/'
+        : '#pagination/' + nextPage + '/'
+      url.searchParams.delete('startIndex')
+      if (!url.searchParams.has('disableCsd')) {
+        url.searchParams.set('disableCsd', 'missing-library')
+      }
+      return url.toString()
+    } catch {
+      return null
+    }
+  }
+
+  function synthesizeNextPageUrlFromStartIndex() {
+    try {
+      const url = new URL(window.location.href)
+      const spa = parseSpaHashState()
+
+      // Preserve the time filter from the SPA hash; without it the synthesized
+      // URL falls back to Amazon's default time range, which can be empty.
+      if (spa.timeToken && !url.searchParams.has('timeFilter')) {
+        const token = /^\d{4}$/.test(spa.timeToken) ? 'year-' + spa.timeToken : spa.timeToken
+        url.searchParams.set('timeFilter', token)
+      }
+
+      let nextStart
+      if (spa.pageNumber != null && Number.isFinite(spa.pageNumber)) {
+        // Hash pagination is 1-based and reflects the page actually shown; the
+        // query startIndex can be stale on SPA pages, so trust the hash.
+        nextStart = spa.pageNumber * 10
+      } else {
+        const currentStart = parseInt(url.searchParams.get('startIndex') || '0', 10)
+        if (!Number.isFinite(currentStart)) return null
+        nextStart = currentStart + 10
+      }
+      url.searchParams.set('startIndex', String(nextStart))
+
+      if (!url.searchParams.has('disableCsd')) {
+        url.searchParams.set('disableCsd', 'missing-library')
+      }
+      // Drop any SPA pagination hash so the query-param navigation triggers a
+      // full page load rather than an in-page (same-document) hash change.
+      url.hash = ''
+      return url.toString()
+    } catch {
+      return null
+    }
+  }
+
+  function isBareHashHref(href) {
+    return typeof href === 'string' && href.trim().charAt(0) === '#'
+  }
+
   function getNextPageUrl() {
     const sel = getSelectors()
     const next = queryFirst(document, sel.NEXT_PAGE)
-    if (!next) return null
-    return absoluteUrl(next.getAttribute('href'))
+    const rawHref = next ? next.getAttribute('href') : null
+
+    let resolved = null
+
+    // 1. SPA hash pagination (#time/2026/pagination/N/) — startIndex does not
+    //    advance these pages and returns duplicate page-1 orders.
+    if (hasHashPaginationLinks() || parseSpaHashState().pageNumber != null) {
+      resolved = synthesizeNextSpaHashPageUrl()
+    }
+
+    // 2. Prefer a real pagination link that carries a startIndex query param
+    //    (fully navigable, triggers a full page load).
+    if (!resolved) {
+      resolved = findNextPageUrlFromStartIndexLinks()
+    }
+
+    // 3. If a "next" affordance exists but it's a hash-based SPA link
+    //    (e.g. "#pagination/next/"), synthesize a startIndex URL so navigation
+    //    reloads the document rather than an in-page hash change.
+    if (!resolved && next && !hasHashPaginationLinks()) {
+      const synth = synthesizeNextPageUrlFromStartIndex()
+      if (synth) {
+        resolved = synth
+      }
+    }
+
+    // 4. Fall back to the selector href only when it's a real navigable path
+    //    (not a bare hash that would resolve to the wrong page).
+    if (!resolved && rawHref && !isBareHashHref(rawHref)) {
+      resolved = absoluteUrl(rawHref)
+    }
+
+    return resolved || null
   }
 
   function findCsdEncryptedContainers(root) {
@@ -1497,6 +1706,20 @@
     return waitForDecryptedContent(isOrderListContentReady)
   }
 
+  // Stricter than isOrderListContentReady: only true when parseOrderListPage would
+  // return at least one order (requires order id + detail url, same as parse).
+  function hasParseableOrderListContent() {
+    const cards = findOrderCards()
+    for (let i = 0; i < cards.length; i++) {
+      if (parseListOrderCard(cards[i])) return true
+    }
+    return parseOrderListFromDetailLinks().length > 0
+  }
+
+  function waitForParseableOrderList(timeoutMs) {
+    return waitForDecryptedContent(hasParseableOrderListContent, timeoutMs)
+  }
+
   function orderDetailHasDecryptedContent(root) {
     if (!root) return false
     const sel = getSelectors()
@@ -1580,6 +1803,7 @@
     hasNextPage,
     getNextPageUrl,
     waitForOrderListReady,
+    waitForParseableOrderList,
     waitForOrderDetailReady,
     waitForOrderDetailReadyInDocument,
     isOrderDetailContentReady,
