@@ -251,6 +251,17 @@
     return Array.from(cards)
   }
 
+  function dedupeNestedOrderCards(cards) {
+    if (!cards || cards.length <= 1) return cards || []
+    return cards.filter((card) => {
+      for (let i = 0; i < cards.length; i++) {
+        const other = cards[i]
+        if (other !== card && card.contains(other)) return false
+      }
+      return true
+    })
+  }
+
   function findOrderCards() {
     const sel = getSelectors()
     const list = Array.isArray(sel.ORDER_CARD) ? sel.ORDER_CARD : [sel.ORDER_CARD]
@@ -267,7 +278,7 @@
         // ignore invalid selectors
       }
     }
-    if (fromSelectors.length > 0) return fromSelectors
+    if (fromSelectors.length > 0) return dedupeNestedOrderCards(fromSelectors)
 
     const potential = new Set()
     document.querySelectorAll('*').forEach((el) => {
@@ -287,10 +298,10 @@
       }
     })
     const fallbackCards = Array.from(potential)
-    if (fallbackCards.length > 0) return fallbackCards
+    if (fallbackCards.length > 0) return dedupeNestedOrderCards(fallbackCards)
 
     const fromLinks = findOrderCardsFromDetailLinks()
-    if (fromLinks.length > 0) return fromLinks
+    if (fromLinks.length > 0) return dedupeNestedOrderCards(fromLinks)
 
     return []
   }
@@ -674,14 +685,86 @@
     return parseAddressFromRecipientText(root)
   }
 
+  function parseItemQuantityFromText(text) {
+    const s = coerceString(text)
+    if (!s) return null
+    if (/^\d+$/.test(s)) {
+      const n = parseInt(s, 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    const labelMatch = s.match(/(?:Qty|Quantity)\s*:?\s*(\d+)/i)
+    if (labelMatch) {
+      const n = parseInt(labelMatch[1], 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    const xMatch = s.match(/\bx\s*(\d+)\b/i)
+    if (xMatch) {
+      const n = parseInt(xMatch[1], 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    if (s.length < 24 && !/[$£€₹]/.test(s)) {
+      const n = parseInt(s, 10)
+      if (Number.isFinite(n) && n > 0) return n
+    }
+    return null
+  }
+
+  function extractItemQuantity(container, qtySelectorList) {
+    const qtyEl = queryFirst(container, qtySelectorList)
+    if (qtyEl) {
+      const fromEl = parseItemQuantityFromText(textOf(qtyEl))
+      if (fromEl != null) return fromEl
+
+      const offscreen = qtyEl.querySelector('.a-offscreen')
+      if (offscreen) {
+        const fromOffscreen = parseItemQuantityFromText(textOf(offscreen))
+        if (fromOffscreen != null) return fromOffscreen
+      }
+
+      const numericChildren = qtyEl.querySelectorAll('span, div, bdi')
+      for (let i = 0; i < numericChildren.length; i++) {
+        const childText = textOf(numericChildren[i])
+        if (!/^\d+$/.test(childText)) continue
+        const n = parseInt(childText, 10)
+        if (Number.isFinite(n) && n > 0) return n
+      }
+    }
+
+    const badge = container.querySelector(
+      '.od-item-view-qty, span.item-view-qty, span.product-image__qty, [data-component="itemQuantity"], [data-component="quantity"]'
+    )
+    if (badge) {
+      const fromBadge = parseItemQuantityFromText(textOf(badge))
+      if (fromBadge != null) return fromBadge
+    }
+
+    const qm = textOf(container).match(/(?:Qty|Quantity)[:\s]*(\d+)/i)
+    if (qm) {
+      const n = parseInt(qm[1], 10)
+      if (Number.isFinite(n) && n > 0) return n
+    }
+
+    return 1
+  }
+
   function findDetailItemContainers(root) {
     const sel = getSelectors()
     let containers = queryAllFirst(root, sel.ITEM_ROOT)
 
     if (containers.length === 1) {
       const only = containers[0]
-      const inner = only.querySelectorAll('.yohtmlc-item, .item-box, .a-fixed-left-grid')
-      if (inner.length > 1) containers = Array.from(inner)
+      const itemBoundaries = only.querySelectorAll('.yohtmlc-item, .item-box')
+      if (itemBoundaries.length > 1) {
+        containers = Array.from(itemBoundaries)
+      } else {
+        let inner = []
+        try {
+          inner = only.querySelectorAll(':scope > .a-fixed-left-grid')
+        } catch {
+          inner = only.querySelectorAll('.a-fixed-left-grid')
+        }
+        if (inner.length > 1) containers = Array.from(inner)
+      }
     }
 
     containers = containers.filter(
@@ -691,7 +774,9 @@
     if (containers.length === 0) {
       const seen = new Set()
       root.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"], a[href*="/gp/aw/d/"]').forEach((link) => {
-        let parent = link.closest('.yohtmlc-item, .item-box, .a-fixed-left-grid, .a-row')
+        let parent =
+          link.closest('.yohtmlc-item, .item-box') ||
+          link.closest('.a-fixed-left-grid, .a-row')
         if (!parent) parent = link.parentElement
         if (parent && !seen.has(parent)) {
           seen.add(parent)
@@ -728,15 +813,7 @@
       seenKeys.add(key)
       counter.n += 1
 
-      let qty = 1
-      const qtyEl = queryFirst(container, sel.ITEM_QTY)
-      if (qtyEl) {
-        const q = parseInt(textOf(qtyEl), 10)
-        if (Number.isFinite(q) && q > 0) qty = q
-      } else {
-        const qm = textOf(container).match(/(?:Qty|Quantity)[:\s]*(\d+)/i)
-        if (qm) qty = parseInt(qm[1], 10) || 1
-      }
+      const qty = extractItemQuantity(container, sel.ITEM_QTY)
 
       const unitPrice =
         extractPriceFromText(textOf(queryFirst(container, sel.ITEM_PRICE))) ||
@@ -774,16 +851,19 @@
         const img = link.querySelector('img')
         if (img && img.alt) name = img.alt.trim()
       }
-      if (!name || name.length < 3) {
-        const row = link.closest('.yohtmlc-item, .item-box, .a-fixed-left-grid, .a-row, [data-component="itemTitle"]')
-        if (row) name = textOf(row.querySelector('[data-component="itemTitle"]')) || textOf(row)
+      const row =
+        link.closest('.yohtmlc-item, .item-box') ||
+        link.closest('.a-fixed-left-grid, .a-row, [data-component="itemTitle"]')
+      if ((!name || name.length < 3) && row) {
+        name = textOf(row.querySelector('[data-component="itemTitle"]')) || textOf(row)
       }
+      const qty = row ? extractItemQuantity(row, getSelectors().ITEM_QTY) : 1
       items.push({
         asin,
         name: name || null,
         productUrl: absoluteUrl(href),
         imageUrl: (link.querySelector('img') || {}).src || null,
-        quantity: 1,
+        quantity: qty,
         unitPrice: null,
         lineTotal: null,
       })
@@ -1351,6 +1431,15 @@
     return typeof href === 'string' && href.trim().charAt(0) === '#'
   }
 
+  function getSpaListPageInfo() {
+    return {
+      href: window.location.href,
+      hash: window.location.hash || '',
+      spaPage: getCurrentSpaPageNumber(),
+      parseable: hasParseableOrderListContent(),
+    }
+  }
+
   function getNextPageUrl() {
     const sel = getSelectors()
     const next = queryFirst(document, sel.NEXT_PAGE)
@@ -1802,6 +1891,8 @@
     parseOrderDetailPage,
     hasNextPage,
     getNextPageUrl,
+    getSpaListPageInfo,
+    getCurrentSpaPageNumber,
     waitForOrderListReady,
     waitForParseableOrderList,
     waitForOrderDetailReady,

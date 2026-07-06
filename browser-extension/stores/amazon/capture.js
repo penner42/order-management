@@ -333,6 +333,53 @@
         return true
       }
 
+      if (message.type === 'amazonGetSpaListPageInfo') {
+        try {
+          const d = dom()
+          if (!d || typeof d.getSpaListPageInfo !== 'function') {
+            sendResponse({ success: false, error: 'Amazon DOM helpers not loaded.' })
+            return true
+          }
+          sendResponse({ success: true, info: d.getSpaListPageInfo() })
+        } catch (e) {
+          sendResponse({
+            success: false,
+            error: String(e && e.message ? e.message : e),
+          })
+        }
+        return true
+      }
+
+      if (message.type === 'amazonNavigateSpaListPage') {
+        try {
+          const target = message.url ? String(message.url) : ''
+          if (!target) {
+            sendResponse({ success: false, error: 'Missing SPA list page URL.' })
+            return true
+          }
+          const next = new URL(target, window.location.href)
+          const cur = new URL(window.location.href)
+          if (
+            next.origin === cur.origin &&
+            next.pathname === cur.pathname &&
+            next.search === cur.search &&
+            next.hash &&
+            next.hash !== cur.hash
+          ) {
+            window.location.hash = next.hash
+          } else {
+            window.location.assign(next.toString())
+          }
+          sendResponse({ success: true })
+        } catch (e) {
+          sendResponse({
+            success: false,
+            error: String(e && e.message ? e.message : e),
+          })
+        }
+        return true
+      }
+
       if (message.type === 'amazonFetchAccountEmail') {
         ;(async () => {
           try {

@@ -299,19 +299,38 @@ function existingOrderHasActionableUpdates(
 
 function getBulkImportSortGroup(
   diff: OrderDiff | null | undefined,
-  isCanceled: boolean,
-  selectedBuyingGroupId: number | null | undefined,
-  selectedAccountId: number | null | undefined
+  isCanceled: boolean
 ): BulkImportSortGroup {
   const isExisting = diff?.is_existing_order === true
   if (isCanceled && !isExisting) return 'canceled'
   if (
     !isExisting ||
-    existingOrderHasActionableUpdates(diff ?? null, isCanceled, selectedBuyingGroupId, selectedAccountId)
+    countActionableItemChanges(diff ?? null) > 0 ||
+    countShipmentChanges(diff ?? null) > 0 ||
+    orderNeedsCancelUpdate(diff ?? null, isCanceled)
   ) {
     return 'changes'
   }
   return 'unchanged'
+}
+
+function computeBulkImportDisplayOrder(
+  payloads: NormalizedPayload[],
+  diffs: Record<number, OrderDiff | null>
+): number[] {
+  const indexed = payloads.map((payload, index) => ({
+    index,
+    isCanceled: isCanceledOrderPayload(payload),
+  }))
+  return [...indexed]
+    .sort((a, b) => {
+      const groupCmp =
+        BULK_IMPORT_SORT_GROUP_ORDER[getBulkImportSortGroup(diffs[a.index], a.isCanceled)] -
+        BULK_IMPORT_SORT_GROUP_ORDER[getBulkImportSortGroup(diffs[b.index], b.isCanceled)]
+      if (groupCmp !== 0) return groupCmp
+      return a.index - b.index
+    })
+    .map((entry) => entry.index)
 }
 
 export default function ImportReviewBulk() {
@@ -332,15 +351,18 @@ export default function ImportReviewBulk() {
   const [selectedBuyingGroupIdByIndex, setSelectedBuyingGroupIdByIndex] = useState<Record<number, number | null>>({})
   const [selectedAccountIdByIndex, setSelectedAccountIdByIndex] = useState<Record<number, number | null>>({})
   const [selectedPaymentMethodIdByIndex, setSelectedPaymentMethodIdByIndex] = useState<Record<number, number | null>>({})
+  const [displayIndexOrder, setDisplayIndexOrder] = useState<number[] | null>(null)
 
   useEffect(() => {
     if (!token) {
       setLoading(false)
       setPayloads([])
+      setDisplayIndexOrder(null)
       return
     }
     setLoading(true)
     setError(null)
+    setDisplayIndexOrder(null)
     api
       .get<{ orders: NormalizedPayload[] }>(`/integrations/stores/orders/bulk-session/${encodeURIComponent(token)}`)
       .then((res) => {
@@ -382,6 +404,12 @@ export default function ImportReviewBulk() {
       })
       .finally(() => setLoading(false))
   }, [token])
+
+  useEffect(() => {
+    if (loading || payloads.length === 0) return
+    if (displayIndexOrder != null) return
+    setDisplayIndexOrder(computeBulkImportDisplayOrder(payloads, diffs))
+  }, [loading, payloads.length, diffs, displayIndexOrder])
 
   const flattenedPaymentMethods = useMemo(
     () =>
@@ -586,32 +614,21 @@ export default function ImportReviewBulk() {
     }
   }
 
-  const indexedPayloads = payloads.map((p, index) => ({
-    payload: p,
+  const sortGroupForIndex = (index: number, isCanceled: boolean) =>
+    getBulkImportSortGroup(diffs[index], isCanceled)
+
+  const sortedPayloads = (displayIndexOrder ?? payloads.map((_, index) => index)).map((index) => ({
+    payload: payloads[index],
     index,
-    isCanceled: isCanceledOrderPayload(p),
+    isCanceled: isCanceledOrderPayload(payloads[index]),
   }))
 
-  const sortGroupForEntry = (entry: (typeof indexedPayloads)[number]) =>
-    getBulkImportSortGroup(
-      diffs[entry.index],
-      entry.isCanceled,
-      selectedBuyingGroupIdByIndex[entry.index],
-      selectedAccountIdByIndex[entry.index]
-    )
-
-  const sortedPayloads = [...indexedPayloads].sort((a, b) => {
-    const groupCmp =
-      BULK_IMPORT_SORT_GROUP_ORDER[sortGroupForEntry(a)] -
-      BULK_IMPORT_SORT_GROUP_ORDER[sortGroupForEntry(b)]
-    if (groupCmp !== 0) return groupCmp
-    return a.index - b.index
-  })
-
   const firstUnchangedIndex = sortedPayloads.findIndex(
-    (x) => sortGroupForEntry(x) === 'unchanged'
+    (x) => sortGroupForIndex(x.index, x.isCanceled) === 'unchanged'
   )
-  const firstCanceledIndex = sortedPayloads.findIndex((x) => sortGroupForEntry(x) === 'canceled')
+  const firstCanceledIndex = sortedPayloads.findIndex(
+    (x) => sortGroupForIndex(x.index, x.isCanceled) === 'canceled'
+  )
 
   return (
     <div>

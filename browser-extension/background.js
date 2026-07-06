@@ -1589,6 +1589,36 @@ function parseAmazonHashPaginationPage(hash) {
   return m ? parseInt(m[1], 10) : null;
 }
 
+function isAmazonSpaHashPaginationNav(fromUrl, toUrl) {
+  try {
+    const from = new URL(String(fromUrl));
+    const to = new URL(String(toUrl));
+    if (from.origin !== to.origin || from.pathname !== to.pathname) return false;
+    if (from.search !== to.search) return false;
+    const toHash = String(to.hash || "");
+    return parseAmazonHashPaginationPage(toHash) != null || /\/pagination\//i.test(toHash);
+  } catch {
+    return false;
+  }
+}
+
+async function waitForAmazonSpaListPage(tabId, expectedPage, timeoutMs, port) {
+  const deadline = Date.now() + (typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 35000);
+  while (Date.now() < deadline) {
+    const resp = await sendAmazonTabMessage(tabId, {
+      store: "amazon",
+      type: "amazonGetSpaListPageInfo",
+    });
+    if (resp && resp.success === true && resp.info) {
+      const page = resp.info.spaPage;
+      const parseable = resp.info.parseable === true;
+      if (page === expectedPage && parseable) return resp.info;
+    }
+    await keepaliveSleep(400, port);
+  }
+  throw new Error("Timed out waiting for Amazon order list page " + String(expectedPage) + ".");
+}
+
 function tabUrlMatchesWaitHint(tabUrl, urlHint) {
   if (!urlHint) {
     return !!tabUrl && /^https:\/\/(.*\.)?amazon\.com/i.test(String(tabUrl));
@@ -1621,6 +1651,7 @@ function tabUrlMatchesWaitHint(tabUrl, urlHint) {
 
       if (expectedPage != null) {
         const pageMatch = actualPage === expectedPage;
+        if (pageMatch) return pathnameMatch;
         const hashMatch = !expected.hash || actual.hash === expected.hash;
         return pathnameMatch && pageMatch && hashMatch;
       }
@@ -2716,11 +2747,42 @@ function attachAmazonBulkPortHandlers(port) {
           break;
         }
 
-        await navigateTab(msg.sourceTabId, nextListPageUrl);
-        await waitForTabComplete(msg.sourceTabId, 35000, port, {
-          urlHint: nextListPageUrl,
-          requireNavigation: true,
-        });
+        clearAmazonTabSignals(msg.sourceTabId);
+        const expectedSpaPage = (() => {
+          try {
+            return parseAmazonHashPaginationPage(new URL(nextListPageUrl).hash);
+          } catch {
+            return null;
+          }
+        })();
+        const navTabBefore = await ensureTabExists(msg.sourceTabId);
+        const spaHashNav =
+          expectedSpaPage != null &&
+          navTabBefore &&
+          navTabBefore.url &&
+          isAmazonSpaHashPaginationNav(navTabBefore.url, nextListPageUrl);
+
+        if (spaHashNav) {
+          const navResp = await sendAmazonTabMessage(msg.sourceTabId, {
+            store: "amazon",
+            type: "amazonNavigateSpaListPage",
+            url: nextListPageUrl,
+          });
+          if (!navResp || navResp.success !== true) {
+            throw new Error(
+              navResp && navResp.error
+                ? String(navResp.error)
+                : "Could not navigate Amazon SPA order list page."
+            );
+          }
+          await waitForAmazonSpaListPage(msg.sourceTabId, expectedSpaPage, 35000, port);
+        } else {
+          await navigateTab(msg.sourceTabId, nextListPageUrl);
+          await waitForTabComplete(msg.sourceTabId, 35000, port, {
+            urlHint: nextListPageUrl,
+            requireNavigation: true,
+          });
+        }
         await keepaliveSleep(400, port);
         port.postMessage({ type: "pageStatus", status: "ok", page: pageIndex + 1, maxPages });
       }

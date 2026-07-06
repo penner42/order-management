@@ -72,11 +72,14 @@
       '.yohtmlc-item .a-color-price',
     ],
     ITEM_QTY: [
-      '[data-component="quantity"]',
       '.od-item-view-qty',
       'span.item-view-qty',
       'span.product-image__qty',
       '[data-component="itemQuantity"]',
+      '[data-component="quantity"] .a-offscreen',
+      '[data-component="quantity"] span',
+      '[data-component="itemQuantity"] span',
+      '[data-component="quantity"]',
     ],
     SHIPMENT_ROOT: [
       '[data-component="shipments"] > .a-box-group > .a-box',

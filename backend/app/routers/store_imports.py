@@ -452,6 +452,73 @@ def _aggregate_incoming_items_by_name(
     return by_name
 
 
+def _sync_existing_item_quantities_and_prices(
+    db: Session,
+    normalized: dict[str, Any],
+    existing_items: list[Item],
+) -> None:
+    """Reconcile aggregated line quantities/prices for an existing order.
+
+    Shipment linking skips rows that already exist, so quantity and unit-price
+    changes detected in the diff would otherwise never be persisted.
+    """
+    incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
+    if not incoming_by_name:
+        return
+
+    groups: dict[str, list[Item]] = {}
+    for item in existing_items:
+        desc = (item.description or "").strip()
+        if desc:
+            groups.setdefault(desc, []).append(item)
+
+    for name, incoming in incoming_by_name.items():
+        group = groups.get(name)
+        if not group:
+            continue
+
+        inc_qty = incoming["total_quantity"]
+        inc_price = incoming["unit_price"]
+
+        if inc_price is not None:
+            for item in group:
+                item.price_paid = inc_price
+
+        current_total = sum(i.quantity or 1 for i in group)
+        if inc_qty == current_total:
+            continue
+
+        if inc_qty > current_total:
+            target = min(group, key=lambda i: (bool(i.shipment_items), i.id))
+            target.quantity = (target.quantity or 1) + (inc_qty - current_total)
+            continue
+
+        excess = current_total - inc_qty
+        for item in sorted(
+            group,
+            key=lambda i: (bool(i.shipment_items), bool(i.payment_line_items), i.id),
+            reverse=True,
+        ):
+            if excess <= 0:
+                break
+            qty = item.quantity or 1
+            if item.payment_line_items:
+                reducible = max(0, qty - 1)
+                take = min(excess, reducible)
+                if take > 0:
+                    item.quantity = qty - take
+                    excess -= take
+                continue
+            if qty <= excess:
+                excess -= qty
+                db.delete(item)
+                if item in existing_items:
+                    existing_items.remove(item)
+            else:
+                item.quantity = qty - excess
+                excess = 0
+
+
 def _build_order_diff(
     db: Session,
     linked_order: Order | None,
@@ -1269,6 +1336,7 @@ def _apply_items_and_shipments(
         )
 
     if existing_order:
+        _sync_existing_item_quantities_and_prices(db, normalized, existing_items)
         _apply_canceled_statuses(existing_items, normalized)
 
 # ---------------------------------------------------------------------------
