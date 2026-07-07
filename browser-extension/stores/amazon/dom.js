@@ -1847,24 +1847,96 @@
     return waitForDecryptedContent(isOrderDetailContentReady, timeout)
   }
 
+  function isAmazonOwnedEmail(email) {
+    const normalized = coerceString(email)
+    if (!normalized) return false
+    const domain = normalized.toLowerCase().split('@')[1]
+    if (!domain) return false
+    return domain === 'amazon.com' || domain.endsWith('.amazon.com')
+  }
+
+  function extractEmailsFromText(text) {
+    const source = coerceString(text) || ''
+    if (!source) return []
+    const results = []
+    const re = new RegExp(EMAIL_RE.source, 'gi')
+    let match
+    while ((match = re.exec(source)) !== null) {
+      const email = coerceString(match[0])
+      if (email && !results.includes(email)) results.push(email)
+    }
+    return results
+  }
+
+  function isAmazonSignInHtml(doc) {
+    if (!doc) return false
+    const hasSignInForm = !!doc.querySelector(
+      '#ap_email, #ap_password, #ap_signin_form, form[name="signIn"], form[action*="/ap/signin"]'
+    )
+    if (!hasSignInForm) return false
+    const hasLoginSecurity = !!doc.querySelector(
+      '#email-section, #name-section, [data-testid="email-section"], [id*="email-section" i]'
+    )
+    if (hasLoginSecurity) return false
+    const bodyText = doc.body ? doc.body.textContent || '' : ''
+    if (/login\s*(?:and|&)\s*security/i.test(bodyText)) return false
+    return true
+  }
+
+  function parseEmailFromLoginSecuritySection(doc) {
+    const sectionSelectors = [
+      '#email-section',
+      '#EMAIL_TABLE',
+      '[data-testid="email-section"]',
+      '[id*="email-section" i]',
+    ]
+    for (let si = 0; si < sectionSelectors.length; si++) {
+      const section = doc.querySelector(sectionSelectors[si])
+      if (!section) continue
+      const emails = extractEmailsFromText(textOf(section)).filter((email) => !isAmazonOwnedEmail(email))
+      if (emails.length > 0) return emails[0]
+    }
+
+    const labelNodes = doc.querySelectorAll('span, div, label, h4, h5, td, th')
+    for (let i = 0; i < labelNodes.length; i++) {
+      const label = textOf(labelNodes[i])
+      if (!/^(e-?mail|email address)$/i.test(label)) continue
+      const row = labelNodes[i].closest('.a-row, tr, li, .a-box, .a-section')
+      if (!row) continue
+      const emails = extractEmailsFromText(textOf(row)).filter((email) => !isAmazonOwnedEmail(email))
+      if (emails.length > 0) return emails[0]
+    }
+
+    return null
+  }
+
   function parseEmailFromAccountHtml(html) {
     if (!html) return null
     try {
       const doc = new DOMParser().parseFromString(html, 'text/html')
-      const emailInputs = doc.querySelectorAll('input[type="email"], input[name*="email" i]')
+      if (isAmazonSignInHtml(doc)) return null
+
+      const emailInputs = doc.querySelectorAll(
+        'input[type="email"]:not(#ap_email), input[name*="email" i]:not(#ap_email):not([name="email"])'
+      )
       for (let i = 0; i < emailInputs.length; i++) {
         const val = coerceString(emailInputs[i].value)
-        if (val && EMAIL_RE.test(val)) return val
+        if (val && EMAIL_RE.test(val) && !isAmazonOwnedEmail(val)) return val
       }
+
+      const fromSection = parseEmailFromLoginSecuritySection(doc)
+      if (fromSection) return fromSection
+
       const bodyText = doc.body ? doc.body.textContent || '' : html
-      const idx = bodyText.toLowerCase().indexOf('email')
-      if (idx >= 0) {
-        const slice = bodyText.slice(idx, idx + 200)
-        const m = EMAIL_RE.exec(slice)
-        if (m) return m[0]
+      const labelMatch = /\bemail\b/i.exec(bodyText)
+      if (labelMatch && labelMatch.index >= 0) {
+        const slice = bodyText.slice(labelMatch.index, labelMatch.index + 300)
+        const nearbyEmails = extractEmailsFromText(slice).filter((email) => !isAmazonOwnedEmail(email))
+        if (nearbyEmails.length > 0) return nearbyEmails[0]
       }
-      const m = EMAIL_RE.exec(bodyText)
-      return m ? m[0] : null
+
+      const allEmails = extractEmailsFromText(bodyText).filter((email) => !isAmazonOwnedEmail(email))
+      return allEmails.length > 0 ? allEmails[0] : null
     } catch {
       return null
     }
@@ -1872,6 +1944,19 @@
 
   async function fetchAccountEmail(baseOrigin) {
     const origin = baseOrigin || window.location.origin
+    try {
+      const path = window.location.pathname || ''
+      if (
+        window.location.origin === origin &&
+        (path.includes('/gp/css/account/info/') || path.includes('/a/settings'))
+      ) {
+        const fromCurrent = parseEmailFromAccountHtml(document.documentElement.outerHTML)
+        if (fromCurrent) return fromCurrent
+      }
+    } catch {
+      // ignore
+    }
+
     const url = origin + '/gp/css/account/info/view.html'
     try {
       const resp = await fetch(url, { credentials: 'include' })

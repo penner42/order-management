@@ -23,21 +23,29 @@
     }
   }
 
-  async function ensureAccountEmailCached() {
-    const existing = await new Promise((resolve) => {
-      try {
-        chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (data) => {
-          resolve(data && data[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY] ? data[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY] : null)
-        })
-      } catch {
-        resolve(null)
+  async function ensureAccountEmailCached(options) {
+    const opts = options && typeof options === 'object' ? options : {}
+    const forceRefresh = !!opts.forceRefresh
+    const origin = window.location.origin
+
+    if (!forceRefresh) {
+      const existing = await new Promise((resolve) => {
+        try {
+          chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (data) => {
+            resolve(data && data[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY] ? data[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY] : null)
+          })
+        } catch {
+          resolve(null)
+        }
+      })
+      if (existing && existing.email && existing.origin === origin) {
+        return existing.email
       }
-    })
-    if (existing && existing.email) return existing.email
+    }
 
     const d = dom()
     if (!d || typeof d.fetchAccountEmail !== 'function') return null
-    const email = await d.fetchAccountEmail(window.location.origin)
+    const email = await d.fetchAccountEmail(origin)
     if (email) {
       await new Promise((resolve) => {
         chrome.storage.local.set(
@@ -45,7 +53,7 @@
             [AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]: {
               email,
               capturedAt: new Date().toISOString(),
-              origin: window.location.origin,
+              origin,
             },
           },
           () => resolve(null)
@@ -281,7 +289,7 @@
       if (message.type === 'amazonParseCurrentDetailPage') {
         ;(async () => {
           try {
-            await ensureAccountEmailCached()
+            await ensureAccountEmailCached({ forceRefresh: true })
             const parsed = await captureCurrentDetailPage({
               skipTrackingEnrichment: !!message.skipTrackingEnrichment,
               pageAlreadyReady: !!message.pageAlreadyReady,
@@ -383,7 +391,7 @@
       if (message.type === 'amazonFetchAccountEmail') {
         ;(async () => {
           try {
-            const email = await ensureAccountEmailCached()
+            const email = await ensureAccountEmailCached({ forceRefresh: true })
             sendResponse({ success: true, email: email || null })
           } catch (e) {
             sendResponse({

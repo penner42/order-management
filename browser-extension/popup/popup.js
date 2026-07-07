@@ -965,13 +965,7 @@ function renderOrderDetails(payload, resultsEl) {
           return;
         }
 
-        chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (emailData) => {
-          const emailRow =
-            emailData && emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
-              ? emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
-              : null;
-          const accountEmail = emailRow && emailRow.email ? String(emailRow.email) : null;
-
+        function normalizeAndOpen(accountEmail) {
           getOrderManagerApiBaseUrl((baseUrl) => {
             if (!baseUrl) {
               resultsEl.innerHTML =
@@ -1002,7 +996,37 @@ function renderOrderDetails(payload, resultsEl) {
 
             openBulkReviewForOrders([body], resultsEl);
           });
-        });
+        }
+
+        function readCachedAccountEmail() {
+          chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (emailData) => {
+            const emailRow =
+              emailData && emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
+                ? emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
+                : null;
+            const accountEmail = emailRow && emailRow.email ? String(emailRow.email) : null;
+            normalizeAndOpen(accountEmail);
+          });
+        }
+
+        if (tab && typeof tab.id === "number") {
+          chrome.tabs.sendMessage(
+            tab.id,
+            { store: "amazon", type: "amazonFetchAccountEmail" },
+            (resp) => {
+              const accountEmail =
+                resp && resp.success === true && resp.email ? String(resp.email) : null;
+              if (accountEmail) {
+                normalizeAndOpen(accountEmail);
+                return;
+              }
+              readCachedAccountEmail();
+            }
+          );
+          return;
+        }
+
+        readCachedAccountEmail();
       }
 
       function requestParsedOrder(pageUrl) {
