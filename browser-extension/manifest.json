@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Order Manager Browser Integration",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Integrate order data from store order pages into Order Manager.",
   "permissions": [
     "activeTab",

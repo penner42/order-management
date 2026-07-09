@@ -5,13 +5,19 @@ import hashlib
 import json
 import logging
 import os
+import random
 import shutil
 import subprocess
 import threading
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
+
+from jose import jwt
 
 from app.config import settings
 
@@ -178,9 +184,110 @@ def get_status() -> dict[str, Any]:
     }
 
 
+_AMO_API_BASE = "https://addons.mozilla.org/api/v5"
+
+
 def _run(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
     logger.info("Running %s", " ".join(cmd))
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
+
+
+def _make_amo_jwt() -> str:
+    issued_at = int(time.time())
+    payload = {
+        "iss": settings.web_ext_api_key.strip(),
+        "jti": f"0.{random.randint(1, 1_000_000_000)}",
+        "iat": issued_at,
+        "exp": issued_at + 300,
+    }
+    return jwt.encode(payload, settings.web_ext_api_secret.strip(), algorithm="HS256")
+
+
+def _amo_request(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"Authorization": f"JWT {_make_amo_jwt()}"})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"AMO API request failed ({exc.code}): {body}") from exc
+
+
+def _amo_download(url: str, dest: Path) -> None:
+    request = urllib.request.Request(url, headers={"Authorization": f"JWT {_make_amo_jwt()}"})
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            dest.write_bytes(response.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"AMO download failed ({exc.code}): {body}") from exc
+
+
+def _firefox_addon_guid(ext_dir: Path) -> str:
+    manifest = json.loads((ext_dir / "manifest.json").read_text(encoding="utf-8"))
+    gecko = manifest.get("browser_specific_settings", {}).get("gecko", {})
+    guid = gecko.get("id")
+    if not guid:
+        raise RuntimeError("manifest.json is missing browser_specific_settings.gecko.id")
+    return str(guid)
+
+
+def _firefox_artifact_filename(version: str) -> str:
+    return f"order_manager_browser_integration-{version}.xpi"
+
+
+def _firefox_version_already_exists(output: str) -> bool:
+    lowered = output.lower()
+    return "version already exists" in lowered or "(status: 409)" in lowered
+
+
+def _download_firefox_artifact_from_amo(ext_dir: Path, version: str) -> str:
+    guid = _firefox_addon_guid(ext_dir)
+    version_url = f"{_AMO_API_BASE}/addons/addon/{guid}/versions/{version}/"
+    version_data = _amo_request(version_url)
+    file_info = version_data.get("file") or {}
+    download_url = file_info.get("url")
+    if not download_url:
+        raise RuntimeError(f"AMO has no downloadable file for Firefox version {version}")
+
+    filename = _firefox_artifact_filename(version)
+    dest = ext_dir / "dist" / filename
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _amo_download(download_url, dest)
+    logger.info("Downloaded Firefox extension version %s from AMO", version)
+    return filename
+
+
+def _sign_firefox(ext_dir: Path, *, npm: str, env: dict[str, str], version: str) -> None:
+    logger.info("Running %s run sign:firefox", npm)
+    result = subprocess.run(
+        [npm, "run", "sign:firefox"],
+        cwd=ext_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        if result.stdout.strip():
+            logger.info(result.stdout.rstrip())
+        return
+
+    output = f"{result.stdout}\n{result.stderr}"
+    if _firefox_version_already_exists(output):
+        logger.info(
+            "Firefox version %s already exists on AMO; downloading signed artifact",
+            version,
+        )
+        _download_firefox_artifact_from_amo(ext_dir, version)
+        return
+
+    logger.error("Firefox signing failed:\n%s", output.rstrip())
+    raise subprocess.CalledProcessError(
+        result.returncode,
+        result.args,
+        output=result.stdout,
+        stderr=result.stderr,
+    )
 
 
 def _ensure_npm_deps(ext_dir: Path) -> None:
@@ -315,7 +422,7 @@ def _sign_extension(ext_dir: Path, *, force: bool = False) -> dict[str, Any]:
 
     if firefox_needed:
         if force or not firefox_ok:
-            _run([npm, "run", "sign:firefox"], cwd=ext_dir, env=env)
+            _sign_firefox(ext_dir, npm=npm, env=env, version=version)
             firefox_file = _firefox_artifact_for_version(ext_dir) or _find_firefox_artifact(ext_dir)
         else:
             logger.info("Firefox extension unchanged; reusing existing signed artifact")
