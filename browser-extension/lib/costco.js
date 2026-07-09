@@ -34,6 +34,68 @@
     map[key] = value
   }
 
+  // Costco GraphQL returns `shipment` as a single object on each line item, not an array.
+  function coerceShipmentArray(shipment) {
+    if (Array.isArray(shipment)) return shipment
+    if (shipment && typeof shipment === 'object') return [shipment]
+    return []
+  }
+
+  function collectShipmentsFromCostcoLineItem(lineItem, shipmentsById) {
+    const shipmentSlices = []
+    const shipments = coerceShipmentArray(lineItem && lineItem.shipment)
+    const itemStatus =
+      lineItem && (coerceString(lineItem.status) || coerceString(lineItem.orderStatus))
+
+    for (let si = 0; si < shipments.length; si++) {
+      const s = shipments[si] || {}
+      const shipmentId =
+        coerceString(s.shipmentId) ||
+        coerceString(s.packageNumber) ||
+        coerceString(s.trackingNumber)
+      if (!shipmentId) continue
+
+      const trackingNumber = coerceString(s.trackingNumber)
+      const trackingUrl = coerceString(s.trackingSiteUrl)
+      const deliveredDate = normalizeIsoOrNull(s.deliveredDate)
+      const estimatedArrivalDate = normalizeIsoOrNull(s.estimatedArrivalDate)
+      const deliveryDate =
+        deliveredDate ||
+        estimatedArrivalDate ||
+        normalizeIsoOrNull(lineItem && lineItem.deliveryDate) ||
+        normalizeIsoOrNull(lineItem && lineItem.estimatedDeliveryDate)
+
+      const shipmentStatus = coerceString(s.status) || itemStatus || null
+
+      uniqPush(shipmentsById, shipmentId, {
+        shipmentId,
+        trackingNumber: trackingNumber || null,
+        trackingUrl: trackingUrl || null,
+        deliveryDate: deliveryDate || null,
+        status: {
+          rawStatusType: shipmentStatus,
+          message: shipmentStatus,
+        },
+      })
+
+      const qty = safeNumber(lineItem && lineItem.quantity)
+      shipmentSlices.push({
+        shipmentId,
+        quantity: qty != null && qty > 0 ? qty : 1,
+      })
+    }
+
+    return shipmentSlices
+  }
+
+  function shipmentsListFromMap(shipmentsById) {
+    const shipmentsList = []
+    for (const sid in shipmentsById) {
+      shipmentsList.push(shipmentsById[sid])
+    }
+    return shipmentsList
+  }
+
   function extractOrdersFromCostcoGraphql(graphqlPayload) {
     if (!graphqlPayload || typeof graphqlPayload !== 'object') return []
     const go = graphqlPayload.data && graphqlPayload.data.getOnlineOrders
@@ -100,6 +162,7 @@
       : null
 
     const items = []
+    const shipmentsById = {}
     const allLineItems = extractDetailLineItems(details)
     for (let i = 0; i < allLineItems.length; i++) {
       const it = allLineItems[i] || {}
@@ -107,6 +170,7 @@
       const qty = safeNumber(it.quantity)
       const unitPrice = safeNumber(it.price)
       const lineTotal = safeNumber(it.merchandiseTotalAmount)
+      const shipmentSlices = collectShipmentsFromCostcoLineItem(it, shipmentsById)
 
       items.push({
         logicalItemId,
@@ -127,7 +191,7 @@
           rawStatusCode: coerceString(it.orderStatus) || coerceString(it.status) || null,
           normalizedStatus: null,
         },
-        shipments: [],
+        shipments: shipmentSlices,
         returnability: {
           isReturnable: !!it.orderLineItemCancelAllowed ? !!it.orderReturnAllowed : !!it.orderReturnAllowed,
           returnEligibilityMessage: null,
@@ -175,7 +239,7 @@
         lastName: coerceString(details.lastName) || null,
       },
       shippingAddress,
-      shipments: [],
+      shipments: shipmentsListFromMap(shipmentsById),
       paymentMethods,
       items,
       cancellations: {
@@ -206,6 +270,7 @@
     if (!orderNumber) return null
 
     const byId = {}
+    const shipmentsById = {}
     const orderDiscount = extractOrderDiscountFromCostcoOrderDetails(details)
     const items = extractDetailLineItems(details)
     for (let i = 0; i < items.length; i++) {
@@ -218,10 +283,16 @@
         lineTotal: safeNumber(it.merchandiseTotalAmount),
         itemNumber: coerceString(it.itemNumber) || null,
         itemDescription: coerceString(it.itemDescription) || null,
+        shipmentSlices: collectShipmentsFromCostcoLineItem(it, shipmentsById),
       }
     }
 
-    return { orderNumber: String(orderNumber).trim(), byId, orderDiscount }
+    return {
+      orderNumber: String(orderNumber).trim(),
+      byId,
+      orderDiscount,
+      shipmentsById,
+    }
   }
 
   function mergeCostcoOrderDetailsIntoNormalizedOrders(normalizedOrders, orderDetailsPayloadsByOrderNumber) {
@@ -243,6 +314,20 @@
         order.orderDiscount = idx.orderDiscount
       }
 
+      const orderShipmentsById = {}
+      const existingShipments = Array.isArray(order.shipments) ? order.shipments : []
+      for (let si = 0; si < existingShipments.length; si++) {
+        const shipment = existingShipments[si] || {}
+        const shipmentId = coerceString(shipment.shipmentId)
+        if (shipmentId) orderShipmentsById[shipmentId] = shipment
+      }
+      const detailShipmentsById =
+        idx.shipmentsById && typeof idx.shipmentsById === 'object' ? idx.shipmentsById : {}
+      for (const sid in detailShipmentsById) {
+        uniqPush(orderShipmentsById, sid, detailShipmentsById[sid])
+      }
+      order.shipments = shipmentsListFromMap(orderShipmentsById)
+
       const items = Array.isArray(order.items) ? order.items : []
       for (let ii = 0; ii < items.length; ii++) {
         const item = items[ii] || {}
@@ -260,6 +345,11 @@
         if (d.lineTotal != null) {
           item.pricing.lineTotal = d.lineTotal
           item.pricing.linePrice = d.lineTotal
+        }
+
+        const existingSlices = Array.isArray(item.shipments) ? item.shipments : []
+        if (existingSlices.length === 0 && Array.isArray(d.shipmentSlices) && d.shipmentSlices.length > 0) {
+          item.shipments = d.shipmentSlices
         }
       }
     }
@@ -300,39 +390,7 @@
           (item.lineNumber != null ? String(item.lineNumber) : null) ||
           null
 
-        const shipmentSlices = []
-        const shipments = Array.isArray(item.shipment) ? item.shipment : []
-
-        for (let si = 0; si < shipments.length; si++) {
-          const s = shipments[si] || {}
-          const shipmentId = coerceString(s.shipmentId) || coerceString(s.packageNumber) || coerceString(s.trackingNumber)
-          if (!shipmentId) continue
-
-          const trackingNumber = coerceString(s.trackingNumber)
-          const trackingUrl = coerceString(s.trackingSiteUrl)
-
-          const deliveredDate = normalizeIsoOrNull(s.deliveredDate)
-          const estimatedArrivalDate = normalizeIsoOrNull(s.estimatedArrivalDate)
-          const deliveryDate = deliveredDate || estimatedArrivalDate || normalizeIsoOrNull(item.deliveryDate)
-
-          const shipmentStatus = coerceString(s.status) || coerceString(item.status) || null
-
-          uniqPush(shipmentsById, shipmentId, {
-            shipmentId,
-            trackingNumber: trackingNumber || null,
-            trackingUrl: trackingUrl || null,
-            deliveryDate: deliveryDate || null,
-            status: {
-              rawStatusType: shipmentStatus,
-              message: shipmentStatus,
-            },
-          })
-
-          shipmentSlices.push({
-            shipmentId,
-            quantity: 1,
-          })
-        }
+        const shipmentSlices = collectShipmentsFromCostcoLineItem(item, shipmentsById)
 
         itemsList.push({
           logicalItemId,
@@ -361,9 +419,7 @@
         })
       }
 
-      for (const sid in shipmentsById) {
-        shipmentsList.push(shipmentsById[sid])
-      }
+      shipmentsList.push(...shipmentsListFromMap(shipmentsById))
 
       normalized.push({
         store: 'costco',

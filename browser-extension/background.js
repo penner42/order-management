@@ -652,8 +652,13 @@ function normalizeCostcoOrdersGraphqlPayloadFallback(graphqlPayload, sourceUrl) 
         (item.lineNumber != null ? String(item.lineNumber) : null) ||
         null;
 
-      const shipmentSlices = [];
-      const shipments = Array.isArray(item.shipment) ? item.shipment : [];
+      const shipmentSlices = []
+      const shipments = (() => {
+        const shipment = item.shipment
+        if (Array.isArray(shipment)) return shipment
+        if (shipment && typeof shipment === "object") return [shipment]
+        return []
+      })()
       for (let si = 0; si < shipments.length; si++) {
         const s = shipments[si] || {};
         const shipmentId =
