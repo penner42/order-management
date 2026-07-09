@@ -236,9 +236,13 @@ def _firefox_artifact_filename(version: str) -> str:
     return f"order_manager_browser_integration-{version}.xpi"
 
 
-def _firefox_version_already_exists(output: str) -> bool:
+def _should_download_firefox_from_amo(output: str) -> bool:
     lowered = output.lower()
-    return "version already exists" in lowered or "(status: 409)" in lowered
+    return (
+        "version already exists" in lowered
+        or "this upload has already been submitted" in lowered
+        or "(status: 409)" in lowered
+    )
 
 
 def _download_firefox_artifact_from_amo(ext_dir: Path, version: str) -> str:
@@ -273,9 +277,9 @@ def _sign_firefox(ext_dir: Path, *, npm: str, env: dict[str, str], version: str)
         return
 
     output = f"{result.stdout}\n{result.stderr}"
-    if _firefox_version_already_exists(output):
+    if _should_download_firefox_from_amo(output):
         logger.info(
-            "Firefox version %s already exists on AMO; downloading signed artifact",
+            "Firefox version %s already on AMO; downloading signed artifact",
             version,
         )
         _download_firefox_artifact_from_amo(ext_dir, version)
