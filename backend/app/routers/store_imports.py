@@ -1180,11 +1180,12 @@ def _apply_items_and_shipments(
         status = ItemStatus.SHIPPED if has_tracking else ItemStatus.PURCHASED
 
         if not shipments_slices:
-            if (name, "") in existing_item_keys:
+            quantity = item_data.get("quantities", {}).get("ordered") or 1
+            key = (name, "", item_index, quantity)
+            if key in existing_item_keys:
                 continue
             if existing_order:
                 continue
-            quantity = item_data.get("quantities", {}).get("ordered") or 1
             item = Item(
                 order_id=order.id,
                 price_paid=unit_price,
@@ -1197,7 +1198,7 @@ def _apply_items_and_shipments(
             )
             db.add(item)
             existing_items.append(item)
-            existing_item_keys.add((name, ""))
+            existing_item_keys.add(key)
             continue
 
         for slice_data in shipments_slices:
@@ -1210,12 +1211,11 @@ def _apply_items_and_shipments(
             )
             db_key = walmart_original or tracking_key
 
-            key = (name, slice_key)
+            slice_qty = slice_data.get("quantity") or 1
+            key = (name, slice_key, item_index, slice_qty)
             if key in existing_item_keys:
                 get_or_create_shipment_for_slice(sid)
                 continue
-
-            slice_qty = slice_data.get("quantity") or 1
 
             existing_item = find_existing_item_for_tracking(name, db_key, tracking_key)
             if existing_item:

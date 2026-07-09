@@ -148,6 +148,17 @@ function getFirstNumber(obj: unknown, paths: string[]): number | null {
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '—'
   try {
+    const dateOnly = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso.trim())
+    if (dateOnly) {
+      const year = Number(dateOnly[1])
+      const month = Number(dateOnly[2])
+      const day = Number(dateOnly[3])
+      return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      })
+    }
     return new Date(iso).toLocaleDateString(undefined, {
       year: 'numeric',
       month: 'short',
