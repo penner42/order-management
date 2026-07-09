@@ -27,9 +27,11 @@
     const opts = options && typeof options === 'object' ? options : {}
     const forceRefresh = !!opts.forceRefresh
     const origin = window.location.origin
+    const cookieStoreId = opts.cookieStoreId ? String(opts.cookieStoreId) : 'default'
+    let cachedRow = null
 
     if (!forceRefresh) {
-      const existing = await new Promise((resolve) => {
+      cachedRow = await new Promise((resolve) => {
         try {
           chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (data) => {
             resolve(data && data[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY] ? data[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY] : null)
@@ -38,14 +40,17 @@
           resolve(null)
         }
       })
-      if (existing && existing.email && existing.origin === origin) {
-        return existing.email
+      const cachedContainer = cachedRow && cachedRow.cookieStoreId ? String(cachedRow.cookieStoreId) : 'default'
+      if (cachedRow && cachedRow.email && cachedRow.origin === origin && cachedContainer === cookieStoreId) {
+        return cachedRow.email
       }
     }
 
     const d = dom()
     if (!d || typeof d.fetchAccountEmail !== 'function') return null
-    const email = await d.fetchAccountEmail(origin)
+    const email = await d.fetchAccountEmail(origin, {
+      allowSlowLookup: !!opts.allowSlowLookup,
+    })
     if (email) {
       await new Promise((resolve) => {
         chrome.storage.local.set(
@@ -54,6 +59,7 @@
               email,
               capturedAt: new Date().toISOString(),
               origin,
+              cookieStoreId,
             },
           },
           () => resolve(null)
@@ -271,7 +277,7 @@
       if (message.type === 'amazonParseCurrentListPage') {
         ;(async () => {
           try {
-            await ensureAccountEmailCached()
+            ensureAccountEmailCached().catch(() => {})
             const orders = await captureCurrentListPage({
               pageAlreadyReady: !!message.pageAlreadyReady,
             })
@@ -289,7 +295,6 @@
       if (message.type === 'amazonParseCurrentDetailPage') {
         ;(async () => {
           try {
-            await ensureAccountEmailCached({ forceRefresh: true })
             const parsed = await captureCurrentDetailPage({
               skipTrackingEnrichment: !!message.skipTrackingEnrichment,
               pageAlreadyReady: !!message.pageAlreadyReady,
@@ -308,7 +313,7 @@
       if (message.type === 'amazonCaptureOrderDetailFromUrl') {
         ;(async () => {
           try {
-            await ensureAccountEmailCached()
+            ensureAccountEmailCached({ allowSlowLookup: false }).catch(() => {})
             const parsed = await captureOrderDetailFromUrl(message.detailUrl, {
               skipTrackingEnrichment: !!message.skipTrackingEnrichment,
             })
@@ -391,7 +396,11 @@
       if (message.type === 'amazonFetchAccountEmail') {
         ;(async () => {
           try {
-            const email = await ensureAccountEmailCached({ forceRefresh: true })
+            const email = await ensureAccountEmailCached({
+              forceRefresh: !!message.forceRefresh,
+              cookieStoreId: message.cookieStoreId,
+              allowSlowLookup: !!message.allowSlowLookup,
+            })
             sendResponse({ success: true, email: email || null })
           } catch (e) {
             sendResponse({

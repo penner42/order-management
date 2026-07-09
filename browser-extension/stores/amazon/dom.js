@@ -809,7 +809,9 @@
 
       const index = counter.n
       const key = asin ? `${asin}:${index}` : `${name || 'item'}:${index}`
-      if ((!asin && (!name || name.length < 3)) || seenKeys.has(key)) return
+      if ((!asin && (!name || name.length < 3)) || seenKeys.has(key)) {
+        return
+      }
       seenKeys.add(key)
       counter.n += 1
 
@@ -844,7 +846,9 @@
     queryProductLinks(scope).forEach((link) => {
       const href = link.getAttribute('href') || ''
       const asin = extractAsinFromUrl(href)
-      if (!asin || seen.has(asin)) return
+      if (!asin || seen.has(asin)) {
+        return
+      }
       seen.add(asin)
       let name = textOf(link)
       if (!name || name.length < 3) {
@@ -1910,11 +1914,249 @@
     return null
   }
 
+  function decodeHtmlForEmailSearch(html) {
+    return String(html || '')
+      .replace(/&#64;/g, '@')
+      .replace(/&#x40;/gi, '@')
+      .replace(/&amp;/g, '&')
+      .replace(/\\u0040/gi, '@')
+      .replace(/\\x40/gi, '@')
+  }
+
+  function parseEmailFromEmbeddedJson(html) {
+    const source = decodeHtmlForEmailSearch(coerceString(html) || '')
+    if (!source) return null
+    const patterns = [
+      /"email(?:Address)?"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /"customerEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /data-email="([^"]+@[^"]+)"/gi,
+      /&quot;email(?:Address)?&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
+      /&quot;customerEmail&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
+    ]
+    for (let pi = 0; pi < patterns.length; pi++) {
+      const re = new RegExp(patterns[pi].source, patterns[pi].flags)
+      let match
+      while ((match = re.exec(source)) !== null) {
+        const email = coerceString(match[1])
+        if (email && EMAIL_RE.test(email) && !isAmazonOwnedEmail(email)) return email
+      }
+    }
+    return null
+  }
+
+  function parseEmailFromAccountFlyout(doc) {
+    if (!doc) return null
+    const flyoutSelectors = [
+      '#nav-flyout-ya-signin',
+      '#nav-flyout-accountList',
+      '#nav-al-signin',
+      '#nav-flyout-avab',
+      '[data-nav-role="signin"]',
+    ]
+    for (let i = 0; i < flyoutSelectors.length; i++) {
+      const flyout = doc.querySelector(flyoutSelectors[i])
+      if (!flyout) continue
+      const emails = extractEmailsFromText(
+        (flyout.innerHTML || '') + ' ' + textOf(flyout)
+      ).filter((email) => !isAmazonOwnedEmail(email))
+      if (emails.length > 0) return emails[0]
+    }
+    return null
+  }
+
+  function parseEmailFromCvfSwitcher(doc) {
+    if (!doc) return null
+    const selectors = [
+      '.cvf-account-switcher-profile-details',
+      '.cvf-account-switcher-account-group',
+      '.cvf-widget-btn-val',
+      '[data-testid="account-switcher"]',
+      '.ab-account-switcher-accounts-list',
+      '#ab-accounts-switcher-wrapper',
+      '#ap-account-switcher-container',
+    ]
+    for (let si = 0; si < selectors.length; si++) {
+      const nodes = doc.querySelectorAll(selectors[si])
+      for (let ni = 0; ni < nodes.length; ni++) {
+        const emails = extractEmailsFromText(
+          textOf(nodes[ni]) + ' ' + (nodes[ni].innerHTML || '')
+        ).filter((email) => !isAmazonOwnedEmail(email))
+        if (emails.length > 0) return emails[0]
+      }
+    }
+    return null
+  }
+
+  function parseEmailFromLiveDocument(doc) {
+    if (!doc || !doc.documentElement) return null
+    const html = doc.documentElement.outerHTML || ''
+    const fromJson = parseEmailFromEmbeddedJson(html)
+    if (fromJson) return fromJson
+    const fromFlyout = parseEmailFromAccountFlyout(doc)
+    if (fromFlyout) return fromFlyout
+    const fromCvf = parseEmailFromCvfSwitcher(doc)
+    if (fromCvf) return fromCvf
+    const fromNav = parseEmailFromNavAccount(doc)
+    if (fromNav) return fromNav
+    const fromSection = parseEmailFromLoginSecuritySection(doc)
+    if (fromSection) return fromSection
+    return parseEmailFromAccountHtml(html)
+  }
+
+  function waitForAccountEmailInDocument(doc, timeoutMs) {
+    const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 20000
+    return new Promise((resolve) => {
+      let settled = false
+      let observer = null
+      let pollTimer = null
+      let timeoutTimer = null
+
+      const finish = (email) => {
+        if (settled) return
+        settled = true
+        if (observer) {
+          try {
+            observer.disconnect()
+          } catch {
+            // ignore
+          }
+        }
+        if (pollTimer != null) clearInterval(pollTimer)
+        if (timeoutTimer != null) clearTimeout(timeoutTimer)
+        resolve(email || null)
+      }
+
+      const check = () => {
+        try {
+          const email = parseEmailFromLiveDocument(doc)
+          if (email) {
+            finish(email)
+            return true
+          }
+        } catch {
+          // ignore
+        }
+        return false
+      }
+
+      if (check()) return
+
+      if (doc.documentElement) {
+        observer = new MutationObserver(() => {
+          check()
+        })
+        observer.observe(doc.documentElement, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true,
+        })
+      }
+
+      pollTimer = setInterval(check, 500)
+      timeoutTimer = setTimeout(() => finish(null), timeout)
+    })
+  }
+
+  async function fetchAccountEmailFromIframe(pageUrl, timeoutMs) {
+    const url = withDisableCsdUrl(pageUrl)
+    const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 25000
+
+    return await new Promise((resolve) => {
+      const iframe = document.createElement('iframe')
+      iframe.style.cssText =
+        'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:0;border:0;'
+      iframe.setAttribute('aria-hidden', 'true')
+
+      let settled = false
+      const cleanup = () => {
+        try {
+          iframe.remove()
+        } catch {
+          // ignore
+        }
+      }
+      const finish = (email) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve(email || null)
+      }
+
+      const timeoutTimer = setTimeout(() => finish(null), timeout)
+
+      iframe.addEventListener('load', () => {
+        ;(async () => {
+          try {
+            const frameDoc = iframe.contentDocument
+            if (!frameDoc) {
+              clearTimeout(timeoutTimer)
+              finish(null)
+              return
+            }
+            const email = await waitForAccountEmailInDocument(
+              frameDoc,
+              Math.max(0, timeout - 2000)
+            )
+            clearTimeout(timeoutTimer)
+            finish(email)
+          } catch {
+            clearTimeout(timeoutTimer)
+            finish(null)
+          }
+        })()
+      })
+
+      iframe.addEventListener('error', () => {
+        clearTimeout(timeoutTimer)
+        finish(null)
+      })
+
+      document.documentElement.appendChild(iframe)
+      iframe.src = url
+    })
+  }
+
+  function parseEmailFromNavAccount(doc) {
+    if (!doc) return null
+    const selectors = ['#nav-link-accountList', '#nav-logobar-greeting', '[data-nav-role="signin"]']
+    for (let i = 0; i < selectors.length; i++) {
+      const el = doc.querySelector(selectors[i])
+      if (!el) continue
+      const blob = [
+        el.getAttribute('title') || '',
+        el.getAttribute('href') || '',
+        el.getAttribute('data-nav-ref') || '',
+        textOf(el),
+      ].join(' ')
+      const emails = extractEmailsFromText(blob).filter((email) => !isAmazonOwnedEmail(email))
+      if (emails.length > 0) return emails[0]
+    }
+    return null
+  }
+
   function parseEmailFromAccountHtml(html) {
     if (!html) return null
     try {
+      const fromJson = parseEmailFromEmbeddedJson(html)
+      if (fromJson) return fromJson
+
+      const fromRaw = extractEmailsFromText(decodeHtmlForEmailSearch(html)).filter(
+        (email) => !isAmazonOwnedEmail(email)
+      )
+      if (fromRaw.length > 0) return fromRaw[0]
+
       const doc = new DOMParser().parseFromString(html, 'text/html')
       if (isAmazonSignInHtml(doc)) return null
+
+      const fromNav = parseEmailFromNavAccount(doc)
+      if (fromNav) return fromNav
+
+      const fromFlyout = parseEmailFromAccountFlyout(doc)
+      if (fromFlyout) return fromFlyout
+
+      const fromCvf = parseEmailFromCvfSwitcher(doc)
+      if (fromCvf) return fromCvf
 
       const emailInputs = doc.querySelectorAll(
         'input[type="email"]:not(#ap_email), input[name*="email" i]:not(#ap_email):not([name="email"])'
@@ -1942,30 +2184,50 @@
     }
   }
 
-  async function fetchAccountEmail(baseOrigin) {
+  async function fetchAccountEmail(baseOrigin, options) {
     const origin = baseOrigin || window.location.origin
+    const opts = options && typeof options === 'object' ? options : {}
+    const allowSlowLookup = !!opts.allowSlowLookup
+
     try {
-      const path = window.location.pathname || ''
-      if (
-        window.location.origin === origin &&
-        (path.includes('/gp/css/account/info/') || path.includes('/a/settings'))
-      ) {
-        const fromCurrent = parseEmailFromAccountHtml(document.documentElement.outerHTML)
-        if (fromCurrent) return fromCurrent
+      const fromCurrentDoc = parseEmailFromLiveDocument(document)
+      if (fromCurrentDoc) {
+        return fromCurrentDoc
       }
     } catch {
       // ignore
     }
 
-    const url = origin + '/gp/css/account/info/view.html'
-    try {
-      const resp = await fetch(url, { credentials: 'include' })
-      if (!resp.ok) return null
-      const html = await resp.text()
-      return parseEmailFromAccountHtml(html)
-    } catch {
-      return null
+    const accountUrls = [
+      origin + '/ax/account/manage',
+      origin + '/gp/css/account/info/view.html',
+      origin + '/hz/profilepicker',
+    ]
+
+    for (let ui = 0; ui < accountUrls.length; ui++) {
+      const url = accountUrls[ui]
+      try {
+        const resp = await fetch(url, { credentials: 'include' })
+        if (!resp.ok) continue
+        const html = await resp.text()
+        const parsed = parseEmailFromAccountHtml(html)
+        if (parsed) return parsed
+      } catch {
+        // try next URL
+      }
     }
+
+    if (allowSlowLookup) {
+      const iframeUrl = origin + '/ax/account/manage'
+      try {
+        const parsed = await fetchAccountEmailFromIframe(iframeUrl, 8000)
+        if (parsed) return parsed
+      } catch {
+        // ignore
+      }
+    }
+
+    return null
   }
 
   const api = {
@@ -1987,6 +2249,10 @@
     diagnoseOrderDetailContentReady,
     fetchAccountEmail,
     parseEmailFromAccountHtml,
+    parseEmailFromEmbeddedJson,
+    parseEmailFromNavAccount,
+    parseEmailFromLiveDocument,
+    fetchAccountEmailFromIframe,
     extractOrderIdFromUrl,
     enrichShipmentsWithTracking,
     parseTrackingPageHtml,

@@ -394,13 +394,13 @@ function normalizeAmazonOrderPayloadFallback(raw, sourceUrl, accountEmail) {
     const s = coerceString(v);
     if (!s) return null;
     const isoPrefix = /^(\d{4}-\d{2}-\d{2})/.exec(s);
-    if (isoPrefix) return isoPrefix[1] + "T00:00:00.000Z";
+    if (isoPrefix) return isoPrefix[1];
     const d = new Date(s);
     if (Number.isNaN(d.getTime())) return null;
     const y = d.getFullYear();
     const mo = String(d.getMonth() + 1).padStart(2, "0");
     const day = String(d.getDate()).padStart(2, "0");
-    return y + "-" + mo + "-" + day + "T00:00:00.000Z";
+    return y + "-" + mo + "-" + day;
   }
 
   if (!raw || typeof raw !== "object") {
@@ -1072,13 +1072,23 @@ async function clearAmazonDetailStorage() {
   });
 }
 
-async function getAmazonAccountEmailAsync() {
+async function getAmazonAccountEmailAsync(cookieStoreId) {
+  const containerKey = cookieStoreId ? String(cookieStoreId) : "default";
   return await new Promise((resolve) => {
     try {
       chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (s) => {
         const row = s && s[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY];
-        const email = row && row.email ? String(row.email).trim() : "";
-        resolve(email || null);
+        if (!row || !row.email) {
+          resolve(null);
+          return;
+        }
+        const rowContainer = row.cookieStoreId ? String(row.cookieStoreId) : "default";
+        if (rowContainer === containerKey) {
+          resolve(String(row.email).trim() || null);
+          return;
+        }
+        // Same-origin fallback when container-specific cache is unavailable.
+        resolve(String(row.email).trim() || null);
       });
     } catch {
       resolve(null);
@@ -2549,8 +2559,13 @@ function attachAmazonBulkPortHandlers(port) {
     port.postMessage({ type: "jobStarted" });
 
     try {
-      await sendAmazonTabMessage(msg.sourceTabId, { store: "amazon", type: "amazonFetchAccountEmail" });
-      let accountEmail = await getAmazonAccountEmailAsync();
+      await sendAmazonTabMessage(msg.sourceTabId, {
+        store: "amazon",
+        type: "amazonFetchAccountEmail",
+        cookieStoreId: cookieStoreId || "default",
+        allowSlowLookup: false,
+      });
+      let accountEmail = await getAmazonAccountEmailAsync(cookieStoreId);
 
       const sourceOrigin = (() => {
         try {
@@ -2697,7 +2712,7 @@ function attachAmazonBulkPortHandlers(port) {
               );
             }
 
-            if (!accountEmail) accountEmail = await getAmazonAccountEmailAsync();
+            if (!accountEmail) accountEmail = await getAmazonAccountEmailAsync(cookieStoreId);
             const body = normalizeAmazonOrderPayloadSafe(
               payload,
               detailUrl,

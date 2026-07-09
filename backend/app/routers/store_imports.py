@@ -6,6 +6,7 @@ URL hash.  The frontend calls these endpoints:
   POST /orders/diff   – read-only diff against an existing order
   POST /orders/apply  – create/update order, items, shipments in one shot
 """
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict
 import secrets
@@ -57,16 +58,20 @@ def _parse_order_date_str(value: str | None) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     raw = value.strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return datetime.strptime(raw, "%Y-%m-%d").replace(hour=12, tzinfo=timezone.utc)
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+            dt = dt.replace(hour=12)
         return dt
     except ValueError:
         pass
     for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(raw, fmt).replace(hour=12, tzinfo=timezone.utc)
         except ValueError:
             continue
     return None
@@ -954,6 +959,7 @@ def _apply_items_and_shipments(
                 existing_item_keys.add((desc, tracking))
 
     existing_shipments_by_lookup_key = _shipments_by_lookup_key(existing_shipments)
+    pre_existing_item_ids: set[int] = {ei.id for ei in existing_items}
 
     shipments_by_id: dict[str, dict[str, Any]] = {}
     for s in shipments:
@@ -985,6 +991,7 @@ def _apply_items_and_shipments(
             for ei in existing_items
             if (ei.description or "").strip() == name
             and ei.id not in used_existing_item_ids
+            and ei.id in pre_existing_item_ids
         ]
         if not candidates:
             return None
@@ -1262,10 +1269,6 @@ def _apply_items_and_shipments(
                     )
                 existing_item_keys.discard((name, ""))
                 existing_item_keys.add(key)
-                continue
-
-            if existing_order:
-                get_or_create_shipment_for_slice(sid)
                 continue
 
             quantity = slice_data.get("quantity") or 1

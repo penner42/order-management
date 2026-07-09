@@ -16,13 +16,13 @@
     const s = coerceString(v)
     if (!s) return null
     const isoPrefix = /^(\d{4}-\d{2}-\d{2})/.exec(s)
-    if (isoPrefix) return isoPrefix[1] + 'T00:00:00.000Z'
+    if (isoPrefix) return isoPrefix[1]
     const d = new Date(s)
     if (Number.isNaN(d.getTime())) return null
     const y = d.getFullYear()
     const mo = String(d.getMonth() + 1).padStart(2, '0')
     const day = String(d.getDate()).padStart(2, '0')
-    return y + '-' + mo + '-' + day + 'T00:00:00.000Z'
+    return y + '-' + mo + '-' + day
   }
 
   function normalizeAmazonOrderPayload(raw, sourceUrl, accountEmail) {

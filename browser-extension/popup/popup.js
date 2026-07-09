@@ -999,34 +999,46 @@ function renderOrderDetails(payload, resultsEl) {
         }
 
         function readCachedAccountEmail() {
+          const tabCookieStoreId = tab && tab.cookieStoreId ? String(tab.cookieStoreId) : "default";
+          let tabOrigin = null;
+          try {
+            if (tab && tab.url) tabOrigin = new URL(String(tab.url)).origin;
+          } catch {
+            tabOrigin = null;
+          }
           chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (emailData) => {
             const emailRow =
               emailData && emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
                 ? emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
                 : null;
-            const accountEmail = emailRow && emailRow.email ? String(emailRow.email) : null;
+            let accountEmail = null;
+            if (emailRow && emailRow.email) {
+              const cachedContainer =
+                emailRow.cookieStoreId ? String(emailRow.cookieStoreId) : "default";
+              if (cachedContainer === tabCookieStoreId) {
+                accountEmail = String(emailRow.email);
+              } else if (tabOrigin && emailRow.origin === tabOrigin) {
+                accountEmail = String(emailRow.email);
+              }
+            }
             normalizeAndOpen(accountEmail);
           });
         }
 
+        readCachedAccountEmail();
+
         if (tab && typeof tab.id === "number") {
           chrome.tabs.sendMessage(
             tab.id,
-            { store: "amazon", type: "amazonFetchAccountEmail" },
-            (resp) => {
-              const accountEmail =
-                resp && resp.success === true && resp.email ? String(resp.email) : null;
-              if (accountEmail) {
-                normalizeAndOpen(accountEmail);
-                return;
-              }
-              readCachedAccountEmail();
-            }
+            {
+              store: "amazon",
+              type: "amazonFetchAccountEmail",
+              cookieStoreId: tab.cookieStoreId ? String(tab.cookieStoreId) : "default",
+              allowSlowLookup: false,
+            },
+            () => {}
           );
-          return;
         }
-
-        readCachedAccountEmail();
       }
 
       function requestParsedOrder(pageUrl) {
