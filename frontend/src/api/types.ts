@@ -132,6 +132,7 @@ export interface Order {
   shipping: string | null
   sales_tax: string | null
   order_discount: string
+  insurance_cost: string
   notes: string | null
   created_at: string
   updated_at?: string

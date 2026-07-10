@@ -248,7 +248,7 @@ export default function Orders() {
   const [stores, setStores] = useState<Store[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
-  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; purchase_date?: string; order_discount?: string }>>({})
+  const [orderEdits, setOrderEdits] = useState<Record<number, { store_order_number?: string; purchase_date?: string; order_discount?: string; insurance_cost?: string }>>({})
   const [savingOrderId, setSavingOrderId] = useState<number | null>(null)
   const [itemEdits, setItemEdits] = useState<Record<number, { quantity?: number; description?: string; price_paid?: string; price_sold?: string; shipping?: string; sales_tax?: string; status?: ItemStatus }>>({})
   const [paymentEdits, setPaymentEdits] = useState<Record<number, { payment_method_id: number; amount: string }[]>>({})
@@ -1417,6 +1417,20 @@ export default function Orders() {
     const discount = Math.max(0, parseDecimal(orderDiscount))
     return Math.max(0, totalPaid - discount)
   }
+  const orderPayout = (
+    orderId: number,
+    items: { id: number; price_sold?: string | null; quantity?: number }[],
+    insuranceCost: string | null | undefined
+  ) => {
+    let payout = 0
+    for (const item of items) {
+      const edits = itemEdits[item.id]
+      const qty = Math.max(0, edits?.quantity ?? item.quantity ?? 1)
+      payout += parseDecimal(edits?.price_sold ?? item.price_sold) * qty
+    }
+    const insurance = Math.max(0, parseDecimal(insuranceCost))
+    return Math.max(0, payout - insurance)
+  }
 
   const nowIso = () => new Date().toISOString().slice(0, 19)
 
@@ -1509,6 +1523,7 @@ export default function Orders() {
 
     for (const o of visibleOrders) {
       const discount = parseDecimal(orderEdits[o.id]?.order_discount ?? o.order_discount ?? '0')
+      const insurance = parseDecimal(orderEdits[o.id]?.insurance_cost ?? o.insurance_cost ?? '0')
       for (const item of o.items ?? []) {
         const edits = itemEdits[item.id]
         const qty = edits?.quantity ?? item.quantity ?? 1
@@ -1526,6 +1541,7 @@ export default function Orders() {
         totalPayout += itemPayout * qty
       }
       totalCost -= discount
+      totalPayout -= Math.max(0, insurance)
     }
 
     return { cost, payout, subtotal, shipping, salesTax, totalCost, totalPayout }
@@ -2145,7 +2161,9 @@ export default function Orders() {
                 amount: op.amount != null ? String(op.amount) : '',
               }))
             const discount = orderEdits[o.id]?.order_discount ?? o.order_discount ?? '0'
+            const insurance = orderEdits[o.id]?.insurance_cost ?? o.insurance_cost ?? '0'
             const totalPaid = orderTotals(o.items ?? [], discount)
+            const totalPayout = orderPayout(o.id, o.items ?? [], insurance)
             const itemCount = o.items?.length ?? 0
 
             return (
@@ -2460,6 +2478,41 @@ export default function Orders() {
                         </div>
                       ))
                     })()}
+                    <div className="flex items-center justify-between gap-2 flex-nowrap pt-0.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <label className="text-xs text-ink-muted shrink-0 whitespace-nowrap">Insurance</label>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="0.00"
+                          value={orderEdits[o.id]?.insurance_cost ?? (o.insurance_cost ?? '0')}
+                          onChange={(e) =>
+                            setOrderEdits((prev) => ({ ...prev, [o.id]: { ...prev[o.id], insurance_cost: e.target.value } }))
+                          }
+                          onBlur={(e) => {
+                            const raw = e.target.value.trim()
+                            const parsed = raw === '' || raw === '.' ? 0 : parseDecimal(raw)
+                            const nextValue = Number.isFinite(parsed) ? parsed.toFixed(2) : '0.00'
+                            const current = parseDecimal(o.insurance_cost ?? '0')
+                            if (Math.abs(parsed - current) >= 0.005) updateOrder(o.id, { insurance_cost: nextValue })
+                            setOrderEdits((prev) => {
+                              const next = { ...prev }
+                              if (next[o.id]) {
+                                delete next[o.id].insurance_cost
+                                if (Object.keys(next[o.id]).length === 0) delete next[o.id]
+                              }
+                              return next
+                            })
+                          }}
+                          disabled={savingOrderId === o.id}
+                          className="w-24 h-6 rounded border border-brand-200 dark:border-gray-600 px-1 py-0 text-sm font-mono !bg-brand-50/50 dark:!bg-gray-600/80 shrink-0 disabled:opacity-60"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs font-medium text-ink-muted whitespace-nowrap">Total payout</span>
+                        <span className="text-sm font-mono tabular-nums">${totalPayout.toFixed(2)}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
 

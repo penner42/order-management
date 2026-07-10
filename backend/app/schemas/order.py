@@ -32,6 +32,7 @@ class OrderBase(BaseModel):
     notes: str | None = None
     buying_group_id: int | None = None
     order_discount: Decimal = Decimal("0")
+    insurance_cost: Decimal = Decimal("0")
 
 
 class OrderCreate(OrderBase):
@@ -52,6 +53,7 @@ class OrderUpdate(BaseModel):
     notes: str | None = None
     buying_group_id: int | None = None
     order_discount: Decimal | None = None
+    insurance_cost: Decimal | None = None
     payment_methods: list[OrderPaymentMethodCreate] | None = None
 
 

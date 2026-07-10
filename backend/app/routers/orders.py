@@ -383,6 +383,7 @@ def create_order(data: OrderCreate, db: Session = Depends(get_db), current_user:
         buying_group_id=data.buying_group_id,
         store_order_number=data.store_order_number,
         order_discount=data.order_discount,
+        insurance_cost=data.insurance_cost,
         status=getattr(data, "status", "active") or "active",
     )
     db.add(order)
