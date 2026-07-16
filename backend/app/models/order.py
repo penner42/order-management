@@ -29,6 +29,7 @@ class Order(Base):
     order_discount = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
     insurance_cost = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
     notes = Column(String(2000), nullable=True)
+    invoice_pdf_path = Column(String(500), nullable=True)  # saved store invoice PDF (relative to invoice dir)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

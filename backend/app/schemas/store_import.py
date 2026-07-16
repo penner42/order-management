@@ -30,6 +30,10 @@ class StoreOrderImportPayload(BaseModel):
         default=None,
         description="Order-level discount amount (positive number).",
     )
+    invoiceHtml: str | None = Field(
+        default=None,
+        description="Rendered HTML of the store's invoice page, converted to PDF on apply.",
+    )
 
 
 class StoreOrderDiffResponse(BaseModel):

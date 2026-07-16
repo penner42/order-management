@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 from app.auth import get_current_user
@@ -23,6 +24,7 @@ from app.models import (
 from app.models.user import get_default_app_user_id
 from app.schemas.order import OrderRead, OrderCreate, OrderUpdate, OrderPaymentMethodCreate, OrderListPage
 from app.schemas.item import ItemCreateNested
+from app.utils.invoices import invoice_pdf_path
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -428,6 +430,23 @@ def get_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(ge
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return order
+
+
+@router.get("/{order_id}/invoice")
+def get_order_invoice(order_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    """Download the saved store invoice PDF for an order."""
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order.invoice_pdf_path:
+        raise HTTPException(status_code=404, detail="No invoice saved for this order")
+
+    path = invoice_pdf_path(order.invoice_pdf_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Invoice file not found")
+
+    download_name = f"invoice-{order.store_order_number or order.id}.pdf"
+    return FileResponse(path, media_type="application/pdf", filename=download_name)
 
 
 @router.patch("/{order_id}", response_model=OrderRead)

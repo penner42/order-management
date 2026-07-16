@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "admin"
 
+    # Directory where imported store invoice PDFs are stored
+    invoice_dir: str = "data/invoices"
+
     # Browser extension signing (optional; auto-detects repo browser-extension/ if unset)
     browser_extension_dir: str = ""
     web_ext_api_key: str = ""

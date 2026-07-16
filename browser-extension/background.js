@@ -109,6 +109,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // ---------------------------------------------------------------------------
 
 const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
+const WALMART_INVOICE_HTML_STORAGE_KEY = "walmartInvoiceHtml";
 const COSTCO_ORDER_DETAIL_STORAGE_KEY = "costcoOrderDetailsGraphqlCapture";
 const WALMART_BULK_PORTS = new Set();
 const COSTCO_BULK_PORTS = new Set();
@@ -1003,7 +1004,10 @@ function normalizeWalmartOrderDetailPayloadFallback(payload, sourceUrl) {
 async function clearWalmartDetailStorage() {
   await new Promise((resolve) => {
     try {
-      chrome.storage.local.remove(WALMART_ORDER_DETAIL_STORAGE_KEY, () => resolve(null));
+      chrome.storage.local.remove(
+        [WALMART_ORDER_DETAIL_STORAGE_KEY, WALMART_INVOICE_HTML_STORAGE_KEY],
+        () => resolve(null)
+      );
     } catch {
       resolve(null);
     }
@@ -1029,6 +1033,34 @@ async function waitForWalmartDetail(orderNumber, timeoutMs) {
     await sleep(500);
   }
   throw new Error("Timed out waiting for Walmart order detail payload for " + String(orderNumber));
+}
+
+/** Best-effort wait for the captured invoice HTML of the given order. Returns null on timeout. */
+async function waitForWalmartInvoiceHtml(orderNumber, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const current = await new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(WALMART_INVOICE_HTML_STORAGE_KEY, (s) => {
+          resolve(s && s[WALMART_INVOICE_HTML_STORAGE_KEY] ? s[WALMART_INVOICE_HTML_STORAGE_KEY] : null);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+
+    if (
+      current &&
+      typeof current.html === "string" &&
+      current.html &&
+      current.url &&
+      String(current.url).includes(String(orderNumber))
+    ) {
+      return current.html;
+    }
+    await sleep(500);
+  }
+  return null;
 }
 
 async function clearCostcoDetailStorage() {
@@ -2098,6 +2130,20 @@ function attachBulkPortHandlers(port) {
 
           const payloadObj = await waitForWalmartDetail(orderNumber, 20000);
           const body = normalizeWalmartOrderDetailPayloadSafe(payloadObj.payload, payloadObj.url);
+
+          // The invoice HTML is captured a few seconds after the order detail
+          // payload (the page needs to finish rendering; worst case the capture
+          // polls up to ~15s for the order to appear). Missing invoice is
+          // non-fatal; the order imports without one.
+          try {
+            const invoiceHtml = await waitForWalmartInvoiceHtml(orderNumber, 20000);
+            if (invoiceHtml) {
+              body.invoiceHtml = invoiceHtml;
+            }
+          } catch {
+            // ignore
+          }
+
           collectedPayloads.push(body);
           port.postMessage({ type: "orderStatus", status: "ok", orderNumber });
         } catch (e) {

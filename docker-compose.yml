@@ -28,8 +28,10 @@ services:
       BROWSER_EXTENSION_DIR: /browser-extension
       WEB_EXT_API_KEY: ${WEB_EXT_API_KEY:-}
       WEB_EXT_API_SECRET: ${WEB_EXT_API_SECRET:-}
+      INVOICE_DIR: /data/invoices
     volumes:
       - ./browser-extension:/browser-extension
+      - invoice_data:/data/invoices
     depends_on:
       db:
         condition: service_healthy
@@ -100,3 +102,4 @@ services:
 
 volumes:
   pgdata:
+  invoice_data:

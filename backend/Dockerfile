@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Headless Chromium for invoice HTML -> PDF rendering (print-preview fidelity)
+RUN playwright install --with-deps chromium
+
 COPY . .
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1

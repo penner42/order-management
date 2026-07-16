@@ -5,7 +5,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { api } from '../api/client'
+import { api, getStoredToken } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
 import type {
@@ -245,6 +245,7 @@ export default function Orders() {
   const [savingTrackingId, setSavingTrackingId] = useState<number | null>(null)
   const [shipments, setShipments] = useState<Shipment[]>([])
   const [copyingId, setCopyingId] = useState<number | null>(null)
+  const [downloadingInvoiceId, setDownloadingInvoiceId] = useState<number | null>(null)
   const [stores, setStores] = useState<Store[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
@@ -1486,6 +1487,32 @@ export default function Orders() {
     }
   }
 
+  const downloadInvoice = async (o: Order) => {
+    if (downloadingInvoiceId != null) return
+    setDownloadingInvoiceId(o.id)
+    try {
+      const token = getStoredToken()
+      const res = await fetch(`/api/orders/${o.id}/invoice`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail || 'Failed to download invoice')
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `invoice-${o.store_order_number || o.id}.pdf`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setDownloadingInvoiceId(null)
+    }
+  }
+
   const visibleOrders = useMemo(
     () => orders.filter((o) => (o.items?.length ?? 0) > 0),
     [orders]
@@ -2554,6 +2581,20 @@ export default function Orders() {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                             </svg>
                           </button>
+                          {o.has_invoice && (
+                            <button
+                              type="button"
+                              title="Download invoice"
+                              onClick={() => downloadInvoice(o)}
+                              disabled={downloadingInvoiceId === o.id}
+                              className="p-2 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition disabled:opacity-50"
+                              aria-label="Download invoice"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                            </button>
+                          )}
                           {o.items && o.items.length > 0 && (
                             <button
                               type="button"
@@ -2817,6 +2858,20 @@ export default function Orders() {
                                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                                     </svg>
                                   </button>
+                                  {o.has_invoice && (
+                                    <button
+                                      type="button"
+                                      title="Download invoice"
+                                      onClick={() => downloadInvoice(o)}
+                                      disabled={downloadingInvoiceId === o.id}
+                                      className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition disabled:opacity-50"
+                                      aria-label="Download invoice"
+                                    >
+                                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                      </svg>
+                                    </button>
+                                  )}
                                   {o.items && o.items.length > 0 && (
                                     <button
                                       type="button"

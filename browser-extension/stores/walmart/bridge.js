@@ -2,6 +2,7 @@
   'use strict'
 
   const STORAGE_KEY = 'walmartOrderDetail'
+  const INVOICE_STORAGE_KEY = 'walmartInvoiceHtml'
   const EXTENSION_SOURCE = 'order-manager-walmart-extension'
 
   if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
@@ -9,17 +10,34 @@
   }
 
   // Listen for page-context Walmart messages and persist order detail payloads
+  // and captured invoice HTML.
   window.addEventListener('message', (event) => {
     try {
       const data = event.data
-      if (!data || data.source !== 'order-manager-walmart' || data.type !== 'orderDetail') return
-      const payload = data.payload
+      if (!data || data.source !== 'order-manager-walmart') return
       const url = data.url || (typeof document !== 'undefined' ? document.location.href : null)
-      if (!payload || !url) return
+      if (!url) return
 
-      chrome.storage.local.set({
-        [STORAGE_KEY]: { url, payload },
-      })
+      if (data.type === 'orderDetail') {
+        const payload = data.payload
+        if (!payload) return
+        chrome.storage.local.set({
+          [STORAGE_KEY]: { url, payload },
+        })
+        return
+      }
+
+      if (data.type === 'invoiceHtml') {
+        const html = data.payload && data.payload.html
+        if (!html || typeof html !== 'string') return
+        chrome.storage.local.set({
+          [INVOICE_STORAGE_KEY]: {
+            url,
+            html,
+            capturedAt: (data.payload && data.payload.capturedAt) || new Date().toISOString(),
+          },
+        })
+      }
     } catch {
       // never break the page
     }

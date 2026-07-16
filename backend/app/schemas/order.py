@@ -2,7 +2,7 @@
 from datetime import datetime
 from decimal import Decimal
 from app.schemas.common import TimestampsMixin
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 from app.schemas.item import ItemRead
 from app.schemas.payment_method import PaymentMethodRead
 from app.schemas.store import StoreRead, StoreAccountRead
@@ -68,6 +68,13 @@ class OrderRead(OrderBase, TimestampsMixin):
     buying_group: BuyingGroupRead | None = None
     items: list[ItemRead] = []
     order_payments: list[OrderPaymentMethodRead] = []
+    # Internal: read from the ORM object, excluded from responses (has_invoice is exposed instead).
+    invoice_pdf_path: str | None = Field(default=None, exclude=True)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def has_invoice(self) -> bool:
+        return bool(self.invoice_pdf_path)
 
     model_config = ConfigDict(from_attributes=True)
 

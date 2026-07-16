@@ -40,6 +40,7 @@ from app.schemas.store_import import (
     BulkImportSessionResponse,
     BulkImportSessionPayloads,
 )
+from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
 
 router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
 
@@ -1540,6 +1541,11 @@ def apply_store_order_direct(
                 )
             )
 
+    if payload.invoiceHtml:
+        filename = render_invoice_pdf(payload.invoiceHtml, order.id)
+        if filename:
+            order.invoice_pdf_path = filename
+
     db.commit()
     return DirectApplyResponse(order_id=order.id)
 
@@ -1567,8 +1573,17 @@ def create_bulk_import_session(
 def get_bulk_import_session(
     token: str,
 ):
-    """Resolve a bulk import session token into the original payloads."""
+    """Resolve a bulk import session token into the original payloads.
+
+    Also kicks off background PDF rendering for any captured invoices, so the
+    files are (usually) ready by the time the user applies each order.
+    """
     payloads = _bulk_sessions.get(token)
     if not payloads:
         raise HTTPException(status_code=404, detail="Bulk import session not found or expired.")
+
+    for payload in payloads:
+        if payload.invoiceHtml:
+            prewarm_invoice_pdf(payload.invoiceHtml)
+
     return BulkImportSessionPayloads(orders=payloads)

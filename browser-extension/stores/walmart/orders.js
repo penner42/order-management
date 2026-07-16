@@ -60,7 +60,394 @@
     currentUrl = newUrl || window.location.href
     ordersListCache = null
     orderDetailCache = null
+    cancelPendingInvoiceCapture()
     postEvent('reset', { url: currentUrl })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Invoice HTML capture (order detail page → rendered HTML for PDF conversion)
+  // ---------------------------------------------------------------------------
+
+  // Fallback delay when we cannot verify render readiness via the order number.
+  const INVOICE_CAPTURE_DELAY_MS = 2500
+  // Poll interval / cap while waiting for the order details to finish rendering.
+  const INVOICE_RENDER_POLL_MS = 500
+  const INVOICE_RENDER_WAIT_MAX_MS = 15000
+  // Keep the serialized document well under chrome.storage.local quotas.
+  const INVOICE_MAX_CSS_CHARS = 3 * 1024 * 1024
+  const INVOICE_MAX_HTML_CHARS = 6 * 1024 * 1024
+
+  let invoiceCaptureTimer = null
+  let invoiceCaptureGeneration = 0
+
+  function cancelPendingInvoiceCapture() {
+    invoiceCaptureGeneration++
+    try {
+      if (invoiceCaptureTimer != null) {
+        clearTimeout(invoiceCaptureTimer)
+        invoiceCaptureTimer = null
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function collectStylesheetCss() {
+    const parts = []
+    let total = 0
+    let sheets = []
+    try {
+      sheets = Array.from(document.styleSheets || [])
+    } catch {
+      sheets = []
+    }
+
+    for (let i = 0; i < sheets.length; i++) {
+      if (total >= INVOICE_MAX_CSS_CHARS) break
+      const sheet = sheets[i]
+      let text = null
+
+      let rules = null
+      try {
+        rules = sheet.cssRules
+      } catch {
+        rules = null
+      }
+
+      if (rules) {
+        try {
+          const chunks = []
+          for (let r = 0; r < rules.length; r++) {
+            chunks.push(rules[r].cssText)
+          }
+          text = chunks.join('\n')
+        } catch {
+          text = null
+        }
+      } else if (sheet.href) {
+        // Cross-origin stylesheet: fetch its text directly (page context).
+        try {
+          const res = await fetch(sheet.href, { credentials: 'omit' })
+          if (res && res.ok) {
+            text = await res.text()
+          }
+        } catch {
+          text = null
+        }
+      }
+
+      if (text) {
+        parts.push(text)
+        total += text.length
+      }
+    }
+
+    let css = parts.join('\n')
+    if (css.length > INVOICE_MAX_CSS_CHARS) {
+      css = css.slice(0, INVOICE_MAX_CSS_CHARS)
+    }
+    return css
+  }
+
+  function toAbsoluteUrl(value) {
+    try {
+      if (!value) return null
+      return new URL(value, window.location.href).href
+    } catch {
+      return null
+    }
+  }
+
+  function cleanInvoiceClone(clone) {
+    // Remove scripts, external resources we re-inline, and page chrome that has
+    // no place on an invoice.
+    const removeSelectors = [
+      'script',
+      'noscript',
+      'iframe',
+      'template',
+      'link',
+      'style',
+      'header',
+      'footer',
+      'nav',
+      '[role="navigation"]',
+      '[role="banner"]',
+      '[role="contentinfo"]',
+      '[data-testid="GlobalHeader"]',
+      '[data-testid="GlobalFooter"]',
+      '#omni-header',
+      '#omni-footer',
+    ]
+    for (let i = 0; i < removeSelectors.length; i++) {
+      let els = []
+      try {
+        els = clone.querySelectorAll(removeSelectors[i])
+      } catch {
+        els = []
+      }
+      for (let j = 0; j < els.length; j++) {
+        try {
+          els[j].remove()
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    // Absolutize image URLs so the backend renderer can fetch them, and drop
+    // srcset/lazy-loading attributes the renderer does not understand.
+    let imgs = []
+    try {
+      imgs = clone.querySelectorAll('img')
+    } catch {
+      imgs = []
+    }
+    for (let i = 0; i < imgs.length; i++) {
+      const img = imgs[i]
+      try {
+        const abs = toAbsoluteUrl(img.getAttribute('src'))
+        if (abs) {
+          img.setAttribute('src', abs)
+        } else {
+          img.remove()
+          continue
+        }
+        img.removeAttribute('srcset')
+        img.removeAttribute('sizes')
+        img.removeAttribute('loading')
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function findInvoiceContentRoot() {
+    // Walmart's own order content lives inside the main content region; other
+    // extensions inject their UI directly into <body>, so scoping the capture
+    // to this element keeps the invoice free of third-party popups/overlays.
+    try {
+      return (
+        document.querySelector('#maincontent') ||
+        document.querySelector('main') ||
+        document.querySelector('[role="main"]') ||
+        null
+      )
+    } catch {
+      return null
+    }
+  }
+
+  // Attributes commonly used by lazy-loading libraries to hold the real URL.
+  const INVOICE_LAZY_SRC_ATTRS = ['data-src', 'data-lazy-src', 'data-original', 'data-image-src']
+
+  function resolveLiveImageUrl(img) {
+    // currentSrc is what the browser actually chose (resolves srcset and
+    // JS lazy loaders that already ran).
+    try {
+      if (img.currentSrc && img.currentSrc.indexOf('data:') !== 0) return img.currentSrc
+    } catch {
+      // ignore
+    }
+    const attrs = ['src'].concat(INVOICE_LAZY_SRC_ATTRS)
+    for (let i = 0; i < attrs.length; i++) {
+      try {
+        const value = img.getAttribute(attrs[i])
+        if (value && value.indexOf('data:') !== 0) {
+          const abs = toAbsoluteUrl(value)
+          if (abs) return abs
+        }
+      } catch {
+        // ignore
+      }
+    }
+    // Last resort: an inline data URI (could be a real image, not a placeholder).
+    try {
+      const src = img.getAttribute('src')
+      if (src && src.indexOf('data:') === 0) return src
+    } catch {
+      // ignore
+    }
+    return null
+  }
+
+  function hydrateCloneImages(liveRoot, cloneRoot) {
+    // Copy the browser-resolved image URLs onto the clone. Must run before
+    // cleanInvoiceClone() removes elements, while live/clone trees still have
+    // identical structure (same querySelectorAll order).
+    let liveImgs = []
+    let cloneImgs = []
+    try {
+      liveImgs = liveRoot.querySelectorAll('img')
+      cloneImgs = cloneRoot.querySelectorAll('img')
+    } catch {
+      return
+    }
+    const n = Math.min(liveImgs.length, cloneImgs.length)
+    for (let i = 0; i < n; i++) {
+      try {
+        const url = resolveLiveImageUrl(liveImgs[i])
+        if (url) cloneImgs[i].setAttribute('src', url)
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function escapeHtmlAttr(value) {
+    return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+  }
+
+  async function captureInvoiceHtml() {
+    if (!isOrderDetailPage()) return null
+
+    const liveRoot = findInvoiceContentRoot() || document.body
+    if (!liveRoot) return null
+
+    // Images are NOT waited on here: the capture only resolves their URLs
+    // (currentSrc / lazy-loader attributes); the backend's background Chromium
+    // render fetches and waits for the actual image data.
+    let contentClone = null
+    try {
+      contentClone = liveRoot.cloneNode(true)
+    } catch {
+      return null
+    }
+
+    try {
+      hydrateCloneImages(liveRoot, contentClone)
+    } catch {
+      // ignore
+    }
+
+    try {
+      cleanInvoiceClone(contentClone)
+    } catch {
+      // best effort; continue with whatever we have
+    }
+
+    let css = ''
+    try {
+      css = await collectStylesheetCss()
+    } catch {
+      css = ''
+    }
+
+    // Rebuild a minimal document: html/body classes carried over so Walmart's
+    // CSS selectors still match, base href so relative URLs in CSS resolve.
+    let htmlClass = ''
+    let bodyClass = ''
+    try {
+      htmlClass = (document.documentElement && document.documentElement.getAttribute('class')) || ''
+    } catch {
+      // ignore
+    }
+    try {
+      bodyClass = (document.body && document.body.getAttribute('class')) || ''
+    } catch {
+      // ignore
+    }
+
+    let contentHtml = null
+    try {
+      contentHtml = contentClone.outerHTML
+    } catch {
+      return null
+    }
+
+    function assemble(includeCss) {
+      return (
+        '<!DOCTYPE html>\n' +
+        '<html class="' + escapeHtmlAttr(htmlClass) + '">' +
+        '<head>' +
+        '<meta charset="utf-8">' +
+        '<base href="https://www.walmart.com/">' +
+        (includeCss && css ? '<style>' + css + '</style>' : '') +
+        '</head>' +
+        '<body class="' + escapeHtmlAttr(bodyClass) + '">' +
+        contentHtml +
+        '</body></html>'
+      )
+    }
+
+    let html = assemble(true)
+    if (html.length > INVOICE_MAX_HTML_CHARS) {
+      // Retry without inlined CSS rather than dropping the capture entirely.
+      html = assemble(false)
+      if (html.length > INVOICE_MAX_HTML_CHARS) return null
+    }
+
+    return html
+  }
+
+  function getExpectedOrderNumber() {
+    try {
+      const order = orderDetailCache && orderDetailCache.order
+      if (order && order.id != null) return String(order.id)
+    } catch {
+      // ignore
+    }
+    try {
+      const m = (window.location.pathname || '').match(/\/orders\/([^/]+)/)
+      if (m && m[1]) return decodeURIComponent(m[1])
+    } catch {
+      // ignore
+    }
+    return null
+  }
+
+  function scheduleInvoiceCapture() {
+    if (!isOrderDetailPage()) return
+    cancelPendingInvoiceCapture()
+    const generation = invoiceCaptureGeneration
+    const urlAtSchedule = currentUrl
+    const orderNumber = getExpectedOrderNumber()
+    const start = Date.now()
+
+    function attempt() {
+      invoiceCaptureTimer = null
+      // Ignore attempts scheduled before an SPA navigation / newer capture.
+      if (generation !== invoiceCaptureGeneration || urlAtSchedule !== currentUrl) return
+
+      const elapsed = Date.now() - start
+      let rendered = false
+      try {
+        // Compare digits only: the page displays the order number with
+        // separators (e.g. "2000131-59543210") that the raw id lacks.
+        const root = findInvoiceContentRoot()
+        const wantedDigits = orderNumber ? String(orderNumber).replace(/\D+/g, '') : ''
+        rendered = !!(
+          wantedDigits &&
+          root &&
+          root.textContent &&
+          root.textContent.replace(/\D+/g, '').indexOf(wantedDigits) >= 0
+        )
+      } catch {
+        rendered = false
+      }
+
+      const ready =
+        rendered ||
+        (!orderNumber && elapsed >= INVOICE_CAPTURE_DELAY_MS) ||
+        elapsed >= INVOICE_RENDER_WAIT_MAX_MS
+
+      if (!ready) {
+        invoiceCaptureTimer = setTimeout(attempt, INVOICE_RENDER_POLL_MS)
+        return
+      }
+
+      captureInvoiceHtml()
+        .then((html) => {
+          if (!html) return
+          if (generation !== invoiceCaptureGeneration || urlAtSchedule !== currentUrl) return
+          postEvent('invoiceHtml', { html, capturedAt: new Date().toISOString() })
+        })
+        .catch(() => {
+          // never break the page
+        })
+    }
+
+    invoiceCaptureTimer = setTimeout(attempt, INVOICE_RENDER_POLL_MS)
   }
 
 
@@ -182,6 +569,7 @@
         if (extracted) {
           orderDetailCache = extracted
           postEvent('orderDetail', extracted)
+          scheduleInvoiceCapture()
         }
       }
     } catch {
@@ -343,6 +731,7 @@
 
       orderDetailCache = payload
       postEvent('orderDetail', payload)
+      scheduleInvoiceCapture()
     } catch {
       // ignore
     }

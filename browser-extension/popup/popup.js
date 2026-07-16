@@ -2,6 +2,7 @@
 let lastOrderDetails = null;
 
 const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
+const WALMART_INVOICE_HTML_STORAGE_KEY = "walmartInvoiceHtml";
 const COSTCO_ORDER_DETAIL_STORAGE_KEY = "costcoOrderDetailsGraphqlCapture";
 const WALMART_BULK_JOB_STORAGE_KEY = "walmartBulkJob";
 const COSTCO_BULK_JOB_STORAGE_KEY = "costcoBulkJob";
@@ -785,7 +786,7 @@ function renderOrderDetails(payload, resultsEl) {
           resultsEl.textContent = "Opening Order Manager…";
 
           chrome.storage.local.get(
-            WALMART_ORDER_DETAIL_STORAGE_KEY,
+            [WALMART_ORDER_DETAIL_STORAGE_KEY, WALMART_INVOICE_HTML_STORAGE_KEY],
             (s) => {
               const current = s && s[WALMART_ORDER_DETAIL_STORAGE_KEY];
               if (!current || current.url !== url || !current.payload) {
@@ -793,6 +794,12 @@ function renderOrderDetails(payload, resultsEl) {
                   '<span class="error">No saved order data for this page.</span>';
                 return;
               }
+
+              const storedInvoice = s && s[WALMART_INVOICE_HTML_STORAGE_KEY];
+              const invoiceHtml =
+                storedInvoice && storedInvoice.url === url && typeof storedInvoice.html === "string"
+                  ? storedInvoice.html
+                  : null;
 
               getOrderManagerApiBaseUrl((baseUrl) => {
                 if (!baseUrl) {
@@ -826,6 +833,10 @@ function renderOrderDetails(payload, resultsEl) {
                     escapeHtml(String(e && e.message ? e.message : e)) +
                     "</span>";
                   return;
+                }
+
+                if (invoiceHtml) {
+                  body.invoiceHtml = invoiceHtml;
                 }
 
                 try {

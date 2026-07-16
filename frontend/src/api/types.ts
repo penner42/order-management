@@ -134,6 +134,7 @@ export interface Order {
   order_discount: string
   insurance_cost: string
   notes: string | null
+  has_invoice: boolean
   created_at: string
   updated_at?: string
   store?: Store
