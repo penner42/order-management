@@ -14,6 +14,7 @@ import {
   getDefaultItemPayout,
   getDefaultOrderTotal,
 } from '../utils/importDefaults'
+import { stripIgnoredWalmartImportSlices } from '../utils/stripIgnoredWalmartImport'
 
 interface NormalizedItem {
   logicalItemId?: string | null
@@ -173,7 +174,7 @@ function decodeHashPayload(): NormalizedPayload | null {
     const json = decodeURIComponent(escape(atob(hash)))
     const data = JSON.parse(json) as NormalizedPayload
     if (!data || !data.externalOrder) return null
-    return data
+    return stripIgnoredWalmartImportSlices(data)
   } catch {
     return null
   }

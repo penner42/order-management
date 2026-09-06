@@ -497,6 +497,13 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
     const shipment = g.shipment || {};
     const subtotal = g.subtotal || {};
 
+    if (
+      typeof shipment.trackingNumber === "string" &&
+      shipment.trackingNumber.trim().toLowerCase() === "sent via email"
+    ) {
+      continue;
+    }
+
     const shipmentEntry = {
       shipmentId: shipment.id || null,
       groupId: g.id || null,
@@ -546,6 +553,12 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
   for (let gi = 0; gi < groups.length; gi++) {
     const g = groups[gi] || {};
     const shipment = g.shipment || {};
+    if (
+      typeof shipment.trackingNumber === "string" &&
+      shipment.trackingNumber.trim().toLowerCase() === "sent via email"
+    ) {
+      continue;
+    }
     const shipmentId = shipment.id || null;
     // Prefer detailed items from categories (have itemPrice/unitPrice); fall back to group.items
     let groupItems = [];

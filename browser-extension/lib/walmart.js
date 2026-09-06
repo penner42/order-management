@@ -83,6 +83,14 @@
     })
   }
 
+  // Walmart uses this placeholder for digital / email delivery — ignore entirely on import.
+  function isIgnoredWalmartTracking(trackingNumber) {
+    return (
+      typeof trackingNumber === 'string' &&
+      trackingNumber.trim().toLowerCase() === 'sent via email'
+    )
+  }
+
   function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
     if (!payload || typeof payload !== 'object') {
       throw new Error('Missing Walmart order payload.')
@@ -134,6 +142,10 @@
       const shipment = g.shipment || {}
       const subtotal = g.subtotal || {}
 
+      if (isIgnoredWalmartTracking(shipment.trackingNumber)) {
+        continue
+      }
+
       shipments.push({
         shipmentId: shipment.id || null,
         groupId: g.id || null,
@@ -180,6 +192,9 @@
     for (let gi = 0; gi < groups.length; gi++) {
       const g = groups[gi] || {}
       const shipment = g.shipment || {}
+      if (isIgnoredWalmartTracking(shipment.trackingNumber)) {
+        continue
+      }
       const shipmentId = shipment.id || null
 
       let groupItems = []

@@ -203,6 +203,76 @@ def _resolve_store_name(store_raw: str) -> str:
     return name
 
 
+_WALMART_IGNORED_TRACKING = "sent via email"
+
+
+def _is_ignored_walmart_tracking(tracking_raw: Any) -> bool:
+    """True for Walmart's email-delivery placeholder tracking value."""
+    if not isinstance(tracking_raw, str):
+        return False
+    return tracking_raw.strip().lower() == _WALMART_IGNORED_TRACKING
+
+
+def _strip_ignored_walmart_import_slices(normalized: dict[str, Any]) -> dict[str, Any]:
+    """Remove Walmart shipments/items with tracking 'Sent via email'.
+
+    These are digital/email deliveries and should not appear on import, be
+    persisted, or count as changes to existing orders.
+    """
+    store = (normalized.get("store") or "").strip().lower()
+    if store != "walmart":
+        return normalized
+
+    shipments = normalized.get("shipments") or []
+    ignored_shipment_ids: set[str] = set()
+    kept_shipments: list[Any] = []
+    for shipment in shipments:
+        if not isinstance(shipment, dict):
+            continue
+        if _is_ignored_walmart_tracking(shipment.get("trackingNumber")):
+            sid = shipment.get("shipmentId")
+            if sid is not None and str(sid).strip():
+                ignored_shipment_ids.add(str(sid).strip())
+            continue
+        kept_shipments.append(shipment)
+
+    items = normalized.get("items") or []
+    kept_items: list[Any] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_ships = item.get("shipments") or []
+        if any(
+            isinstance(slice_, dict)
+            and slice_.get("shipmentId") is not None
+            and str(slice_.get("shipmentId")).strip() in ignored_shipment_ids
+            for slice_ in item_ships
+        ):
+            continue
+        kept_items.append(item)
+
+    if len(kept_shipments) == len(shipments) and len(kept_items) == len(items):
+        return normalized
+
+    out = dict(normalized)
+    out["shipments"] = kept_shipments
+    out["items"] = kept_items
+    return out
+
+
+def _sanitize_store_import_payload_dict(payload: StoreOrderImportPayload) -> dict[str, Any]:
+    """Dump a payload to a dict and strip ignored Walmart email-delivery slices."""
+    return _strip_ignored_walmart_import_slices(payload.model_dump(mode="json"))
+
+
+def _sanitize_store_import_payload(
+    payload: StoreOrderImportPayload,
+) -> StoreOrderImportPayload:
+    """Return a payload with ignored Walmart email-delivery slices removed."""
+    return StoreOrderImportPayload.model_validate(
+        _sanitize_store_import_payload_dict(payload)
+    )
+
 def _normalize_tracking_for_store(
     store_name: str,
     external_order_id: str | None,
@@ -1355,7 +1425,7 @@ def compute_order_diff(
 ):
     """Read-only diff: compare an incoming payload against an existing order."""
     external_order_id, _ = _parse_external_order_fields(data)
-    normalized: dict[str, Any] = data.model_dump(mode="json")
+    normalized: dict[str, Any] = _sanitize_store_import_payload_dict(data)
 
     linked_order: Order | None = (
         db.query(Order)
@@ -1383,7 +1453,7 @@ def compute_order_diff_bulk(
     for p in orders:
         external_order_id, _ = _parse_external_order_fields(p)
         external_ids.append(external_order_id)
-        normalized_payloads.append(p.model_dump(mode="json"))
+        normalized_payloads.append(_sanitize_store_import_payload_dict(p))
 
     linked_orders: list[Order] = (
         db.query(Order).filter(Order.store_order_number.in_(external_ids)).all()
@@ -1462,7 +1532,7 @@ def apply_store_order_direct(
     """Create or update an order directly from a normalized payload (no staging row)."""
     payload = body.payload
     external_order_id, _ = _parse_external_order_fields(payload)
-    normalized: dict[str, Any] = payload.model_dump(mode="json")
+    normalized: dict[str, Any] = _sanitize_store_import_payload_dict(payload)
 
     store_account_id = body.store_account_id
     if store_account_id is not None:
@@ -1565,7 +1635,31 @@ def create_bulk_import_session(
     # Generate a short, URL-safe token. This is not security-critical; it only
     # references in-memory data and still requires a logged-in user to consume.
     token = secrets.token_urlsafe(16)
-    _bulk_sessions[token] = body.orders
+    sanitized: list[StoreOrderImportPayload] = []
+    for order in body.orders:
+        cleaned = _sanitize_store_import_payload(order)
+        # Drop Walmart orders that only contained ignored email-delivery slices.
+        store = (cleaned.store or "").strip().lower()
+        if store == "walmart":
+            items = cleaned.items or []
+            shipments = cleaned.shipments or []
+            original = order.model_dump(mode="json")
+            original_items = original.get("items") or []
+            original_shipments = original.get("shipments") or []
+            stripped_something = len(items) < len(original_items) or len(shipments) < len(
+                original_shipments
+            )
+            if stripped_something and not items and not shipments:
+                continue
+        sanitized.append(cleaned)
+
+    if not sanitized:
+        raise HTTPException(
+            status_code=400,
+            detail="No importable orders after filtering ignored Walmart email deliveries.",
+        )
+
+    _bulk_sessions[token] = sanitized
     return BulkImportSessionResponse(token=token)
 
 

@@ -5,6 +5,7 @@ import type { BuyingGroup, PaymentMethod, Store, StoreAccount } from '../api/typ
 import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
 import { matchStoreAccountIdForImport } from '../utils/storeAccountMatch'
 import { getDefaultItemPayout, getDefaultOrderTotal } from '../utils/importDefaults'
+import { stripIgnoredWalmartImportSlices } from '../utils/stripIgnoredWalmartImport'
 
 type NormalizedPayload = any
 
@@ -377,7 +378,9 @@ export default function ImportReviewBulk() {
     api
       .get<{ orders: NormalizedPayload[] }>(`/integrations/stores/orders/bulk-session/${encodeURIComponent(token)}`)
       .then((res) => {
-        const orders = Array.isArray(res.orders) ? res.orders : []
+        const orders = (Array.isArray(res.orders) ? res.orders : []).map((order) =>
+          stripIgnoredWalmartImportSlices(order)
+        )
         setPayloads(orders)
         if (orders.length === 0) {
           setDiffs({})
