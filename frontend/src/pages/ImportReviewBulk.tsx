@@ -4,7 +4,11 @@ import { api } from '../api/client'
 import type { BuyingGroup, PaymentMethod, Store, StoreAccount } from '../api/types'
 import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
 import { matchStoreAccountIdForImport } from '../utils/storeAccountMatch'
-import { getDefaultItemPayout, getDefaultOrderTotal } from '../utils/importDefaults'
+import {
+  formatImportDefaultAmount,
+  getDefaultItemPayout,
+  getDefaultOrderTotal,
+} from '../utils/importDefaults'
 import { stripIgnoredWalmartImportSlices } from '../utils/stripIgnoredWalmartImport'
 
 type NormalizedPayload = any
@@ -363,12 +367,14 @@ export default function ImportReviewBulk() {
   const [selectedBuyingGroupIdByIndex, setSelectedBuyingGroupIdByIndex] = useState<Record<number, number | null>>({})
   const [selectedAccountIdByIndex, setSelectedAccountIdByIndex] = useState<Record<number, number | null>>({})
   const [selectedPaymentMethodIdByIndex, setSelectedPaymentMethodIdByIndex] = useState<Record<number, number | null>>({})
+  const [itemPayoutsByIndex, setItemPayoutsByIndex] = useState<Record<number, string[]>>({})
   const [displayIndexOrder, setDisplayIndexOrder] = useState<number[] | null>(null)
 
   useEffect(() => {
     if (!token) {
       setLoading(false)
       setPayloads([])
+      setItemPayoutsByIndex({})
       setDisplayIndexOrder(null)
       return
     }
@@ -382,6 +388,22 @@ export default function ImportReviewBulk() {
           stripIgnoredWalmartImportSlices(order)
         )
         setPayloads(orders)
+        setItemPayoutsByIndex(
+          Object.fromEntries(
+            orders.map((order, orderIdx) => {
+              const items = Array.isArray((order as any).items)
+                ? ((order as any).items as NormalizedItem[])
+                : []
+              return [
+                orderIdx,
+                items.map((item) => {
+                  const payout = getDefaultItemPayout(item)
+                  return payout != null ? formatImportDefaultAmount(payout) : ''
+                }),
+              ]
+            })
+          )
+        )
         if (orders.length === 0) {
           setDiffs({})
           return
@@ -477,6 +499,15 @@ export default function ImportReviewBulk() {
       items[itemIndex] = updatedItem
       out[orderIndex] = { ...(order as any), items }
       return out
+    })
+  }
+
+  function setItemPayout(orderIndex: number, itemIndex: number, value: string) {
+    setItemPayoutsByIndex((prev) => {
+      const current = prev[orderIndex] ? [...prev[orderIndex]] : []
+      while (current.length <= itemIndex) current.push('')
+      current[itemIndex] = value
+      return { ...prev, [orderIndex]: current }
     })
   }
 
@@ -604,7 +635,13 @@ export default function ImportReviewBulk() {
       const storeAccountId = selectedAccountIdByIndex[index] ?? null
       const paymentMethodId = selectedPaymentMethodIdByIndex[index] ?? null
       const items = Array.isArray((payload as any).items) ? ((payload as any).items as NormalizedItem[]) : []
-      const itemPayouts = items.map((item) => getDefaultItemPayout(item))
+      const payoutStrings = itemPayoutsByIndex[index] ?? []
+      const itemPayouts = items.map((_, itemIdx) => {
+        const t = (payoutStrings[itemIdx] ?? '').trim()
+        if (!t) return null
+        const n = Number(t)
+        return Number.isFinite(n) ? n : null
+      })
       const orderTotal = getDefaultOrderTotal(payload)
       await api.post('/integrations/stores/orders/apply', {
         payload,
@@ -1046,6 +1083,8 @@ export default function ImportReviewBulk() {
                           <col className="w-24" />
                           <col className="w-24" />
                           <col className="w-24" />
+                          <col className="w-24" />
+                          <col className="w-24" />
                         </colgroup>
                         <thead>
                           <tr className="bg-brand-100/50 dark:bg-gray-800/70 text-left border-b border-brand-200 dark:border-gray-700">
@@ -1073,13 +1112,19 @@ export default function ImportReviewBulk() {
                             <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap text-right">
                               Line total
                             </th>
+                            <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap text-right">
+                              Unit Payout
+                            </th>
+                            <th className="py-1.5 px-2 font-medium text-ink-muted w-0 whitespace-nowrap text-right">
+                              Total Payout
+                            </th>
                           </tr>
                         </thead>
                         <tbody>
                           {items.length === 0 ? (
                             <tr>
                               <td
-                                colSpan={8}
+                                colSpan={10}
                                 className="py-3 px-2 text-center text-ink-muted dark:text-gray-400"
                               >
                                 No items in this order.
@@ -1116,6 +1161,15 @@ export default function ImportReviewBulk() {
                                 item.pricing?.lineTotal ??
                                 item.pricing?.linePrice ??
                                 (unitCost != null ? unitCost * (qty ?? 1) : null)
+                              const unitPayoutRaw = (itemPayoutsByIndex[idx]?.[itemIdx] ?? '').trim()
+                              const unitPayoutNum = unitPayoutRaw ? Number(unitPayoutRaw) : NaN
+                              const unitPayoutValid = Number.isFinite(unitPayoutNum)
+                              const lineTotalPayout =
+                                unitPayoutValid && typeof qty === 'number'
+                                  ? unitPayoutNum * qty
+                                  : unitPayoutValid
+                                    ? unitPayoutNum
+                                    : null
                               const shipSlices = item.shipments ?? []
                               const firstShipment = shipSlices[0]
                                 ? shipmentsById.get(shipSlices[0].shipmentId ?? '')
@@ -1270,6 +1324,20 @@ export default function ImportReviewBulk() {
                                   <td className="py-1.5 px-2 text-right font-mono text-xs md:text-sm tabular-nums whitespace-nowrap">
                                     {fmtMoney(lineTotal)}
                                   </td>
+                                  <td className="py-1.5 px-2 text-right">
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      placeholder="—"
+                                      value={itemPayoutsByIndex[idx]?.[itemIdx] ?? ''}
+                                      onChange={(e) => setItemPayout(idx, itemIdx, e.target.value)}
+                                      className="w-20 text-right font-mono text-xs md:text-sm rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-0.5 text-ink dark:text-gray-200 tabular-nums"
+                                      aria-label={`Unit payout for ${(item.name || '').slice(0, 30)}`}
+                                    />
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right font-mono text-xs md:text-sm tabular-nums whitespace-nowrap">
+                                    {lineTotalPayout != null ? fmtMoney(lineTotalPayout) : '—'}
+                                  </td>
                                 </tr>
                               )
                             })
@@ -1319,6 +1387,14 @@ export default function ImportReviewBulk() {
 
                               const orderTotal = itemsSubtotal + orderShipping + orderTax - orderDiscount
 
+                              const payoutsTotal = items.reduce((sum, it, i) => {
+                                const u = (itemPayoutsByIndex[idx]?.[i] ?? '').trim()
+                                const n = u ? Number(u) : NaN
+                                const q = (it as any)?.quantities?.ordered
+                                const qtyN = typeof q === 'number' && Number.isFinite(q) ? q : 1
+                                return sum + (Number.isFinite(n) ? n * qtyN : 0)
+                              }, 0)
+
                               const rowClass =
                                 'bg-brand-50/60 dark:bg-gray-900/50 border-t border-brand-200 dark:border-gray-700'
 
@@ -1331,6 +1407,8 @@ export default function ImportReviewBulk() {
                                     <td className="py-2 px-2 text-right font-mono text-xs md:text-sm tabular-nums whitespace-nowrap">
                                       {fmtMoney(itemsSubtotal)}
                                     </td>
+                                    <td />
+                                    <td />
                                   </tr>
                                   <tr className={rowClass}>
                                     <td colSpan={7} className="py-2 px-2 text-right text-xs text-ink-muted dark:text-gray-400">
@@ -1339,6 +1417,8 @@ export default function ImportReviewBulk() {
                                     <td className="py-2 px-2 text-right font-mono text-xs md:text-sm tabular-nums whitespace-nowrap">
                                       {orderDiscount > 0 ? `−${fmtMoney(orderDiscount)}` : '—'}
                                     </td>
+                                    <td />
+                                    <td />
                                   </tr>
                                   <tr className={rowClass}>
                                     <td colSpan={7} className="py-2 px-2 text-right text-xs font-semibold text-ink dark:text-gray-200">
@@ -1346,6 +1426,10 @@ export default function ImportReviewBulk() {
                                     </td>
                                     <td className="py-2 px-2 text-right font-mono text-xs md:text-sm font-semibold tabular-nums whitespace-nowrap text-ink dark:text-gray-100">
                                       {fmtMoney(orderTotal)}
+                                    </td>
+                                    <td />
+                                    <td className="py-2 px-2 text-right font-mono text-xs md:text-sm font-semibold tabular-nums whitespace-nowrap text-ink dark:text-gray-100">
+                                      {fmtMoney(payoutsTotal)}
                                     </td>
                                   </tr>
                                 </>
