@@ -23,19 +23,25 @@ function longestMatchNameLength(group: BuyingGroup, addressNameLower: string): n
   }, 0)
 }
 
-/** Walmart-style: shipping full name contains a buying group name or alias. */
+/** Walmart/Amazon-style: address fields contain a buying group name or alias. */
 export function matchBuyingGroupByAddressName(
-  addressName: string | null | undefined,
+  addressFields: Array<string | null | undefined> | string | null | undefined,
   groups: BuyingGroup[]
 ): number | null {
   if (!groups.length) return null
-  const addressNameLower = normalizeNameForMatching(addressName)
-  if (!addressNameLower) return null
+  const fields = Array.isArray(addressFields) ? addressFields : [addressFields]
+  const normalizedFields = fields
+    .map((field) => normalizeNameForMatching(field))
+    .filter(Boolean)
+  if (normalizedFields.length === 0) return null
 
   let best: BuyingGroup | null = null
   let bestLength = 0
   for (const group of groups) {
-    const matchLength = longestMatchNameLength(group, addressNameLower)
+    const matchLength = normalizedFields.reduce(
+      (max, field) => Math.max(max, longestMatchNameLength(group, field)),
+      0
+    )
     if (matchLength > bestLength) {
       best = group
       bestLength = matchLength
@@ -44,7 +50,7 @@ export function matchBuyingGroupByAddressName(
   return best?.id ?? null
 }
 
-/** Costco-style: shipping first/last/full name exactly matches a buying group name or alias. */
+/** Costco-style: shipping name/address fields exactly match a buying group name or alias. */
 export function matchBuyingGroupByExactNames(
   names: Array<string | null | undefined>,
   groups: BuyingGroup[]
@@ -64,6 +70,19 @@ export function matchBuyingGroupByExactNames(
   return null
 }
 
+function shippingAddressMatchFields(
+  shippingAddress: Record<string, unknown> | null
+): Array<string | null | undefined> {
+  if (!shippingAddress) return []
+  return [
+    shippingAddress.fullName as string | null | undefined,
+    shippingAddress.firstName as string | null | undefined,
+    shippingAddress.lastName as string | null | undefined,
+    shippingAddress.addressLine1 as string | null | undefined,
+    shippingAddress.addressLine2 as string | null | undefined,
+  ]
+}
+
 export function autoMatchBuyingGroupIdForImport(
   payload: { store?: string | null; shippingAddress?: Record<string, unknown> | null },
   groups: BuyingGroup[]
@@ -74,28 +93,19 @@ export function autoMatchBuyingGroupIdForImport(
     .trim()
     .toLowerCase()
   const shippingAddress = payload.shippingAddress ?? null
+  const addressFields = shippingAddressMatchFields(shippingAddress)
 
   if (storeName === 'costco') {
-    return matchBuyingGroupByExactNames(
+    return matchBuyingGroupByExactNames(addressFields, groups)
+  }
+
+  if (storeName === 'walmart' || storeName === 'amazon') {
+    return matchBuyingGroupByAddressName(
       [
-        shippingAddress?.firstName as string | null | undefined,
-        shippingAddress?.lastName as string | null | undefined,
         shippingAddress?.fullName as string | null | undefined,
+        shippingAddress?.addressLine1 as string | null | undefined,
+        shippingAddress?.addressLine2 as string | null | undefined,
       ],
-      groups
-    )
-  }
-
-  if (storeName === 'walmart') {
-    return matchBuyingGroupByAddressName(
-      shippingAddress?.fullName as string | null | undefined,
-      groups
-    )
-  }
-
-  if (storeName === 'amazon') {
-    return matchBuyingGroupByAddressName(
-      shippingAddress?.fullName as string | null | undefined,
       groups
     )
   }

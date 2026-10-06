@@ -323,7 +323,7 @@ export default function ImportReview() {
     }
   }, [payload, flattenedPaymentMethods, paymentAmount])
 
-  // Auto-match buying group by address name or alias
+  // Auto-match buying group by address name, address lines, or alias
   useEffect(() => {
     if (!payload || buyingGroups.length === 0) return
     const matchId = autoMatchBuyingGroupIdForImport(payload, buyingGroups)

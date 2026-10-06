@@ -145,7 +145,7 @@ export default function BuyingGroups() {
     <div>
       <h1 className="text-2xl font-semibold text-ink mb-2">Buying groups</h1>
       <p className="text-sm text-ink-muted mb-8">
-        Add aliases to match shipping names on Walmart and Costco imports.
+        Add aliases to match shipping names and address lines on store imports.
       </p>
       <form onSubmit={create} className="flex gap-2 mb-6">
         <input
