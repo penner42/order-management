@@ -52,7 +52,7 @@ npm run sign:chrome    # → dist/order-manager-<version>.crx
 npm run sign:firefox   # → dist/order_manager_browser_integration-<version>.xpi
 ```
 
-`web-ext` loads credentials from `.env` automatically when present.
+`web-ext` loads credentials from `.env` automatically when present. Packaging exclusions live in `web-ext-config.mjs` (`web-ext` does not read `.gitignore`-style ignore files).
 
 ### Install signed builds
 

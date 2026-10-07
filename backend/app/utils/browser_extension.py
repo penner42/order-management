@@ -28,12 +28,16 @@ _SKIP_FILE_NAMES = {
     ".build-meta.json",
     ".env",
     ".env.example",
+    ".amo-upload-uuid",
+    ".web-extension-id",
     ".webignore",
+    ".web-extignore",
     "package.json",
     "package-lock.json",
     "README.md",
+    "order.json",
 }
-_SKIP_FILE_GLOBS = ("*.crx", "*.xpi")
+_SKIP_FILE_GLOBS = ("*.crx", "*.xpi", "*.zip")
 
 _lock = threading.Lock()
 _state: dict[str, Any] = {
@@ -240,18 +244,36 @@ def _should_download_firefox_from_amo(output: str) -> bool:
     lowered = output.lower()
     # AMO often returns: 'Version 0.1.22 already exists.' — the number sits
     # between "version" and "already exists", so require a looser match.
+    # Throttled re-submits after a restart should also resume the approval wait.
     return (
         "already exists" in lowered
         or "this upload has already been submitted" in lowered
         or "(status: 409)" in lowered
         or ("conflict" in lowered and "version" in lowered)
+        or "request was throttled" in lowered
     )
 
 
-def _download_firefox_artifact_from_amo(ext_dir: Path, version: str) -> str:
+# Match web-ext defaults: poll until file.status == public (up to 15 minutes).
+_AMO_APPROVAL_TIMEOUT_S = 900
+_AMO_APPROVAL_POLL_S = 5
+
+
+def _amo_firefox_version(ext_dir: Path, version: str) -> dict[str, Any] | None:
     guid = _firefox_addon_guid(ext_dir)
     version_url = f"{_AMO_API_BASE}/addons/addon/{guid}/versions/{version}/"
-    version_data = _amo_request(version_url)
+    try:
+        return _amo_request(version_url)
+    except RuntimeError as exc:
+        if "(404)" in str(exc):
+            return None
+        raise
+
+
+def _download_firefox_artifact_from_amo(ext_dir: Path, version: str) -> str:
+    version_data = _amo_firefox_version(ext_dir, version)
+    if version_data is None:
+        raise RuntimeError(f"AMO has no Firefox version {version}")
     file_info = version_data.get("file") or {}
     download_url = file_info.get("url")
     if not download_url:
@@ -261,8 +283,73 @@ def _download_firefox_artifact_from_amo(ext_dir: Path, version: str) -> str:
     dest = ext_dir / "dist" / filename
     dest.parent.mkdir(parents=True, exist_ok=True)
     _amo_download(download_url, dest)
-    logger.info("Downloaded Firefox extension version %s from AMO", version)
+    logger.info(
+        "Downloaded Firefox extension version %s from AMO (status=%s)",
+        version,
+        file_info.get("status"),
+    )
     return filename
+
+
+def _clear_amo_upload_uuid(ext_dir: Path) -> None:
+    path = ext_dir / ".amo-upload-uuid"
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError:
+            logger.warning("Could not remove %s", path)
+
+
+def _wait_and_download_signed_firefox(
+    ext_dir: Path,
+    version: str,
+    *,
+    timeout_s: float = _AMO_APPROVAL_TIMEOUT_S,
+    poll_s: float = _AMO_APPROVAL_POLL_S,
+) -> str:
+    """Poll AMO until the version is public, then download a META-INF-signed XPI.
+
+    web-ext does this wait itself, but if the backend restarts mid-approval the
+    version already exists as ``unreviewed``. Re-running sign then 409s and we
+    must resume waiting instead of downloading the unsigned zip.
+    """
+    deadline = time.monotonic() + timeout_s
+    last_status: str | None = None
+    while True:
+        version_data = _amo_firefox_version(ext_dir, version)
+        if version_data is None:
+            raise RuntimeError(f"AMO has no Firefox version {version}")
+
+        file_info = version_data.get("file") or {}
+        last_status = str(file_info.get("status") or "") or None
+        download_url = file_info.get("url")
+
+        if last_status in {"disabled", "rejected", "unavailable"}:
+            raise RuntimeError(f"AMO Firefox version {version} is {last_status}")
+
+        if last_status == "public" and download_url:
+            filename = _download_firefox_artifact_from_amo(ext_dir, version)
+            artifact = ext_dir / "dist" / filename
+            if _firefox_xpi_is_signed(artifact):
+                _clear_amo_upload_uuid(ext_dir)
+                return filename
+            logger.warning(
+                "AMO Firefox %s is public but missing META-INF; retrying",
+                version,
+            )
+        else:
+            logger.info(
+                "Waiting for AMO to sign Firefox %s (status=%s)",
+                version,
+                last_status,
+            )
+
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"Timed out waiting for AMO to sign Firefox {version} "
+                f"(last status={last_status!r})"
+            )
+        time.sleep(poll_s)
 
 
 def _firefox_xpi_is_signed(path: Path) -> bool:
@@ -282,7 +369,52 @@ def _firefox_xpi_is_signed(path: Path) -> bool:
         return False
 
 
+def _firefox_xpi_matches_version(path: Path, version: str) -> bool:
+    name = path.name
+    return f"-{version}.xpi" in name or name.endswith(f"{version}.xpi")
+
+
+def _iter_firefox_xpi_candidates(ext_dir: Path, version: str) -> list[Path]:
+    preferred = ext_dir / "dist" / _firefox_artifact_filename(version)
+    candidates: list[Path] = []
+    if preferred.is_file():
+        candidates.append(preferred)
+    for path in sorted((ext_dir / "dist").glob("*.xpi")):
+        if path == preferred:
+            continue
+        if _firefox_xpi_matches_version(path, version):
+            candidates.append(path)
+    return candidates
+
+
+def _promote_signed_firefox_artifact(ext_dir: Path, version: str) -> Path | None:
+    """Return the canonical signed XPI path, renaming web-ext's hash-named file if needed."""
+    preferred = ext_dir / "dist" / _firefox_artifact_filename(version)
+    for path in _iter_firefox_xpi_candidates(ext_dir, version):
+        if not _firefox_xpi_is_signed(path):
+            continue
+        if path != preferred:
+            preferred.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, preferred)
+            logger.info("Promoted signed Firefox artifact %s → %s", path.name, preferred.name)
+        return preferred
+    return None
+
+
 def _sign_firefox(ext_dir: Path, *, npm: str, env: dict[str, str], version: str) -> None:
+    # If this version was already submitted (common after a restart mid-approval),
+    # resume waiting for Mozilla to publish the signed XPI instead of re-uploading.
+    existing = _amo_firefox_version(ext_dir, version)
+    if existing is not None:
+        file_info = existing.get("file") or {}
+        logger.info(
+            "Firefox %s already on AMO (status=%s); waiting for signed artifact",
+            version,
+            file_info.get("status"),
+        )
+        _wait_and_download_signed_firefox(ext_dir, version)
+        return
+
     logger.info("Running %s run sign:firefox", npm)
     result = subprocess.run(
         [npm, "run", "sign:firefox"],
@@ -291,35 +423,32 @@ def _sign_firefox(ext_dir: Path, *, npm: str, env: dict[str, str], version: str)
         capture_output=True,
         text=True,
     )
-    artifact = ext_dir / "dist" / _firefox_artifact_filename(version)
     if result.returncode == 0:
         if result.stdout.strip():
             logger.info(result.stdout.rstrip())
-        if not _firefox_xpi_is_signed(artifact):
-            # Prefer AMO download over an unsigned local artifact (Firefox will
-            # reject those with "has not been verified").
-            logger.warning(
-                "Local Firefox artifact for %s is missing META-INF; trying AMO download",
-                version,
-            )
-            _download_firefox_artifact_from_amo(ext_dir, version)
-            if not _firefox_xpi_is_signed(artifact):
-                raise RuntimeError(
-                    f"Firefox artifact {artifact.name} is not Mozilla-signed (no META-INF)"
-                )
+        promoted = _promote_signed_firefox_artifact(ext_dir, version)
+        if promoted is not None:
+            _clear_amo_upload_uuid(ext_dir)
+            return
+        # Prefer AMO over an unsigned local artifact (Firefox will reject those
+        # with "has not been verified"). Resume approval wait if needed.
+        logger.warning(
+            "Local Firefox artifact for %s is missing META-INF; waiting on AMO",
+            version,
+        )
+        _wait_and_download_signed_firefox(ext_dir, version)
         return
 
     output = f"{result.stdout}\n{result.stderr}"
     if _should_download_firefox_from_amo(output):
         logger.info(
-            "Firefox version %s already on AMO; downloading signed artifact",
+            "Firefox version %s already on AMO; waiting for signed artifact",
             version,
         )
-        _download_firefox_artifact_from_amo(ext_dir, version)
-        if not _firefox_xpi_is_signed(artifact):
-            raise RuntimeError(
-                f"AMO download for Firefox {version} is not Mozilla-signed (no META-INF)"
-            )
+        if _promote_signed_firefox_artifact(ext_dir, version) is not None:
+            _clear_amo_upload_uuid(ext_dir)
+            return
+        _wait_and_download_signed_firefox(ext_dir, version)
         return
 
     logger.error("Firefox signing failed:\n%s", output.rstrip())
@@ -363,12 +492,9 @@ def _chrome_artifact_for_version(ext_dir: Path) -> str | None:
 
 def _firefox_artifact_for_version(ext_dir: Path) -> str | None:
     version = _read_manifest_version(ext_dir)
-    preferred = f"order_manager_browser_integration-{version}.xpi"
-    if (ext_dir / "dist" / preferred).is_file():
-        return preferred
-    for path in sorted(ext_dir.glob("dist/*.xpi")):
-        if f"-{version}.xpi" in path.name or path.name.endswith(f"{version}.xpi"):
-            return path.name
+    promoted = _promote_signed_firefox_artifact(ext_dir, version)
+    if promoted is not None:
+        return promoted.name
     return None
 
 
