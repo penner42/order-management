@@ -617,6 +617,20 @@ def _sync_existing_item_quantities_and_prices(
         if desc:
             groups.setdefault(desc, []).append(item)
 
+    shipment_ids = {
+        si.shipment_id
+        for item in existing_items
+        for si in item.shipment_items
+    }
+    tracked_shipment_ids: set[int] = set()
+    if shipment_ids:
+        for s in db.query(Shipment).filter(Shipment.id.in_(shipment_ids)):
+            if (s.tracking_number or "").strip():
+                tracked_shipment_ids.add(s.id)
+
+    def _item_has_tracking(item: Item) -> bool:
+        return any(si.shipment_id in tracked_shipment_ids for si in item.shipment_items)
+
     for name, incoming in incoming_by_name.items():
         group = groups.get(name)
         if not group:
@@ -639,10 +653,17 @@ def _sync_existing_item_quantities_and_prices(
             continue
 
         excess = current_total - inc_qty
+        # Prefer trimming untracked / placeholder lines before anything that
+        # already has a real tracking number (e.g. Amazon 3+3 later shipping
+        # as one package must not delete the newly tracked row).
         for item in sorted(
             group,
-            key=lambda i: (bool(i.shipment_items), bool(i.payment_line_items), i.id),
-            reverse=True,
+            key=lambda i: (
+                _item_has_tracking(i),
+                bool(i.payment_line_items),
+                not bool(i.shipment_items),
+                i.id,
+            ),
         ):
             if excess <= 0:
                 break
@@ -1208,6 +1229,22 @@ def _apply_items_and_shipments(
             if shipped:
                 item.status = ItemStatus.SHIPPED
 
+    def relink_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
+        """Move *item* onto *shipment*, dropping empty placeholder shipment links."""
+        for si in list(item.shipment_items):
+            if si.shipment_id == shipment.id:
+                linked_item_ids.add(item.id)
+                if shipped:
+                    item.status = ItemStatus.SHIPPED
+                return
+            old = existing_shipments_by_id.get(si.shipment_id)
+            if old is not None and (old.tracking_number or "").strip():
+                # Linked to a different real tracking — caller should not reuse.
+                continue
+            db.delete(si)
+            item.shipment_items.remove(si)
+        link_item_to_shipment(item, shipment, shipped=shipped)
+
     def _apply_shipment_fields(
         shipment: Shipment,
         *,
@@ -1245,7 +1282,14 @@ def _apply_items_and_shipments(
         if not shipment_id:
             return None
         if shipment_id in shipments_created:
-            return shipments_created[shipment_id]
+            shipment = shipments_created[shipment_id]
+            if item_to_link is not None:
+                relink_item_to_shipment(
+                    item_to_link,
+                    shipment,
+                    shipped=bool((shipment.tracking_number or "").strip()),
+                )
+            return shipment
         src = shipments_by_id.get(shipment_id) or {}
         tracking_raw = src.get("trackingNumber")
         tracking_key, walmart_original = _normalize_tracking_for_store(
@@ -1266,22 +1310,10 @@ def _apply_items_and_shipments(
 
         status_info = src.get("status") or {}
         normalized_status = _incoming_shipment_status(status_info)
+        delivery_str = delivery_raw if isinstance(delivery_raw, str) else None
 
-        if item_to_link:
-            for si in item_to_link.shipment_items:
-                s = existing_shipments_by_id.get(si.shipment_id)
-                if s is not None and not (s.tracking_number or "").strip():
-                    _apply_shipment_fields(
-                        s,
-                        tracking_key=tracking_key,
-                        delivery_raw=delivery_raw if isinstance(delivery_raw, str) else None,
-                        delivered_at=delivered_at,
-                        normalized_status=normalized_status,
-                        walmart_original=walmart_original,
-                    )
-                    return s
-
-        # If we already have a shipment for this slice, update its fields.
+        # Prefer an existing shipment that already has this tracking so split
+        # Amazon quantities that later share one package do not create duplicates.
         lookup_reg = walmart_original or tracking_key
         existing_shipment = _find_existing_shipment(
             existing_shipments_by_lookup_key,
@@ -1292,12 +1324,34 @@ def _apply_items_and_shipments(
             _apply_shipment_fields(
                 existing_shipment,
                 tracking_key=tracking_key,
-                delivery_raw=delivery_raw if isinstance(delivery_raw, str) else None,
+                delivery_raw=delivery_str,
                 delivered_at=delivered_at,
                 normalized_status=normalized_status,
                 walmart_original=walmart_original,
             )
+            shipments_created[shipment_id] = existing_shipment
+            if item_to_link is not None:
+                relink_item_to_shipment(
+                    item_to_link,
+                    existing_shipment,
+                    shipped=bool(tracking_key),
+                )
             return existing_shipment
+
+        if item_to_link:
+            for si in item_to_link.shipment_items:
+                s = existing_shipments_by_id.get(si.shipment_id)
+                if s is not None and not (s.tracking_number or "").strip():
+                    _apply_shipment_fields(
+                        s,
+                        tracking_key=tracking_key,
+                        delivery_raw=delivery_str,
+                        delivered_at=delivered_at,
+                        normalized_status=normalized_status,
+                        walmart_original=walmart_original,
+                    )
+                    shipments_created[shipment_id] = s
+                    return s
 
         shipment = Shipment(
             user_id=order.user_id,
@@ -1314,6 +1368,7 @@ def _apply_items_and_shipments(
         db.add(shipment)
         db.flush()
         shipments_created[shipment_id] = shipment
+        existing_shipments_by_id[shipment.id] = shipment
         for reg_key in _shipment_db_keys(shipment):
             existing_shipments_by_lookup_key[reg_key] = shipment
         return shipment
@@ -1386,73 +1441,89 @@ def _apply_items_and_shipments(
                 get_or_create_shipment_for_slice(sid)
                 continue
 
-            existing_item = find_existing_item_for_tracking(name, db_key, tracking_key)
-            if existing_item:
-                item_keys = item_tracking_keys(existing_item)
-                if db_key and db_key in item_keys:
-                    get_or_create_shipment_for_slice(
-                        sid,
-                        item_to_link=existing_item,
-                    )
-                    existing_item_keys.add(key)
-                    continue
-                if tracking_key and tracking_key in item_keys:
-                    get_or_create_shipment_for_slice(
-                        sid,
-                        item_to_link=existing_item,
-                    )
-                    existing_item_keys.add(key)
-                    continue
+            incoming_keys = {k for k in (db_key, tracking_key) if k}
+            remaining = max(int(slice_qty), 1)
+            linked_any = False
 
-                incoming_keys = {k for k in (db_key, tracking_key) if k}
-                already_linked_elsewhere = (
-                    (bool(existing_item.shipment_items) or existing_item.id in linked_item_ids)
-                    and bool(incoming_keys)
-                    and incoming_keys.isdisjoint(item_keys)
+            while remaining > 0:
+                existing_item = find_existing_item_for_tracking(
+                    name, db_key, tracking_key
                 )
-                if already_linked_elsewhere and (existing_item.quantity or 1) <= slice_qty:
-                    # Same product on separate shipment slices (e.g. two Amazon
-                    # line items with different tracking). Reusing the matched
-                    # row would violate shipment_items.item_id uniqueness.
-                    used_existing_item_ids.discard(existing_item.id)
-                    existing_item = None
+                if not existing_item:
+                    break
 
-            if existing_item:
+                item_keys = item_tracking_keys(existing_item)
+                if (db_key and db_key in item_keys) or (
+                    tracking_key and tracking_key in item_keys
+                ):
+                    get_or_create_shipment_for_slice(
+                        sid,
+                        item_to_link=existing_item,
+                    )
+                    remaining -= existing_item.quantity or 1
+                    linked_any = True
+                    continue
+
+                # Only treat non-empty tracking keys as a real conflict.
+                # Empty placeholder shipments (common on first Amazon import
+                # before tracking exists) should be updated / relinked.
+                real_item_keys = {k for k in item_keys if k}
+                already_linked_elsewhere = (
+                    (
+                        bool(real_item_keys)
+                        or existing_item.id in linked_item_ids
+                    )
+                    and bool(incoming_keys)
+                    and incoming_keys.isdisjoint(real_item_keys)
+                )
+                if already_linked_elsewhere:
+                    # Same product on separate shipment slices (e.g. two Amazon
+                    # line items with different tracking). Keep this row marked
+                    # used and try another candidate; creating a new line for
+                    # remaining units happens after the loop if needed.
+                    continue
+
+                take = min(remaining, existing_item.quantity or 1)
                 allocated_item = allocate_item_for_slice(
-                    existing_item, slice_qty, name
+                    existing_item, take, name
                 )
                 shipment = get_or_create_shipment_for_slice(
                     sid,
                     item_to_link=allocated_item,
                 )
                 if shipment:
-                    link_item_to_shipment(
+                    relink_item_to_shipment(
                         allocated_item, shipment, shipped=has_tracking
                     )
+                remaining -= take
+                linked_any = True
                 existing_item_keys.discard((name, ""))
-                existing_item_keys.add(key)
-                continue
 
-            quantity = slice_data.get("quantity") or 1
-            item = Item(
-                order_id=order.id,
-                price_paid=unit_price,
-                price_sold=payout,
-                status=status,
-                quantity=quantity,
-                description=name,
-                shipping=None,
-                sales_tax=None,
-            )
-            db.add(item)
-            db.flush()
-            existing_items.append(item)
-            shipment = get_or_create_shipment_for_slice(
-                sid,
-                item_to_link=item,
-            )
-            if shipment:
-                link_item_to_shipment(item, shipment, shipped=has_tracking)
+            if remaining > 0:
+                # No (more) existing lines to attach — create the leftover
+                # quantity on this shipment (new import or partial match).
+                item = Item(
+                    order_id=order.id,
+                    price_paid=unit_price,
+                    price_sold=payout,
+                    status=status,
+                    quantity=remaining,
+                    description=name,
+                    shipping=None,
+                    sales_tax=None,
+                )
+                db.add(item)
+                db.flush()
+                existing_items.append(item)
+                shipment = get_or_create_shipment_for_slice(
+                    sid,
+                    item_to_link=item,
+                )
+                if shipment:
+                    link_item_to_shipment(item, shipment, shipped=has_tracking)
+
+            if linked_any or remaining > 0:
+                existing_item_keys.discard((name, ""))
             existing_item_keys.add(key)
 
     # Second pass: update existing shipments' delivered_at / notes even when
