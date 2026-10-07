@@ -335,15 +335,18 @@ export default function ImportReview() {
     setApplying(true)
     setError(null)
     try {
-      const payouts: (number | null)[] = itemPayouts.map((s) => {
-        const t = s.trim()
-        if (!t) return null
-        const n = Number(t)
-        return Number.isFinite(n) ? n : null
-      })
+      const isExisting = diff?.is_existing_order === true
+      const payouts: (number | null)[] | undefined = isExisting
+        ? undefined
+        : itemPayouts.map((s) => {
+            const t = s.trim()
+            if (!t) return null
+            const n = Number(t)
+            return Number.isFinite(n) ? n : null
+          })
       let paymentPayload: { payment_method_id: number; amount: number }[] | undefined
       const trimmedAmount = paymentAmount.trim()
-      if (selectedPaymentMethodId != null && trimmedAmount) {
+      if (!isExisting && selectedPaymentMethodId != null && trimmedAmount) {
         const n = Number(trimmedAmount)
         if (Number.isFinite(n) && n > 0) {
           paymentPayload = [{ payment_method_id: selectedPaymentMethodId, amount: n }]
@@ -873,25 +876,35 @@ export default function ImportReview() {
                         {fmtMoney(lineTotal)}
                       </td>
                       <td className="py-1.5 px-2">
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          placeholder="—"
-                          value={itemPayouts[idx] ?? ''}
-                          onChange={(e) => {
-                            setItemPayouts((prev) => {
-                              const next = [...prev]
-                              while (next.length <= idx) next.push('')
-                              next[idx] = e.target.value
-                              return next
-                            })
-                          }}
-                          className="w-20 text-right text-sm font-mono rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 text-ink dark:text-gray-200 tabular-nums"
-                          aria-label={`Unit payout for ${(item.name || '').slice(0, 30)}`}
-                        />
+                        {isExistingOrder ? (
+                          <span className="block w-20 text-right text-sm font-mono text-ink-muted dark:text-gray-500 tabular-nums">
+                            —
+                          </span>
+                        ) : (
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            placeholder="—"
+                            value={itemPayouts[idx] ?? ''}
+                            onChange={(e) => {
+                              setItemPayouts((prev) => {
+                                const next = [...prev]
+                                while (next.length <= idx) next.push('')
+                                next[idx] = e.target.value
+                                return next
+                              })
+                            }}
+                            className="w-20 text-right text-sm font-mono rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 text-ink dark:text-gray-200 tabular-nums"
+                            aria-label={`Unit payout for ${(item.name || '').slice(0, 30)}`}
+                          />
+                        )}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums whitespace-nowrap">
-                        {lineTotalPayout != null ? fmtMoney(lineTotalPayout) : '—'}
+                        {isExistingOrder
+                          ? '—'
+                          : lineTotalPayout != null
+                            ? fmtMoney(lineTotalPayout)
+                            : '—'}
                       </td>
                       <td className="py-1.5 px-2">
                         {shipmentStatus && (
@@ -924,14 +937,16 @@ export default function ImportReview() {
                     {p.totals?.subtotal != null ? fmtMoney(p.totals.subtotal) : '—'}
                   </td>
                   <td className="py-1.5 px-2 text-right font-mono text-sm font-semibold tabular-nums">
-                    {fmtMoney(
-                      items.reduce((sum, item, i) => {
-                        const u = itemPayouts[i]?.trim()
-                        const n = u ? Number(u) : NaN
-                        const qty = item.quantities?.ordered ?? 1
-                        return sum + (Number.isFinite(n) ? n * qty : 0)
-                      }, 0)
-                    )}
+                    {isExistingOrder
+                      ? '—'
+                      : fmtMoney(
+                          items.reduce((sum, item, i) => {
+                            const u = itemPayouts[i]?.trim()
+                            const n = u ? Number(u) : NaN
+                            const qty = item.quantities?.ordered ?? 1
+                            return sum + (Number.isFinite(n) ? n * qty : 0)
+                          }, 0)
+                        )}
                   </td>
                   <td />
                 </tr>

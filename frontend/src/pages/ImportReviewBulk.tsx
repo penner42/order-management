@@ -634,14 +634,17 @@ export default function ImportReviewBulk() {
       const buyingGroupId = selectedBuyingGroupIdByIndex[index] ?? null
       const storeAccountId = selectedAccountIdByIndex[index] ?? null
       const paymentMethodId = selectedPaymentMethodIdByIndex[index] ?? null
+      const isExisting = diffs[index]?.is_existing_order === true
       const items = Array.isArray((payload as any).items) ? ((payload as any).items as NormalizedItem[]) : []
       const payoutStrings = itemPayoutsByIndex[index] ?? []
-      const itemPayouts = items.map((_, itemIdx) => {
-        const t = (payoutStrings[itemIdx] ?? '').trim()
-        if (!t) return null
-        const n = Number(t)
-        return Number.isFinite(n) ? n : null
-      })
+      const itemPayouts = isExisting
+        ? undefined
+        : items.map((_, itemIdx) => {
+            const t = (payoutStrings[itemIdx] ?? '').trim()
+            if (!t) return null
+            const n = Number(t)
+            return Number.isFinite(n) ? n : null
+          })
       const orderTotal = getDefaultOrderTotal(payload)
       await api.post('/integrations/stores/orders/apply', {
         payload,
@@ -649,7 +652,7 @@ export default function ImportReviewBulk() {
         buying_group_id: buyingGroupId,
         item_payouts: itemPayouts,
         payment_methods:
-          paymentMethodId != null
+          !isExisting && paymentMethodId != null
             ? [{ payment_method_id: paymentMethodId, amount: orderTotal }]
             : null,
       })
@@ -1325,18 +1328,28 @@ export default function ImportReviewBulk() {
                                     {fmtMoney(lineTotal)}
                                   </td>
                                   <td className="py-1.5 px-2 text-right">
-                                    <input
-                                      type="text"
-                                      inputMode="decimal"
-                                      placeholder="—"
-                                      value={itemPayoutsByIndex[idx]?.[itemIdx] ?? ''}
-                                      onChange={(e) => setItemPayout(idx, itemIdx, e.target.value)}
-                                      className="w-20 text-right font-mono text-xs md:text-sm rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-0.5 text-ink dark:text-gray-200 tabular-nums"
-                                      aria-label={`Unit payout for ${(item.name || '').slice(0, 30)}`}
-                                    />
+                                    {isExisting ? (
+                                      <span className="block w-20 text-right font-mono text-xs md:text-sm text-ink-muted dark:text-gray-500 tabular-nums">
+                                        —
+                                      </span>
+                                    ) : (
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        placeholder="—"
+                                        value={itemPayoutsByIndex[idx]?.[itemIdx] ?? ''}
+                                        onChange={(e) => setItemPayout(idx, itemIdx, e.target.value)}
+                                        className="w-20 text-right font-mono text-xs md:text-sm rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-0.5 text-ink dark:text-gray-200 tabular-nums"
+                                        aria-label={`Unit payout for ${(item.name || '').slice(0, 30)}`}
+                                      />
+                                    )}
                                   </td>
                                   <td className="py-1.5 px-2 text-right font-mono text-xs md:text-sm tabular-nums whitespace-nowrap">
-                                    {lineTotalPayout != null ? fmtMoney(lineTotalPayout) : '—'}
+                                    {isExisting
+                                      ? '—'
+                                      : lineTotalPayout != null
+                                        ? fmtMoney(lineTotalPayout)
+                                        : '—'}
                                   </td>
                                 </tr>
                               )
@@ -1429,7 +1442,7 @@ export default function ImportReviewBulk() {
                                     </td>
                                     <td />
                                     <td className="py-2 px-2 text-right font-mono text-xs md:text-sm font-semibold tabular-nums whitespace-nowrap text-ink dark:text-gray-100">
-                                      {fmtMoney(payoutsTotal)}
+                                      {isExisting ? '—' : fmtMoney(payoutsTotal)}
                                     </td>
                                   </tr>
                                 </>

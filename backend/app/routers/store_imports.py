@@ -1570,7 +1570,7 @@ def apply_store_order_direct(
         normalized,
         payload.store,
         order,
-        body.item_payouts,
+        None if is_existing_order else body.item_payouts,
         external_order_id,
         existing_order=is_existing_order,
     )
