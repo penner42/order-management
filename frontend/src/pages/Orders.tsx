@@ -245,6 +245,7 @@ export default function Orders() {
   const [savingTrackingId, setSavingTrackingId] = useState<number | null>(null)
   const [shipments, setShipments] = useState<Shipment[]>([])
   const [copyingId, setCopyingId] = useState<number | null>(null)
+  const [copiedAllTracking, setCopiedAllTracking] = useState(false)
   const [downloadingInvoiceId, setDownloadingInvoiceId] = useState<number | null>(null)
   const [stores, setStores] = useState<Store[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
@@ -1518,6 +1519,24 @@ export default function Orders() {
     [orders]
   )
 
+  const visibleTrackingNumbers = useMemo(() => {
+    const numbers = new Set<string>()
+    for (const o of visibleOrders) {
+      for (const item of o.items ?? []) {
+        const tn = (trackingEdits[item.id] ?? itemIdToTracking[item.id] ?? '').trim()
+        if (tn) numbers.add(tn)
+      }
+    }
+    return [...numbers]
+  }, [visibleOrders, trackingEdits, itemIdToTracking])
+
+  const copyAllVisibleTrackingNumbers = () => {
+    if (visibleTrackingNumbers.length === 0) return
+    copyToClipboard(visibleTrackingNumbers.join('\n'))
+    setCopiedAllTracking(true)
+    window.setTimeout(() => setCopiedAllTracking(false), 1500)
+  }
+
   const pageButtons = useMemo(() => {
     const pages = totalPages
     if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1)
@@ -2079,6 +2098,27 @@ export default function Orders() {
         >
           Reset Filters
         </button>
+          </div>
+          <div className="flex items-center justify-end sm:justify-center">
+            <button
+              type="button"
+              onClick={copyAllVisibleTrackingNumbers}
+              disabled={visibleTrackingNumbers.length === 0}
+              className={`px-3 py-1.5 rounded-lg border text-sm transition shrink-0 ${
+                visibleTrackingNumbers.length > 0
+                  ? 'border-brand-200 dark:border-gray-600 text-ink dark:text-gray-200 hover:bg-brand-50 dark:hover:bg-gray-700'
+                  : 'border-brand-200 dark:border-gray-600 text-ink-muted dark:text-gray-500 opacity-60 cursor-not-allowed'
+              }`}
+              title={
+                visibleTrackingNumbers.length > 0
+                  ? `Copy ${visibleTrackingNumbers.length} tracking number${visibleTrackingNumbers.length === 1 ? '' : 's'} from the current view`
+                  : 'No tracking numbers in the current view'
+              }
+            >
+              {copiedAllTracking
+                ? 'Copied!'
+                : `Copy all tracking numbers${visibleTrackingNumbers.length > 0 ? ` (${visibleTrackingNumbers.length})` : ''}`}
+            </button>
           </div>
         </div>
         <button
