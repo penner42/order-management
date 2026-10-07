@@ -10,6 +10,7 @@ import {
   getDefaultOrderTotal,
 } from '../utils/importDefaults'
 import { stripIgnoredWalmartImportSlices } from '../utils/stripIgnoredWalmartImport'
+import { normalizeTrackingForDisplay } from '../utils/walmartTracking'
 
 type NormalizedPayload = any
 
@@ -38,6 +39,7 @@ interface NormalizedShipment {
   trackingUrl?: string | null
   deliveryDate?: string | null
   fulfillmentType?: string | null
+  detailedGroupType?: string | null
   status?: { rawStatusType?: string | null; message?: string | null }
 }
 
@@ -96,20 +98,6 @@ interface ItemDiffInfo {
   currentQuantity?: number
   currentPrice?: number | null
   detailedChanges?: { field: string; before: unknown; after: unknown }[]
-}
-
-function normalizeTrackingForDisplay(
-  storeName: string,
-  externalOrderId: string | undefined | null,
-  trackingNumber: string | undefined | null
-): string | null {
-  if (!trackingNumber) return null
-  const storeLower = (storeName || '').trim().toLowerCase()
-  const compact = trackingNumber.replace(/\s+/g, '')
-  if (storeLower === 'walmart' && compact.length === 20 && compact.startsWith('555') && /^\d+$/.test(compact)) {
-    return externalOrderId && externalOrderId.trim() ? externalOrderId.trim() : trackingNumber
-  }
-  return trackingNumber
 }
 
 function fmtMoney(v: number | null | undefined): string {
@@ -1181,7 +1169,8 @@ export default function ImportReviewBulk() {
                               const trackingNumber = normalizeTrackingForDisplay(
                                 storeName,
                                 orderId,
-                                trackingNumberRaw
+                                trackingNumberRaw,
+                                firstShipment?.fulfillmentType ?? firstShipment?.detailedGroupType
                               )
                               const trackingUrl = firstShipment?.trackingUrl ?? null
                               const diffInfo = isExisting
@@ -1463,7 +1452,8 @@ export default function ImportReviewBulk() {
                             const displayTracking = normalizeTrackingForDisplay(
                               storeName,
                               orderId,
-                              s.trackingNumber ?? null
+                              s.trackingNumber ?? null,
+                              s.fulfillmentType ?? s.detailedGroupType
                             )
                             const shipDiff =
                               s.trackingNumber && isExisting
