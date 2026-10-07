@@ -91,6 +91,72 @@
     })
   }
 
+  function isAmazonTrackingPageUrl(url) {
+    if (!url) return false
+    return /ship-track|shiptrack|progress-tracker|progress\/tracker|track\.amazon|package\/track|trackingId=|ssf\/type\/track|your-account\/ship-track/i.test(
+      String(url)
+    )
+  }
+
+  function isNonTrackingAmazonUrl(url) {
+    if (!url) return true
+    return /product-support|\/ps\/product|\/hz\/contact|\/returns?\/|return\.html|ap\/signin|account\/manage|gp\/css\/homepage/i.test(
+      String(url)
+    )
+  }
+
+  function absoluteHref(href) {
+    try {
+      return new URL(String(href), window.location.href).toString()
+    } catch {
+      return href ? String(href) : null
+    }
+  }
+
+  function findPageTrackingLinks() {
+    const out = []
+    const seen = new Set()
+    document.querySelectorAll('a[href]').forEach((a) => {
+      const href = absoluteHref(a.getAttribute('href'))
+      if (!href || seen.has(href)) return
+      if (isNonTrackingAmazonUrl(href)) return
+      if (!isAmazonTrackingPageUrl(href)) return
+      seen.add(href)
+      out.push({ trackingUrl: href })
+    })
+    return out
+  }
+
+  function repairShipmentTracking(parsed) {
+    if (!parsed || !Array.isArray(parsed.shipments)) return
+    const pageHits = findPageTrackingLinks()
+
+    parsed.shipments.forEach((s) => {
+      if (!s) return
+      const url = s.trackingUrl ? String(s.trackingUrl) : ''
+      if (url && (isNonTrackingAmazonUrl(url) || !isAmazonTrackingPageUrl(url))) {
+        if (!s.trackingNumber) s.trackingUrl = null
+      }
+    })
+
+    if (pageHits.length === 0) return
+    const hit = pageHits[0]
+    parsed.shipments.forEach((s) => {
+      if (!s) return
+      if (s.trackingNumber) return
+      if (s.trackingUrl && isAmazonTrackingPageUrl(s.trackingUrl)) return
+      s.trackingUrl = hit.trackingUrl
+    })
+    if (parsed.shipments.length === 1 && parsed.shipments[0].trackingUrl) {
+      const sid = parsed.shipments[0].shipmentId
+      ;(parsed.items || []).forEach((item) => {
+        if (item && (!item.shipmentId || String(item.shipmentId).indexOf('shipment-') === 0)) {
+          item.shipmentId = sid
+        }
+      })
+    }
+  }
+
   async function captureCurrentDetailPage(options) {
     const opts = options && typeof options === 'object' ? options : {}
     const skipTracking = !!opts.skipTrackingEnrichment
@@ -106,6 +172,10 @@
     if (!parsed || !parsed.orderId) {
       throw new Error('Could not parse Amazon order detail page.')
     }
+
+    // Drop product-support false positives and attach real ship-track links.
+    repairShipmentTracking(parsed)
+
     if (!skipTracking && typeof d.enrichShipmentsWithTracking === 'function') {
       await d.enrichShipmentsWithTracking(parsed.shipments, window.location.origin)
     }

@@ -238,10 +238,13 @@ def _firefox_artifact_filename(version: str) -> str:
 
 def _should_download_firefox_from_amo(output: str) -> bool:
     lowered = output.lower()
+    # AMO often returns: 'Version 0.1.22 already exists.' — the number sits
+    # between "version" and "already exists", so require a looser match.
     return (
-        "version already exists" in lowered
+        "already exists" in lowered
         or "this upload has already been submitted" in lowered
         or "(status: 409)" in lowered
+        or ("conflict" in lowered and "version" in lowered)
     )
 
 
@@ -262,6 +265,23 @@ def _download_firefox_artifact_from_amo(ext_dir: Path, version: str) -> str:
     return filename
 
 
+def _firefox_xpi_is_signed(path: Path) -> bool:
+    """True when the XPI contains Mozilla signature files (META-INF)."""
+    if not path.is_file():
+        return False
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(path) as zf:
+            names = {info.filename.replace("\\", "/") for info in zf.infolist()}
+        return any(
+            name.startswith("META-INF/") and name.lower().endswith((".rsa", ".sf"))
+            for name in names
+        )
+    except Exception:
+        return False
+
+
 def _sign_firefox(ext_dir: Path, *, npm: str, env: dict[str, str], version: str) -> None:
     logger.info("Running %s run sign:firefox", npm)
     result = subprocess.run(
@@ -271,9 +291,22 @@ def _sign_firefox(ext_dir: Path, *, npm: str, env: dict[str, str], version: str)
         capture_output=True,
         text=True,
     )
+    artifact = ext_dir / "dist" / _firefox_artifact_filename(version)
     if result.returncode == 0:
         if result.stdout.strip():
             logger.info(result.stdout.rstrip())
+        if not _firefox_xpi_is_signed(artifact):
+            # Prefer AMO download over an unsigned local artifact (Firefox will
+            # reject those with "has not been verified").
+            logger.warning(
+                "Local Firefox artifact for %s is missing META-INF; trying AMO download",
+                version,
+            )
+            _download_firefox_artifact_from_amo(ext_dir, version)
+            if not _firefox_xpi_is_signed(artifact):
+                raise RuntimeError(
+                    f"Firefox artifact {artifact.name} is not Mozilla-signed (no META-INF)"
+                )
         return
 
     output = f"{result.stdout}\n{result.stderr}"
@@ -283,6 +316,10 @@ def _sign_firefox(ext_dir: Path, *, npm: str, env: dict[str, str], version: str)
             version,
         )
         _download_firefox_artifact_from_amo(ext_dir, version)
+        if not _firefox_xpi_is_signed(artifact):
+            raise RuntimeError(
+                f"AMO download for Firefox {version} is not Mozilla-signed (no META-INF)"
+            )
         return
 
     logger.error("Firefox signing failed:\n%s", output.rstrip())

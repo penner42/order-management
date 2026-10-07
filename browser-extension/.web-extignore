@@ -1,0 +1,22 @@
+# Keep signed Firefox packages limited to extension runtime files.
+# Without this, web-ext packs dist/, lockfiles, docs, etc. and can produce
+# installable-looking but unverified / invalid XPIs.
+
+.*
+!.web-extignore
+dist/
+node_modules/
+.keys/
+*.md
+*.crx
+*.xpi
+*.zip
+package.json
+package-lock.json
+.env
+.env.*
+order.json
+.git/
+.gitignore
+.cursor/
+*.log

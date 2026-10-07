@@ -905,7 +905,56 @@
 
   function isAmazonTrackingPageUrl(url) {
     if (!url) return false
-    return /ship-track|progress\/tracker|track\.amazon/i.test(String(url))
+    return /ship-track|shiptrack|progress-tracker|progress\/tracker|track\.amazon|package\/track|trackingId=|ssf\/type\/track|your-account\/ship-track/i.test(
+      String(url)
+    )
+  }
+
+  function isNonTrackingAmazonUrl(url) {
+    if (!url) return true
+    const u = String(url)
+    // Product support / returns / contact links often sit next to "Track package"
+    // in shipmentConnections and must never be treated as tracking pages.
+    return /product-support|\/ps\/product|\/hz\/contact|\/returns?\/|return\.html|ap\/signin|account\/manage|gp\/css\/homepage/i.test(
+      u
+    )
+  }
+
+  function looksLikeTrackingAnchor(anchor) {
+    if (!anchor) return false
+    const href = coerceString(anchor.getAttribute('href')) || ''
+    if (!href || href === '#' || /^javascript:/i.test(href)) return false
+    if (isNonTrackingAmazonUrl(href)) return false
+    // Only accept anchors that actually point at an Amazon tracking page.
+    // Matching on "Track package" text alone picks product-support links.
+    return isAmazonTrackingPageUrl(href)
+  }
+
+  function extractTrackingIdsFromText(text) {
+    const s = coerceString(text)
+    if (!s) return []
+    const found = []
+    const seen = new Set()
+    const patterns = [
+      /\b(TBA[A-Z0-9]{8,})\b/gi,
+      /\b(1Z[A-Z0-9]{16})\b/gi,
+      /\b(TBC[A-Z0-9]{8,})\b/gi,
+      /Tracking\s*ID\s*:\s*([A-Z0-9-]{8,})/gi,
+    ]
+    for (let pi = 0; pi < patterns.length; pi++) {
+      const re = patterns[pi]
+      let m
+      while ((m = re.exec(s)) !== null) {
+        const id = coerceString(m[1])
+        if (!id || seen.has(id.toUpperCase())) continue
+        if (!isLikelyCarrierTrackingNumber(id) && !/^TBA/i.test(id) && !/^TBC/i.test(id)) {
+          continue
+        }
+        seen.add(id.toUpperCase())
+        found.push(id)
+      }
+    }
+    return found
   }
 
   function needsTrackingPageLookup(shipment) {
@@ -1021,26 +1070,56 @@
     return shipments
   }
 
-  function parseTrackingFromBlock(block) {
+  function collectTrackingAnchors(scope) {
+    if (!scope || !scope.querySelectorAll) return []
     const sel = getSelectors()
-    const links = []
-    queryAllFirst(block, sel.TRACKING_LINK).forEach((a) => links.push(a))
-    block
-      .querySelectorAll(
-        'a[href*="ship-track"], a[href*="progress/tracker"], a[href*="trackingId="], a[href*="track.amazon"]'
-      )
-      .forEach((a) => {
-        if (!links.includes(a)) links.push(a)
-      })
+    const anchors = []
+    const push = (el) => {
+      if (!el || anchors.includes(el)) return
+      // Prefer an inner <a> when the matched node is a button wrapper.
+      if (el.tagName && el.tagName.toLowerCase() !== 'a') {
+        const inner = el.querySelector && el.querySelector('a[href]')
+        if (inner) {
+          push(inner)
+          return
+        }
+      }
+      anchors.push(el)
+    }
 
+    queryAllFirst(scope, sel.TRACKING_LINK).forEach(push)
+    scope
+      .querySelectorAll(
+        'a[href*="ship-track"], a[href*="shiptrack"], a[href*="progress-tracker"], a[href*="progress/tracker"], a[href*="trackingId="], a[href*="track.amazon"], a[href*="package/track"], a[href*="/gp/your-account/ship-track"], a[href*="ssf/type/track"]'
+      )
+      .forEach(push)
+
+    // Broader fallback: any anchor whose label/text says track package.
+    scope.querySelectorAll('a[href]').forEach((a) => {
+      if (looksLikeTrackingAnchor(a)) push(a)
+    })
+
+    return anchors
+  }
+
+  function parseTrackingFromBlock(block) {
     const results = []
     const seen = new Set()
-    links.forEach((a) => {
+
+    collectTrackingAnchors(block).forEach((a) => {
       const url = absoluteUrl(a.getAttribute('href'))
-      if (!url || seen.has(url)) return
+      if (!url || seen.has(url) || url === '#' || /^javascript:/i.test(url)) return
+      if (isNonTrackingAmazonUrl(url)) return
+      if (!isAmazonTrackingPageUrl(url) && !extractTrackingIdsFromText(textOf(a)).length) {
+        return
+      }
       seen.add(url)
 
       let trackingNumber = extractTrackingFromUrl(url)
+      if (!trackingNumber) {
+        const fromText = extractTrackingIdsFromText(textOf(a))
+        if (fromText.length > 0) trackingNumber = fromText[0]
+      }
       if (!trackingNumber) {
         const tn = /\b(\d{9,22})\b/.exec(textOf(a))
         if (tn) trackingNumber = tn[1]
@@ -1048,7 +1127,77 @@
 
       results.push({ trackingNumber, trackingUrl: url })
     })
+
+    // Prefer real tracking-page URLs over bare IDs / weaker matches.
+    results.sort((a, b) => {
+      const aScore = (isAmazonTrackingPageUrl(a.trackingUrl) ? 2 : 0) + (a.trackingNumber ? 1 : 0)
+      const bScore = (isAmazonTrackingPageUrl(b.trackingUrl) ? 2 : 0) + (b.trackingNumber ? 1 : 0)
+      return bScore - aScore
+    })
+
+    // Delivered cards sometimes show TBA/1Z inline without a track link.
+    if (results.length === 0) {
+      extractTrackingIdsFromText(textOf(block)).forEach((id) => {
+        const key = `id:${id}`
+        if (seen.has(key)) return
+        seen.add(key)
+        results.push({ trackingNumber: id, trackingUrl: null })
+      })
+    }
+
     return results
+  }
+
+  function shipmentNeedsTrackingFix(shipment) {
+    if (!shipment) return false
+    if (coerceString(shipment.trackingNumber)) return false
+    const url = coerceString(shipment.trackingUrl)
+    if (!url) return true
+    // False positive (e.g. product-support) — keep searching.
+    return !isAmazonTrackingPageUrl(url) || isNonTrackingAmazonUrl(url)
+  }
+
+  function attachMissingTrackingToShipments(root, shipments) {
+    if (!root || !Array.isArray(shipments) || shipments.length === 0) return shipments
+
+    // Drop false-positive URLs so we can attach a real track link.
+    shipments.forEach((s) => {
+      if (!s) return
+      const url = coerceString(s.trackingUrl)
+      if (url && (isNonTrackingAmazonUrl(url) || !isAmazonTrackingPageUrl(url))) {
+        if (!coerceString(s.trackingNumber)) s.trackingUrl = null
+      }
+    })
+
+    const missing = shipments.filter((s) => shipmentNeedsTrackingFix(s))
+    const pageHits = parseTrackingFromBlock(root)
+    if (missing.length === 0 || pageHits.length === 0) return shipments
+
+    // One consolidated Amazon package: apply the first page hit to every
+    // missing shipment slice (e.g. qty 3 + 3 that share one track page).
+    if (pageHits.length === 1 || missing.length > 1) {
+      const hit = pageHits[0]
+      missing.forEach((s) => {
+        if (hit.trackingUrl) s.trackingUrl = hit.trackingUrl
+        if (hit.trackingNumber && !s.trackingNumber) s.trackingNumber = hit.trackingNumber
+        if (hit.trackingNumber || hit.trackingUrl) {
+          s.shipmentId = buildShipmentId(
+            { trackingNumber: s.trackingNumber, trackingUrl: s.trackingUrl },
+            0
+          )
+        }
+      })
+      return shipments
+    }
+
+    for (let i = 0; i < missing.length && i < pageHits.length; i++) {
+      const s = missing[i]
+      const hit = pageHits[i]
+      s.trackingUrl = hit.trackingUrl
+      s.trackingNumber = hit.trackingNumber
+      s.shipmentId = buildShipmentId(hit, i)
+    }
+    return shipments
   }
 
   function extractShipmentIdFromUrl(url) {
@@ -1254,6 +1403,16 @@
           shipmentId: buildShipmentId(entry, idx),
           ...entry,
         })
+      })
+    }
+    attachMissingTrackingToShipments(root, shipments)
+    // Keep item.shipmentId aligned when consolidated tracking rewrites ids.
+    if (shipments.length === 1 && shipments[0] && shipments[0].shipmentId) {
+      const onlyId = shipments[0].shipmentId
+      items.forEach((item) => {
+        if (item && (!item.shipmentId || String(item.shipmentId).indexOf('shipment-') === 0)) {
+          item.shipmentId = onlyId
+        }
       })
     }
     const shippingAddress = resolveShippingAddress(root)

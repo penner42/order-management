@@ -1154,6 +1154,7 @@ def _apply_items_and_shipments(
             keys.update(_shipment_db_keys(s) or {""})
         return keys
 
+
     def find_existing_item_for_tracking(
         name: str, db_key: str | None, tracking_key: str | None
     ) -> Item | None:
@@ -1578,6 +1579,7 @@ def _apply_items_and_shipments(
         _sync_existing_item_quantities_and_prices(db, normalized, existing_items)
         _apply_canceled_statuses(existing_items, normalized)
 
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -1591,6 +1593,7 @@ def compute_order_diff(
     """Read-only diff: compare an incoming payload against an existing order."""
     external_order_id, _ = _parse_external_order_fields(data)
     normalized: dict[str, Any] = _sanitize_store_import_payload_dict(data)
+
 
     linked_order: Order | None = (
         db.query(Order)
@@ -1698,6 +1701,7 @@ def apply_store_order_direct(
     payload = body.payload
     external_order_id, _ = _parse_external_order_fields(payload)
     normalized: dict[str, Any] = _sanitize_store_import_payload_dict(payload)
+
 
     store_account_id = body.store_account_id
     if store_account_id is not None:
