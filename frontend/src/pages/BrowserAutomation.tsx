@@ -479,11 +479,11 @@ export default function BrowserAutomation() {
     <div>
       <h1 className="text-2xl font-semibold text-ink dark:text-gray-100 mb-2">Browser automation</h1>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
-        Run a real Google Chrome session on the server for each store account. Log in once in the
-        embedded view (MFA supported); then use Import now to capture Walmart or Amazon orders into
-        Import Review. Sessions live on the machine hosting the API — use a trusted/home network IP
-        when possible. If you see a “Robot or human?” / press-and-hold page, complete it in the live
-        view (hold the button). If a profile stays blocked, delete it and create a new one.
+        Run a real Firefox session on the server for each store account. Log in once in the embedded
+        view (MFA supported); then use Import now to capture Walmart or Amazon orders into Import
+        Review. Sessions live on the machine hosting the API — use a trusted/home network IP when
+        possible. If you see a “Robot or human?” / press-and-hold page, complete it in the live view
+        (hold the button). If a profile stays blocked, delete it and create a new one.
       </p>
 
       {error && (

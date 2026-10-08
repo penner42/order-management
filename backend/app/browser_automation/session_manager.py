@@ -1,7 +1,8 @@
-"""Manage Playwright persistent contexts per browser profile."""
+"""Manage Playwright persistent contexts per browser profile (Firefox)."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import random
 from dataclasses import dataclass, field
@@ -31,7 +32,7 @@ WALMART_SIGNIN_HINTS = (
 )
 
 # Soften common automation fingerprints before any page JS runs.
-# Keep platform/UA honest (real Chrome on Linux) — mismatched Client Hints get flagged.
+# Keep platform/UA honest — mismatched fingerprints get flagged.
 _STEALTH_INIT_SCRIPT = """
 (() => {
   try {
@@ -41,95 +42,13 @@ _STEALTH_INIT_SCRIPT = """
     });
   } catch (e) {}
   try {
-    if (navigator.webdriver) {
-      delete Navigator.prototype.webdriver;
+    if (Object.getOwnPropertyDescriptor(navigator, 'webdriver')) {
+      delete navigator.webdriver;
     }
-  } catch (e) {}
-  try {
-    window.chrome = window.chrome || {};
-    window.chrome.runtime = window.chrome.runtime || {
-      OnInstalledReason: {
-        CHROME_UPDATE: 'chrome_update',
-        INSTALL: 'install',
-        SHARED_MODULE_UPDATE: 'shared_module_update',
-        UPDATE: 'update',
-      },
-      OnRestartRequiredReason: {
-        APP_UPDATE: 'app_update',
-        OS_UPDATE: 'os_update',
-        PERIODIC: 'periodic',
-      },
-      PlatformArch: {
-        ARM: 'arm',
-        ARM64: 'arm64',
-        MIPS: 'mips',
-        MIPS64: 'mips64',
-        X86_32: 'x86-32',
-        X86_64: 'x86-64',
-      },
-      PlatformNaclArch: {
-        ARM: 'arm',
-        MIPS: 'mips',
-        MIPS64: 'mips64',
-        X86_32: 'x86-32',
-        X86_64: 'x86-64',
-      },
-      PlatformOs: {
-        ANDROID: 'android',
-        CROS: 'cros',
-        LINUX: 'linux',
-        MAC: 'mac',
-        OPENBSD: 'openbsd',
-        WIN: 'win',
-      },
-      RequestUpdateCheckStatus: {
-        NO_UPDATE: 'no_update',
-        THROTTLED: 'throttled',
-        UPDATE_AVAILABLE: 'update_available',
-      },
-      connect: function () { return { onMessage: { addListener: function () {} }, postMessage: function () {} }; },
-      sendMessage: function () {},
-      id: undefined,
-    };
-    window.chrome.csi = window.chrome.csi || function () { return {}; };
-    window.chrome.loadTimes = window.chrome.loadTimes || function () { return {}; };
-    window.chrome.app = window.chrome.app || {
-      isInstalled: false,
-      InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
-      RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
-      getDetails: function () { return null; },
-      getIsInstalled: function () { return false; },
-    };
   } catch (e) {}
   try {
     Object.defineProperty(navigator, 'languages', {
       get: () => Object.freeze(['en-US', 'en']),
-    });
-  } catch (e) {}
-  try {
-    const makePlugin = (name, filename, description) => {
-      const plugin = { name, filename, description, length: 1 };
-      plugin[0] = { type: 'application/pdf', suffixes: 'pdf', description, enabledPlugin: plugin };
-      return plugin;
-    };
-    const plugins = [
-      makePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-      makePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-      makePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-      makePlugin('Microsoft Edge PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-      makePlugin('WebKit built-in PDF', 'internal-pdf-viewer', 'Portable Document Format'),
-    ];
-    plugins.item = (i) => plugins[i] || null;
-    plugins.namedItem = (n) => plugins.find((p) => p.name === n) || null;
-    plugins.refresh = () => {};
-    Object.defineProperty(navigator, 'plugins', { get: () => plugins });
-    Object.defineProperty(navigator, 'mimeTypes', {
-      get: () => {
-        const mimes = [{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }];
-        mimes.item = (i) => mimes[i] || null;
-        mimes.namedItem = (n) => mimes.find((m) => m.type === n) || null;
-        return mimes;
-      },
     });
   } catch (e) {}
   try {
@@ -142,7 +61,6 @@ _STEALTH_INIT_SCRIPT = """
     }
   } catch (e) {}
   try {
-    // Pass common headless checks that look for 0x0 / missing outer sizes.
     if (!window.outerWidth) {
       Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
     }
@@ -153,14 +71,21 @@ _STEALTH_INIT_SCRIPT = """
 })();
 """
 
+DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
+
 
 def _launch_user_agent() -> str | None:
-    """Only override UA when explicitly configured — mismatches with real Chrome get flagged."""
+    """Only override UA when explicitly configured."""
     configured = (settings.browser_user_agent or "").strip()
     return configured or None
 
 
-DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
+def _playwright_key(key: str) -> str | None:
+    """Map a browser KeyboardEvent.key to a Playwright key name."""
+    if not key or key in ("Dead", "Unidentified", "Process"):
+        return None
+    # Playwright accepts standard KeyboardEvent.key values for most keys.
+    return key
 
 
 @dataclass
@@ -169,14 +94,14 @@ class LiveSession:
     playwright: Playwright
     context: BrowserContext
     page: Page
-    cdp: Any | None = None
     screencast_on: bool = False
+    screencast_handle: Any | None = None
     viewers: set[asyncio.Queue] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     mode: str = "idle"  # idle | login | import
     viewport_width: int = DEFAULT_VIEWPORT["width"]
     viewport_height: int = DEFAULT_VIEWPORT["height"]
-    channel: str = "chromium"
+    browser: str = "firefox"
 
 
 class SessionManager:
@@ -194,24 +119,6 @@ class SessionManager:
     def get(self, profile_id: int) -> LiveSession | None:
         return self._sessions.get(profile_id)
 
-    def _launch_args(self, width: int, height: int) -> list[str]:
-        return [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-infobars",
-            "--disable-features=AutomationControlled,IsolateOrigins,site-per-process",
-            f"--window-size={width},{height}",
-            "--window-position=0,0",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            "--disable-ipc-flooding-protection",
-            "--password-store=basic",
-            "--use-mock-keychain",
-        ]
-
     async def _launch_persistent_context(
         self,
         pw: Playwright,
@@ -220,50 +127,29 @@ class SessionManager:
         headless: bool,
         width: int,
         height: int,
-    ) -> tuple[BrowserContext, str]:
-        """Prefer installed Google Chrome; fall back to Playwright Chromium."""
-        common: dict[str, Any] = {
+    ) -> BrowserContext:
+        kwargs: dict[str, Any] = {
             "headless": headless,
             "viewport": {"width": width, "height": height},
-            "screen": {"width": width, "height": height},
             "locale": "en-US",
             "timezone_id": "America/Los_Angeles",
             "color_scheme": "light",
-            "args": self._launch_args(width, height),
-            "ignore_default_args": ["--enable-automation"],
-            # Required inside Docker; real Chrome still behaves much closer to desktop.
-            "chromium_sandbox": False,
             "ignore_https_errors": False,
             "java_script_enabled": True,
             "accept_downloads": True,
             "has_touch": False,
-            "is_mobile": False,
-            "device_scale_factor": 1,
+            "firefox_user_prefs": {
+                # Reduce first-run / automation nags
+                "browser.shell.checkDefaultBrowser": False,
+                "datareporting.policy.dataSubmissionEnabled": False,
+                "toolkit.telemetry.reportingpolicy.firstRun": False,
+                "dom.webnotifications.enabled": False,
+            },
         }
         ua = _launch_user_agent()
         if ua:
-            common["user_agent"] = ua
-
-        preferred = (settings.browser_channel or "chrome").strip().lower()
-        if preferred in ("", "chromium"):
-            ctx = await pw.chromium.launch_persistent_context(user_data, **common)
-            return ctx, "chromium"
-
-        try:
-            ctx = await pw.chromium.launch_persistent_context(
-                user_data,
-                channel=preferred,
-                **common,
-            )
-            return ctx, preferred
-        except Exception as exc:
-            logger.warning(
-                "Failed to launch channel=%s (%s); falling back to bundled Chromium",
-                preferred,
-                exc,
-            )
-            ctx = await pw.chromium.launch_persistent_context(user_data, **common)
-            return ctx, "chromium"
+            kwargs["user_agent"] = ua
+        return await pw.firefox.launch_persistent_context(user_data, **kwargs)
 
     async def _warm_then_goto(self, page: Page, *, warm_url: str | None, start_url: str) -> None:
         """Hit the retailer homepage first so bot sensors see a normal entry path."""
@@ -301,9 +187,7 @@ class SessionManager:
                 headless = bool(settings.browser_headless)
                 width = DEFAULT_VIEWPORT["width"]
                 height = DEFAULT_VIEWPORT["height"]
-                # Walmart/Amazon bot checks (PerimeterX / HUMAN) heavily fingerprint
-                # Playwright's bundled Chromium. Prefer real Google Chrome under Xvfb.
-                context, channel = await self._launch_persistent_context(
+                context = await self._launch_persistent_context(
                     pw,
                     user_data,
                     headless=headless,
@@ -312,7 +196,6 @@ class SessionManager:
                 )
                 await context.add_init_script(_STEALTH_INIT_SCRIPT)
                 page = context.pages[0] if context.pages else await context.new_page()
-                # Extra pass in case a page was created before init scripts attached.
                 try:
                     await page.add_init_script(_STEALTH_INIT_SCRIPT)
                 except Exception:
@@ -325,13 +208,12 @@ class SessionManager:
                     mode=mode,
                     viewport_width=width,
                     viewport_height=height,
-                    channel=channel,
+                    browser="firefox",
                 )
                 self._sessions[profile_id] = session
                 logger.info(
-                    "Started browser profile=%s channel=%s headless=%s mode=%s",
+                    "Started browser profile=%s browser=firefox headless=%s mode=%s",
                     profile_id,
-                    channel,
                     headless,
                     mode,
                 )
@@ -348,11 +230,13 @@ class SessionManager:
         if not session:
             return
         try:
-            if session.screencast_on and session.cdp:
+            if session.screencast_on:
                 try:
-                    await session.cdp.send("Page.stopScreencast")
+                    await session.page.screencast.stop()
                 except Exception:
                     pass
+                session.screencast_on = False
+                session.screencast_handle = None
             await session.context.close()
         except Exception as exc:
             logger.warning("Error closing browser context for profile %s: %s", profile_id, exc)
@@ -362,75 +246,81 @@ class SessionManager:
             pass
         self.release_slot()
 
+    def _broadcast_frame(self, session: LiveSession, msg: dict) -> None:
+        dead: list[asyncio.Queue] = []
+        for q in list(session.viewers):
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                try:
+                    _ = q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    q.put_nowait(msg)
+                except asyncio.QueueFull:
+                    dead.append(q)
+        for q in dead:
+            session.viewers.discard(q)
+
+    def _on_frame_handler(self, session: LiveSession):
+        async def on_frame(frame: dict) -> None:
+            data = frame.get("data")
+            if not data:
+                return
+            if isinstance(data, (bytes, bytearray)):
+                b64 = base64.b64encode(data).decode("ascii")
+            else:
+                b64 = str(data)
+            msg = {
+                "type": "frame",
+                "data": b64,
+                "metadata": {
+                    "viewportWidth": frame.get("viewportWidth") or session.viewport_width,
+                    "viewportHeight": frame.get("viewportHeight") or session.viewport_height,
+                    "timestamp": frame.get("timestamp"),
+                },
+                "url": session.page.url,
+            }
+            self._broadcast_frame(session, msg)
+
+        return on_frame
+
+    async def _start_screencast_locked(self, session: LiveSession) -> None:
+        """Caller must hold session.lock. Starts Playwright page.screencast (Firefox-safe)."""
+        session.screencast_handle = await session.page.screencast.start(
+            on_frame=self._on_frame_handler(session),
+            quality=55,
+            size={"width": session.viewport_width, "height": session.viewport_height},
+        )
+        session.screencast_on = True
+
+    async def _stop_screencast_locked(self, session: LiveSession) -> None:
+        try:
+            await session.page.screencast.stop()
+        except Exception:
+            pass
+        session.screencast_on = False
+        session.screencast_handle = None
+
     async def start_screencast(self, session: LiveSession, queue: asyncio.Queue) -> None:
         async with session.lock:
             session.viewers.add(queue)
             if session.screencast_on:
                 return
-            cdp = await session.context.new_cdp_session(session.page)
-            session.cdp = cdp
-
-            async def on_frame(params: dict) -> None:
-                data = params.get("data")
-                session_id = params.get("sessionId")
-                metadata = params.get("metadata") or {}
-                if session.cdp and session_id is not None:
-                    try:
-                        await session.cdp.send("Page.screencastFrameAck", {"sessionId": session_id})
-                    except Exception:
-                        pass
-                msg = {
-                    "type": "frame",
-                    "data": data,
-                    "metadata": metadata,
-                    "url": session.page.url,
-                }
-                dead: list[asyncio.Queue] = []
-                for q in list(session.viewers):
-                    try:
-                        q.put_nowait(msg)
-                    except asyncio.QueueFull:
-                        try:
-                            _ = q.get_nowait()
-                        except asyncio.QueueEmpty:
-                            pass
-                        try:
-                            q.put_nowait(msg)
-                        except asyncio.QueueFull:
-                            dead.append(q)
-                for q in dead:
-                    session.viewers.discard(q)
-
-            cdp.on("Page.screencastFrame", lambda params: asyncio.create_task(on_frame(params)))
-            await cdp.send(
-                "Page.startScreencast",
-                {
-                    "format": "jpeg",
-                    "quality": 55,
-                    "maxWidth": session.viewport_width,
-                    "maxHeight": session.viewport_height,
-                    "everyNthFrame": 1,
-                },
-            )
-            session.screencast_on = True
+            await self._start_screencast_locked(session)
 
     async def stop_viewer(self, session: LiveSession, queue: asyncio.Queue) -> None:
         async with session.lock:
             session.viewers.discard(queue)
             if session.viewers or not session.screencast_on:
                 return
-            if session.cdp:
-                try:
-                    await session.cdp.send("Page.stopScreencast")
-                except Exception:
-                    pass
-            session.screencast_on = False
+            await self._stop_screencast_locked(session)
 
     async def resize_viewport(self, session: LiveSession, width: int, height: int) -> None:
-        """Match Playwright viewport + screencast to the embedded window size."""
+        """Match Playwright viewport to the embedded window size."""
         width = max(320, min(3840, int(width)))
         height = max(240, min(2160, int(height)))
-        # Keep even dimensions (some sensors dislike odd sizes).
         width -= width % 2
         height -= height % 2
         if width == session.viewport_width and height == session.viewport_height:
@@ -442,138 +332,61 @@ class SessionManager:
                 await session.page.set_viewport_size({"width": width, "height": height})
             except Exception as exc:
                 logger.warning("set_viewport_size failed: %s", exc)
-            cdp = session.cdp
-            if cdp:
-                try:
-                    await cdp.send(
-                        "Emulation.setDeviceMetricsOverride",
-                        {
-                            "width": width,
-                            "height": height,
-                            "deviceScaleFactor": 1,
-                            "mobile": False,
-                            "screenWidth": width,
-                            "screenHeight": height,
-                        },
-                    )
-                except Exception:
-                    pass
-            if not session.screencast_on or not session.cdp:
+            if not session.screencast_on:
                 return
+            await self._stop_screencast_locked(session)
             try:
-                await session.cdp.send("Page.stopScreencast")
-            except Exception:
-                pass
-            try:
-                await session.cdp.send(
-                    "Page.startScreencast",
-                    {
-                        "format": "jpeg",
-                        "quality": 55,
-                        "maxWidth": width,
-                        "maxHeight": height,
-                        "everyNthFrame": 1,
-                    },
-                )
+                await self._start_screencast_locked(session)
             except Exception as exc:
                 logger.warning("Restart screencast after resize failed: %s", exc)
                 session.screencast_on = False
+                session.screencast_handle = None
 
     async def dispatch_input(self, session: LiveSession, message: dict) -> None:
-        """Forward mouse/keyboard events from the UI into CDP."""
-        cdp = session.cdp
-        if not cdp:
-            cdp = await session.context.new_cdp_session(session.page)
-            session.cdp = cdp
-
+        """Forward mouse/keyboard events from the UI into Playwright (Firefox-safe)."""
+        page = session.page
         msg_type = message.get("type")
         if msg_type == "mouse":
             event = message.get("event") or "click"
             x = float(message.get("x") or 0)
             y = float(message.get("y") or 0)
             button = message.get("button") or "left"
-            click_count = int(message.get("clickCount") or 1)
-            modifiers = int(message.get("modifiers") or 0)
+            if button not in ("left", "right", "middle"):
+                button = "left"
             if event == "move":
-                await cdp.send(
-                    "Input.dispatchMouseEvent",
-                    {"type": "mouseMoved", "x": x, "y": y, "modifiers": modifiers},
-                )
+                await page.mouse.move(x, y)
             elif event == "down":
-                await cdp.send(
-                    "Input.dispatchMouseEvent",
-                    {
-                        "type": "mousePressed",
-                        "x": x,
-                        "y": y,
-                        "button": button,
-                        "clickCount": click_count,
-                        "modifiers": modifiers,
-                    },
-                )
+                await page.mouse.move(x, y)
+                await page.mouse.down(button=button)
             elif event == "up":
-                await cdp.send(
-                    "Input.dispatchMouseEvent",
-                    {
-                        "type": "mouseReleased",
-                        "x": x,
-                        "y": y,
-                        "button": button,
-                        "clickCount": click_count,
-                        "modifiers": modifiers,
-                    },
-                )
+                await page.mouse.move(x, y)
+                await page.mouse.up(button=button)
             elif event == "wheel":
-                await cdp.send(
-                    "Input.dispatchMouseEvent",
-                    {
-                        "type": "mouseWheel",
-                        "x": x,
-                        "y": y,
-                        "deltaX": float(message.get("deltaX") or 0),
-                        "deltaY": float(message.get("deltaY") or 0),
-                        "modifiers": modifiers,
-                    },
+                await page.mouse.move(x, y)
+                await page.mouse.wheel(
+                    float(message.get("deltaX") or 0),
+                    float(message.get("deltaY") or 0),
                 )
             elif event == "click":
-                for etype in ("mousePressed", "mouseReleased"):
-                    await cdp.send(
-                        "Input.dispatchMouseEvent",
-                        {
-                            "type": etype,
-                            "x": x,
-                            "y": y,
-                            "button": button,
-                            "clickCount": click_count,
-                            "modifiers": modifiers,
-                        },
-                    )
+                click_count = int(message.get("clickCount") or 1)
+                await page.mouse.click(x, y, button=button, click_count=click_count)
         elif msg_type == "key":
             event = message.get("event") or "down"
-            key = message.get("key") or ""
-            code = message.get("code") or ""
-            text = message.get("text")
-            modifiers = int(message.get("modifiers") or 0)
-            windows_virtual_key_code = message.get("windowsVirtualKeyCode")
-            native_virtual_key_code = message.get("nativeVirtualKeyCode")
-            payload: dict[str, Any] = {
-                "type": "keyDown" if event == "down" else ("keyUp" if event == "up" else "char"),
-                "modifiers": modifiers,
-            }
-            if key:
-                payload["key"] = key
-            if code:
-                payload["code"] = code
-            if text is not None:
-                payload["text"] = text
-            if windows_virtual_key_code is not None:
-                payload["windowsVirtualKeyCode"] = int(windows_virtual_key_code)
-            if native_virtual_key_code is not None:
-                payload["nativeVirtualKeyCode"] = int(native_virtual_key_code)
-            # char events need text
-            if payload["type"] == "char" and not payload.get("text"):
-                payload["text"] = key if len(key) == 1 else ""
-            await cdp.send("Input.dispatchKeyEvent", payload)
+            key = _playwright_key(str(message.get("key") or ""))
+            if not key:
+                return
+            # Skip separate "char" events — keyboard.down already inserts text and
+            # sending both doubles every character (same bug we fixed for CDP).
+            if event == "char":
+                return
+            try:
+                if event == "down":
+                    await page.keyboard.down(key)
+                elif event == "up":
+                    await page.keyboard.up(key)
+            except Exception as exc:
+                # Unknown key names should not kill the live session.
+                logger.debug("keyboard %s %r failed: %s", event, key, exc)
 
 
 session_manager = SessionManager()
@@ -589,7 +402,6 @@ async def amazon_session_logged_in(page: Page) -> bool:
     if looks_like_amazon_signin(url):
         return False
     try:
-        # Nav account line or orders chrome is a strong signal.
         handle = await page.query_selector("#nav-link-accountList, #nav-orders, .nav-action-signin-label")
         if handle:
             text = (await handle.inner_text()) or ""
@@ -597,7 +409,6 @@ async def amazon_session_logged_in(page: Page) -> bool:
                 return False
         if "/your-orders" in url or "order-history" in url:
             return not looks_like_amazon_signin(url)
-        # Try loading orders; redirect to signin means logged out.
         await page.goto(AMAZON_ORDERS_URL, wait_until="domcontentloaded", timeout=45_000)
         return not looks_like_amazon_signin(page.url)
     except Exception:
@@ -617,7 +428,6 @@ async def walmart_session_logged_in(page: Page) -> bool:
         await page.goto(WALMART_ORDERS_URL, wait_until="domcontentloaded", timeout=45_000)
         if looks_like_walmart_signin(page.url):
             return False
-        # Sign-in CTA on orders page means logged out.
         sign_in = await page.query_selector(
             'a[href*="login"], button:has-text("Sign in"), a:has-text("Sign in")'
         )
@@ -625,7 +435,6 @@ async def walmart_session_logged_in(page: Page) -> bool:
             href = (await sign_in.get_attribute("href")) or ""
             text = ((await sign_in.inner_text()) or "").lower()
             if "login" in href.lower() or "sign in" in text:
-                # If we also see order detail links, still treat as logged in.
                 order_link = await page.query_selector('a[href*="/orders/"]')
                 if not order_link:
                     return False

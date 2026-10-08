@@ -129,10 +129,13 @@ async def delete_browser_profile(
     profile = _get_profile_or_404(db, profile_id)
     await session_manager.close_session(profile_id)
     user_data = profile_user_data_dir(profile_id)
+    # Also remove legacy Chromium profile dirs from before the Firefox switch.
+    legacy_chrome = user_data.parent / f"profile-{profile_id}"
     db.delete(profile)
     db.commit()
-    if user_data.is_dir():
-        shutil.rmtree(user_data, ignore_errors=True)
+    for path in (user_data, legacy_chrome):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
     return None
 
 
@@ -226,7 +229,7 @@ async def cancel_login(
 
 @router.websocket("/{profile_id}/live")
 async def live_view(websocket: WebSocket, profile_id: int, token: str | None = Query(None)):
-    """Stream CDP screencast frames and accept input events for login."""
+    """Stream live Firefox screencast frames and accept input events for login."""
     if not token:
         await websocket.close(code=4401)
         return

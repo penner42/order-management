@@ -14,7 +14,9 @@ def profiles_root() -> Path:
 
 
 def profile_user_data_dir(profile_id: int) -> Path:
-    path = profiles_root() / f"profile-{profile_id}"
+    # Firefox profile layout differs from Chromium; use a separate dir so old
+    # Chrome/Chromium user-data does not corrupt the Firefox session.
+    path = profiles_root() / f"firefox-profile-{profile_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

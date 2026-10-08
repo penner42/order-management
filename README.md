@@ -119,7 +119,7 @@ The **browser-extension** folder contains a Chrome/Firefox extension that can re
 
 ## Browser automation (Walmart / Amazon)
 
-The app can run **Playwright Chromium on the API host** with one persistent profile per store account. Use **Browser automation** in the nav:
+The app can run **Playwright Firefox on the API host** with one persistent profile per store account. Use **Browser automation** in the nav:
 
 1. Create a Store Account (for Amazon, name it with the login email for import matching).
 2. Add a browser profile and choose **Walmart** or **Amazon**.
@@ -132,8 +132,8 @@ Notes:
 - Concurrent browsers are capped by `BROWSER_MAX_CONCURRENT` (default 2).
 - Set `APP_PUBLIC_BASE_URL` to the frontend origin used in review links (default `http://localhost:5173`).
 - Store sites may challenge datacenter IPs; this works best when the backend runs on a trusted/home network.
-- Automation browsers default to **headed Google Chrome** (`BROWSER_CHANNEL=chrome`, `BROWSER_HEADLESS=false`) under Xvfb in Docker. Playwright’s bundled Chromium is only a fallback. Headless mode is heavily flagged by Walmart’s bot checks (press-and-hold / “Robot or human?”).
-- If a profile is stuck on a robot check, **Delete** it and create a new one (burned cookies/_px state lives in the profile directory).
+- Automation browsers default to **headed Firefox** (`BROWSER_HEADLESS=false`) under Xvfb in Docker. Invoice PDF rendering still uses headless Chromium separately. Headless mode is heavily flagged by Walmart’s bot checks (press-and-hold / “Robot or human?”).
+- Profile data lives under `firefox-profile-<id>/` (separate from any old Chromium profile dirs). If a profile is stuck on a robot check, **Delete** it and create a new one.
 - Supported retailers: **Walmart** and **Amazon**. The browser extension remains available for Costco and ad-hoc capture.
 
 ## Project layout

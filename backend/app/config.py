@@ -23,16 +23,14 @@ class Settings(BaseSettings):
     # Directory where imported store invoice PDFs are stored
     invoice_dir: str = "data/invoices"
 
-    # Persistent Chromium profiles for automated store import (cookies/MFA)
+    # Persistent Firefox profiles for automated store import (cookies/MFA)
     browser_profiles_dir: str = "data/browser_profiles"
     # Cap concurrent Playwright browsers (login + import)
     browser_max_concurrent: int = 2
     # Headless=True is heavily flagged by Walmart/Amazon bot checks. Prefer headed
-    # (use Xvfb in Docker). Invoice PDF rendering stays separately headless.
+    # Firefox under Xvfb in Docker. Invoice PDF rendering stays separately headless Chromium.
     browser_headless: bool = False
-    # Prefer real Google Chrome in Docker (`chrome`). Use `chromium` for Playwright's bundle.
-    browser_channel: str = "chrome"
-    # Optional UA override; leave empty so real Chrome reports its own UA / Client Hints.
+    # Optional UA override; leave empty so Firefox reports its own UA.
     browser_user_agent: str = ""
     # Public app base URL used when building import-review links (no trailing slash)
     app_public_base_url: str = "http://localhost:5173"
