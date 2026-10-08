@@ -119,7 +119,7 @@ The **browser-extension** folder contains a Chrome/Firefox extension that can re
 
 ## Browser automation (Walmart / Amazon)
 
-The app can run **Playwright Firefox on the API host** with one persistent profile per store account. Use **Browser automation** in the nav:
+The app can run **Camoufox (anti-detect Firefox) on the API host** with one persistent profile per store account. Use **Browser automation** in the nav:
 
 1. Create a Store Account (for Amazon, name it with the login email for import matching).
 2. Add a browser profile and choose **Walmart** or **Amazon**.
@@ -132,9 +132,26 @@ Notes:
 - Concurrent browsers are capped by `BROWSER_MAX_CONCURRENT` (default 2).
 - Set `APP_PUBLIC_BASE_URL` to the frontend origin used in review links (default `http://localhost:5173`).
 - Store sites may challenge datacenter IPs; this works best when the backend runs on a trusted/home network.
-- Automation browsers default to **headed Firefox** (`BROWSER_HEADLESS=false`) under Xvfb in Docker. Invoice PDF rendering still uses headless Chromium separately. Headless mode is heavily flagged by Walmart’s bot checks (press-and-hold / “Robot or human?”).
-- Profile data lives under `firefox-profile-<id>/` (separate from any old Chromium profile dirs). If a profile is stuck on a robot check, **Delete** it and create a new one.
+- Automation browsers default to **headed Camoufox** (`BROWSER_HEADLESS=false`) under Xvfb in Docker. Login does **not** auto-navigate to the retailer — open the store from the live-view address bar. Invoice PDF rendering still uses headless Chromium separately.
+- Profile data lives under `camoufox-profile-<id>/`. If a profile is stuck on a block page, **Delete** it and create a new one.
 - Supported retailers: **Walmart** and **Amazon**. The browser extension remains available for Costco and ad-hoc capture.
+- Live view uses a WebSocket at `/api/browser-profiles/{id}/live` (same host/port as the site — no extra port). Behind a reverse proxy you must forward WebSocket upgrades for `/api`. If the upgrade is missing, backend logs show a plain `GET .../live` with **404/426** instead of a WebSocket accept.
+
+Nginx example (TLS terminator → Vite/frontend on 5173, or directly to backend on 8000 for `/api`):
+
+```nginx
+location /api/ {
+  proxy_pass http://127.0.0.1:5173;  # or :8000 if API is exposed directly
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_read_timeout 3600s;
+  proxy_send_timeout 3600s;
+}
+```
 
 ## Project layout
 

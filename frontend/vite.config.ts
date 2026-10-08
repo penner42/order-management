@@ -39,10 +39,17 @@ export default defineConfig({
         target: apiProxyTarget,
         changeOrigin: true,
         ws: true,
+        // Keep HTTP/1.1 semantics for Upgrade; some proxies break WS otherwise.
         configure(proxy) {
+          proxy.on('error', (err, _req, _res) => {
+            console.error('[vite proxy /api]', err.message)
+          })
+          proxy.on('proxyReqWs', (_proxyReq, req) => {
+            console.info('[vite proxy ws]', req.url)
+          })
           proxy.on('proxyReq', (_proxyReq, req, res) => {
             if (handleExtensionCors(req, res as ServerResponse)) {
-              (req as any).extensionCorsHandled = true
+              ;(req as any).extensionCorsHandled = true
             }
           })
           proxy.on('proxyRes', (proxyRes: IncomingMessage, req: IncomingMessage) => {

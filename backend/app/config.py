@@ -23,14 +23,14 @@ class Settings(BaseSettings):
     # Directory where imported store invoice PDFs are stored
     invoice_dir: str = "data/invoices"
 
-    # Persistent Firefox profiles for automated store import (cookies/MFA)
+    # Persistent Camoufox profiles for automated store import (cookies/MFA)
     browser_profiles_dir: str = "data/browser_profiles"
-    # Cap concurrent Playwright browsers (login + import)
+    # Cap concurrent browsers (login + import)
     browser_max_concurrent: int = 2
     # Headless=True is heavily flagged by Walmart/Amazon bot checks. Prefer headed
-    # Firefox under Xvfb in Docker. Invoice PDF rendering stays separately headless Chromium.
+    # Camoufox under Xvfb in Docker. Invoice PDF rendering stays separately headless Chromium.
     browser_headless: bool = False
-    # Optional UA override; leave empty so Firefox reports its own UA.
+    # Optional UA override; leave empty so Camoufox owns the fingerprint.
     browser_user_agent: str = ""
     # Public app base URL used when building import-review links (no trailing slash)
     app_public_base_url: str = "http://localhost:5173"

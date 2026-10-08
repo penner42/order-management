@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from playwright.async_api import Page
 
-from app.browser_automation.common import LoginRequiredError
+from app.browser_automation.common import LoginRequiredError, inject_scripts_for_evaluate
 from app.browser_automation.paths import walmart_orders_script_path, walmart_script_paths
 from app.browser_automation.session_manager import (
     WALMART_ORDERS_URL,
@@ -21,14 +21,13 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 
 async def _inject_walmart_scripts(page: Page) -> None:
     # orders.js installs network hooks + collectOrders RPC; lib/walmart.js normalizes.
-    for path in walmart_script_paths():
-        await page.add_script_tag(path=str(path))
+    await inject_scripts_for_evaluate(page, walmart_script_paths())
 
 
 async def _ensure_orders_hook(page: Page) -> None:
     installed = await page.evaluate("() => !!window.__wmOrdersHookInstalled")
     if not installed:
-        await page.add_script_tag(path=str(walmart_orders_script_path()))
+        await inject_scripts_for_evaluate(page, [walmart_orders_script_path()])
 
 
 async def _ensure_normalize_lib(page: Page) -> None:

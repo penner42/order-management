@@ -5,6 +5,12 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc curl gnupg unzip \
     xvfb fonts-liberation fonts-dejavu-core fonts-noto-core fonts-freefont-ttf \
+    # Camoufox/Firefox GUI + audio libs (python:slim has none of these)
+    libgtk-3-0 libx11-xcb1 libasound2 libdbus-glib-1-2 \
+    libxt6 libxrender1 libxi6 libxcomposite1 libxdamage1 libxrandr2 \
+    libxkbcommon0 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 \
+    libatk1.0-0 libatk-bridge2.0-0 libgdk-pixbuf-2.0-0 libglib2.0-0 \
+    libnss3 libnspr4 libxcb1 libxshmfence1 libgbm1 \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg \
@@ -16,15 +22,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Firefox for store automation live sessions; Chromium kept for invoice HTML -> PDF.
-RUN playwright install --with-deps firefox chromium
+# Chromium for invoice HTML -> PDF. Camoufox for store login/import (+ Firefox OS deps).
+RUN playwright install --with-deps chromium \
+    && playwright install-deps firefox \
+    && python -m camoufox fetch
 
 COPY . .
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Virtual display for headed Firefox (store automation). Invoice PDFs stay headless Chromium.
+# Virtual display for headed Camoufox (store automation). Invoice PDFs stay headless Chromium.
 ENV DISPLAY=:99
+# Docker/LXC often block user namespaces required by Firefox sandboxes.
+ENV MOZ_DISABLE_CONTENT_SANDBOX=1
+ENV MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
+ENV MOZ_ENABLE_WAYLAND=0
 
 # Entrypoint: Xvfb + migrations, then exec CMD (admin user is ensured on app startup)
 RUN set -e && \

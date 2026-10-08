@@ -44,15 +44,19 @@ const RESIZE_SNAP = 16
 const RESIZE_THRESHOLD = 16
 /** Never drive the remote browser below a normal desktop pane — tiny viewports get blocked. */
 const MIN_VIEWPORT_WIDTH = 1024
-const MIN_VIEWPORT_HEIGHT = 640
-const DEFAULT_VIEWPORT = { width: 1280, height: 800 }
+const MIN_VIEWPORT_HEIGHT = 720
+const DEFAULT_VIEWPORT = { width: 1600, height: 900 }
+/** ~40 Hz pointer moves — responsive without flooding the WS. */
+const MOUSE_MOVE_MIN_MS = 24
 
 function LiveBrowserView({
   profileId,
+  suggestedUrl,
   onDone,
   onCancel,
 }: {
   profileId: number
+  suggestedUrl: string
   onDone: () => void
   onCancel: () => void
 }) {
@@ -63,10 +67,55 @@ function LiveBrowserView({
   const lastSizeRef = useRef({ width: 0, height: 0 })
   const resizeTimerRef = useRef<number | null>(null)
   const openedRef = useRef(false)
+  const frameBusyRef = useRef(false)
+  const pendingFrameRef = useRef<string | null>(null)
   const [url, setUrl] = useState('')
+  const [address, setAddress] = useState(suggestedUrl)
   const [error, setError] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
+
+  const paintFrame = useCallback((b64: string) => {
+    pendingFrameRef.current = b64
+    if (frameBusyRef.current) return
+    frameBusyRef.current = true
+
+    const pump = () => {
+      const next = pendingFrameRef.current
+      pendingFrameRef.current = null
+      if (!next) {
+        frameBusyRef.current = false
+        return
+      }
+      const canvas = canvasRef.current
+      if (!canvas) {
+        frameBusyRef.current = false
+        return
+      }
+      const img = imgRef.current || new Image()
+      imgRef.current = img
+      img.onload = () => {
+        if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth
+        if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight
+        const ctx = canvas.getContext('2d')
+        if (ctx) ctx.drawImage(img, 0, 0)
+        if (pendingFrameRef.current) {
+          requestAnimationFrame(pump)
+        } else {
+          frameBusyRef.current = false
+        }
+      }
+      img.onerror = () => {
+        if (pendingFrameRef.current) {
+          requestAnimationFrame(pump)
+        } else {
+          frameBusyRef.current = false
+        }
+      }
+      img.src = `data:image/jpeg;base64,${next}`
+    }
+    requestAnimationFrame(pump)
+  }, [])
 
   const send = useCallback((payload: Record<string, unknown>) => {
     const ws = wsRef.current
@@ -148,10 +197,14 @@ function LiveBrowserView({
       setError(null)
       sendResize(true)
     }
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       setConnected(false)
       if (!openedRef.current) {
-        setError('Live view connection failed.')
+        setError(
+          `Live view connection failed (WebSocket close ${ev.code || 0}). ` +
+            'Behind a reverse proxy, /api must upgrade WebSockets (HTTP/1.1, Upgrade + Connection headers). ' +
+            'Backend logs show a plain GET 404/426 when the upgrade is missing.'
+        )
       }
     }
     // onerror always fires before onclose; don't surface it alone (false positives).
@@ -160,20 +213,16 @@ function LiveBrowserView({
       try {
         const msg = JSON.parse(ev.data as string)
         if (msg.type === 'frame' && msg.data) {
-          const canvas = canvasRef.current
-          if (!canvas) return
-          const img = imgRef.current || new Image()
-          imgRef.current = img
-          img.onload = () => {
-            canvas.width = img.naturalWidth
-            canvas.height = img.naturalHeight
-            const ctx = canvas.getContext('2d')
-            if (ctx) ctx.drawImage(img, 0, 0)
+          paintFrame(msg.data as string)
+          if (msg.url) {
+            setUrl(msg.url)
+            setAddress(msg.url)
           }
-          img.src = `data:image/jpeg;base64,${msg.data}`
-          if (msg.url) setUrl(msg.url)
         } else if (msg.type === 'status') {
-          if (msg.url) setUrl(msg.url)
+          if (msg.url) {
+            setUrl(msg.url)
+            setAddress(msg.url)
+          }
         } else if (msg.type === 'error') {
           setError(msg.message || 'Live view error')
         }
@@ -185,8 +234,10 @@ function LiveBrowserView({
     return () => {
       ws.close()
       wsRef.current = null
+      pendingFrameRef.current = null
+      frameBusyRef.current = false
     }
-  }, [profileId, sendResize])
+  }, [profileId, sendResize, paintFrame])
 
   useEffect(() => {
     const el = viewportRef.current
@@ -215,7 +266,7 @@ function LiveBrowserView({
   const lastMoveSentRef = useRef(0)
   const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const now = performance.now()
-    if (now - lastMoveSentRef.current < 32) return
+    if (now - lastMoveSentRef.current < MOUSE_MOVE_MIN_MS) return
     lastMoveSentRef.current = now
     const { x, y } = coords(e)
     send({ type: 'mouse', event: 'move', x, y })
@@ -237,7 +288,22 @@ function LiveBrowserView({
     const { x, y } = coords(e)
     send({ type: 'mouse', event: 'wheel', x, y, deltaX: e.deltaX, deltaY: e.deltaY })
   }
+  const pasteText = (text: string) => {
+    if (text) send({ type: 'paste', text })
+  }
+  const onPaste = (e: React.ClipboardEvent<HTMLCanvasElement>) => {
+    e.preventDefault()
+    pasteText(e.clipboardData?.getData('text/plain') ?? '')
+  }
   const onKeyDown = (e: React.KeyboardEvent<HTMLCanvasElement>) => {
+    // Ctrl/Cmd+V: send local clipboard text. Remote Ctrl+V has no access to your clipboard.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      e.preventDefault()
+      if (navigator.clipboard?.readText) {
+        void navigator.clipboard.readText().then(pasteText).catch(() => {})
+      }
+      return
+    }
     e.preventDefault()
     const modifiers =
       (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0)
@@ -263,6 +329,9 @@ function LiveBrowserView({
     }
   }
   const onKeyUp = (e: React.KeyboardEvent<HTMLCanvasElement>) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      return
+    }
     e.preventDefault()
     const modifiers =
       (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0)
@@ -277,41 +346,65 @@ function LiveBrowserView({
     })
   }
 
-  const blocked = /walmart\.com\/blocked/i.test(url)
+  const navigateTo = (raw: string) => {
+    let next = raw.trim()
+    if (!next) return
+    if (!/^https?:\/\//i.test(next)) next = `https://${next}`
+    setAddress(next)
+    send({ type: 'navigate', url: next })
+  }
+
+  const blocked = /\/blocked/i.test(url)
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4">
-      <div className="bg-[#dee1e6] dark:bg-gray-900 rounded-xl shadow-2xl w-[min(1280px,98vw)] h-[min(900px,96vh)] flex flex-col overflow-hidden border border-black/10 dark:border-gray-700">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-1 sm:p-2">
+      <div className="bg-[#dee1e6] dark:bg-gray-900 rounded-xl shadow-2xl w-[min(1920px,100vw-0.5rem)] h-[min(1080px,100vh-0.5rem)] flex flex-col overflow-hidden border border-black/10 dark:border-gray-700">
         {/* Window chrome */}
-        <div className="flex items-center gap-3 px-3 py-1.5 bg-[#e8eaed] dark:bg-gray-800 border-b border-black/10 dark:border-gray-700 shrink-0">
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-[#e8eaed] dark:bg-gray-800 border-b border-black/10 dark:border-gray-700 shrink-0">
           <div className="flex items-center gap-1.5 shrink-0" aria-hidden>
             <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
             <span className="h-3 w-3 rounded-full bg-[#febc2e]" />
             <span className="h-3 w-3 rounded-full bg-[#28c840]" />
           </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 rounded-full bg-white dark:bg-gray-900 border border-black/10 dark:border-gray-600 px-3 py-1 text-xs text-ink dark:text-gray-200">
-              <svg
-                className="h-3 w-3 text-ink-muted dark:text-gray-500 shrink-0"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                aria-hidden
+          <form
+            className="min-w-0 flex-1 flex items-center gap-1.5"
+            onSubmit={(e) => {
+              e.preventDefault()
+              navigateTo(address)
+            }}
+          >
+            <input
+              type="text"
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+              placeholder={connected ? 'Enter URL…' : 'Connecting…'}
+              disabled={!connected}
+              className="min-w-0 flex-1 rounded-full bg-white dark:bg-gray-900 border border-black/10 dark:border-gray-600 px-3 py-1 text-xs text-ink dark:text-gray-200 outline-none focus:ring-1 focus:ring-brand-500"
+              aria-label="Address bar"
+            />
+            <button
+              type="submit"
+              disabled={!connected}
+              className="rounded-md border border-black/10 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs text-ink dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+            >
+              Go
+            </button>
+            {suggestedUrl && (
+              <button
+                type="button"
+                disabled={!connected}
+                onClick={() => navigateTo(suggestedUrl)}
+                className="rounded-md border border-black/10 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs text-ink dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
               >
-                <rect x="5" y="11" width="14" height="10" rx="2" />
-                <path d="M8 11V8a4 4 0 0 1 8 0v3" />
-              </svg>
-              <span className="truncate" title={url}>
-                {connected ? url || 'Connecting…' : 'Disconnected'}
-              </span>
-              {viewportSize.width > 0 && (
-                <span className="ml-auto shrink-0 text-[10px] text-ink-muted dark:text-gray-500">
-                  {viewportSize.width}×{viewportSize.height}
-                </span>
-              )}
-            </div>
-          </div>
+                Home
+              </button>
+            )}
+          </form>
+          {viewportSize.width > 0 && (
+            <span className="shrink-0 text-[10px] text-ink-muted dark:text-gray-500">
+              {viewportSize.width}×{viewportSize.height}
+            </span>
+          )}
           <button
             type="button"
             onClick={onCancel}
@@ -320,21 +413,22 @@ function LiveBrowserView({
             Cancel
           </button>
         </div>
-        {(error || blocked) && (
-          <div className="px-3 py-1.5 shrink-0 bg-[#f1f3f4] dark:bg-gray-900 border-b border-black/5 dark:border-gray-800">
-            {error && (
-              <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
-            )}
-            {blocked && (
-              <p className="text-xs text-amber-800 dark:text-amber-200">
-                Walmart blocked this browser session. Cancel, delete the profile, create a new one, then try Log in again.
-              </p>
-            )}
-          </div>
-        )}
+        <div className="px-3 py-1.5 shrink-0 bg-[#f1f3f4] dark:bg-gray-900 border-b border-black/5 dark:border-gray-800">
+          {error ? (
+            <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
+          ) : blocked ? (
+            <p className="text-xs text-amber-800 dark:text-amber-200">
+              Site blocked this session. Cancel, delete the profile, create a new one after Camoufox is deployed, then open the store homepage yourself via the address bar.
+            </p>
+          ) : (
+            <p className="text-xs text-ink-muted dark:text-gray-400">
+              Click the page to focus. Ctrl/Cmd+V pastes into the remote browser. Use Home or the address bar to open the store, sign in, then Done.
+            </p>
+          )}
+        </div>
         <div
           ref={viewportRef}
-          className="relative flex-1 min-h-[640px] bg-white dark:bg-gray-950 overflow-hidden"
+          className="relative flex-1 min-h-0 bg-white dark:bg-gray-950 overflow-hidden"
         >
           <canvas
             ref={canvasRef}
@@ -344,6 +438,7 @@ function LiveBrowserView({
             onMouseDown={onMouseDown}
             onMouseUp={onMouseUp}
             onWheel={onWheel}
+            onPaste={onPaste}
             onKeyDown={onKeyDown}
             onKeyUp={onKeyUp}
           />
@@ -378,6 +473,7 @@ export default function BrowserAutomation() {
   const [selectedAccountId, setSelectedAccountId] = useState<number | ''>('')
   const [selectedRetailer, setSelectedRetailer] = useState<'amazon' | 'walmart'>('walmart')
   const [loginProfileId, setLoginProfileId] = useState<number | null>(null)
+  const [loginSuggestedUrl, setLoginSuggestedUrl] = useState('https://www.walmart.com/')
   const [maxPagesByProfile, setMaxPagesByProfile] = useState<Record<number, number>>({})
   const [jobsByProfile, setJobsByProfile] = useState<Record<number, BrowserJob>>({})
   const pollRef = useRef<number | null>(null)
@@ -430,7 +526,11 @@ export default function BrowserAutomation() {
   const startLogin = async (profileId: number) => {
     setError(null)
     try {
-      await api.post(`/browser-profiles/${profileId}/login/start`, {})
+      const res = await api.post<{ login_url?: string }>(
+        `/browser-profiles/${profileId}/login/start`,
+        {}
+      )
+      setLoginSuggestedUrl(res.login_url || 'https://www.walmart.com/')
       setLoginProfileId(profileId)
       load()
     } catch (err) {
@@ -529,11 +629,10 @@ export default function BrowserAutomation() {
     <div>
       <h1 className="text-2xl font-semibold text-ink dark:text-gray-100 mb-2">Browser automation</h1>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
-        Run a real Firefox session on the server for each store account. Log in once in the embedded
-        view (MFA supported); then use Import now to capture Walmart or Amazon orders into Import
-        Review. Sessions live on the machine hosting the API — use a trusted/home network IP when
-        possible. If you see a “Robot or human?” / press-and-hold page, complete it in the live view
-        (hold the button). If a profile stays blocked, delete it and create a new one.
+        Run a Camoufox (anti-detect Firefox) session on the server for each store account. Log in once
+        in the embedded view (MFA supported); then use Import now to capture Walmart or Amazon orders
+        into Import Review. Login opens a blank page — use the address bar / Home to open the store
+        yourself. If a profile is blocked, delete it and create a new one after Camoufox is deployed.
       </p>
 
       {error && (
@@ -704,6 +803,7 @@ export default function BrowserAutomation() {
       {loginProfileId != null && (
         <LiveBrowserView
           profileId={loginProfileId}
+          suggestedUrl={loginSuggestedUrl}
           onDone={() => {
             void finishLogin()
           }}

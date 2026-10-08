@@ -1200,6 +1200,24 @@
     return shipments
   }
 
+  /**
+   * Post-parse cleanup used by extension capture + browser-automation import.
+   * Drops product-support false positives and attaches real ship-track links.
+   */
+  function repairShipmentTracking(parsed) {
+    if (!parsed || !Array.isArray(parsed.shipments)) return parsed
+    attachMissingTrackingToShipments(document, parsed.shipments)
+    if (parsed.shipments.length === 1 && parsed.shipments[0] && parsed.shipments[0].shipmentId) {
+      const onlyId = parsed.shipments[0].shipmentId
+      ;(parsed.items || []).forEach((item) => {
+        if (item && (!item.shipmentId || String(item.shipmentId).indexOf('shipment-') === 0)) {
+          item.shipmentId = onlyId
+        }
+      })
+    }
+    return parsed
+  }
+
   function extractShipmentIdFromUrl(url) {
     if (!url) return null
     const m = /[?&]shipmentId=([^&]+)/i.exec(String(url))
@@ -2414,6 +2432,7 @@
     fetchAccountEmailFromIframe,
     extractOrderIdFromUrl,
     enrichShipmentsWithTracking,
+    repairShipmentTracking,
     parseTrackingPageHtml,
     isLikelyCarrierTrackingNumber,
   }

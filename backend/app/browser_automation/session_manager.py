@@ -1,4 +1,4 @@
-"""Manage Playwright persistent contexts per browser profile (Firefox)."""
+"""Manage Camoufox (anti-detect Firefox) persistent contexts per browser profile."""
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +8,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
-from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, Page
 
 from app.browser_automation.paths import profile_user_data_dir
 from app.config import settings
@@ -32,53 +32,13 @@ WALMART_SIGNIN_HINTS = (
     "/blocked",
 )
 
-# Soften common automation fingerprints before any page JS runs.
-# Keep platform/UA honest — mismatched fingerprints get flagged.
-_STEALTH_INIT_SCRIPT = """
-(() => {
-  try {
-    Object.defineProperty(Navigator.prototype, 'webdriver', {
-      get: () => undefined,
-      configurable: true,
-    });
-  } catch (e) {}
-  try {
-    if (Object.getOwnPropertyDescriptor(navigator, 'webdriver')) {
-      delete navigator.webdriver;
-    }
-  } catch (e) {}
-  try {
-    Object.defineProperty(navigator, 'languages', {
-      get: () => Object.freeze(['en-US', 'en']),
-    });
-  } catch (e) {}
-  try {
-    const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
-    if (originalQuery) {
-      window.navigator.permissions.query = (parameters) =>
-        parameters && parameters.name === 'notifications'
-          ? Promise.resolve({ state: Notification.permission })
-          : originalQuery(parameters);
-    }
-  } catch (e) {}
-  try {
-    if (!window.outerWidth) {
-      Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
-    }
-    if (!window.outerHeight) {
-      Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight + 85 });
-    }
-  } catch (e) {}
-})();
-"""
-
-DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
-# Screencast max bounds — keep stable so resize does not restart the stream.
+DEFAULT_VIEWPORT = {"width": 1600, "height": 900}
+# Cap stream resolution for WebSocket bandwidth; keep close to the UI window.
 SCREENCAST_MAX = {"width": 1920, "height": 1080}
+SCREENCAST_QUALITY = 62
 RESIZE_SNAP = 16
 RESIZE_THRESHOLD = 16
-# Reject tiny panes (e.g. 1120×240) that look automated and get hard-blocked.
-MIN_VIEWPORT = {"width": 1024, "height": 640}
+MIN_VIEWPORT = {"width": 1024, "height": 720}
 
 
 def _snap_size(width: int, height: int) -> tuple[int, int]:
@@ -89,26 +49,19 @@ def _snap_size(width: int, height: int) -> tuple[int, int]:
     return width, height
 
 
-def _launch_user_agent() -> str | None:
-    """Only override UA when explicitly configured."""
-    configured = (settings.browser_user_agent or "").strip()
-    return configured or None
-
-
 def _playwright_key(key: str) -> str | None:
     """Map a browser KeyboardEvent.key to a Playwright key name."""
     if not key or key in ("Dead", "Unidentified", "Process"):
         return None
-    # Playwright accepts standard KeyboardEvent.key values for most keys.
     return key
 
 
 @dataclass
 class LiveSession:
     profile_id: int
-    playwright: Playwright
     context: BrowserContext
     page: Page
+    camoufox: Any
     screencast_on: bool = False
     screencast_handle: Any | None = None
     viewers: set[asyncio.Queue] = field(default_factory=set)
@@ -116,7 +69,10 @@ class LiveSession:
     mode: str = "idle"  # idle | login | import
     viewport_width: int = DEFAULT_VIEWPORT["width"]
     viewport_height: int = DEFAULT_VIEWPORT["height"]
-    browser: str = "firefox"
+    browser: str = "camoufox"
+    # Coalesce pointer moves so the WS receive loop never waits on humanize/animation.
+    pending_mouse: tuple[float, float] | None = None
+    mouse_flush_task: asyncio.Task | None = None
 
 
 class SessionManager:
@@ -134,40 +90,49 @@ class SessionManager:
     def get(self, profile_id: int) -> LiveSession | None:
         return self._sessions.get(profile_id)
 
-    async def _launch_persistent_context(
+    async def _launch_camoufox_context(
         self,
-        pw: Playwright,
         user_data: str,
         *,
         headless: bool,
         width: int,
         height: int,
-    ) -> BrowserContext:
-        kwargs: dict[str, Any] = {
-            "headless": headless,
-            "viewport": {"width": width, "height": height},
-            "locale": "en-US",
-            "timezone_id": "America/Los_Angeles",
-            "color_scheme": "light",
-            "ignore_https_errors": False,
-            "java_script_enabled": True,
-            "accept_downloads": True,
-            "has_touch": False,
-            "firefox_user_prefs": {
-                # Reduce first-run / automation nags
-                "browser.shell.checkDefaultBrowser": False,
-                "datareporting.policy.dataSubmissionEnabled": False,
-                "toolkit.telemetry.reportingpolicy.firstRun": False,
-                "dom.webnotifications.enabled": False,
+    ) -> tuple[BrowserContext, Any]:
+        """Launch Camoufox persistent context (anti-detect Firefox fork)."""
+        try:
+            from camoufox.async_api import AsyncCamoufox
+        except ImportError as exc:
+            raise RuntimeError(
+                "camoufox is not installed. Rebuild the backend image after adding the dependency."
+            ) from exc
+
+        # headless=False under our Xvfb — avoid headless="virtual" (1×1 display is detectable).
+        # Sandbox env vars are set in Docker (MOZ_DISABLE_*_SANDBOX) for LXC/EPERM.
+        # humanize=False: live-view mouse must be immediate (humanize adds ~1s per move).
+        cm = AsyncCamoufox(
+            persistent_context=True,
+            user_data_dir=user_data,
+            headless=bool(headless),
+            os="linux",
+            locale="en-US",
+            humanize=False,
+            enable_cache=True,
+            # Needed for predictable live-view click mapping; Camoufox still spoofs other signals.
+            window=(width, height),
+            block_webrtc=True,
+            firefox_user_prefs={
+                "security.sandbox.content.level": 0,
+                "security.sandbox.gpu.level": 0,
             },
-        }
-        ua = _launch_user_agent()
-        if ua:
-            kwargs["user_agent"] = ua
-        return await pw.firefox.launch_persistent_context(user_data, **kwargs)
+        )
+        context = await cm.__aenter__()
+        if not isinstance(context, BrowserContext):
+            # Non-persistent mode returns a Browser; we always request persistent_context.
+            raise RuntimeError("Camoufox did not return a persistent BrowserContext")
+        return context, cm
 
     async def _warm_then_goto(self, page: Page, *, warm_url: str | None, start_url: str) -> None:
-        """Hit the retailer homepage first so bot sensors see a normal entry path."""
+        """Optional warm path used for import jobs (not interactive login)."""
         current = (page.url or "").lower()
         if "/blocked" in current:
             logger.warning("Skipping navigation; page is already on a block interstitial: %s", page.url)
@@ -205,41 +170,44 @@ class SessionManager:
             await self.acquire_slot()
             try:
                 user_data = str(profile_user_data_dir(profile_id))
-                pw = await async_playwright().start()
                 headless = bool(settings.browser_headless)
                 width = DEFAULT_VIEWPORT["width"]
                 height = DEFAULT_VIEWPORT["height"]
-                context = await self._launch_persistent_context(
-                    pw,
+                context, camoufox = await self._launch_camoufox_context(
                     user_data,
                     headless=headless,
                     width=width,
                     height=height,
                 )
-                await context.add_init_script(_STEALTH_INIT_SCRIPT)
                 page = context.pages[0] if context.pages else await context.new_page()
+                # Sync viewport from whatever Camoufox actually opened.
                 try:
-                    await page.add_init_script(_STEALTH_INIT_SCRIPT)
+                    vp = page.viewport_size
+                    if vp:
+                        width = int(vp.get("width") or width)
+                        height = int(vp.get("height") or height)
                 except Exception:
                     pass
                 session = LiveSession(
                     profile_id=profile_id,
-                    playwright=pw,
                     context=context,
                     page=page,
+                    camoufox=camoufox,
                     mode=mode,
                     viewport_width=width,
                     viewport_height=height,
-                    browser="firefox",
+                    browser="camoufox",
                 )
                 self._sessions[profile_id] = session
                 logger.info(
-                    "Started browser profile=%s browser=firefox headless=%s mode=%s",
+                    "Started browser profile=%s browser=camoufox headless=%s mode=%s",
                     profile_id,
                     headless,
                     mode,
                 )
-                if start_url:
+                # Interactive login: stay on blank/new tab — user navigates in the live view.
+                # Import jobs pass start_url and still warm-navigate.
+                if start_url and mode != "login":
                     await self._warm_then_goto(page, warm_url=warm_url, start_url=start_url)
                 return session
             except Exception:
@@ -259,13 +227,19 @@ class SessionManager:
                     pass
                 session.screencast_on = False
                 session.screencast_handle = None
-            await session.context.close()
+            if session.camoufox is not None:
+                try:
+                    await session.camoufox.__aexit__(None, None, None)
+                except Exception as exc:
+                    logger.warning("Camoufox shutdown failed for profile %s: %s", profile_id, exc)
+                    try:
+                        await session.context.close()
+                    except Exception:
+                        pass
+            else:
+                await session.context.close()
         except Exception as exc:
             logger.warning("Error closing browser context for profile %s: %s", profile_id, exc)
-        try:
-            await session.playwright.stop()
-        except Exception:
-            pass
         self.release_slot()
 
     def _broadcast_frame(self, session: LiveSession, msg: dict) -> None:
@@ -309,12 +283,13 @@ class SessionManager:
         return on_frame
 
     async def _start_screencast_locked(self, session: LiveSession) -> None:
-        """Caller must hold session.lock. Starts Playwright page.screencast (Firefox-safe)."""
+        """Caller must hold session.lock."""
+        cast_w = min(SCREENCAST_MAX["width"], max(MIN_VIEWPORT["width"], session.viewport_width))
+        cast_h = min(SCREENCAST_MAX["height"], max(MIN_VIEWPORT["height"], session.viewport_height))
         session.screencast_handle = await session.page.screencast.start(
             on_frame=self._on_frame_handler(session),
-            quality=55,
-            # Fixed max size — do not tie to viewport or every resize restarts the stream.
-            size=dict(SCREENCAST_MAX),
+            quality=SCREENCAST_QUALITY,
+            size={"width": cast_w, "height": cast_h},
         )
         session.screencast_on = True
 
@@ -341,7 +316,7 @@ class SessionManager:
             await self._stop_screencast_locked(session)
 
     async def resize_viewport(self, session: LiveSession, width: int, height: int) -> None:
-        """Match Playwright viewport to the embedded window size (no screencast restart)."""
+        """Match Playwright viewport to the embedded window; restart screencast if size changed."""
         width, height = _snap_size(width, height)
         prev_w, prev_h = session.viewport_width, session.viewport_height
         if width == prev_w and height == prev_h:
@@ -358,9 +333,33 @@ class SessionManager:
                 await session.page.set_viewport_size({"width": width, "height": height})
             except Exception as exc:
                 logger.warning("set_viewport_size failed: %s", exc)
+            # Restart stream so JPEG size tracks the new viewport (sharper when larger).
+            if session.screencast_on and session.viewers:
+                await self._stop_screencast_locked(session)
+                await self._start_screencast_locked(session)
+
+    async def _flush_pending_mouse(self, session: LiveSession) -> None:
+        """Apply the latest coalesced pointer position (drops intermediate moves)."""
+        try:
+            while session.pending_mouse is not None:
+                x, y = session.pending_mouse
+                session.pending_mouse = None
+                try:
+                    await session.page.mouse.move(x, y)
+                except Exception as exc:
+                    logger.debug("mouse move failed: %s", exc)
+                    break
+        finally:
+            session.mouse_flush_task = None
+
+    def _queue_mouse_move(self, session: LiveSession, x: float, y: float) -> None:
+        session.pending_mouse = (x, y)
+        task = session.mouse_flush_task
+        if task is None or task.done():
+            session.mouse_flush_task = asyncio.create_task(self._flush_pending_mouse(session))
 
     async def dispatch_input(self, session: LiveSession, message: dict) -> None:
-        """Forward mouse/keyboard events from the UI into Playwright (Firefox-safe)."""
+        """Forward mouse/keyboard events from the UI into Playwright."""
         page = session.page
         msg_type = message.get("type")
         if msg_type == "mouse":
@@ -371,7 +370,8 @@ class SessionManager:
             if button not in ("left", "right", "middle"):
                 button = "left"
             if event == "move":
-                await page.mouse.move(x, y)
+                # Non-blocking: coalesce so a backlog of moves can't freeze the live view.
+                self._queue_mouse_move(session, x, y)
             elif event == "down":
                 await page.mouse.move(x, y)
                 await page.mouse.down(button=button)
@@ -392,8 +392,6 @@ class SessionManager:
             key = _playwright_key(str(message.get("key") or ""))
             if not key:
                 return
-            # Skip separate "char" events — keyboard.down already inserts text and
-            # sending both doubles every character (same bug we fixed for CDP).
             if event == "char":
                 return
             try:
@@ -402,8 +400,18 @@ class SessionManager:
                 elif event == "up":
                     await page.keyboard.up(key)
             except Exception as exc:
-                # Unknown key names should not kill the live session.
                 logger.debug("keyboard %s %r failed: %s", event, key, exc)
+        elif msg_type == "paste":
+            text = str(message.get("text") or "")
+            if not text:
+                return
+            # Cap absurd pastes (passwords/MFA codes are tiny; bulk paste still ok).
+            if len(text) > 100_000:
+                text = text[:100_000]
+            try:
+                await page.keyboard.insert_text(text)
+            except Exception as exc:
+                logger.debug("paste insert_text failed: %s", exc)
 
 
 session_manager = SessionManager()
@@ -467,6 +475,12 @@ def login_start_url_for_retailer(retailer: str) -> str:
 
 
 def login_warm_url_for_retailer(retailer: str) -> str:
+    if retailer == "walmart":
+        return WALMART_HOME_URL
+    return AMAZON_HOME_URL
+
+
+def login_home_url_for_retailer(retailer: str) -> str:
     if retailer == "walmart":
         return WALMART_HOME_URL
     return AMAZON_HOME_URL

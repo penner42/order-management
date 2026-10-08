@@ -16,8 +16,7 @@ from app.browser_automation.common import LoginRequiredError, post_bulk_session
 from app.browser_automation.jobs import create_job, get_job, update_job
 from app.browser_automation.paths import profile_user_data_dir
 from app.browser_automation.session_manager import (
-    login_start_url_for_retailer,
-    login_warm_url_for_retailer,
+    login_home_url_for_retailer,
     retailer_session_logged_in,
     session_manager,
 )
@@ -129,11 +128,14 @@ async def delete_browser_profile(
     profile = _get_profile_or_404(db, profile_id)
     await session_manager.close_session(profile_id)
     user_data = profile_user_data_dir(profile_id)
-    # Also remove legacy Chromium profile dirs from before the Firefox switch.
-    legacy_chrome = user_data.parent / f"profile-{profile_id}"
+    # Also remove legacy profile dirs from earlier Chrome/Firefox engines.
+    legacy_dirs = [
+        user_data.parent / f"profile-{profile_id}",
+        user_data.parent / f"firefox-profile-{profile_id}",
+    ]
     db.delete(profile)
     db.commit()
-    for path in (user_data, legacy_chrome):
+    for path in (user_data, *legacy_dirs):
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
     return None
@@ -149,19 +151,15 @@ async def start_login(
     if profile.retailer not in SUPPORTED_RETAILERS:
         raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
 
-    login_url = login_start_url_for_retailer(profile.retailer)
-    warm_url = login_warm_url_for_retailer(profile.retailer)
+    # Suggested first URL for the live-view address bar. We intentionally do NOT
+    # auto-navigate on login — automated goto is a strong Walmart/Amazon bot signal.
+    login_url = login_home_url_for_retailer(profile.retailer)
     profile.status = "login_in_progress"
     profile.last_error = None
     db.commit()
 
     try:
-        await session_manager.ensure_session(
-            profile_id,
-            mode="login",
-            start_url=login_url,
-            warm_url=warm_url,
-        )
+        await session_manager.ensure_session(profile_id, mode="login")
     except Exception as exc:
         profile.status = "error"
         profile.last_error = str(exc)
@@ -227,14 +225,35 @@ async def cancel_login(
     return _profile_read(_get_profile_or_404(db, profile_id))
 
 
+@router.get("/{profile_id}/live")
+async def live_view_http_hint(profile_id: int):
+    """Plain HTTP hits this when the reverse proxy did not upgrade to WebSocket."""
+    raise HTTPException(
+        status_code=426,
+        detail=(
+            "Live view requires a WebSocket connection. Your reverse proxy must forward "
+            "HTTP Upgrade to the app for /api/browser-profiles/*/live "
+            "(proxy_http_version 1.1; Upgrade + Connection headers). "
+            f"profile_id={profile_id}"
+        ),
+        headers={"Upgrade": "websocket"},
+    )
+
+
 @router.websocket("/{profile_id}/live")
 async def live_view(websocket: WebSocket, profile_id: int, token: str | None = Query(None)):
-    """Stream live Firefox screencast frames and accept input events for login."""
+    """Stream live browser screencast frames and accept input events for login."""
+    # Accept first so close codes / JSON errors reach the browser (rejecting
+    # before accept often surfaces only as a generic client-side failure).
+    await websocket.accept()
+
     if not token:
+        await websocket.send_json({"type": "error", "message": "Missing auth token for live view."})
         await websocket.close(code=4401)
         return
     username = decode_token(token)
     if not username:
+        await websocket.send_json({"type": "error", "message": "Invalid or expired auth token."})
         await websocket.close(code=4401)
         return
 
@@ -242,24 +261,34 @@ async def live_view(websocket: WebSocket, profile_id: int, token: str | None = Q
     try:
         user = db.query(User).filter(User.username == username).first()
         if not user:
+            await websocket.send_json({"type": "error", "message": "User not found."})
             await websocket.close(code=4401)
             return
         profile = db.query(BrowserProfile).filter(BrowserProfile.id == profile_id).first()
         if not profile:
+            await websocket.send_json({"type": "error", "message": "Browser profile not found."})
             await websocket.close(code=4404)
             return
     finally:
         db.close()
 
-    await websocket.accept()
     session = session_manager.get(profile_id)
     if not session:
-        await websocket.send_json({"type": "error", "message": "No active browser session. Start login first."})
-        await websocket.close()
+        await websocket.send_json(
+            {"type": "error", "message": "No active browser session. Start login first."}
+        )
+        await websocket.close(code=4404)
         return
 
+    logger.info("Live view WebSocket connected profile=%s user=%s", profile_id, username)
     queue: asyncio.Queue = asyncio.Queue(maxsize=3)
-    await session_manager.start_screencast(session, queue)
+    try:
+        await session_manager.start_screencast(session, queue)
+    except Exception as exc:
+        logger.exception("Failed to start screencast for profile %s", profile_id)
+        await websocket.send_json({"type": "error", "message": f"Failed to start live view: {exc}"})
+        await websocket.close(code=1011)
+        return
 
     async def pump_frames() -> None:
         while True:
@@ -290,7 +319,7 @@ async def live_view(websocket: WebSocket, profile_id: int, token: str | None = Q
             except json.JSONDecodeError:
                 continue
             msg_type = message.get("type")
-            if msg_type in ("mouse", "key"):
+            if msg_type in ("mouse", "key", "paste"):
                 try:
                     await session_manager.dispatch_input(session, message)
                 except Exception as exc:

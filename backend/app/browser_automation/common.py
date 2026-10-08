@@ -1,13 +1,29 @@
 """Shared helpers for browser-automation importers."""
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Sequence
+
+from playwright.async_api import Page
 
 from app.config import settings
 
 
 class LoginRequiredError(Exception):
     """Raised when a retailer session is not authenticated."""
+
+
+async def inject_scripts_for_evaluate(page: Page, paths: Sequence[Path]) -> None:
+    """Load extension scripts into the same JS world as ``page.evaluate``.
+
+    Camoufox runs Playwright evaluate in an isolated world. ``add_script_tag``
+    installs into the page main world, so helpers like ``OrderManagerWalmart``
+    are invisible to later evaluates. Running the file source via evaluate keeps
+    them in the same world.
+    """
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        await page.evaluate("(code) => { (0, eval)(code); }", source)
 
 
 def post_bulk_session(orders: list[dict[str, Any]]) -> tuple[str, str]:

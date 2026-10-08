@@ -1,0 +1,36 @@
+---
+description: Store order-fetch changes must update extension + browser-automation paths
+alwaysApply: true
+---
+
+# Dual Paths for Store Order Fetching
+
+Order capture has **two** paths. Any change to how orders are fetched, parsed, normalized, or enriched for a store must be applied to **both** (or shared code both use).
+
+## Paths
+
+| Path | Role | Where |
+|------|------|--------|
+| **Manual** | Browser extension capture | `browser-extension/` (`stores/<store>/`, `lib/<store>.js`, content/background) |
+| **Automated** | Server Camoufox/Playwright import | `backend/app/browser_automation/` (`*_import.py`, `paths.py`, injected scripts) |
+
+Shared parsers live under `browser-extension/` and are injected by automation via `paths.py` — prefer putting logic there so both paths get it. If behavior only exists in one path (e.g. `skip_tracking`, repair steps, script lists), update the other path to match.
+
+## Do
+
+- When fixing tracking, DOM selectors, normalize helpers, list/detail capture, or enrichment: check extension **and** `amazon_import.py` / `walmart_import.py` (and any future store importers).
+- Prefer implementing once in extension `dom.js` / `lib/*.js` and calling it from both capture.js and the automation `page.evaluate` path.
+- Keep automation script injection lists in `paths.py` in sync with scripts the extension needs for the same capture quality.
+- Default automation flags to the same behavior as extension capture (e.g. tracking enrichment on unless there is a deliberate, documented reason).
+
+## Avoid
+
+- Fixing only the extension and leaving browser-automation with older skips or missing steps.
+- Fixing only `*_import.py` without updating shared extension parsers when the bug is in parse/normalize logic.
+- Adding a new store import feature to one path without a plan for the other.
+
+## Examples
+
+- "Amazon tracking numbers missing" → update extension parsers **and** ensure `amazon_import.py` runs repair + `enrichShipmentsWithTracking` (not `skip_tracking=True`).
+- "Walmart normalize wrong field" → change `lib/walmart.js` (shared) and confirm both extension and `walmart_import.py` load/call it.
+- "New store X import" → ship extension capture **and** `backend/app/browser_automation/x_import.py` (+ `paths.py` scripts).

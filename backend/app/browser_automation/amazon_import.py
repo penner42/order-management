@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from playwright.async_api import Page
 
-from app.browser_automation.common import LoginRequiredError
+from app.browser_automation.common import LoginRequiredError, inject_scripts_for_evaluate
 from app.browser_automation.paths import amazon_script_paths
 from app.browser_automation.session_manager import (
     AMAZON_ORDERS_URL,
@@ -20,8 +20,7 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 async def _inject_amazon_scripts(page: Page) -> None:
-    for path in amazon_script_paths():
-        await page.add_script_tag(path=str(path))
+    await inject_scripts_for_evaluate(page, amazon_script_paths())
 
 
 async def _ensure_scripts(page: Page) -> None:
@@ -45,7 +44,11 @@ async def _parse_list_page(page: Page) -> list[dict[str, Any]]:
     )
 
 
-async def _parse_detail_page(page: Page, *, skip_tracking: bool = True) -> dict[str, Any]:
+async def _parse_detail_page(page: Page, *, skip_tracking: bool = False) -> dict[str, Any]:
+    """Parse Amazon order detail; by default fetch track pages for carrier IDs.
+
+    Matches extension capture.js: repair false-positive URLs, then enrich.
+    """
     await _ensure_scripts(page)
     return await page.evaluate(
         """async (skipTracking) => {
@@ -54,6 +57,9 @@ async def _parse_detail_page(page: Page, *, skip_tracking: bool = True) -> dict[
           await d.waitForOrderDetailReady(35000);
           const parsed = d.parseOrderDetailPage();
           if (!parsed || !parsed.orderId) throw new Error('Could not parse Amazon order detail page.');
+          if (typeof d.repairShipmentTracking === 'function') {
+            d.repairShipmentTracking(parsed);
+          }
           if (!skipTracking && typeof d.enrichShipmentsWithTracking === 'function') {
             await d.enrichShipmentsWithTracking(parsed.shipments, window.location.origin);
           }
@@ -331,7 +337,7 @@ async def run_amazon_import(
                     await page.goto(detail_url, wait_until="domcontentloaded", timeout=60_000)
                     if looks_like_amazon_signin(page.url):
                         raise LoginRequiredError("Amazon session requires login.")
-                    raw = await _parse_detail_page(page, skip_tracking=True)
+                    raw = await _parse_detail_page(page, skip_tracking=False)
                     source_url = page.url
                 else:
                     raw = summary
