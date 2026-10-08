@@ -69,6 +69,8 @@ function LiveBrowserView({
   const openedRef = useRef(false)
   const frameBusyRef = useRef(false)
   const pendingFrameRef = useRef<string | null>(null)
+  /** Playwright viewport size from frame metadata (may differ from JPEG bitmap size). */
+  const remoteViewportRef = useRef({ width: 0, height: 0 })
   const [url, setUrl] = useState('')
   const [address, setAddress] = useState(suggestedUrl)
   const [error, setError] = useState<string | null>(null)
@@ -213,6 +215,12 @@ function LiveBrowserView({
       try {
         const msg = JSON.parse(ev.data as string)
         if (msg.type === 'frame' && msg.data) {
+          const meta = msg.metadata as { viewportWidth?: number; viewportHeight?: number } | undefined
+          const vpW = Number(meta?.viewportWidth) || 0
+          const vpH = Number(meta?.viewportHeight) || 0
+          if (vpW > 0 && vpH > 0) {
+            remoteViewportRef.current = { width: vpW, height: vpH }
+          }
           paintFrame(msg.data as string)
           if (msg.url) {
             setUrl(msg.url)
@@ -251,15 +259,36 @@ function LiveBrowserView({
     }
   }, [sendResize])
 
+  /** Map canvas pointer → remote viewport CSS px (object-fit: contain + letterbox). */
   const coords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas) return { x: 0, y: 0 }
     const rect = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
+    const bitmapW = canvas.width
+    const bitmapH = canvas.height
+    if (!bitmapW || !bitmapH || rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 }
+
+    // Keep aspect ratio (see canvas object-fit: contain). Stretching made Walmart's
+    // OTP cells paper-thin and nearly impossible to hit in the live view.
+    const scale = Math.min(rect.width / bitmapW, rect.height / bitmapH)
+    const drawW = bitmapW * scale
+    const drawH = bitmapH * scale
+    const offsetX = (rect.width - drawW) / 2
+    const offsetY = (rect.height - drawH) / 2
+    const localX = e.clientX - rect.left - offsetX
+    const localY = e.clientY - rect.top - offsetY
+    if (localX < 0 || localY < 0 || localX > drawW || localY > drawH) {
+      return { x: -1, y: -1 }
+    }
+
+    const x = localX / scale
+    const y = localY / scale
+    // If the JPEG was resized relative to the Playwright viewport, scale into page space.
+    const vpW = remoteViewportRef.current.width || bitmapW
+    const vpH = remoteViewportRef.current.height || bitmapH
     return {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
+      x: Math.max(0, Math.min(vpW - 1e-3, (x * vpW) / bitmapW)),
+      y: Math.max(0, Math.min(vpH - 1e-3, (y * vpH) / bitmapH)),
     }
   }
 
@@ -269,23 +298,34 @@ function LiveBrowserView({
     if (now - lastMoveSentRef.current < MOUSE_MOVE_MIN_MS) return
     lastMoveSentRef.current = now
     const { x, y } = coords(e)
+    if (x < 0 || y < 0) return
     send({ type: 'mouse', event: 'move', x, y })
   }
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault()
     canvasRef.current?.focus()
     const { x, y } = coords(e)
+    if (x < 0 || y < 0) return
     send({ type: 'mouse', event: 'move', x, y })
     send({ type: 'mouse', event: 'down', x, y, button: 'left', clickCount: 1 })
   }
   const onMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault()
     const { x, y } = coords(e)
-    send({ type: 'mouse', event: 'up', x, y, button: 'left', clickCount: 1 })
+    // Always release the button (even in letterbox gutters) so focus isn't stuck.
+    send({
+      type: 'mouse',
+      event: 'up',
+      x: x < 0 ? 0 : x,
+      y: y < 0 ? 0 : y,
+      button: 'left',
+      clickCount: 1,
+    })
   }
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
     const { x, y } = coords(e)
+    if (x < 0 || y < 0) return
     send({ type: 'mouse', event: 'wheel', x, y, deltaX: e.deltaX, deltaY: e.deltaY })
   }
   const pasteText = (text: string) => {
@@ -433,7 +473,7 @@ function LiveBrowserView({
           <canvas
             ref={canvasRef}
             tabIndex={0}
-            className="absolute inset-0 h-full w-full cursor-default outline-none"
+            className="absolute inset-0 h-full w-full cursor-default outline-none object-contain bg-black/5 dark:bg-black/40"
             onMouseMove={onMouseMove}
             onMouseDown={onMouseDown}
             onMouseUp={onMouseUp}

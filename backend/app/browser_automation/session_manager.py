@@ -73,6 +73,8 @@ class LiveSession:
     # Coalesce pointer moves so the WS receive loop never waits on humanize/animation.
     pending_mouse: tuple[float, float] | None = None
     mouse_flush_task: asyncio.Task | None = None
+    # Serialize move flush vs down/up so coalesced moves can't displace clicks.
+    mouse_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class SessionManager:
@@ -341,14 +343,17 @@ class SessionManager:
     async def _flush_pending_mouse(self, session: LiveSession) -> None:
         """Apply the latest coalesced pointer position (drops intermediate moves)."""
         try:
-            while session.pending_mouse is not None:
-                x, y = session.pending_mouse
-                session.pending_mouse = None
-                try:
-                    await session.page.mouse.move(x, y)
-                except Exception as exc:
-                    logger.debug("mouse move failed: %s", exc)
-                    break
+            async with session.mouse_lock:
+                while session.pending_mouse is not None:
+                    x, y = session.pending_mouse
+                    session.pending_mouse = None
+                    try:
+                        await session.page.mouse.move(x, y)
+                    except Exception as exc:
+                        logger.debug("mouse move failed: %s", exc)
+                        break
+        except asyncio.CancelledError:
+            raise
         finally:
             session.mouse_flush_task = None
 
@@ -357,6 +362,69 @@ class SessionManager:
         task = session.mouse_flush_task
         if task is None or task.done():
             session.mouse_flush_task = asyncio.create_task(self._flush_pending_mouse(session))
+
+    async def _mouse_action(self, session: LiveSession, x: float, y: float, action) -> None:
+        """Run a click-related mouse op without racing coalesced moves."""
+        session.pending_mouse = None
+        async with session.mouse_lock:
+            await action(x, y)
+
+    async def _snap_to_nearby_input(self, page: Page, x: float, y: float) -> tuple[float, float]:
+        """Widen hit targets for tiny OTP/digit inputs (Walmart MFA, etc.)."""
+        try:
+            snapped = await page.evaluate(
+                """([x, y]) => {
+                  const MAX_DIST = 28;
+                  const isTypeable = (el) => {
+                    if (!el || el.disabled || el.readOnly) return false;
+                    const tag = (el.tagName || '').toLowerCase();
+                    if (tag === 'textarea') return true;
+                    if (tag !== 'input') return false;
+                    const type = (el.type || 'text').toLowerCase();
+                    return !['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image'].includes(type);
+                  };
+                  const center = (el) => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return null;
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height, r };
+                  };
+                  const at = document.elementFromPoint(x, y);
+                  let el = at;
+                  while (el) {
+                    if (isTypeable(el)) {
+                      const c = center(el);
+                      if (c) return { x: c.x, y: c.y };
+                    }
+                    el = el.parentElement;
+                  }
+                  // Visual OTP boxes are often wrappers; the real input may sit under/near them.
+                  const inputs = Array.from(document.querySelectorAll('input, textarea'));
+                  let best = null;
+                  let bestDist = MAX_DIST;
+                  for (const inp of inputs) {
+                    if (!isTypeable(inp)) continue;
+                    const c = center(inp);
+                    if (!c) continue;
+                    const cx = Math.max(c.r.left, Math.min(x, c.r.right));
+                    const cy = Math.max(c.r.top, Math.min(y, c.r.bottom));
+                    const dist = Math.hypot(x - cx, y - cy);
+                    // Prefer snapping into narrow digit cells even when the click is slightly off.
+                    const narrow = c.w < 48 || c.h < 48;
+                    const limit = narrow ? MAX_DIST : 12;
+                    if (dist <= limit && dist < bestDist) {
+                      bestDist = dist;
+                      best = { x: c.x, y: c.y };
+                    }
+                  }
+                  return best;
+                }""",
+                [x, y],
+            )
+            if isinstance(snapped, dict) and "x" in snapped and "y" in snapped:
+                return float(snapped["x"]), float(snapped["y"])
+        except Exception as exc:
+            logger.debug("input snap failed: %s", exc)
+        return x, y
 
     async def dispatch_input(self, session: LiveSession, message: dict) -> None:
         """Forward mouse/keyboard events from the UI into Playwright."""
@@ -373,31 +441,63 @@ class SessionManager:
                 # Non-blocking: coalesce so a backlog of moves can't freeze the live view.
                 self._queue_mouse_move(session, x, y)
             elif event == "down":
-                await page.mouse.move(x, y)
-                await page.mouse.down(button=button)
+                x, y = await self._snap_to_nearby_input(page, x, y)
+
+                async def _down(px: float, py: float) -> None:
+                    await page.mouse.move(px, py)
+                    await page.mouse.down(button=button)
+
+                await self._mouse_action(session, x, y, _down)
             elif event == "up":
-                await page.mouse.move(x, y)
-                await page.mouse.up(button=button)
+                # Don't re-target on up: down may have snapped into a tiny OTP cell;
+                # moving again would drag-focus away from it.
+                session.pending_mouse = None
+
+                async def _up(_px: float, _py: float) -> None:
+                    await page.mouse.up(button=button)
+
+                await self._mouse_action(session, x, y, _up)
             elif event == "wheel":
-                await page.mouse.move(x, y)
-                await page.mouse.wheel(
-                    float(message.get("deltaX") or 0),
-                    float(message.get("deltaY") or 0),
-                )
+
+                async def _wheel(px: float, py: float) -> None:
+                    await page.mouse.move(px, py)
+                    await page.mouse.wheel(
+                        float(message.get("deltaX") or 0),
+                        float(message.get("deltaY") or 0),
+                    )
+
+                await self._mouse_action(session, x, y, _wheel)
             elif event == "click":
                 click_count = int(message.get("clickCount") or 1)
-                await page.mouse.click(x, y, button=button, click_count=click_count)
+                x, y = await self._snap_to_nearby_input(page, x, y)
+
+                async def _click(px: float, py: float) -> None:
+                    await page.mouse.click(px, py, button=button, click_count=click_count)
+
+                await self._mouse_action(session, x, y, _click)
         elif msg_type == "key":
             event = message.get("event") or "down"
             key = _playwright_key(str(message.get("key") or ""))
             if not key:
                 return
             if event == "char":
+                # Prefer insert_text for printable chars — more reliable in OTP digit cells.
+                text = str(message.get("text") or key)
+                if text:
+                    try:
+                        await page.keyboard.insert_text(text)
+                    except Exception as exc:
+                        logger.debug("keyboard insert_text %r failed: %s", text, exc)
                 return
             try:
                 if event == "down":
+                    # Printable keys are applied via the separate char/insert_text event.
+                    if len(key) == 1:
+                        return
                     await page.keyboard.down(key)
                 elif event == "up":
+                    if len(key) == 1:
+                        return
                     await page.keyboard.up(key)
             except Exception as exc:
                 logger.debug("keyboard %s %r failed: %s", event, key, exc)
