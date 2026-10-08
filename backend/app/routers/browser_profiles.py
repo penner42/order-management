@@ -289,6 +289,15 @@ async def live_view(websocket: WebSocket, profile_id: int, token: str | None = Q
                     await session_manager.dispatch_input(session, message)
                 except Exception as exc:
                     logger.debug("Input dispatch failed: %s", exc)
+            elif msg_type == "resize":
+                try:
+                    await session_manager.resize_viewport(
+                        session,
+                        int(message.get("width") or 0),
+                        int(message.get("height") or 0),
+                    )
+                except Exception as exc:
+                    logger.debug("Resize failed: %s", exc)
             elif msg_type == "navigate":
                 url = message.get("url")
                 if url:

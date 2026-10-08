@@ -72,6 +72,9 @@ def _launch_user_agent() -> str:
     return configured or _DEFAULT_CHROME_UA
 
 
+DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
+
+
 @dataclass
 class LiveSession:
     profile_id: int
@@ -83,6 +86,8 @@ class LiveSession:
     viewers: set[asyncio.Queue] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     mode: str = "idle"  # idle | login | import
+    viewport_width: int = DEFAULT_VIEWPORT["width"]
+    viewport_height: int = DEFAULT_VIEWPORT["height"]
 
 
 class SessionManager:
@@ -122,8 +127,8 @@ class SessionManager:
                 context = await pw.chromium.launch_persistent_context(
                     user_data,
                     headless=headless,
-                    viewport={"width": 1280, "height": 800},
-                    screen={"width": 1280, "height": 800},
+                    viewport=dict(DEFAULT_VIEWPORT),
+                    screen=dict(DEFAULT_VIEWPORT),
                     user_agent=_launch_user_agent(),
                     locale="en-US",
                     timezone_id="America/Los_Angeles",
@@ -147,6 +152,8 @@ class SessionManager:
                     context=context,
                     page=page,
                     mode=mode,
+                    viewport_width=DEFAULT_VIEWPORT["width"],
+                    viewport_height=DEFAULT_VIEWPORT["height"],
                 )
                 self._sessions[profile_id] = session
                 logger.info(
@@ -227,8 +234,8 @@ class SessionManager:
                 {
                     "format": "jpeg",
                     "quality": 55,
-                    "maxWidth": 1280,
-                    "maxHeight": 800,
+                    "maxWidth": session.viewport_width,
+                    "maxHeight": session.viewport_height,
                     "everyNthFrame": 1,
                 },
             )
@@ -245,6 +252,40 @@ class SessionManager:
                 except Exception:
                     pass
             session.screencast_on = False
+
+    async def resize_viewport(self, session: LiveSession, width: int, height: int) -> None:
+        """Match Playwright viewport + screencast to the embedded window size."""
+        width = max(320, min(3840, int(width)))
+        height = max(240, min(2160, int(height)))
+        if width == session.viewport_width and height == session.viewport_height:
+            return
+        async with session.lock:
+            session.viewport_width = width
+            session.viewport_height = height
+            try:
+                await session.page.set_viewport_size({"width": width, "height": height})
+            except Exception as exc:
+                logger.warning("set_viewport_size failed: %s", exc)
+            if not session.screencast_on or not session.cdp:
+                return
+            try:
+                await session.cdp.send("Page.stopScreencast")
+            except Exception:
+                pass
+            try:
+                await session.cdp.send(
+                    "Page.startScreencast",
+                    {
+                        "format": "jpeg",
+                        "quality": 55,
+                        "maxWidth": width,
+                        "maxHeight": height,
+                        "everyNthFrame": 1,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Restart screencast after resize failed: %s", exc)
+                session.screencast_on = False
 
     async def dispatch_input(self, session: LiveSession, message: dict) -> None:
         """Forward mouse/keyboard events from the UI into CDP."""

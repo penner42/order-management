@@ -49,11 +49,48 @@ function LiveBrowserView({
   onCancel: () => void
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
+  const lastSizeRef = useRef({ width: 0, height: 0 })
+  const resizeTimerRef = useRef<number | null>(null)
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
+
+  const send = useCallback((payload: Record<string, unknown>) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify(payload))
+  }, [])
+
+  const sendResize = useCallback(
+    (immediate = false) => {
+      const apply = () => {
+        const el = viewportRef.current
+        if (!el) return
+        const width = Math.max(320, Math.floor(el.clientWidth))
+        const height = Math.max(240, Math.floor(el.clientHeight))
+        if (width === lastSizeRef.current.width && height === lastSizeRef.current.height) return
+        lastSizeRef.current = { width, height }
+        setViewportSize({ width, height })
+        send({ type: 'resize', width, height })
+      }
+
+      if (immediate) {
+        if (resizeTimerRef.current != null) {
+          window.clearTimeout(resizeTimerRef.current)
+          resizeTimerRef.current = null
+        }
+        apply()
+        return
+      }
+      if (resizeTimerRef.current != null) window.clearTimeout(resizeTimerRef.current)
+      resizeTimerRef.current = window.setTimeout(apply, 120)
+    },
+    [send]
+  )
 
   useEffect(() => {
     const token = getStoredToken()
@@ -67,7 +104,11 @@ function LiveBrowserView({
     )
     wsRef.current = ws
 
-    ws.onopen = () => setConnected(true)
+    ws.onopen = () => {
+      setConnected(true)
+      // Sync remote viewport to the windowed pane as soon as we connect.
+      sendResize(true)
+    }
     ws.onclose = () => setConnected(false)
     ws.onerror = () => setError('Live view connection failed.')
     ws.onmessage = (ev) => {
@@ -100,13 +141,19 @@ function LiveBrowserView({
       ws.close()
       wsRef.current = null
     }
-  }, [profileId])
+  }, [profileId, sendResize])
 
-  const send = useCallback((payload: Record<string, unknown>) => {
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify(payload))
-  }, [])
+  useEffect(() => {
+    const el = viewportRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => sendResize())
+    ro.observe(el)
+    sendResize(true)
+    return () => {
+      ro.disconnect()
+      if (resizeTimerRef.current != null) window.clearTimeout(resizeTimerRef.current)
+    }
+  }, [sendResize])
 
   const coords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
@@ -140,12 +187,12 @@ function LiveBrowserView({
     e.preventDefault()
     const modifiers =
       (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0)
+    // keyDown must not include text when we also send char — that doubles every character.
     send({
       type: 'key',
       event: 'down',
       key: e.key,
       code: e.code,
-      text: e.key.length === 1 ? e.key : undefined,
       windowsVirtualKeyCode: e.keyCode,
       nativeVirtualKeyCode: e.keyCode,
       modifiers,
@@ -156,6 +203,7 @@ function LiveBrowserView({
         event: 'char',
         key: e.key,
         text: e.key,
+        unmodifiedText: e.key,
         modifiers,
       })
     }
@@ -176,13 +224,14 @@ function LiveBrowserView({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-5xl w-full max-h-[95vh] flex flex-col">
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-brand-200/80 dark:border-gray-700">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 sm:p-6">
+      <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-[min(1100px,96vw)] h-[min(820px,92vh)] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-brand-200/80 dark:border-gray-700 shrink-0">
           <div className="min-w-0">
-            <h2 className="text-lg font-medium text-ink dark:text-gray-100">Log in — live browser</h2>
+            <h2 className="text-sm font-medium text-ink dark:text-gray-100">Log in — live browser</h2>
             <p className="text-xs text-ink-muted dark:text-gray-400 truncate" title={url}>
               {connected ? url || 'Connecting…' : 'Disconnected'}
+              {viewportSize.width > 0 ? ` · ${viewportSize.width}×${viewportSize.height}` : ''}
             </p>
           </div>
           <button
@@ -193,17 +242,22 @@ function LiveBrowserView({
             Cancel
           </button>
         </div>
-        <div className="p-3 overflow-auto flex-1">
+        <div className="px-3 pt-2 shrink-0">
           {error && (
-            <p className="text-sm text-red-600 dark:text-red-400 mb-2">{error}</p>
+            <p className="text-sm text-red-600 dark:text-red-400 mb-1">{error}</p>
           )}
           <p className="text-xs text-ink-muted dark:text-gray-400 mb-2">
-            Click the view to focus, then sign in (including MFA). When your orders page loads, click Done.
+            Click the window to focus, then sign in (including MFA). When your orders page loads, click Done.
           </p>
+        </div>
+        <div
+          ref={viewportRef}
+          className="mx-3 mb-2 flex-1 min-h-0 rounded border border-brand-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 overflow-hidden"
+        >
           <canvas
             ref={canvasRef}
             tabIndex={0}
-            className="w-full bg-gray-100 dark:bg-gray-800 border border-brand-200 dark:border-gray-700 rounded cursor-crosshair outline-none"
+            className="block w-full h-full cursor-crosshair outline-none"
             onMouseDown={onMouseDown}
             onMouseUp={onMouseUp}
             onWheel={onWheel}
@@ -211,7 +265,7 @@ function LiveBrowserView({
             onKeyUp={onKeyUp}
           />
         </div>
-        <div className="flex justify-end gap-2 px-4 py-3 border-t border-brand-200/80 dark:border-gray-700">
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-brand-200/80 dark:border-gray-700 shrink-0">
           <button
             type="button"
             onClick={onCancel}
