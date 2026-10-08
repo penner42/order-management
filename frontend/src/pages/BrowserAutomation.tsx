@@ -42,6 +42,10 @@ function statusClass(status: string): string {
 /** Snap + hysteresis so ResizeObserver ↔ canvas ↔ backend can't oscillate by 1px. */
 const RESIZE_SNAP = 16
 const RESIZE_THRESHOLD = 16
+/** Never drive the remote browser below a normal desktop pane — tiny viewports get blocked. */
+const MIN_VIEWPORT_WIDTH = 1024
+const MIN_VIEWPORT_HEIGHT = 640
+const DEFAULT_VIEWPORT = { width: 1280, height: 800 }
 
 function LiveBrowserView({
   profileId,
@@ -58,6 +62,7 @@ function LiveBrowserView({
   const wsRef = useRef<WebSocket | null>(null)
   const lastSizeRef = useRef({ width: 0, height: 0 })
   const resizeTimerRef = useRef<number | null>(null)
+  const openedRef = useRef(false)
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
@@ -69,28 +74,44 @@ function LiveBrowserView({
     ws.send(JSON.stringify(payload))
   }, [])
 
+  const measureViewport = useCallback(() => {
+    const el = viewportRef.current
+    if (!el) return null
+    // Wait until flex layout has given the pane a real size.
+    if (el.clientWidth < 400 || el.clientHeight < 400) return null
+    const rawW = Math.floor(el.clientWidth)
+    const rawH = Math.floor(el.clientHeight)
+    const width = Math.max(
+      MIN_VIEWPORT_WIDTH,
+      Math.floor(rawW / RESIZE_SNAP) * RESIZE_SNAP
+    )
+    const height = Math.max(
+      MIN_VIEWPORT_HEIGHT,
+      Math.floor(rawH / RESIZE_SNAP) * RESIZE_SNAP
+    )
+    return { width, height }
+  }, [])
+
   const sendResize = useCallback(
     (immediate = false) => {
       const apply = () => {
-        const el = viewportRef.current
-        if (!el) return
-        const rawW = Math.max(320, Math.floor(el.clientWidth))
-        const rawH = Math.max(240, Math.floor(el.clientHeight))
-        const width = Math.max(320, Math.floor(rawW / RESIZE_SNAP) * RESIZE_SNAP)
-        const height = Math.max(240, Math.floor(rawH / RESIZE_SNAP) * RESIZE_SNAP)
+        const measured = measureViewport()
+        // Fall back once so we never stick on a 240px-tall bot-looking viewport.
+        const next = measured ?? (lastSizeRef.current.width > 0 ? null : DEFAULT_VIEWPORT)
+        if (!next) return
         const prev = lastSizeRef.current
         if (prev.width > 0 && prev.height > 0) {
           if (
-            Math.abs(width - prev.width) < RESIZE_THRESHOLD &&
-            Math.abs(height - prev.height) < RESIZE_THRESHOLD
+            Math.abs(next.width - prev.width) < RESIZE_THRESHOLD &&
+            Math.abs(next.height - prev.height) < RESIZE_THRESHOLD
           ) {
             return
           }
         }
-        if (width === prev.width && height === prev.height) return
-        lastSizeRef.current = { width, height }
-        setViewportSize({ width, height })
-        send({ type: 'resize', width, height })
+        if (next.width === prev.width && next.height === prev.height) return
+        lastSizeRef.current = next
+        setViewportSize(next)
+        send({ type: 'resize', width: next.width, height: next.height })
       }
 
       if (immediate) {
@@ -98,13 +119,14 @@ function LiveBrowserView({
           window.clearTimeout(resizeTimerRef.current)
           resizeTimerRef.current = null
         }
-        apply()
+        // Double rAF: let the modal finish flex layout before measuring.
+        requestAnimationFrame(() => requestAnimationFrame(apply))
         return
       }
       if (resizeTimerRef.current != null) window.clearTimeout(resizeTimerRef.current)
       resizeTimerRef.current = window.setTimeout(apply, 250)
     },
-    [send]
+    [measureViewport, send]
   )
 
   useEffect(() => {
@@ -113,6 +135,7 @@ function LiveBrowserView({
       setError('Not authenticated.')
       return
     }
+    openedRef.current = false
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(
       `${proto}://${window.location.host}/api/browser-profiles/${profileId}/live?token=${encodeURIComponent(token)}`
@@ -120,12 +143,19 @@ function LiveBrowserView({
     wsRef.current = ws
 
     ws.onopen = () => {
+      openedRef.current = true
       setConnected(true)
-      // Sync remote viewport to the windowed pane as soon as we connect.
+      setError(null)
       sendResize(true)
     }
-    ws.onclose = () => setConnected(false)
-    ws.onerror = () => setError('Live view connection failed.')
+    ws.onclose = () => {
+      setConnected(false)
+      if (!openedRef.current) {
+        setError('Live view connection failed.')
+      }
+    }
+    // onerror always fires before onclose; don't surface it alone (false positives).
+    ws.onerror = () => {}
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data as string)
@@ -247,11 +277,13 @@ function LiveBrowserView({
     })
   }
 
+  const blocked = /walmart\.com\/blocked/i.test(url)
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 sm:p-6">
-      <div className="bg-[#dee1e6] dark:bg-gray-900 rounded-xl shadow-2xl w-[min(1100px,96vw)] h-[min(820px,92vh)] flex flex-col overflow-hidden border border-black/10 dark:border-gray-700">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4">
+      <div className="bg-[#dee1e6] dark:bg-gray-900 rounded-xl shadow-2xl w-[min(1280px,98vw)] h-[min(900px,96vh)] flex flex-col overflow-hidden border border-black/10 dark:border-gray-700">
         {/* Window chrome */}
-        <div className="flex items-center gap-3 px-3 py-2 bg-[#e8eaed] dark:bg-gray-800 border-b border-black/10 dark:border-gray-700 shrink-0">
+        <div className="flex items-center gap-3 px-3 py-1.5 bg-[#e8eaed] dark:bg-gray-800 border-b border-black/10 dark:border-gray-700 shrink-0">
           <div className="flex items-center gap-1.5 shrink-0" aria-hidden>
             <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
             <span className="h-3 w-3 rounded-full bg-[#febc2e]" />
@@ -288,18 +320,21 @@ function LiveBrowserView({
             Cancel
           </button>
         </div>
-        <div className="px-3 py-1.5 shrink-0 bg-[#f1f3f4] dark:bg-gray-900 border-b border-black/5 dark:border-gray-800">
-          {error ? (
-            <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
-          ) : (
-            <p className="text-xs text-ink-muted dark:text-gray-400">
-              Click the page to focus, then sign in (including MFA). When your orders page loads, click Done.
-            </p>
-          )}
-        </div>
+        {(error || blocked) && (
+          <div className="px-3 py-1.5 shrink-0 bg-[#f1f3f4] dark:bg-gray-900 border-b border-black/5 dark:border-gray-800">
+            {error && (
+              <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
+            )}
+            {blocked && (
+              <p className="text-xs text-amber-800 dark:text-amber-200">
+                Walmart blocked this browser session. Cancel, delete the profile, create a new one, then try Log in again.
+              </p>
+            )}
+          </div>
+        )}
         <div
           ref={viewportRef}
-          className="relative flex-1 min-h-0 bg-white dark:bg-gray-950 overflow-hidden"
+          className="relative flex-1 min-h-[640px] bg-white dark:bg-gray-950 overflow-hidden"
         >
           <canvas
             ref={canvasRef}

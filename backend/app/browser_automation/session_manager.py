@@ -29,6 +29,7 @@ WALMART_SIGNIN_HINTS = (
     "/authorize",
     "px-captcha",
     "human.walmart",
+    "/blocked",
 )
 
 # Soften common automation fingerprints before any page JS runs.
@@ -71,18 +72,20 @@ _STEALTH_INIT_SCRIPT = """
 })();
 """
 
-DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
+DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
 # Screencast max bounds — keep stable so resize does not restart the stream.
 SCREENCAST_MAX = {"width": 1920, "height": 1080}
 RESIZE_SNAP = 16
 RESIZE_THRESHOLD = 16
+# Reject tiny panes (e.g. 1120×240) that look automated and get hard-blocked.
+MIN_VIEWPORT = {"width": 1024, "height": 640}
 
 
 def _snap_size(width: int, height: int) -> tuple[int, int]:
-    width = max(320, min(SCREENCAST_MAX["width"], int(width)))
-    height = max(240, min(SCREENCAST_MAX["height"], int(height)))
-    width = max(320, (width // RESIZE_SNAP) * RESIZE_SNAP)
-    height = max(240, (height // RESIZE_SNAP) * RESIZE_SNAP)
+    width = max(MIN_VIEWPORT["width"], min(SCREENCAST_MAX["width"], int(width)))
+    height = max(MIN_VIEWPORT["height"], min(SCREENCAST_MAX["height"], int(height)))
+    width = max(MIN_VIEWPORT["width"], (width // RESIZE_SNAP) * RESIZE_SNAP)
+    height = max(MIN_VIEWPORT["height"], (height // RESIZE_SNAP) * RESIZE_SNAP)
     return width, height
 
 
@@ -165,10 +168,17 @@ class SessionManager:
 
     async def _warm_then_goto(self, page: Page, *, warm_url: str | None, start_url: str) -> None:
         """Hit the retailer homepage first so bot sensors see a normal entry path."""
+        current = (page.url or "").lower()
+        if "/blocked" in current:
+            logger.warning("Skipping navigation; page is already on a block interstitial: %s", page.url)
+            return
         if warm_url:
             try:
                 await page.goto(warm_url, wait_until="domcontentloaded", timeout=60_000)
                 await page.wait_for_timeout(random.randint(900, 2200))
+                if "/blocked" in (page.url or "").lower():
+                    logger.warning("Blocked during warm navigation: %s", page.url)
+                    return
             except Exception as exc:
                 logger.warning("Warm navigation to %s failed: %s", warm_url, exc)
         try:
