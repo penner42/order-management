@@ -173,8 +173,10 @@ class SessionManager:
             try:
                 user_data = str(profile_user_data_dir(profile_id))
                 headless = bool(settings.browser_headless)
-                width = DEFAULT_VIEWPORT["width"]
-                height = DEFAULT_VIEWPORT["height"]
+                # Open the OS window at the stream cap so set_viewport_size can grow
+                # up to SCREENCAST_MAX without being clipped by a smaller window.
+                width = SCREENCAST_MAX["width"]
+                height = SCREENCAST_MAX["height"]
                 context, camoufox = await self._launch_camoufox_context(
                     user_data,
                     headless=headless,
@@ -270,24 +272,28 @@ class SessionManager:
                 b64 = base64.b64encode(data).decode("ascii")
             else:
                 b64 = str(data)
-            # Prefer live Playwright viewport (CSS px) — mouse events use this space.
-            vp_w = session.viewport_width
-            vp_h = session.viewport_height
-            try:
-                vp = session.page.viewport_size
-                if vp and vp.get("width") and vp.get("height"):
-                    vp_w = int(vp["width"])
-                    vp_h = int(vp["height"])
-                    session.viewport_width = vp_w
-                    session.viewport_height = vp_h
-            except Exception:
-                pass
+            # Playwright's onFrame viewport* is the page CSS size at capture time.
+            # JPEG may be smaller (scaled to fit `size`); the UI must map via these.
+            vp_w = int(frame.get("viewportWidth") or 0)
+            vp_h = int(frame.get("viewportHeight") or 0)
+            if vp_w < 200 or vp_h < 200:
+                try:
+                    vp = session.page.viewport_size
+                    if vp and vp.get("width") and vp.get("height"):
+                        vp_w = int(vp["width"])
+                        vp_h = int(vp["height"])
+                except Exception:
+                    pass
+            if vp_w < 200 or vp_h < 200:
+                vp_w = session.viewport_width
+                vp_h = session.viewport_height
+            else:
+                session.viewport_width = vp_w
+                session.viewport_height = vp_h
             msg = {
                 "type": "frame",
                 "data": b64,
                 "metadata": {
-                    # Always the Playwright CSS viewport (mouse space). Do not trust
-                    # screencast-provided viewport fields — they can disagree with the page.
                     "viewportWidth": vp_w,
                     "viewportHeight": vp_h,
                     "timestamp": frame.get("timestamp"),
@@ -300,6 +306,8 @@ class SessionManager:
 
     async def _start_screencast_locked(self, session: LiveSession) -> None:
         """Caller must hold session.lock."""
+        # Size is a max bound; Firefox scales frames down to fit while preserving
+        # aspect ratio. Prefer matching the live viewport so frames stay 1:1 when possible.
         cast_w = min(SCREENCAST_MAX["width"], max(MIN_VIEWPORT["width"], session.viewport_width))
         cast_h = min(SCREENCAST_MAX["height"], max(MIN_VIEWPORT["height"], session.viewport_height))
         session.screencast_handle = await session.page.screencast.start(
@@ -343,12 +351,20 @@ class SessionManager:
         async with session.lock:
             if width == session.viewport_width and height == session.viewport_height:
                 return
-            session.viewport_width = width
-            session.viewport_height = height
             try:
                 await session.page.set_viewport_size({"width": width, "height": height})
             except Exception as exc:
                 logger.warning("set_viewport_size failed: %s", exc)
+            # Trust the size Playwright actually applied (Camoufox/window may clamp).
+            try:
+                vp = session.page.viewport_size
+                if vp and vp.get("width") and vp.get("height"):
+                    width = int(vp["width"])
+                    height = int(vp["height"])
+            except Exception:
+                pass
+            session.viewport_width = width
+            session.viewport_height = height
             # Restart stream so JPEG size tracks the new viewport (sharper when larger).
             if session.screencast_on and session.viewers:
                 await self._stop_screencast_locked(session)

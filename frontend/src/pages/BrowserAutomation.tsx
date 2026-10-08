@@ -298,14 +298,16 @@ function LiveBrowserView({
     }
   }, [sendResize, layoutCanvas])
 
-  /** Map pointer on the laid-out canvas box → remote page CSS px. */
+  /**
+   * Map pointer on the laid-out canvas → Playwright page CSS px.
+   * Use the frame's viewport size (not JPEG bitmap size): screencast may scale
+   * the JPEG down to fit `size` while mouse coords stay in viewport space.
+   */
   const coords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas) return { x: 0, y: 0 }
     const rect = canvas.getBoundingClientRect()
-    const bitmapW = canvas.width
-    const bitmapH = canvas.height
-    if (!bitmapW || !bitmapH || rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 }
+    if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 }
 
     const localX = e.clientX - rect.left
     const localY = e.clientY - rect.top
@@ -313,14 +315,12 @@ function LiveBrowserView({
       return { x: -1, y: -1 }
     }
 
-    // Canvas CSS box is sized to the frame aspect ratio, so rect ↔ bitmap is uniform.
-    const bitmapX = (localX / rect.width) * bitmapW
-    const bitmapY = (localY / rect.height) * bitmapH
-    const vpW = remoteViewportRef.current.width || bitmapW
-    const vpH = remoteViewportRef.current.height || bitmapH
+    const vpW = remoteViewportRef.current.width || canvas.width
+    const vpH = remoteViewportRef.current.height || canvas.height
+    if (!vpW || !vpH) return { x: 0, y: 0 }
     return {
-      x: Math.max(0, Math.min(vpW - 1e-3, (bitmapX * vpW) / bitmapW)),
-      y: Math.max(0, Math.min(vpH - 1e-3, (bitmapY * vpH) / bitmapH)),
+      x: Math.max(0, Math.min(vpW - 1e-3, (localX / rect.width) * vpW)),
+      y: Math.max(0, Math.min(vpH - 1e-3, (localY / rect.height) * vpH)),
     }
   }
 
