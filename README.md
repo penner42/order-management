@@ -132,6 +132,7 @@ Notes:
 - Concurrent browsers are capped by `BROWSER_MAX_CONCURRENT` (default 2).
 - Set `APP_PUBLIC_BASE_URL` to the frontend origin used in review links (default `http://localhost:5173`).
 - Store sites may challenge datacenter IPs; this works best when the backend runs on a trusted/home network.
+- Automation browsers default to **headed** Chromium (`BROWSER_HEADLESS=false`) under Xvfb in Docker. Headless mode is heavily flagged by Walmart’s bot checks (press-and-hold / “Robot or human?”).
 - Supported retailers: **Walmart** and **Amazon**. The browser extension remains available for Costco and ad-hoc capture.
 
 ## Project layout

@@ -279,6 +279,8 @@ export default function Orders() {
   const [filterStoreOpen, setFilterStoreOpen] = useState(false)
   const [filterDateOpen, setFilterDateOpen] = useState(false)
   const [showFiltersMobile, setShowFiltersMobile] = useState(false)
+  /** BGs with matches for current filters (excl. BG); used to gray out when a status is selected. */
+  const [availableBuyingGroupIds, setAvailableBuyingGroupIds] = useState<Set<number> | null>(null)
   const location = useLocation()
   const navigate = useNavigate()
   const [page, setPage] = useState(() => {
@@ -353,6 +355,22 @@ export default function Orders() {
       }),
     [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced, page, perPage]
   )
+
+  const applyOrdersPage = (data: OrderListPage) => {
+    setOrders(data.items)
+    setTotalOrders(data.total)
+    setTotalPages(data.pages)
+    if (data.page !== page) setPage(data.page)
+    if (data.per_page !== perPage) setPerPage(data.per_page)
+    setAvailableBuyingGroupIds(
+      data.available_buying_group_ids != null
+        ? new Set(data.available_buying_group_ids)
+        : null
+    )
+  }
+
+  const buyingGroupUnavailable = (groupId: number, statusSelected: boolean) =>
+    statusSelected && availableBuyingGroupIds != null && !availableBuyingGroupIds.has(groupId)
 
   /** Format date as YYYY-MM-DD in local time (for display and date inputs). */
   const toYyyyMmDdLocal = (d: Date) =>
@@ -784,13 +802,7 @@ export default function Orders() {
     setLoading(true)
     api
       .get<OrderListPage>(ordersPath)
-      .then((data) => {
-        setOrders(data.items)
-        setTotalOrders(data.total)
-        setTotalPages(data.pages)
-        if (data.page !== page) setPage(data.page)
-        if (data.per_page !== perPage) setPerPage(data.per_page)
-      })
+      .then(applyOrdersPage)
       .catch(console.error)
       .finally(() => setLoading(false))
   }, [ordersPath])
@@ -972,10 +984,7 @@ export default function Orders() {
         api.get<OrderListPage>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
-      setOrders(ordersData.items)
-      setTotalOrders(ordersData.total)
-      setTotalPages(ordersData.pages)
-      if (ordersData.page !== page) setPage(ordersData.page)
+      applyOrdersPage(ordersData)
       setShipments(shipmentsData)
       setTrackingEdits((prev) => {
         const next = { ...prev }; delete next[itemId]; return next
@@ -1029,10 +1038,7 @@ export default function Orders() {
         api.get<OrderListPage>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
-      setOrders(ordersData.items)
-      setTotalOrders(ordersData.total)
-      setTotalPages(ordersData.pages)
-      if (ordersData.page !== page) setPage(ordersData.page)
+      applyOrdersPage(ordersData)
       setShipments(shipmentsData)
       setSelectedItemIds((prev) => {
         const next = new Set(prev); ids.forEach((id) => next.delete(id)); return next
@@ -1250,10 +1256,7 @@ export default function Orders() {
         if (!paymentId) return
         await api.patch(`/payments/${paymentId}`, next === 'payment_sent' ? { payment_sent_at: now } : { payment_received_at: now })
         const ordersData = await api.get<OrderListPage>(ordersPath)
-        setOrders(ordersData.items)
-        setTotalOrders(ordersData.total)
-        setTotalPages(ordersData.pages)
-        if (ordersData.page !== page) setPage(ordersData.page)
+        applyOrdersPage(ordersData)
       } else {
         for (const item of toUpdate) {
           const n = getNextStatus(getEffectiveItemStatus(item))
@@ -1313,10 +1316,7 @@ export default function Orders() {
         api.get<OrderListPage>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
-      setOrders(ordersData.items)
-      setTotalOrders(ordersData.total)
-      setTotalPages(ordersData.pages)
-      if (ordersData.page !== page) setPage(ordersData.page)
+      applyOrdersPage(ordersData)
       setShipments(shipmentsData)
       setSelectedItemIds((prev) => { const next = new Set(prev); next.delete(itemId); return next })
       setItemEdits((prev) => { const next = { ...prev }; delete next[itemId]; return next })
@@ -1336,10 +1336,7 @@ export default function Orders() {
         api.get<OrderListPage>(ordersPath),
         api.get<Shipment[]>('/shipments'),
       ])
-      setOrders(ordersData.items)
-      setTotalOrders(ordersData.total)
-      setTotalPages(ordersData.pages)
-      if (ordersData.page !== page) setPage(ordersData.page)
+      applyOrdersPage(ordersData)
       setShipments(shipmentsData)
       const idSet = new Set(itemIds)
       setSelectedItemIds((prev) => {
@@ -1476,11 +1473,7 @@ export default function Orders() {
           perPage,
         })
       )
-      setPage(refreshed.page)
-      setPerPage(refreshed.per_page)
-      setOrders(refreshed.items)
-      setTotalOrders(refreshed.total)
-      setTotalPages(refreshed.pages)
+      applyOrdersPage(refreshed)
     } catch (err) {
       console.error(err)
     } finally {
@@ -1717,17 +1710,29 @@ export default function Orders() {
                       {groups.length === 0 ? (
                         <div className="text-sm text-ink-muted dark:text-gray-400 px-2 py-2">No buying groups</div>
                       ) : (
-                        groups.map((g) => (
-                          <label key={g.id} className="flex items-center gap-2 px-2 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-600/30 rounded cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={mobileDraftFilterBuyingGroups.has(g.id)}
-                              onChange={() => toggleMobileDraftBuyingGroup(g.id)}
-                              className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
-                            />
-                            <span className="text-sm text-ink dark:text-gray-200">{g.name}</span>
-                          </label>
-                        ))
+                        groups.map((g) => {
+                          const unavailable = buyingGroupUnavailable(g.id, mobileDraftFilterStatuses.size > 0)
+                          return (
+                            <label
+                              key={g.id}
+                              className={`flex items-center gap-2 px-2 py-1.5 rounded ${
+                                unavailable
+                                  ? 'opacity-40 cursor-default'
+                                  : 'hover:bg-brand-50 dark:hover:bg-gray-600/30 cursor-pointer'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={mobileDraftFilterBuyingGroups.has(g.id)}
+                                onChange={() => toggleMobileDraftBuyingGroup(g.id)}
+                                className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                              />
+                              <span className={`text-sm ${unavailable ? 'text-ink-muted dark:text-gray-500' : 'text-ink dark:text-gray-200'}`}>
+                                {g.name}
+                              </span>
+                            </label>
+                          )
+                        })
                       )}
                     </div>
                   </div>
@@ -1930,17 +1935,29 @@ export default function Orders() {
               {groups.length === 0 ? (
                 <div className="px-3 py-2 text-sm text-ink-muted">No buying groups</div>
               ) : (
-                groups.map((g) => (
-                  <label key={g.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={filterBuyingGroups.has(g.id)}
-                      onChange={() => toggleFilterBuyingGroup(g.id)}
-                      className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
-                    />
-                    <span className="text-sm text-ink dark:text-gray-200">{g.name}</span>
-                  </label>
-                ))
+                groups.map((g) => {
+                  const unavailable = buyingGroupUnavailable(g.id, filterStatuses.size > 0)
+                  return (
+                    <label
+                      key={g.id}
+                      className={`flex items-center gap-2 px-3 py-1.5 ${
+                        unavailable
+                          ? 'opacity-40 cursor-default'
+                          : 'hover:bg-brand-50 dark:hover:bg-gray-700 cursor-pointer'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={filterBuyingGroups.has(g.id)}
+                        onChange={() => toggleFilterBuyingGroup(g.id)}
+                        className="rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                      />
+                      <span className={`text-sm ${unavailable ? 'text-ink-muted dark:text-gray-500' : 'text-ink dark:text-gray-200'}`}>
+                        {g.name}
+                      </span>
+                    </label>
+                  )
+                })
               )}
             </div>
           )}
@@ -3554,11 +3571,7 @@ export default function Orders() {
           perPage,
         })
       )
-      setPage(refreshed.page)
-      setPerPage(refreshed.per_page)
-      setOrders(refreshed.items)
-      setTotalOrders(refreshed.total)
-      setTotalPages(refreshed.pages)
+      applyOrdersPage(refreshed)
     } catch (err) {
       console.error(err)
     } finally {

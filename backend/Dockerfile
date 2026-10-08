@@ -4,6 +4,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc curl gnupg unzip \
+    xvfb fonts-liberation \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg \
@@ -22,11 +23,22 @@ COPY . .
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Entrypoint: migrations, then exec CMD (admin user is ensured on app startup)
+# Virtual display for headed Chromium (store automation). Invoice PDFs stay headless.
+ENV DISPLAY=:99
+
+# Entrypoint: Xvfb + migrations, then exec CMD (admin user is ensured on app startup)
 RUN set -e && \
     printf '%s\n' \
     '#!/bin/sh' \
     'set -e' \
+    'if [ -z "$DISPLAY" ]; then export DISPLAY=:99; fi' \
+    'if command -v Xvfb >/dev/null 2>&1; then' \
+    '  if [ ! -e "/tmp/.X${DISPLAY#:}-lock" ]; then' \
+    '    echo "Starting Xvfb on $DISPLAY..."' \
+    '    Xvfb "$DISPLAY" -screen 0 1280x800x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 &' \
+    '    sleep 0.5' \
+    '  fi' \
+    'fi' \
     'echo "Running migrations..."' \
     'alembic upgrade head' \
     'echo "Starting API..."' \

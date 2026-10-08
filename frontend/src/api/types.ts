@@ -150,6 +150,8 @@ export interface OrderListPage {
   per_page: number
   total: number
   pages: number
+  /** Buying groups with matches for current filters (excluding BG filter). */
+  available_buying_group_ids?: number[]
 }
 
 export interface ShipmentItem {

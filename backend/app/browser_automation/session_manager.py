@@ -23,7 +23,53 @@ WALMART_SIGNIN_HINTS = (
     "identity.walmart.com",
     "/signin",
     "/authorize",
+    "px-captcha",
+    "human.walmart",
 )
+
+# Desktop Chrome UA (Linux). Empty BROWSER_USER_AGENT uses this.
+_DEFAULT_CHROME_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+# Soften common automation fingerprints before any page JS runs.
+_STEALTH_INIT_SCRIPT = """
+(() => {
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  } catch (e) {}
+  try {
+    // Playwright Chromium often exposes an empty chrome object; flesh it out a bit.
+    window.chrome = window.chrome || {};
+    window.chrome.runtime = window.chrome.runtime || {};
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en'],
+    });
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [1, 2, 3, 4, 5],
+    });
+  } catch (e) {}
+  try {
+    const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters) =>
+        parameters && parameters.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters);
+    }
+  } catch (e) {}
+})();
+"""
+
+
+def _launch_user_agent() -> str:
+    configured = (settings.browser_user_agent or "").strip()
+    return configured or _DEFAULT_CHROME_UA
 
 
 @dataclass
@@ -70,13 +116,30 @@ class SessionManager:
             try:
                 user_data = str(profile_user_data_dir(profile_id))
                 pw = await async_playwright().start()
+                headless = bool(settings.browser_headless)
+                # Walmart/Amazon bot checks (PerimeterX / HUMAN) heavily fingerprint
+                # Playwright's default headless Chromium. Prefer headed under Xvfb.
                 context = await pw.chromium.launch_persistent_context(
                     user_data,
-                    headless=True,
+                    headless=headless,
                     viewport={"width": 1280, "height": 800},
-                    args=["--disable-blink-features=AutomationControlled"],
+                    screen={"width": 1280, "height": 800},
+                    user_agent=_launch_user_agent(),
+                    locale="en-US",
+                    timezone_id="America/Los_Angeles",
+                    color_scheme="light",
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ],
                     ignore_default_args=["--enable-automation"],
+                    # Avoid Playwright's default "HeadlessChrome" brand in Client Hints
+                    # when headless is forced on.
+                    chromium_sandbox=False,
                 )
+                await context.add_init_script(_STEALTH_INIT_SCRIPT)
                 page = context.pages[0] if context.pages else await context.new_page()
                 session = LiveSession(
                     profile_id=profile_id,
@@ -86,6 +149,12 @@ class SessionManager:
                     mode=mode,
                 )
                 self._sessions[profile_id] = session
+                logger.info(
+                    "Started browser profile=%s headless=%s mode=%s",
+                    profile_id,
+                    headless,
+                    mode,
+                )
                 if start_url:
                     await page.goto(start_url, wait_until="domcontentloaded", timeout=60_000)
                 return session

@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     browser_profiles_dir: str = "data/browser_profiles"
     # Cap concurrent Playwright browsers (login + import)
     browser_max_concurrent: int = 2
+    # Headless=True is heavily flagged by Walmart/Amazon bot checks. Prefer headed
+    # (use Xvfb in Docker). Invoice PDF rendering stays separately headless.
+    browser_headless: bool = False
+    # Optional UA override; empty = a current desktop Chrome UA matching Chromium.
+    browser_user_agent: str = ""
     # Public app base URL used when building import-review links (no trailing slash)
     app_public_base_url: str = "http://localhost:5173"
 

@@ -85,6 +85,9 @@ class OrderListPage(BaseModel):
     per_page: int
     total: int
     pages: int
+    # Distinct buying groups present in the current result set ignoring buying_group_id filter
+    # (used by the UI to gray out BGs that have no matches for the other active filters).
+    available_buying_group_ids: list[int] = []
 
 
 from app.schemas.item import ItemCreateNested  # noqa: E402

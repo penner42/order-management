@@ -355,6 +355,33 @@ def list_orders_paged(
         search=search,
     )
 
+    # Available BGs for the filter UI: same filters except buying_group_id, so options that
+    # would yield zero results (given status/store/date/search) can be grayed out.
+    q_for_bgs, _, _ = _build_orders_query(
+        db=db,
+        order_status=order_status,
+        status=status,
+        buying_group_id=[],
+        store_id=store_id,
+        store_account_id=store_account_id,
+        date_from=date_from,
+        date_to=date_to,
+        date_from_utc=date_from_utc,
+        date_to_utc=date_to_utc,
+        search=search,
+    )
+    available_buying_group_ids = [
+        int(bg_id)
+        for (bg_id,) in (
+            q_for_bgs.order_by(None)
+            .with_entities(Order.buying_group_id)
+            .filter(Order.buying_group_id.isnot(None))
+            .distinct()
+            .all()
+        )
+        if bg_id is not None
+    ]
+
     total = int(q.order_by(None).with_entities(func.count(func.distinct(Order.id))).scalar() or 0)
     if per_page == 0:
         pages = 1
@@ -370,7 +397,14 @@ def list_orders_paged(
         search_order_level_ids=search_order_level_ids,
         search_item_match_pairs=search_item_match_pairs,
     )
-    return OrderListPage(items=items, page=page, per_page=per_page, total=total, pages=pages)
+    return OrderListPage(
+        items=items,
+        page=page,
+        per_page=per_page,
+        total=total,
+        pages=pages,
+        available_buying_group_ids=available_buying_group_ids,
+    )
 
 
 @router.post("", response_model=OrderRead)

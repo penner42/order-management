@@ -394,7 +394,9 @@ export default function BrowserAutomation() {
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
         Run a real Chromium session on the server for each store account. Log in once in the embedded
         view (MFA supported); then use Import now to capture Walmart or Amazon orders into Import
-        Review. Sessions live on the machine hosting the API — use a trusted network/IP when possible.
+        Review. Sessions live on the machine hosting the API — use a trusted/home network IP when
+        possible. If you see a “Robot or human?” / press-and-hold page, complete it in the live view
+        (hold the button); rebuild so the browser runs headed under Xvfb rather than headless.
       </p>
 
       {error && (
