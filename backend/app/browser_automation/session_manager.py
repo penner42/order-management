@@ -72,6 +72,18 @@ _STEALTH_INIT_SCRIPT = """
 """
 
 DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
+# Screencast max bounds — keep stable so resize does not restart the stream.
+SCREENCAST_MAX = {"width": 1920, "height": 1080}
+RESIZE_SNAP = 16
+RESIZE_THRESHOLD = 16
+
+
+def _snap_size(width: int, height: int) -> tuple[int, int]:
+    width = max(320, min(SCREENCAST_MAX["width"], int(width)))
+    height = max(240, min(SCREENCAST_MAX["height"], int(height)))
+    width = max(320, (width // RESIZE_SNAP) * RESIZE_SNAP)
+    height = max(240, (height // RESIZE_SNAP) * RESIZE_SNAP)
+    return width, height
 
 
 def _launch_user_agent() -> str | None:
@@ -291,7 +303,8 @@ class SessionManager:
         session.screencast_handle = await session.page.screencast.start(
             on_frame=self._on_frame_handler(session),
             quality=55,
-            size={"width": session.viewport_width, "height": session.viewport_height},
+            # Fixed max size — do not tie to viewport or every resize restarts the stream.
+            size=dict(SCREENCAST_MAX),
         )
         session.screencast_on = True
 
@@ -318,29 +331,23 @@ class SessionManager:
             await self._stop_screencast_locked(session)
 
     async def resize_viewport(self, session: LiveSession, width: int, height: int) -> None:
-        """Match Playwright viewport to the embedded window size."""
-        width = max(320, min(3840, int(width)))
-        height = max(240, min(2160, int(height)))
-        width -= width % 2
-        height -= height % 2
-        if width == session.viewport_width and height == session.viewport_height:
+        """Match Playwright viewport to the embedded window size (no screencast restart)."""
+        width, height = _snap_size(width, height)
+        prev_w, prev_h = session.viewport_width, session.viewport_height
+        if width == prev_w and height == prev_h:
             return
+        if prev_w > 0 and prev_h > 0:
+            if abs(width - prev_w) < RESIZE_THRESHOLD and abs(height - prev_h) < RESIZE_THRESHOLD:
+                return
         async with session.lock:
+            if width == session.viewport_width and height == session.viewport_height:
+                return
             session.viewport_width = width
             session.viewport_height = height
             try:
                 await session.page.set_viewport_size({"width": width, "height": height})
             except Exception as exc:
                 logger.warning("set_viewport_size failed: %s", exc)
-            if not session.screencast_on:
-                return
-            await self._stop_screencast_locked(session)
-            try:
-                await self._start_screencast_locked(session)
-            except Exception as exc:
-                logger.warning("Restart screencast after resize failed: %s", exc)
-                session.screencast_on = False
-                session.screencast_handle = None
 
     async def dispatch_input(self, session: LiveSession, message: dict) -> None:
         """Forward mouse/keyboard events from the UI into Playwright (Firefox-safe)."""

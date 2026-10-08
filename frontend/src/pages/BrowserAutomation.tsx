@@ -39,6 +39,10 @@ function statusClass(status: string): string {
   }
 }
 
+/** Snap + hysteresis so ResizeObserver ↔ canvas ↔ backend can't oscillate by 1px. */
+const RESIZE_SNAP = 16
+const RESIZE_THRESHOLD = 16
+
 function LiveBrowserView({
   profileId,
   onDone,
@@ -70,9 +74,20 @@ function LiveBrowserView({
       const apply = () => {
         const el = viewportRef.current
         if (!el) return
-        const width = Math.max(320, Math.floor(el.clientWidth))
-        const height = Math.max(240, Math.floor(el.clientHeight))
-        if (width === lastSizeRef.current.width && height === lastSizeRef.current.height) return
+        const rawW = Math.max(320, Math.floor(el.clientWidth))
+        const rawH = Math.max(240, Math.floor(el.clientHeight))
+        const width = Math.max(320, Math.floor(rawW / RESIZE_SNAP) * RESIZE_SNAP)
+        const height = Math.max(240, Math.floor(rawH / RESIZE_SNAP) * RESIZE_SNAP)
+        const prev = lastSizeRef.current
+        if (prev.width > 0 && prev.height > 0) {
+          if (
+            Math.abs(width - prev.width) < RESIZE_THRESHOLD &&
+            Math.abs(height - prev.height) < RESIZE_THRESHOLD
+          ) {
+            return
+          }
+        }
+        if (width === prev.width && height === prev.height) return
         lastSizeRef.current = { width, height }
         setViewportSize({ width, height })
         send({ type: 'resize', width, height })
@@ -87,7 +102,7 @@ function LiveBrowserView({
         return
       }
       if (resizeTimerRef.current != null) window.clearTimeout(resizeTimerRef.current)
-      resizeTimerRef.current = window.setTimeout(apply, 120)
+      resizeTimerRef.current = window.setTimeout(apply, 250)
     },
     [send]
   )
@@ -284,12 +299,12 @@ function LiveBrowserView({
         </div>
         <div
           ref={viewportRef}
-          className="flex-1 min-h-0 bg-white dark:bg-gray-950 overflow-hidden"
+          className="relative flex-1 min-h-0 bg-white dark:bg-gray-950 overflow-hidden"
         >
           <canvas
             ref={canvasRef}
             tabIndex={0}
-            className="block w-full h-full cursor-default outline-none"
+            className="absolute inset-0 h-full w-full cursor-default outline-none"
             onMouseMove={onMouseMove}
             onMouseDown={onMouseDown}
             onMouseUp={onMouseUp}
