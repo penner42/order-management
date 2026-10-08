@@ -33,6 +33,8 @@ services:
       BROWSER_MAX_CONCURRENT: ${BROWSER_MAX_CONCURRENT:-2}
       # Headless Chromium is heavily bot-flagged by Walmart; headed+Xvfb is the default.
       BROWSER_HEADLESS: ${BROWSER_HEADLESS:-false}
+      # Prefer real Google Chrome (installed in the backend image) over Playwright Chromium.
+      BROWSER_CHANNEL: ${BROWSER_CHANNEL:-chrome}
       APP_PUBLIC_BASE_URL: ${APP_PUBLIC_BASE_URL:-http://localhost:5173}
       DISPLAY: ":99"
     shm_size: "2gb"

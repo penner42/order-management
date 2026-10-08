@@ -167,10 +167,19 @@ function LiveBrowserView({
     }
   }
 
+  const lastMoveSentRef = useRef(0)
+  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const now = performance.now()
+    if (now - lastMoveSentRef.current < 32) return
+    lastMoveSentRef.current = now
+    const { x, y } = coords(e)
+    send({ type: 'mouse', event: 'move', x, y })
+  }
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault()
     canvasRef.current?.focus()
     const { x, y } = coords(e)
+    send({ type: 'mouse', event: 'move', x, y })
     send({ type: 'mouse', event: 'down', x, y, button: 'left', clickCount: 1 })
   }
   const onMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -225,39 +234,63 @@ function LiveBrowserView({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 sm:p-6">
-      <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-[min(1100px,96vw)] h-[min(820px,92vh)] flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-brand-200/80 dark:border-gray-700 shrink-0">
-          <div className="min-w-0">
-            <h2 className="text-sm font-medium text-ink dark:text-gray-100">Log in — live browser</h2>
-            <p className="text-xs text-ink-muted dark:text-gray-400 truncate" title={url}>
-              {connected ? url || 'Connecting…' : 'Disconnected'}
-              {viewportSize.width > 0 ? ` · ${viewportSize.width}×${viewportSize.height}` : ''}
-            </p>
+      <div className="bg-[#dee1e6] dark:bg-gray-900 rounded-xl shadow-2xl w-[min(1100px,96vw)] h-[min(820px,92vh)] flex flex-col overflow-hidden border border-black/10 dark:border-gray-700">
+        {/* Window chrome */}
+        <div className="flex items-center gap-3 px-3 py-2 bg-[#e8eaed] dark:bg-gray-800 border-b border-black/10 dark:border-gray-700 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0" aria-hidden>
+            <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
+            <span className="h-3 w-3 rounded-full bg-[#febc2e]" />
+            <span className="h-3 w-3 rounded-full bg-[#28c840]" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 rounded-full bg-white dark:bg-gray-900 border border-black/10 dark:border-gray-600 px-3 py-1 text-xs text-ink dark:text-gray-200">
+              <svg
+                className="h-3 w-3 text-ink-muted dark:text-gray-500 shrink-0"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden
+              >
+                <rect x="5" y="11" width="14" height="10" rx="2" />
+                <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+              </svg>
+              <span className="truncate" title={url}>
+                {connected ? url || 'Connecting…' : 'Disconnected'}
+              </span>
+              {viewportSize.width > 0 && (
+                <span className="ml-auto shrink-0 text-[10px] text-ink-muted dark:text-gray-500">
+                  {viewportSize.width}×{viewportSize.height}
+                </span>
+              )}
+            </div>
           </div>
           <button
             type="button"
             onClick={onCancel}
-            className="rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm text-ink dark:text-gray-100 hover:bg-brand-50 dark:hover:bg-gray-800"
+            className="rounded-md border border-black/10 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs text-ink dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-800"
           >
             Cancel
           </button>
         </div>
-        <div className="px-3 pt-2 shrink-0">
-          {error && (
-            <p className="text-sm text-red-600 dark:text-red-400 mb-1">{error}</p>
+        <div className="px-3 py-1.5 shrink-0 bg-[#f1f3f4] dark:bg-gray-900 border-b border-black/5 dark:border-gray-800">
+          {error ? (
+            <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
+          ) : (
+            <p className="text-xs text-ink-muted dark:text-gray-400">
+              Click the page to focus, then sign in (including MFA). When your orders page loads, click Done.
+            </p>
           )}
-          <p className="text-xs text-ink-muted dark:text-gray-400 mb-2">
-            Click the window to focus, then sign in (including MFA). When your orders page loads, click Done.
-          </p>
         </div>
         <div
           ref={viewportRef}
-          className="mx-3 mb-2 flex-1 min-h-0 rounded border border-brand-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 overflow-hidden"
+          className="flex-1 min-h-0 bg-white dark:bg-gray-950 overflow-hidden"
         >
           <canvas
             ref={canvasRef}
             tabIndex={0}
-            className="block w-full h-full cursor-crosshair outline-none"
+            className="block w-full h-full cursor-default outline-none"
+            onMouseMove={onMouseMove}
             onMouseDown={onMouseDown}
             onMouseUp={onMouseUp}
             onWheel={onWheel}
@@ -265,11 +298,11 @@ function LiveBrowserView({
             onKeyUp={onKeyUp}
           />
         </div>
-        <div className="flex justify-end gap-2 px-4 py-3 border-t border-brand-200/80 dark:border-gray-700 shrink-0">
+        <div className="flex justify-end gap-2 px-4 py-2.5 bg-[#e8eaed] dark:bg-gray-800 border-t border-black/10 dark:border-gray-700 shrink-0">
           <button
             type="button"
             onClick={onCancel}
-            className="rounded-lg border border-brand-200 dark:border-gray-600 px-4 py-2 text-sm text-ink dark:text-gray-100 hover:bg-brand-50 dark:hover:bg-gray-800"
+            className="rounded-lg border border-black/10 dark:border-gray-600 bg-white dark:bg-gray-900 px-4 py-2 text-sm text-ink dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-800"
           >
             Cancel
           </button>
@@ -446,11 +479,11 @@ export default function BrowserAutomation() {
     <div>
       <h1 className="text-2xl font-semibold text-ink dark:text-gray-100 mb-2">Browser automation</h1>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
-        Run a real Chromium session on the server for each store account. Log in once in the embedded
-        view (MFA supported); then use Import now to capture Walmart or Amazon orders into Import
-        Review. Sessions live on the machine hosting the API — use a trusted/home network IP when
-        possible. If you see a “Robot or human?” / press-and-hold page, complete it in the live view
-        (hold the button); rebuild so the browser runs headed under Xvfb rather than headless.
+        Run a real Google Chrome session on the server for each store account. Log in once in the
+        embedded view (MFA supported); then use Import now to capture Walmart or Amazon orders into
+        Import Review. Sessions live on the machine hosting the API — use a trusted/home network IP
+        when possible. If you see a “Robot or human?” / press-and-hold page, complete it in the live
+        view (hold the button). If a profile stays blocked, delete it and create a new one.
       </p>
 
       {error && (

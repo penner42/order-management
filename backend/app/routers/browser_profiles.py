@@ -17,6 +17,7 @@ from app.browser_automation.jobs import create_job, get_job, update_job
 from app.browser_automation.paths import profile_user_data_dir
 from app.browser_automation.session_manager import (
     login_start_url_for_retailer,
+    login_warm_url_for_retailer,
     retailer_session_logged_in,
     session_manager,
 )
@@ -146,6 +147,7 @@ async def start_login(
         raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
 
     login_url = login_start_url_for_retailer(profile.retailer)
+    warm_url = login_warm_url_for_retailer(profile.retailer)
     profile.status = "login_in_progress"
     profile.last_error = None
     db.commit()
@@ -155,6 +157,7 @@ async def start_login(
             profile_id,
             mode="login",
             start_url=login_url,
+            warm_url=warm_url,
         )
     except Exception as exc:
         profile.status = "error"

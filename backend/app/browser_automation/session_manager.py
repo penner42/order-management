@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -13,9 +14,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+AMAZON_HOME_URL = "https://www.amazon.com/"
 AMAZON_ORDERS_URL = "https://www.amazon.com/your-orders/orders?disableCsd=missing-library"
 AMAZON_SIGNIN_HINTS = ("/ap/signin", "/ap/mfa", "/ap/cvf")
 
+WALMART_HOME_URL = "https://www.walmart.com/"
 WALMART_ORDERS_URL = "https://www.walmart.com/orders"
 WALMART_SIGNIN_HINTS = (
     "/account/login",
@@ -27,31 +30,106 @@ WALMART_SIGNIN_HINTS = (
     "human.walmart",
 )
 
-# Desktop Chrome UA (Linux). Empty BROWSER_USER_AGENT uses this.
-_DEFAULT_CHROME_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
 # Soften common automation fingerprints before any page JS runs.
+# Keep platform/UA honest (real Chrome on Linux) — mismatched Client Hints get flagged.
 _STEALTH_INIT_SCRIPT = """
 (() => {
   try {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  } catch (e) {}
-  try {
-    // Playwright Chromium often exposes an empty chrome object; flesh it out a bit.
-    window.chrome = window.chrome || {};
-    window.chrome.runtime = window.chrome.runtime || {};
-  } catch (e) {}
-  try {
-    Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-US', 'en'],
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
     });
   } catch (e) {}
   try {
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => [1, 2, 3, 4, 5],
+    if (navigator.webdriver) {
+      delete Navigator.prototype.webdriver;
+    }
+  } catch (e) {}
+  try {
+    window.chrome = window.chrome || {};
+    window.chrome.runtime = window.chrome.runtime || {
+      OnInstalledReason: {
+        CHROME_UPDATE: 'chrome_update',
+        INSTALL: 'install',
+        SHARED_MODULE_UPDATE: 'shared_module_update',
+        UPDATE: 'update',
+      },
+      OnRestartRequiredReason: {
+        APP_UPDATE: 'app_update',
+        OS_UPDATE: 'os_update',
+        PERIODIC: 'periodic',
+      },
+      PlatformArch: {
+        ARM: 'arm',
+        ARM64: 'arm64',
+        MIPS: 'mips',
+        MIPS64: 'mips64',
+        X86_32: 'x86-32',
+        X86_64: 'x86-64',
+      },
+      PlatformNaclArch: {
+        ARM: 'arm',
+        MIPS: 'mips',
+        MIPS64: 'mips64',
+        X86_32: 'x86-32',
+        X86_64: 'x86-64',
+      },
+      PlatformOs: {
+        ANDROID: 'android',
+        CROS: 'cros',
+        LINUX: 'linux',
+        MAC: 'mac',
+        OPENBSD: 'openbsd',
+        WIN: 'win',
+      },
+      RequestUpdateCheckStatus: {
+        NO_UPDATE: 'no_update',
+        THROTTLED: 'throttled',
+        UPDATE_AVAILABLE: 'update_available',
+      },
+      connect: function () { return { onMessage: { addListener: function () {} }, postMessage: function () {} }; },
+      sendMessage: function () {},
+      id: undefined,
+    };
+    window.chrome.csi = window.chrome.csi || function () { return {}; };
+    window.chrome.loadTimes = window.chrome.loadTimes || function () { return {}; };
+    window.chrome.app = window.chrome.app || {
+      isInstalled: false,
+      InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+      RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+      getDetails: function () { return null; },
+      getIsInstalled: function () { return false; },
+    };
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'languages', {
+      get: () => Object.freeze(['en-US', 'en']),
+    });
+  } catch (e) {}
+  try {
+    const makePlugin = (name, filename, description) => {
+      const plugin = { name, filename, description, length: 1 };
+      plugin[0] = { type: 'application/pdf', suffixes: 'pdf', description, enabledPlugin: plugin };
+      return plugin;
+    };
+    const plugins = [
+      makePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('Microsoft Edge PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('WebKit built-in PDF', 'internal-pdf-viewer', 'Portable Document Format'),
+    ];
+    plugins.item = (i) => plugins[i] || null;
+    plugins.namedItem = (n) => plugins.find((p) => p.name === n) || null;
+    plugins.refresh = () => {};
+    Object.defineProperty(navigator, 'plugins', { get: () => plugins });
+    Object.defineProperty(navigator, 'mimeTypes', {
+      get: () => {
+        const mimes = [{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }];
+        mimes.item = (i) => mimes[i] || null;
+        mimes.namedItem = (n) => mimes.find((m) => m.type === n) || null;
+        return mimes;
+      },
     });
   } catch (e) {}
   try {
@@ -63,16 +141,26 @@ _STEALTH_INIT_SCRIPT = """
           : originalQuery(parameters);
     }
   } catch (e) {}
+  try {
+    // Pass common headless checks that look for 0x0 / missing outer sizes.
+    if (!window.outerWidth) {
+      Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
+    }
+    if (!window.outerHeight) {
+      Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight + 85 });
+    }
+  } catch (e) {}
 })();
 """
 
 
-def _launch_user_agent() -> str:
+def _launch_user_agent() -> str | None:
+    """Only override UA when explicitly configured — mismatches with real Chrome get flagged."""
     configured = (settings.browser_user_agent or "").strip()
-    return configured or _DEFAULT_CHROME_UA
+    return configured or None
 
 
-DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
+DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
 
 
 @dataclass
@@ -88,6 +176,7 @@ class LiveSession:
     mode: str = "idle"  # idle | login | import
     viewport_width: int = DEFAULT_VIEWPORT["width"]
     viewport_height: int = DEFAULT_VIEWPORT["height"]
+    channel: str = "chromium"
 
 
 class SessionManager:
@@ -105,16 +194,104 @@ class SessionManager:
     def get(self, profile_id: int) -> LiveSession | None:
         return self._sessions.get(profile_id)
 
-    async def ensure_session(self, profile_id: int, *, mode: str, start_url: str | None = None) -> LiveSession:
+    def _launch_args(self, width: int, height: int) -> list[str]:
+        return [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-infobars",
+            "--disable-features=AutomationControlled,IsolateOrigins,site-per-process",
+            f"--window-size={width},{height}",
+            "--window-position=0,0",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-ipc-flooding-protection",
+            "--password-store=basic",
+            "--use-mock-keychain",
+        ]
+
+    async def _launch_persistent_context(
+        self,
+        pw: Playwright,
+        user_data: str,
+        *,
+        headless: bool,
+        width: int,
+        height: int,
+    ) -> tuple[BrowserContext, str]:
+        """Prefer installed Google Chrome; fall back to Playwright Chromium."""
+        common: dict[str, Any] = {
+            "headless": headless,
+            "viewport": {"width": width, "height": height},
+            "screen": {"width": width, "height": height},
+            "locale": "en-US",
+            "timezone_id": "America/Los_Angeles",
+            "color_scheme": "light",
+            "args": self._launch_args(width, height),
+            "ignore_default_args": ["--enable-automation"],
+            # Required inside Docker; real Chrome still behaves much closer to desktop.
+            "chromium_sandbox": False,
+            "ignore_https_errors": False,
+            "java_script_enabled": True,
+            "accept_downloads": True,
+            "has_touch": False,
+            "is_mobile": False,
+            "device_scale_factor": 1,
+        }
+        ua = _launch_user_agent()
+        if ua:
+            common["user_agent"] = ua
+
+        preferred = (settings.browser_channel or "chrome").strip().lower()
+        if preferred in ("", "chromium"):
+            ctx = await pw.chromium.launch_persistent_context(user_data, **common)
+            return ctx, "chromium"
+
+        try:
+            ctx = await pw.chromium.launch_persistent_context(
+                user_data,
+                channel=preferred,
+                **common,
+            )
+            return ctx, preferred
+        except Exception as exc:
+            logger.warning(
+                "Failed to launch channel=%s (%s); falling back to bundled Chromium",
+                preferred,
+                exc,
+            )
+            ctx = await pw.chromium.launch_persistent_context(user_data, **common)
+            return ctx, "chromium"
+
+    async def _warm_then_goto(self, page: Page, *, warm_url: str | None, start_url: str) -> None:
+        """Hit the retailer homepage first so bot sensors see a normal entry path."""
+        if warm_url:
+            try:
+                await page.goto(warm_url, wait_until="domcontentloaded", timeout=60_000)
+                await page.wait_for_timeout(random.randint(900, 2200))
+            except Exception as exc:
+                logger.warning("Warm navigation to %s failed: %s", warm_url, exc)
+        try:
+            await page.goto(start_url, wait_until="domcontentloaded", timeout=60_000)
+        except Exception as exc:
+            logger.warning("Navigate to %s failed: %s", start_url, exc)
+
+    async def ensure_session(
+        self,
+        profile_id: int,
+        *,
+        mode: str,
+        start_url: str | None = None,
+        warm_url: str | None = None,
+    ) -> LiveSession:
         async with self._global_lock:
             existing = self._sessions.get(profile_id)
             if existing:
                 existing.mode = mode
                 if start_url:
-                    try:
-                        await existing.page.goto(start_url, wait_until="domcontentloaded", timeout=60_000)
-                    except Exception as exc:
-                        logger.warning("Navigate existing session failed: %s", exc)
+                    await self._warm_then_goto(existing.page, warm_url=warm_url, start_url=start_url)
                 return existing
 
             await self.acquire_slot()
@@ -122,48 +299,44 @@ class SessionManager:
                 user_data = str(profile_user_data_dir(profile_id))
                 pw = await async_playwright().start()
                 headless = bool(settings.browser_headless)
+                width = DEFAULT_VIEWPORT["width"]
+                height = DEFAULT_VIEWPORT["height"]
                 # Walmart/Amazon bot checks (PerimeterX / HUMAN) heavily fingerprint
-                # Playwright's default headless Chromium. Prefer headed under Xvfb.
-                context = await pw.chromium.launch_persistent_context(
+                # Playwright's bundled Chromium. Prefer real Google Chrome under Xvfb.
+                context, channel = await self._launch_persistent_context(
+                    pw,
                     user_data,
                     headless=headless,
-                    viewport=dict(DEFAULT_VIEWPORT),
-                    screen=dict(DEFAULT_VIEWPORT),
-                    user_agent=_launch_user_agent(),
-                    locale="en-US",
-                    timezone_id="America/Los_Angeles",
-                    color_scheme="light",
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-dev-shm-usage",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ],
-                    ignore_default_args=["--enable-automation"],
-                    # Avoid Playwright's default "HeadlessChrome" brand in Client Hints
-                    # when headless is forced on.
-                    chromium_sandbox=False,
+                    width=width,
+                    height=height,
                 )
                 await context.add_init_script(_STEALTH_INIT_SCRIPT)
                 page = context.pages[0] if context.pages else await context.new_page()
+                # Extra pass in case a page was created before init scripts attached.
+                try:
+                    await page.add_init_script(_STEALTH_INIT_SCRIPT)
+                except Exception:
+                    pass
                 session = LiveSession(
                     profile_id=profile_id,
                     playwright=pw,
                     context=context,
                     page=page,
                     mode=mode,
-                    viewport_width=DEFAULT_VIEWPORT["width"],
-                    viewport_height=DEFAULT_VIEWPORT["height"],
+                    viewport_width=width,
+                    viewport_height=height,
+                    channel=channel,
                 )
                 self._sessions[profile_id] = session
                 logger.info(
-                    "Started browser profile=%s headless=%s mode=%s",
+                    "Started browser profile=%s channel=%s headless=%s mode=%s",
                     profile_id,
+                    channel,
                     headless,
                     mode,
                 )
                 if start_url:
-                    await page.goto(start_url, wait_until="domcontentloaded", timeout=60_000)
+                    await self._warm_then_goto(page, warm_url=warm_url, start_url=start_url)
                 return session
             except Exception:
                 self.release_slot()
@@ -257,6 +430,9 @@ class SessionManager:
         """Match Playwright viewport + screencast to the embedded window size."""
         width = max(320, min(3840, int(width)))
         height = max(240, min(2160, int(height)))
+        # Keep even dimensions (some sensors dislike odd sizes).
+        width -= width % 2
+        height -= height % 2
         if width == session.viewport_width and height == session.viewport_height:
             return
         async with session.lock:
@@ -266,6 +442,22 @@ class SessionManager:
                 await session.page.set_viewport_size({"width": width, "height": height})
             except Exception as exc:
                 logger.warning("set_viewport_size failed: %s", exc)
+            cdp = session.cdp
+            if cdp:
+                try:
+                    await cdp.send(
+                        "Emulation.setDeviceMetricsOverride",
+                        {
+                            "width": width,
+                            "height": height,
+                            "deviceScaleFactor": 1,
+                            "mobile": False,
+                            "screenWidth": width,
+                            "screenHeight": height,
+                        },
+                    )
+                except Exception:
+                    pass
             if not session.screencast_on or not session.cdp:
                 return
             try:
@@ -446,6 +638,12 @@ def login_start_url_for_retailer(retailer: str) -> str:
     if retailer == "walmart":
         return WALMART_ORDERS_URL
     return AMAZON_ORDERS_URL
+
+
+def login_warm_url_for_retailer(retailer: str) -> str:
+    if retailer == "walmart":
+        return WALMART_HOME_URL
+    return AMAZON_HOME_URL
 
 
 async def retailer_session_logged_in(page: Page, retailer: str) -> bool:
