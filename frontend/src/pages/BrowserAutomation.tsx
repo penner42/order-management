@@ -45,7 +45,10 @@ const RESIZE_THRESHOLD = 16
 /** Never drive the remote browser below a normal desktop pane — tiny viewports get blocked. */
 const MIN_VIEWPORT_WIDTH = 1024
 const MIN_VIEWPORT_HEIGHT = 720
-const DEFAULT_VIEWPORT = { width: 1600, height: 900 }
+const DEFAULT_VIEWPORT = { width: 1920, height: 1080 }
+/** Must stay in sync with backend SCREENCAST_MAX. */
+const MAX_VIEWPORT_WIDTH = 2560
+const MAX_VIEWPORT_HEIGHT = 1440
 /** ~40 Hz pointer moves — responsive without flooding the WS. */
 const MOUSE_MOVE_MIN_MS = 24
 
@@ -69,7 +72,10 @@ function LiveBrowserView({
   const openedRef = useRef(false)
   const frameBusyRef = useRef(false)
   const pendingFrameRef = useRef<string | null>(null)
-  /** Playwright viewport size from frame metadata (may differ from JPEG bitmap size). */
+  /**
+   * Screencast JPEG size → Playwright CSS px. Kept in sync from frame metadata when
+   * the encoder scales the bitmap; otherwise equals the bitmap size (1:1).
+   */
   const remoteViewportRef = useRef({ width: 0, height: 0 })
   const [url, setUrl] = useState('')
   const [address, setAddress] = useState(suggestedUrl)
@@ -77,47 +83,75 @@ function LiveBrowserView({
   const [connected, setConnected] = useState(false)
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
 
-  const paintFrame = useCallback((b64: string) => {
-    pendingFrameRef.current = b64
-    if (frameBusyRef.current) return
-    frameBusyRef.current = true
-
-    const pump = () => {
-      const next = pendingFrameRef.current
-      pendingFrameRef.current = null
-      if (!next) {
-        frameBusyRef.current = false
-        return
-      }
-      const canvas = canvasRef.current
-      if (!canvas) {
-        frameBusyRef.current = false
-        return
-      }
-      const img = imgRef.current || new Image()
-      imgRef.current = img
-      img.onload = () => {
-        if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth
-        if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight
-        const ctx = canvas.getContext('2d')
-        if (ctx) ctx.drawImage(img, 0, 0)
-        if (pendingFrameRef.current) {
-          requestAnimationFrame(pump)
-        } else {
-          frameBusyRef.current = false
-        }
-      }
-      img.onerror = () => {
-        if (pendingFrameRef.current) {
-          requestAnimationFrame(pump)
-        } else {
-          frameBusyRef.current = false
-        }
-      }
-      img.src = `data:image/jpeg;base64,${next}`
-    }
-    requestAnimationFrame(pump)
+  /** Size/position the canvas so its CSS box matches the drawn frame (no object-fit guesswork). */
+  const layoutCanvas = useCallback(() => {
+    const pane = viewportRef.current
+    const canvas = canvasRef.current
+    if (!pane || !canvas) return
+    const bw = canvas.width
+    const bh = canvas.height
+    if (!bw || !bh) return
+    const paneW = pane.clientWidth
+    const paneH = pane.clientHeight
+    if (paneW <= 0 || paneH <= 0) return
+    const scale = Math.min(paneW / bw, paneH / bh)
+    const w = Math.max(1, Math.round(bw * scale))
+    const h = Math.max(1, Math.round(bh * scale))
+    canvas.style.width = `${w}px`
+    canvas.style.height = `${h}px`
+    canvas.style.left = `${Math.round((paneW - w) / 2)}px`
+    canvas.style.top = `${Math.round((paneH - h) / 2)}px`
   }, [])
+
+  const paintFrame = useCallback(
+    (b64: string) => {
+      pendingFrameRef.current = b64
+      if (frameBusyRef.current) return
+      frameBusyRef.current = true
+
+      const pump = () => {
+        const next = pendingFrameRef.current
+        pendingFrameRef.current = null
+        if (!next) {
+          frameBusyRef.current = false
+          return
+        }
+        const canvas = canvasRef.current
+        if (!canvas) {
+          frameBusyRef.current = false
+          return
+        }
+        const img = imgRef.current || new Image()
+        imgRef.current = img
+        img.onload = () => {
+          if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth
+          if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight
+          const ctx = canvas.getContext('2d')
+          if (ctx) ctx.drawImage(img, 0, 0)
+          // Default page space to bitmap until metadata says otherwise.
+          if (!remoteViewportRef.current.width || !remoteViewportRef.current.height) {
+            remoteViewportRef.current = { width: img.naturalWidth, height: img.naturalHeight }
+          }
+          layoutCanvas()
+          if (pendingFrameRef.current) {
+            requestAnimationFrame(pump)
+          } else {
+            frameBusyRef.current = false
+          }
+        }
+        img.onerror = () => {
+          if (pendingFrameRef.current) {
+            requestAnimationFrame(pump)
+          } else {
+            frameBusyRef.current = false
+          }
+        }
+        img.src = `data:image/jpeg;base64,${next}`
+      }
+      requestAnimationFrame(pump)
+    },
+    [layoutCanvas]
+  )
 
   const send = useCallback((payload: Record<string, unknown>) => {
     const ws = wsRef.current
@@ -132,13 +166,13 @@ function LiveBrowserView({
     if (el.clientWidth < 400 || el.clientHeight < 400) return null
     const rawW = Math.floor(el.clientWidth)
     const rawH = Math.floor(el.clientHeight)
-    const width = Math.max(
-      MIN_VIEWPORT_WIDTH,
-      Math.floor(rawW / RESIZE_SNAP) * RESIZE_SNAP
+    const width = Math.min(
+      MAX_VIEWPORT_WIDTH,
+      Math.max(MIN_VIEWPORT_WIDTH, Math.floor(rawW / RESIZE_SNAP) * RESIZE_SNAP)
     )
-    const height = Math.max(
-      MIN_VIEWPORT_HEIGHT,
-      Math.floor(rawH / RESIZE_SNAP) * RESIZE_SNAP
+    const height = Math.min(
+      MAX_VIEWPORT_HEIGHT,
+      Math.max(MIN_VIEWPORT_HEIGHT, Math.floor(rawH / RESIZE_SNAP) * RESIZE_SNAP)
     )
     return { width, height }
   }, [])
@@ -218,7 +252,8 @@ function LiveBrowserView({
           const meta = msg.metadata as { viewportWidth?: number; viewportHeight?: number } | undefined
           const vpW = Number(meta?.viewportWidth) || 0
           const vpH = Number(meta?.viewportHeight) || 0
-          if (vpW > 0 && vpH > 0) {
+          // Only adopt metadata when it looks like a real page viewport (not 0 / garbage).
+          if (vpW >= 200 && vpH >= 200) {
             remoteViewportRef.current = { width: vpW, height: vpH }
           }
           paintFrame(msg.data as string)
@@ -250,16 +285,20 @@ function LiveBrowserView({
   useEffect(() => {
     const el = viewportRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => sendResize())
+    const ro = new ResizeObserver(() => {
+      layoutCanvas()
+      sendResize()
+    })
     ro.observe(el)
     sendResize(true)
+    layoutCanvas()
     return () => {
       ro.disconnect()
       if (resizeTimerRef.current != null) window.clearTimeout(resizeTimerRef.current)
     }
-  }, [sendResize])
+  }, [sendResize, layoutCanvas])
 
-  /** Map canvas pointer → remote viewport CSS px (object-fit: contain + letterbox). */
+  /** Map pointer on the laid-out canvas box → remote page CSS px. */
   const coords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas) return { x: 0, y: 0 }
@@ -268,27 +307,20 @@ function LiveBrowserView({
     const bitmapH = canvas.height
     if (!bitmapW || !bitmapH || rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 }
 
-    // Keep aspect ratio (see canvas object-fit: contain). Stretching made Walmart's
-    // OTP cells paper-thin and nearly impossible to hit in the live view.
-    const scale = Math.min(rect.width / bitmapW, rect.height / bitmapH)
-    const drawW = bitmapW * scale
-    const drawH = bitmapH * scale
-    const offsetX = (rect.width - drawW) / 2
-    const offsetY = (rect.height - drawH) / 2
-    const localX = e.clientX - rect.left - offsetX
-    const localY = e.clientY - rect.top - offsetY
-    if (localX < 0 || localY < 0 || localX > drawW || localY > drawH) {
+    const localX = e.clientX - rect.left
+    const localY = e.clientY - rect.top
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
       return { x: -1, y: -1 }
     }
 
-    const x = localX / scale
-    const y = localY / scale
-    // If the JPEG was resized relative to the Playwright viewport, scale into page space.
+    // Canvas CSS box is sized to the frame aspect ratio, so rect ↔ bitmap is uniform.
+    const bitmapX = (localX / rect.width) * bitmapW
+    const bitmapY = (localY / rect.height) * bitmapH
     const vpW = remoteViewportRef.current.width || bitmapW
     const vpH = remoteViewportRef.current.height || bitmapH
     return {
-      x: Math.max(0, Math.min(vpW - 1e-3, (x * vpW) / bitmapW)),
-      y: Math.max(0, Math.min(vpH - 1e-3, (y * vpH) / bitmapH)),
+      x: Math.max(0, Math.min(vpW - 1e-3, (bitmapX * vpW) / bitmapW)),
+      y: Math.max(0, Math.min(vpH - 1e-3, (bitmapY * vpH) / bitmapH)),
     }
   }
 
@@ -398,7 +430,7 @@ function LiveBrowserView({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-1 sm:p-2">
-      <div className="bg-[#dee1e6] dark:bg-gray-900 rounded-xl shadow-2xl w-[min(1920px,100vw-0.5rem)] h-[min(1080px,100vh-0.5rem)] flex flex-col overflow-hidden border border-black/10 dark:border-gray-700">
+      <div className="bg-[#dee1e6] dark:bg-gray-900 rounded-xl shadow-2xl w-[min(2560px,100vw-0.5rem)] h-[min(1440px,100vh-0.5rem)] flex flex-col overflow-hidden border border-black/10 dark:border-gray-700">
         {/* Window chrome */}
         <div className="flex items-center gap-2 px-3 py-1.5 bg-[#e8eaed] dark:bg-gray-800 border-b border-black/10 dark:border-gray-700 shrink-0">
           <div className="flex items-center gap-1.5 shrink-0" aria-hidden>
@@ -468,12 +500,12 @@ function LiveBrowserView({
         </div>
         <div
           ref={viewportRef}
-          className="relative flex-1 min-h-0 bg-white dark:bg-gray-950 overflow-hidden"
+          className="relative flex-1 min-h-0 bg-neutral-200 dark:bg-gray-950 overflow-hidden"
         >
           <canvas
             ref={canvasRef}
             tabIndex={0}
-            className="absolute inset-0 h-full w-full cursor-default outline-none object-contain bg-black/5 dark:bg-black/40"
+            className="absolute cursor-default outline-none bg-white dark:bg-gray-950"
             onMouseMove={onMouseMove}
             onMouseDown={onMouseDown}
             onMouseUp={onMouseUp}

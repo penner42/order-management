@@ -32,10 +32,10 @@ WALMART_SIGNIN_HINTS = (
     "/blocked",
 )
 
-DEFAULT_VIEWPORT = {"width": 1600, "height": 900}
+DEFAULT_VIEWPORT = {"width": 1920, "height": 1080}
 # Cap stream resolution for WebSocket bandwidth; keep close to the UI window.
-SCREENCAST_MAX = {"width": 1920, "height": 1080}
-SCREENCAST_QUALITY = 62
+SCREENCAST_MAX = {"width": 2560, "height": 1440}
+SCREENCAST_QUALITY = 72
 RESIZE_SNAP = 16
 RESIZE_THRESHOLD = 16
 MIN_VIEWPORT = {"width": 1024, "height": 720}
@@ -270,12 +270,26 @@ class SessionManager:
                 b64 = base64.b64encode(data).decode("ascii")
             else:
                 b64 = str(data)
+            # Prefer live Playwright viewport (CSS px) — mouse events use this space.
+            vp_w = session.viewport_width
+            vp_h = session.viewport_height
+            try:
+                vp = session.page.viewport_size
+                if vp and vp.get("width") and vp.get("height"):
+                    vp_w = int(vp["width"])
+                    vp_h = int(vp["height"])
+                    session.viewport_width = vp_w
+                    session.viewport_height = vp_h
+            except Exception:
+                pass
             msg = {
                 "type": "frame",
                 "data": b64,
                 "metadata": {
-                    "viewportWidth": frame.get("viewportWidth") or session.viewport_width,
-                    "viewportHeight": frame.get("viewportHeight") or session.viewport_height,
+                    # Always the Playwright CSS viewport (mouse space). Do not trust
+                    # screencast-provided viewport fields — they can disagree with the page.
+                    "viewportWidth": vp_w,
+                    "viewportHeight": vp_h,
                     "timestamp": frame.get("timestamp"),
                 },
                 "url": session.page.url,
