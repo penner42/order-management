@@ -19,6 +19,7 @@ import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
 import Reports from './pages/Reports'
 import BrowserExtension from './pages/BrowserExtension'
+import Settings from './pages/Settings'
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -88,6 +89,7 @@ function AppShell() {
       { to: '/portals', label: 'Portals' },
       { to: '/imported-orders', label: 'Imported Orders' },
       { to: '/extension', label: 'Extension' },
+      { to: '/settings', label: 'Settings' },
     ]
   }, [user])
 
@@ -241,6 +243,7 @@ function AppShell() {
           <Route path="/portals" element={<Portals />} />
           <Route path="/extension" element={<BrowserExtension />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="/settings" element={<Settings />} />
           {user.role === 'admin' && <Route path="/admin" element={<Admin />} />}
           <Route path="*" element={<Navigate to={user.role === 'admin' ? '/admin' : '/'} replace />} />
         </Routes>

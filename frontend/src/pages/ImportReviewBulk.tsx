@@ -10,6 +10,7 @@ import {
   getDefaultOrderTotal,
 } from '../utils/importDefaults'
 import { stripIgnoredWalmartImportSlices } from '../utils/stripIgnoredWalmartImport'
+import { getIgnoredZipCodes, isIgnoredPostalCode } from '../utils/ignoredZipCodes'
 import { normalizeTrackingForDisplay } from '../utils/walmartTracking'
 
 type NormalizedPayload = any
@@ -278,12 +279,17 @@ function orderNeedsCancelUpdate(diff: OrderDiff | null, isCanceled: boolean): bo
   return false
 }
 
-type BulkImportSortGroup = 'changes' | 'unchanged' | 'canceled'
+type BulkImportSortGroup = 'changes' | 'unchanged' | 'ignored' | 'canceled'
 
 const BULK_IMPORT_SORT_GROUP_ORDER: Record<BulkImportSortGroup, number> = {
   changes: 0,
   unchanged: 1,
-  canceled: 2,
+  ignored: 2,
+  canceled: 3,
+}
+
+function payloadHasIgnoredZip(p: NormalizedPayload, ignoredZipCodes: string[]): boolean {
+  return isIgnoredPostalCode(p?.shippingAddress?.postalCode, ignoredZipCodes)
 }
 
 function existingOrderHasActionableUpdates(
@@ -303,10 +309,12 @@ function existingOrderHasActionableUpdates(
 
 function getBulkImportSortGroup(
   diff: OrderDiff | null | undefined,
-  isCanceled: boolean
+  isCanceled: boolean,
+  isIgnoredZip: boolean
 ): BulkImportSortGroup {
   const isExisting = diff?.is_existing_order === true
   if (isCanceled && !isExisting) return 'canceled'
+  if (isIgnoredZip) return 'ignored'
   if (
     !isExisting ||
     countActionableItemChanges(diff ?? null) > 0 ||
@@ -320,17 +328,23 @@ function getBulkImportSortGroup(
 
 function computeBulkImportDisplayOrder(
   payloads: NormalizedPayload[],
-  diffs: Record<number, OrderDiff | null>
+  diffs: Record<number, OrderDiff | null>,
+  ignoredZipCodes: string[] = getIgnoredZipCodes()
 ): number[] {
   const indexed = payloads.map((payload, index) => ({
     index,
     isCanceled: isCanceledOrderPayload(payload),
+    isIgnoredZip: payloadHasIgnoredZip(payload, ignoredZipCodes),
   }))
   return [...indexed]
     .sort((a, b) => {
       const groupCmp =
-        BULK_IMPORT_SORT_GROUP_ORDER[getBulkImportSortGroup(diffs[a.index], a.isCanceled)] -
-        BULK_IMPORT_SORT_GROUP_ORDER[getBulkImportSortGroup(diffs[b.index], b.isCanceled)]
+        BULK_IMPORT_SORT_GROUP_ORDER[
+          getBulkImportSortGroup(diffs[a.index], a.isCanceled, a.isIgnoredZip)
+        ] -
+        BULK_IMPORT_SORT_GROUP_ORDER[
+          getBulkImportSortGroup(diffs[b.index], b.isCanceled, b.isIgnoredZip)
+        ]
       if (groupCmp !== 0) return groupCmp
       return a.index - b.index
     })
@@ -501,17 +515,19 @@ export default function ImportReviewBulk() {
 
   useEffect(() => {
     if (!payloads || payloads.length === 0) return
+    const ignoredZipCodes = getIgnoredZipCodes()
     setCollapsedByIndex((prev) => {
       const next = { ...prev }
       for (let i = 0; i < payloads.length; i++) {
         const isExisting = diffs[i]?.is_existing_order === true
         const isCanceled = isCanceledOrderPayload(payloads[i])
+        const isIgnoredZip = payloadHasIgnoredZip(payloads[i], ignoredZipCodes)
         if (isExisting && isCanceled) {
           next[i] = false
           continue
         }
         if (typeof next[i] === 'boolean') continue
-        next[i] = isCanceled && !isExisting
+        next[i] = (isCanceled && !isExisting) || isIgnoredZip
       }
       return next
     })
@@ -586,6 +602,8 @@ export default function ImportReviewBulk() {
     })
   }, [payloads, stores, accountsByStore])
 
+  const ignoredZipCodes = useMemo(() => getIgnoredZipCodes(), [payloads.length])
+
   if (!token || payloads.length === 0) {
     return (
       <div className="max-w-2xl mx-auto">
@@ -656,20 +674,24 @@ export default function ImportReviewBulk() {
     }
   }
 
-  const sortGroupForIndex = (index: number, isCanceled: boolean) =>
-    getBulkImportSortGroup(diffs[index], isCanceled)
+  const sortGroupForIndex = (index: number, isCanceled: boolean, isIgnoredZip: boolean) =>
+    getBulkImportSortGroup(diffs[index], isCanceled, isIgnoredZip)
 
   const sortedPayloads = (displayIndexOrder ?? payloads.map((_, index) => index)).map((index) => ({
     payload: payloads[index],
     index,
     isCanceled: isCanceledOrderPayload(payloads[index]),
+    isIgnoredZip: payloadHasIgnoredZip(payloads[index], ignoredZipCodes),
   }))
 
   const firstUnchangedIndex = sortedPayloads.findIndex(
-    (x) => sortGroupForIndex(x.index, x.isCanceled) === 'unchanged'
+    (x) => sortGroupForIndex(x.index, x.isCanceled, x.isIgnoredZip) === 'unchanged'
+  )
+  const firstIgnoredIndex = sortedPayloads.findIndex(
+    (x) => sortGroupForIndex(x.index, x.isCanceled, x.isIgnoredZip) === 'ignored'
   )
   const firstCanceledIndex = sortedPayloads.findIndex(
-    (x) => sortGroupForIndex(x.index, x.isCanceled) === 'canceled'
+    (x) => sortGroupForIndex(x.index, x.isCanceled, x.isIgnoredZip) === 'canceled'
   )
 
   return (
@@ -700,12 +722,15 @@ export default function ImportReviewBulk() {
           const p = entry.payload
           const idx = entry.index
           const isCanceled = entry.isCanceled
+          const isIgnoredZip = entry.isIgnoredZip
           const diff = diffs[idx]
           const externalOrder = p.externalOrder || {}
           const storeName: string = p.store || ''
           const orderId: string = externalOrder.id || ''
           const isExisting = diff && diff.is_existing_order === true
           const showAsNewCanceled = isCanceled && !isExisting
+          const showAsIgnoredZip =
+            isIgnoredZip && !(isCanceled && !isExisting)
           const store = findStoreForPayload(p, stores)
           const storeAccounts = store ? (accountsByStore[store.id] ?? []) : []
           const itemChangesCount = countActionableItemChanges(diff)
@@ -743,6 +768,7 @@ export default function ImportReviewBulk() {
           const address = p.shippingAddress
 
           const showUnchangedSeparator = firstUnchangedIndex >= 0 && renderIdx === firstUnchangedIndex
+          const showIgnoredSeparator = firstIgnoredIndex >= 0 && renderIdx === firstIgnoredIndex
           const showCanceledSeparator = firstCanceledIndex >= 0 && renderIdx === firstCanceledIndex
 
           const itemDiffMap = new Map<string, ItemDiffInfo>()
@@ -809,6 +835,11 @@ export default function ImportReviewBulk() {
                   Existing orders — no updates needed
                 </div>
               )}
+              {showIgnoredSeparator && (
+                <div className="pt-2 border-t border-dashed border-brand-200 dark:border-gray-700 text-xs text-ink-muted dark:text-gray-400">
+                  Orders that can be ignored
+                </div>
+              )}
               {showCanceledSeparator && (
                 <div className="pt-2 border-t border-dashed border-brand-200 dark:border-gray-700 text-xs text-ink-muted dark:text-gray-400">
                   Canceled orders
@@ -828,6 +859,11 @@ export default function ImportReviewBulk() {
                       {showAsNewCanceled && (
                         <span className="inline-flex items-center rounded-full bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 px-2 py-0.5 text-[11px]">
                           Canceled
+                        </span>
+                      )}
+                      {showAsIgnoredZip && (
+                        <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200 px-2 py-0.5 text-[11px]">
+                          Ignorable
                         </span>
                       )}
                       {store && (
