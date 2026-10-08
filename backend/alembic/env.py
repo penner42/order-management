@@ -30,6 +30,7 @@ from app.models import (
     Item,
     Shipment,
     ShipmentItem,
+    BrowserProfile,
 )
 
 config = context.config

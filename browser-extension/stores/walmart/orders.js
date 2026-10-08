@@ -544,6 +544,13 @@
           payload.order = pageProps.order
         } else if (pageProps.orderDetail) {
           payload.order = pageProps.orderDetail
+        } else if (
+          pageProps.initialData &&
+          pageProps.initialData.data &&
+          pageProps.initialData.data.order
+        ) {
+          // Common SSR shape for order detail pages.
+          payload.order = pageProps.initialData.data.order
         }
       }
     } catch {
@@ -551,6 +558,14 @@
     }
 
     return payload
+  }
+
+  function orderDetailHasUsableOrder(payload) {
+    try {
+      return !!(payload && payload.order && payload.order.id != null)
+    } catch {
+      return false
+    }
   }
 
   function processInitialNextData() {
@@ -566,7 +581,9 @@
         }
       } else if (isOrderDetailPage()) {
         const extracted = extractOrderDetailFromNextData(nextData)
-        if (extracted) {
+        // Never publish an empty shell — that overwrites a GraphQL capture that
+        // may have already landed before DOMContentLoaded.
+        if (extracted && orderDetailHasUsableOrder(extracted)) {
           orderDetailCache = extracted
           postEvent('orderDetail', extracted)
           scheduleInvoiceCapture()
@@ -654,10 +671,17 @@
       if (u.hostname !== 'www.walmart.com') return null
       const path = u.pathname || ''
 
-      if (path.startsWith('/orchestra/orders/graphql/getOrder/')) {
+      // Persisted-query hashes change; match the operation path prefix.
+      if (
+        path.indexOf('/orchestra/orders/graphql/getOrder/') === 0 ||
+        /\/orchestra\/[^/]+\/graphql\/getOrder(?:\/|$)/i.test(path)
+      ) {
         return { kind: 'detail', url: u.href }
       }
-      if (path.startsWith('/orchestra/cph/graphql/PurchaseHistoryV3/')) {
+      if (
+        path.indexOf('/orchestra/cph/graphql/PurchaseHistoryV3/') === 0 ||
+        /\/orchestra\/[^/]+\/graphql\/PurchaseHistory/i.test(path)
+      ) {
         return { kind: 'list', url: u.href }
       }
     } catch {
@@ -728,6 +752,9 @@
       } catch {
         // fall back to raw only
       }
+
+      // Ignore error/empty GraphQL envelopes so bulk waiters keep polling.
+      if (!orderDetailHasUsableOrder(payload)) return
 
       orderDetailCache = payload
       postEvent('orderDetail', payload)
@@ -845,13 +872,25 @@
     }
   }
 
-  function init() {
+  function installNetworkHooks() {
+    // Must run at document_start, before Walmart's own scripts. Waiting until
+    // DOMContentLoaded misses the order-detail GraphQL call on modern pages.
     try {
-      postReset(currentUrl)
-      processInitialNextData()
       installUrlWatcher()
       installFetchInterceptor()
       installXhrInterceptor()
+    } catch {
+      // ignore
+    }
+  }
+
+  function initAfterDomReady() {
+    try {
+      // Refresh URL + attempt SSR extraction once the document exists.
+      // Do not reinstall network hooks (idempotent, but URL reset must not
+      // clobber a GraphQL capture already posted to the bridge).
+      currentUrl = window.location.href
+      processInitialNextData()
     } catch {
       // ignore
     }
@@ -1576,13 +1615,15 @@
     }
   }
 
+  // Network hooks first — this file runs at document_start.
+  installNetworkHooks()
+  installExtensionRpcListener()
+
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    init()
-    installExtensionRpcListener()
+    initAfterDomReady()
   } else {
     window.addEventListener('DOMContentLoaded', () => {
-      init()
-      installExtensionRpcListener()
+      initAfterDomReady()
     })
   }
 })()

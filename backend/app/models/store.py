@@ -37,3 +37,9 @@ class StoreAccount(Base):
 
     store = relationship("Store", back_populates="accounts")
     orders = relationship("Order", back_populates="store_account")
+    browser_profile = relationship(
+        "BrowserProfile",
+        back_populates="store_account",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )

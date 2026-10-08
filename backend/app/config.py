@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     # Directory where imported store invoice PDFs are stored
     invoice_dir: str = "data/invoices"
 
+    # Persistent Chromium profiles for automated store import (cookies/MFA)
+    browser_profiles_dir: str = "data/browser_profiles"
+    # Cap concurrent Playwright browsers (login + import)
+    browser_max_concurrent: int = 2
+    # Public app base URL used when building import-review links (no trailing slash)
+    app_public_base_url: str = "http://localhost:5173"
+
     # Browser extension signing (optional; auto-detects repo browser-extension/ if unset)
     browser_extension_dir: str = ""
     web_ext_api_key: str = ""

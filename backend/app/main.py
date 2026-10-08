@@ -19,6 +19,7 @@ from app.routers import (
     portals,
     store_imports,
     browser_extension,
+    browser_profiles,
 )
 from app.admin_bootstrap import ensure_admin_user
 
@@ -60,6 +61,7 @@ app.include_router(shipments.router, prefix="/api")
 app.include_router(portals.router, prefix="/api")
 app.include_router(store_imports.router, prefix="/api")
 app.include_router(browser_extension.router, prefix="/api")
+app.include_router(browser_profiles.router, prefix="/api")
 
 
 @app.get("/")

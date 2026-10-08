@@ -29,9 +29,14 @@ services:
       WEB_EXT_API_KEY: ${WEB_EXT_API_KEY:-}
       WEB_EXT_API_SECRET: ${WEB_EXT_API_SECRET:-}
       INVOICE_DIR: /data/invoices
+      BROWSER_PROFILES_DIR: /data/browser_profiles
+      BROWSER_MAX_CONCURRENT: ${BROWSER_MAX_CONCURRENT:-2}
+      APP_PUBLIC_BASE_URL: ${APP_PUBLIC_BASE_URL:-http://localhost:5173}
+    shm_size: "2gb"
     volumes:
       - ./browser-extension:/browser-extension
       - invoice_data:/data/invoices
+      - browser_profiles_data:/data/browser_profiles
     depends_on:
       db:
         condition: service_healthy
@@ -103,3 +108,4 @@ services:
 volumes:
   pgdata:
   invoice_data:
+  browser_profiles_data:

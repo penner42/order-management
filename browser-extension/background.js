@@ -1027,9 +1027,44 @@ async function clearWalmartDetailStorage() {
   });
 }
 
-async function waitForWalmartDetail(orderNumber, timeoutMs) {
+function walmartOrderIdDigits(value) {
+  return String(value == null ? "" : value).replace(/\D+/g, "");
+}
+
+function walmartDetailMatchesOrder(record, orderNumber) {
+  if (!record || !record.payload || !orderNumber) return false;
+  const wanted = String(orderNumber);
+  const wantedDigits = walmartOrderIdDigits(wanted);
+  if (!wantedDigits) return false;
+
+  const payload = record.payload;
+  const order = payload.order || null;
+  if (!order || order.id == null) return false;
+
+  const orderId = String(order.id);
+  if (orderId === wanted) return true;
+  if (walmartOrderIdDigits(orderId) === wantedDigits) return true;
+
+  const url = record.url ? String(record.url) : "";
+  if (url && url.indexOf(wanted) >= 0) return true;
+  if (url && wantedDigits && walmartOrderIdDigits(url).indexOf(wantedDigits) >= 0) return true;
+
+  return false;
+}
+
+async function waitForWalmartDetail(orderNumber, timeoutMs, port) {
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 30000;
+  while (Date.now() - start < t) {
+    touchServiceWorker();
+    if (port) {
+      try {
+        port.postMessage({ type: "heartbeat" });
+      } catch {
+        // ignore
+      }
+    }
+
     const current = await new Promise((resolve) => {
       try {
         chrome.storage.local.get(WALMART_ORDER_DETAIL_STORAGE_KEY, (s) => {
@@ -1040,7 +1075,7 @@ async function waitForWalmartDetail(orderNumber, timeoutMs) {
       }
     });
 
-    if (current && current.payload && current.url && String(current.url).includes(String(orderNumber))) {
+    if (walmartDetailMatchesOrder(current, orderNumber)) {
       return current;
     }
     await sleep(500);
@@ -1049,9 +1084,19 @@ async function waitForWalmartDetail(orderNumber, timeoutMs) {
 }
 
 /** Best-effort wait for the captured invoice HTML of the given order. Returns null on timeout. */
-async function waitForWalmartInvoiceHtml(orderNumber, timeoutMs) {
+async function waitForWalmartInvoiceHtml(orderNumber, timeoutMs, port) {
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 15000;
+  while (Date.now() - start < t) {
+    touchServiceWorker();
+    if (port) {
+      try {
+        port.postMessage({ type: "heartbeat" });
+      } catch {
+        // ignore
+      }
+    }
+
     const current = await new Promise((resolve) => {
       try {
         chrome.storage.local.get(WALMART_INVOICE_HTML_STORAGE_KEY, (s) => {
@@ -1062,14 +1107,16 @@ async function waitForWalmartInvoiceHtml(orderNumber, timeoutMs) {
       }
     });
 
-    if (
-      current &&
-      typeof current.html === "string" &&
-      current.html &&
-      current.url &&
-      String(current.url).includes(String(orderNumber))
-    ) {
-      return current.html;
+    if (current && typeof current.html === "string" && current.html) {
+      const url = current.url ? String(current.url) : "";
+      const wanted = String(orderNumber);
+      const wantedDigits = walmartOrderIdDigits(wanted);
+      if (
+        (url && url.indexOf(wanted) >= 0) ||
+        (wantedDigits && url && walmartOrderIdDigits(url).indexOf(wantedDigits) >= 0)
+      ) {
+        return current.html;
+      }
     }
     await sleep(500);
   }
@@ -2134,14 +2181,23 @@ function attachBulkPortHandlers(port) {
 
         try {
           await clearWalmartDetailStorage();
-          await navigateTab(scrapeTabId, "https://www.walmart.com/orders/" + encodeURIComponent(orderNumber));
+          const detailUrl = "https://www.walmart.com/orders/" + encodeURIComponent(orderNumber);
+          await navigateTab(scrapeTabId, detailUrl);
+          try {
+            await waitForTabComplete(scrapeTabId, 35000, port, {
+              urlHint: detailUrl,
+              requireNavigation: true,
+            });
+          } catch {
+            // Tab-complete is best-effort; detail capture below is the source of truth.
+          }
 
           if (cancelled) {
             port.postMessage({ type: "jobCancelled" });
             return;
           }
 
-          const payloadObj = await waitForWalmartDetail(orderNumber, 20000);
+          const payloadObj = await waitForWalmartDetail(orderNumber, 35000, port);
           const body = normalizeWalmartOrderDetailPayloadSafe(payloadObj.payload, payloadObj.url);
 
           // The invoice HTML is captured a few seconds after the order detail
@@ -2149,7 +2205,7 @@ function attachBulkPortHandlers(port) {
           // polls up to ~15s for the order to appear). Missing invoice is
           // non-fatal; the order imports without one.
           try {
-            const invoiceHtml = await waitForWalmartInvoiceHtml(orderNumber, 20000);
+            const invoiceHtml = await waitForWalmartInvoiceHtml(orderNumber, 12000, port);
             if (invoiceHtml) {
               body.invoiceHtml = invoiceHtml;
             }

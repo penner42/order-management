@@ -27,6 +27,10 @@ htmlcov/
 # Backups (DB dumps from migrations)
 backups/
 
+# Persistent Chromium profiles for browser automation (cookies / sessions)
+data/browser_profiles/
+backend/data/browser_profiles/
+
 # OS & misc
 .DS_Store
 Thumbs.db

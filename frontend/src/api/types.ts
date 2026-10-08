@@ -213,3 +213,38 @@ export interface BrowserExtensionStatus {
   available: boolean
   meta?: BrowserExtensionMeta | null
 }
+
+export type BrowserProfileStatus =
+  | 'logged_out'
+  | 'ready'
+  | 'login_required'
+  | 'login_in_progress'
+  | 'importing'
+  | 'error'
+
+export interface BrowserProfile {
+  id: number
+  store_account_id: number
+  retailer: string
+  status: BrowserProfileStatus | string
+  last_error: string | null
+  last_import_at: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  store_id?: number | null
+  store_name?: string | null
+  store_account_name?: string | null
+}
+
+export interface BrowserJob {
+  id: string
+  profile_id: number
+  kind: string
+  status: string
+  message?: string | null
+  progress?: Record<string, unknown> | null
+  review_url?: string | null
+  token?: string | null
+  order_count?: number | null
+  error?: string | null
+}

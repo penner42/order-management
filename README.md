@@ -116,6 +116,23 @@ OpenAPI docs: http://localhost:8000/docs (only if the backend port is exposed; s
 
 The **browser-extension** folder contains a Chrome/Firefox extension that can read order numbers from store order pages (e.g. Walmart). Use it to paste order numbers into the app for import/preview. See `browser-extension/README.md` for installation and usage.
 
+## Browser automation (Amazon)
+
+The app can run **Playwright Chromium on the API host** with one persistent profile per store account. Use **Browser automation** in the nav:
+
+1. Create a Store Account (name it with the Amazon login email for import matching).
+2. Add a browser profile for that account.
+3. Click **Log in** and complete Amazon sign-in (including MFA) in the embedded live view, then **Done**.
+4. Click **Import now** to walk order history; when finished, open **Import Review** to apply orders.
+
+Notes:
+
+- Cookies live under `BROWSER_PROFILES_DIR` (default `data/browser_profiles`). Treat that directory as secret; it is gitignored.
+- Concurrent browsers are capped by `BROWSER_MAX_CONCURRENT` (default 2).
+- Set `APP_PUBLIC_BASE_URL` to the frontend origin used in review links (default `http://localhost:5173`).
+- Store sites may challenge datacenter IPs; this works best when the backend runs on a trusted/home network.
+- v1 supports **Amazon** only; the browser extension remains available for other stores and ad-hoc capture.
+
 ## Project layout
 
 ```

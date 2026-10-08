@@ -38,6 +38,7 @@ export default defineConfig({
       '/api': {
         target: apiProxyTarget,
         changeOrigin: true,
+        ws: true,
         configure(proxy) {
           proxy.on('proxyReq', (_proxyReq, req, res) => {
             if (handleExtensionCors(req, res as ServerResponse)) {

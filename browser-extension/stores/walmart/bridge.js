@@ -9,6 +9,30 @@
     return
   }
 
+  // Firefox may ignore/error on content_scripts world:"MAIN". Inject the page
+  // hook explicitly so fetch/XHR interception still runs in page context.
+  // Idempotent with the Chrome MAIN-world content script via __wmOrdersHookInstalled.
+  function injectPageOrdersHook() {
+    try {
+      if (document.documentElement && document.documentElement.dataset.omWmOrdersInjected === '1') {
+        return
+      }
+      if (document.documentElement) {
+        document.documentElement.dataset.omWmOrdersInjected = '1'
+      }
+      const src = chrome.runtime.getURL('stores/walmart/orders.js')
+      const s = document.createElement('script')
+      s.src = src
+      s.async = false
+      ;(document.documentElement || document.head || document.body).appendChild(s)
+      s.parentNode && s.parentNode.removeChild(s)
+    } catch {
+      // ignore
+    }
+  }
+
+  injectPageOrdersHook()
+
   // Listen for page-context Walmart messages and persist order detail payloads
   // and captured invoice HTML.
   window.addEventListener('message', (event) => {
@@ -21,6 +45,9 @@
       if (data.type === 'orderDetail') {
         const payload = data.payload
         if (!payload) return
+        // Ignore empty shells so bulk waiters are not unblocked early.
+        const order = payload.order
+        if (!order || order.id == null) return
         chrome.storage.local.set({
           [STORAGE_KEY]: { url, payload },
         })
