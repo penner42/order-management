@@ -198,7 +198,7 @@ function LiveBrowserView({
             <p className="text-sm text-red-600 dark:text-red-400 mb-2">{error}</p>
           )}
           <p className="text-xs text-ink-muted dark:text-gray-400 mb-2">
-            Click the view to focus, then sign in (including MFA). When Amazon orders load, click Done.
+            Click the view to focus, then sign in (including MFA). When your orders page loads, click Done.
           </p>
           <canvas
             ref={canvasRef}
@@ -239,6 +239,7 @@ export default function BrowserAutomation() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedAccountId, setSelectedAccountId] = useState<number | ''>('')
+  const [selectedRetailer, setSelectedRetailer] = useState<'amazon' | 'walmart'>('walmart')
   const [loginProfileId, setLoginProfileId] = useState<number | null>(null)
   const [maxPagesByProfile, setMaxPagesByProfile] = useState<Record<number, number>>({})
   const [jobsByProfile, setJobsByProfile] = useState<Record<number, BrowserJob>>({})
@@ -280,7 +281,7 @@ export default function BrowserAutomation() {
     try {
       await api.post<BrowserProfile>('/browser-profiles', {
         store_account_id: selectedAccountId,
-        retailer: 'amazon',
+        retailer: selectedRetailer,
       })
       setSelectedAccountId('')
       load()
@@ -392,7 +393,7 @@ export default function BrowserAutomation() {
       <h1 className="text-2xl font-semibold text-ink dark:text-gray-100 mb-2">Browser automation</h1>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
         Run a real Chromium session on the server for each store account. Log in once in the embedded
-        view (MFA supported); then use <strong>Import now</strong> to capture Amazon orders into Import
+        view (MFA supported); then use Import now to capture Walmart or Amazon orders into Import
         Review. Sessions live on the machine hosting the API — use a trusted network/IP when possible.
       </p>
 
@@ -401,15 +402,27 @@ export default function BrowserAutomation() {
       )}
 
       <section className="mb-8 max-w-xl">
-        <h2 className="text-lg font-medium text-ink dark:text-gray-100 mb-2">Add Amazon profile</h2>
+        <h2 className="text-lg font-medium text-ink dark:text-gray-100 mb-2">Add browser profile</h2>
         <p className="text-xs text-ink-muted dark:text-gray-400 mb-3">
           Create a{' '}
           <Link to="/stores" className="text-brand-600 hover:underline dark:text-brand-400">
             Store Account
           </Link>{' '}
-          named with the Amazon login email for auto-matching, then attach a browser profile here.
+          first (for Amazon, name it with the login email for auto-matching), then attach a browser
+          profile here.
         </p>
         <form onSubmit={createProfile} className="flex flex-wrap gap-2 items-end">
+          <label className="min-w-[8rem]">
+            <span className="block text-xs text-ink-muted dark:text-gray-400 mb-1">Retailer</span>
+            <select
+              className="w-full rounded-lg border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-3 py-2 text-sm text-ink dark:text-gray-100"
+              value={selectedRetailer}
+              onChange={(e) => setSelectedRetailer(e.target.value as 'amazon' | 'walmart')}
+            >
+              <option value="walmart">Walmart</option>
+              <option value="amazon">Amazon</option>
+            </select>
+          </label>
           <label className="flex-1 min-w-[12rem]">
             <span className="block text-xs text-ink-muted dark:text-gray-400 mb-1">Store account</span>
             <select
@@ -462,7 +475,9 @@ export default function BrowserAutomation() {
                         {p.store_name ?? 'Store'} — {p.store_account_name ?? 'Account'}
                       </div>
                       <div className="text-xs text-ink-muted dark:text-gray-400 mt-0.5">
-                        Amazon · {p.last_import_at
+                        {p.retailer === 'walmart' ? 'Walmart' : p.retailer === 'amazon' ? 'Amazon' : p.retailer}
+                        {' · '}
+                        {p.last_import_at
                           ? `Last import ${new Date(p.last_import_at).toLocaleString()}`
                           : 'Never imported'}
                       </div>

@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-Retailer = Literal["amazon"]
+Retailer = Literal["amazon", "walmart"]
 ProfileStatus = Literal[
     "logged_out",
     "ready",
@@ -18,7 +18,7 @@ ProfileStatus = Literal[
 
 class BrowserProfileCreate(BaseModel):
     store_account_id: int
-    retailer: Retailer = "amazon"
+    retailer: Retailer = "walmart"
 
 
 class BrowserProfileRead(BaseModel):

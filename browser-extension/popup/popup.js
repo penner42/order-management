@@ -1190,23 +1190,53 @@ function renderOrderDetails(payload, resultsEl) {
       resultsEl.style.display = "block";
       resultsEl.innerHTML = '<div class="loading">Starting…</div>';
 
-      // Open the extension progress tab first, and let background collect order numbers
-      // (popup closes when the tab opens, so we can't own async callbacks here).
-      chrome.storage.local.set(
-        {
-          [WALMART_BULK_JOB_STORAGE_KEY]: {
-            store: "walmart",
-            createdAt: Date.now(),
-            sourceTabId: tab.id,
-            maxPages: pages,
-            orderNumbers: [],
+      const continueStart = () => {
+        // Open the extension progress tab first, and let background collect order numbers
+        // (popup closes when the tab opens, so we can't own async callbacks here).
+        chrome.storage.local.set(
+          {
+            [WALMART_BULK_JOB_STORAGE_KEY]: {
+              store: "walmart",
+              createdAt: Date.now(),
+              sourceTabId: tab.id,
+              maxPages: pages,
+              orderNumbers: [],
+            },
           },
-        },
-        () => {
-          startBulkInExtensionTab([], pages);
-          appendStatusRow("Started. Continue in the bulk import tab.", "ok");
+          () => {
+            startBulkInExtensionTab([], pages);
+            appendStatusRow("Started. Continue in the bulk import tab.", "ok");
+          }
+        );
+      };
+
+      // Firefox treats host permissions as optional; request the configured API
+      // origin here (user gesture) so bulk-session POSTs are allowed.
+      getOrderManagerApiBaseUrl((baseUrl) => {
+        if (!baseUrl || !chrome.permissions || typeof chrome.permissions.request !== "function") {
+          continueStart();
+          return;
         }
-      );
+        let originPattern = null;
+        try {
+          originPattern = new URL(String(baseUrl)).origin + "/*";
+        } catch (e) {
+          originPattern = null;
+        }
+        if (!originPattern) {
+          continueStart();
+          return;
+        }
+        chrome.permissions.contains({ origins: [originPattern] }, (has) => {
+          if (has) {
+            continueStart();
+            return;
+          }
+          chrome.permissions.request({ origins: [originPattern] }, () => {
+            continueStart();
+          });
+        });
+      });
     });
   });
 })();

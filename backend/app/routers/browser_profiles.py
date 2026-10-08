@@ -1,4 +1,4 @@
-"""Browser automation profiles: CRUD, live login WebSocket, Amazon import jobs."""
+"""Browser automation profiles: CRUD, live login WebSocket, import jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -11,18 +11,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSock
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth import decode_token, get_current_user
-from app.browser_automation.amazon_import import (
-    LoginRequiredError,
-    post_bulk_session,
-    run_amazon_import,
-)
+from app.browser_automation.amazon_import import run_amazon_import
+from app.browser_automation.common import LoginRequiredError, post_bulk_session
 from app.browser_automation.jobs import create_job, get_job, update_job
 from app.browser_automation.paths import profile_user_data_dir
 from app.browser_automation.session_manager import (
-    AMAZON_ORDERS_URL,
-    amazon_session_logged_in,
+    login_start_url_for_retailer,
+    retailer_session_logged_in,
     session_manager,
 )
+from app.browser_automation.walmart_import import run_walmart_import
 from app.database import SessionLocal, get_db
 from app.models import BrowserProfile, StoreAccount, User
 from app.schemas.browser_profile import (
@@ -38,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/browser-profiles", tags=["browser-profiles"])
 
-SUPPORTED_RETAILERS = {"amazon"}
+SUPPORTED_RETAILERS = {"amazon", "walmart"}
 
 
 def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
@@ -144,9 +142,10 @@ async def start_login(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
-    if profile.retailer != "amazon":
-        raise HTTPException(status_code=400, detail="Only Amazon login is supported in v1.")
+    if profile.retailer not in SUPPORTED_RETAILERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
 
+    login_url = login_start_url_for_retailer(profile.retailer)
     profile.status = "login_in_progress"
     profile.last_error = None
     db.commit()
@@ -155,7 +154,7 @@ async def start_login(
         await session_manager.ensure_session(
             profile_id,
             mode="login",
-            start_url=AMAZON_ORDERS_URL,
+            start_url=login_url,
         )
     except Exception as exc:
         profile.status = "error"
@@ -167,7 +166,7 @@ async def start_login(
         profile_id=profile_id,
         status=profile.status,
         ws_path=f"/api/browser-profiles/{profile_id}/live",
-        login_url=AMAZON_ORDERS_URL,
+        login_url=login_url,
     )
 
 
@@ -185,8 +184,9 @@ async def finish_login(
         db.commit()
         return _profile_read(profile)
 
+    retailer_label = profile.retailer.capitalize()
     try:
-        logged_in = await amazon_session_logged_in(session.page)
+        logged_in = await retailer_session_logged_in(session.page, profile.retailer)
     except Exception as exc:
         logged_in = False
         profile.last_error = str(exc)
@@ -197,11 +197,13 @@ async def finish_login(
     else:
         profile.status = "login_required"
         if not profile.last_error:
-            profile.last_error = "Still on Amazon sign-in. Complete login in the live view, then click Done."
+            profile.last_error = (
+                f"Still on {retailer_label} sign-in. Complete login in the live view, then click Done."
+            )
 
     db.commit()
-    # Keep the persistent context open so cookies stay warm; close interactive mode.
-    session.mode = "idle"
+    # Persist cookies on disk; free the browser slot until the next import/login.
+    await session_manager.close_session(profile_id)
     return _profile_read(_get_profile_or_404(db, profile_id))
 
 
@@ -310,8 +312,8 @@ async def start_import(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
-    if profile.retailer != "amazon":
-        raise HTTPException(status_code=400, detail="Only Amazon import is supported in v1.")
+    if profile.retailer not in SUPPORTED_RETAILERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
     if profile.status == "login_in_progress":
         raise HTTPException(status_code=400, detail="Finish or cancel login before importing.")
     if profile.status not in ("ready", "login_required", "error", "logged_out"):
@@ -323,7 +325,7 @@ async def start_import(
     profile.last_error = None
     db.commit()
 
-    asyncio.create_task(_run_import_job(job.id, profile_id, body.max_pages))
+    asyncio.create_task(_run_import_job(job.id, profile_id, profile.retailer, body.max_pages))
 
     return ImportStartResponse(job_id=job.id, profile_id=profile_id, status="queued")
 
@@ -339,8 +341,9 @@ def get_browser_job(
     return BrowserJobRead(**job.to_dict())
 
 
-async def _run_import_job(job_id: str, profile_id: int, max_pages: int) -> None:
-    update_job(job_id, status="running", message="Starting Amazon import…")
+async def _run_import_job(job_id: str, profile_id: int, retailer: str, max_pages: int) -> None:
+    label = retailer.capitalize()
+    update_job(job_id, status="running", message=f"Starting {label} import…")
 
     def on_progress(data: dict) -> None:
         update_job(job_id, progress=data, message=data.get("message"))
@@ -353,7 +356,14 @@ async def _run_import_job(job_id: str, profile_id: int, max_pages: int) -> None:
             return
 
         try:
-            orders = await run_amazon_import(profile_id, max_pages=max_pages, on_progress=on_progress)
+            if retailer == "walmart":
+                orders = await run_walmart_import(
+                    profile_id, max_pages=max_pages, on_progress=on_progress
+                )
+            else:
+                orders = await run_amazon_import(
+                    profile_id, max_pages=max_pages, on_progress=on_progress
+                )
             if not orders:
                 update_job(
                     job_id,
@@ -383,12 +393,13 @@ async def _run_import_job(job_id: str, profile_id: int, max_pages: int) -> None:
             profile.last_error = str(exc)
             db.commit()
             update_job(job_id, status="failed", error=str(exc))
-            await session_manager.close_session(profile_id)
         except Exception as exc:
-            logger.exception("Amazon import failed for profile %s", profile_id)
+            logger.exception("%s import failed for profile %s", label, profile_id)
             profile.status = "error"
             profile.last_error = str(exc)
             db.commit()
             update_job(job_id, status="failed", error=str(exc))
+        finally:
+            await session_manager.close_session(profile_id)
     finally:
         db.close()

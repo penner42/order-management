@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Order Manager Browser Integration",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "Integrate order data from store order pages into Order Manager.",
   "permissions": [
     "activeTab",
@@ -19,9 +19,15 @@
     "https://amazon.com/*",
     "https://*.amazon.com/*",
     "https://business.amazon.com/*",
+    "https://orders-dev.penner.win/*",
+    "https://*.penner.win/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "scripts": [

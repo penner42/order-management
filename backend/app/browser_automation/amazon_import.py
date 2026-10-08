@@ -6,21 +6,17 @@ from typing import Any, Callable
 
 from playwright.async_api import Page
 
+from app.browser_automation.common import LoginRequiredError
 from app.browser_automation.paths import amazon_script_paths
 from app.browser_automation.session_manager import (
     AMAZON_ORDERS_URL,
     looks_like_amazon_signin,
     session_manager,
 )
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, Any]], None]
-
-
-class LoginRequiredError(Exception):
-    """Raised when Amazon session is not authenticated."""
 
 
 async def _inject_amazon_scripts(page: Page) -> None:
@@ -361,16 +357,3 @@ async def run_amazon_import(
 
     progress(phase="done", message=f"Captured {len(orders)} order(s)", captured=len(orders))
     return orders
-
-
-def post_bulk_session(orders: list[dict[str, Any]]) -> tuple[str, str]:
-    """Create an in-memory bulk import session. Returns (token, review_url)."""
-    from app.routers.store_imports import create_bulk_import_session
-    from app.schemas.store_import import BulkImportSessionCreate, StoreOrderImportPayload
-
-    payloads = [StoreOrderImportPayload.model_validate(o) for o in orders]
-    result = create_bulk_import_session(BulkImportSessionCreate(orders=payloads))
-    token = result.token
-    base = settings.app_public_base_url.rstrip("/")
-    review_url = f"{base}/import-review/bulk?token={token}"
-    return token, review_url

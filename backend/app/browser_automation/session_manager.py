@@ -16,6 +16,15 @@ logger = logging.getLogger(__name__)
 AMAZON_ORDERS_URL = "https://www.amazon.com/your-orders/orders?disableCsd=missing-library"
 AMAZON_SIGNIN_HINTS = ("/ap/signin", "/ap/mfa", "/ap/cvf")
 
+WALMART_ORDERS_URL = "https://www.walmart.com/orders"
+WALMART_SIGNIN_HINTS = (
+    "/account/login",
+    "/login",
+    "identity.walmart.com",
+    "/signin",
+    "/authorize",
+)
+
 
 @dataclass
 class LiveSession:
@@ -291,3 +300,45 @@ async def amazon_session_logged_in(page: Page) -> bool:
         return not looks_like_amazon_signin(page.url)
     except Exception:
         return False
+
+
+def looks_like_walmart_signin(url: str) -> bool:
+    u = (url or "").lower()
+    return any(hint in u for hint in WALMART_SIGNIN_HINTS)
+
+
+async def walmart_session_logged_in(page: Page) -> bool:
+    url = page.url or ""
+    if looks_like_walmart_signin(url):
+        return False
+    try:
+        await page.goto(WALMART_ORDERS_URL, wait_until="domcontentloaded", timeout=45_000)
+        if looks_like_walmart_signin(page.url):
+            return False
+        # Sign-in CTA on orders page means logged out.
+        sign_in = await page.query_selector(
+            'a[href*="login"], button:has-text("Sign in"), a:has-text("Sign in")'
+        )
+        if sign_in:
+            href = (await sign_in.get_attribute("href")) or ""
+            text = ((await sign_in.inner_text()) or "").lower()
+            if "login" in href.lower() or "sign in" in text:
+                # If we also see order detail links, still treat as logged in.
+                order_link = await page.query_selector('a[href*="/orders/"]')
+                if not order_link:
+                    return False
+        return "/orders" in (page.url or "").lower()
+    except Exception:
+        return False
+
+
+def login_start_url_for_retailer(retailer: str) -> str:
+    if retailer == "walmart":
+        return WALMART_ORDERS_URL
+    return AMAZON_ORDERS_URL
+
+
+async def retailer_session_logged_in(page: Page, retailer: str) -> bool:
+    if retailer == "walmart":
+        return await walmart_session_logged_in(page)
+    return await amazon_session_logged_in(page)
