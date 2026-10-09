@@ -6,13 +6,23 @@ URL hash.  The frontend calls these endpoints:
   POST /orders/diff   – read-only diff against an existing order
   POST /orders/apply  – create/update order, items, shipments in one shot
 """
+import json
+import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict
 import secrets
 import math
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
+
+logger = logging.getLogger(__name__)
+
+# #region agent log
+# Recent shipment-link decisions for production debugging (Import log / docker logs).
+_DBG_SHIP_TRACE: list[dict[str, Any]] = []
+# #endregion
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -1240,27 +1250,25 @@ def _apply_items_and_shipments(
 
     # #region agent log
     def _dbg_ship_link(hypothesis_id: str, message: str, **data: Any) -> None:
+        entry = {
+            "sessionId": "659358",
+            "hypothesisId": hypothesis_id,
+            "location": "store_imports.py:link",
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        _DBG_SHIP_TRACE.append(entry)
+        if len(_DBG_SHIP_TRACE) > 50:
+            del _DBG_SHIP_TRACE[:-40]
+        logger.warning("[dbg-659358] %s %s", message, data)
         try:
-            import json as _json
-            import time as _time
             with open(
                 "/home/apenner/order-management/.cursor/debug-659358.log",
                 "a",
                 encoding="utf-8",
             ) as _f:
-                _f.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "659358",
-                            "hypothesisId": hypothesis_id,
-                            "location": "store_imports.py:link",
-                            "message": message,
-                            "data": data,
-                            "timestamp": int(_time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
+                _f.write(json.dumps(entry) + "\n")
         except Exception:
             pass
     # #endregion

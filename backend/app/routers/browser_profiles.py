@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import shutil
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -981,16 +982,39 @@ async def _run_import_job(
                         except Exception:
                             pass
                         # #region agent log
+                        dbg_trace: list = []
                         try:
-                            import json as _json
-                            import time as _time
+                            from app.routers.store_imports import _DBG_SHIP_TRACE
+
+                            dbg_trace = list(_DBG_SHIP_TRACE[-12:])
+                        except Exception:
+                            dbg_trace = []
+                        err_msg = str(exc)
+                        if dbg_trace:
+                            # Compact trail visible in production Import log UI.
+                            trail = [
+                                {
+                                    "h": t.get("hypothesisId"),
+                                    "m": t.get("message"),
+                                    **(t.get("data") or {}),
+                                }
+                                for t in dbg_trace
+                            ]
+                            err_msg = f"{err_msg}\n[dbg-659358] {json.dumps(trail, default=str)[:1500]}"
+                        logger.warning(
+                            "[dbg-659358] auto_apply_failed order=%s type=%s trace=%s",
+                            failed_order_number,
+                            type(exc).__name__,
+                            dbg_trace[-5:] if dbg_trace else None,
+                        )
+                        try:
                             with open(
                                 "/home/apenner/order-management/.cursor/debug-659358.log",
                                 "a",
                                 encoding="utf-8",
                             ) as _f:
                                 _f.write(
-                                    _json.dumps(
+                                    json.dumps(
                                         {
                                             "sessionId": "659358",
                                             "hypothesisId": "E",
@@ -1000,12 +1024,9 @@ async def _run_import_job(
                                                 "store_order_number": failed_order_number,
                                                 "error_type": type(exc).__name__,
                                                 "error": str(exc)[:800],
-                                                "link_guard_present": hasattr(
-                                                    apply_store_order_payload,
-                                                    "__code__",
-                                                ),
+                                                "trace": dbg_trace,
                                             },
-                                            "timestamp": int(_time.time() * 1000),
+                                            "timestamp": int(time.time() * 1000),
                                         }
                                     )
                                     + "\n"
@@ -1028,7 +1049,7 @@ async def _run_import_job(
                                 level="error",
                                 event_type="order_error",
                                 store_order_number=failed_order_number,
-                                message=str(exc),
+                                message=err_msg,
                             )
                             db.commit()
                         except Exception:
