@@ -81,18 +81,32 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
 
 
 def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[str]:
-    """Store order numbers for this account that still have at least one unshipped, non-canceled item."""
+    """Store order numbers for this account that still need tracking.
+
+    An item counts as unshipped when it is not canceled and has no linked
+    shipment with a non-empty tracking number. Amazon (and similar) imports
+    often create placeholder shipments before tracking exists; those orders
+    must still be included in the unshipped refresh.
+    """
     # Postgres requires ORDER BY cols to appear in the SELECT list when using DISTINCT.
     # Select (id, store_order_number), order by id, then dedupe numbers in Python.
+    has_real_tracking = (
+        db.query(ShipmentItem.id)
+        .join(Shipment, Shipment.id == ShipmentItem.shipment_id)
+        .filter(ShipmentItem.item_id == Item.id)
+        .filter(Shipment.tracking_number.isnot(None))
+        .filter(Shipment.tracking_number != "")
+        .correlate(Item)
+        .exists()
+    )
     rows = (
         db.query(Order.id, Order.store_order_number)
         .join(Item, Item.order_id == Order.id)
-        .outerjoin(ShipmentItem, ShipmentItem.item_id == Item.id)
         .filter(Order.store_account_id == store_account_id)
         .filter(Order.store_order_number.isnot(None))
         .filter(Order.store_order_number != "")
         .filter(Item.status != ItemStatus.CANCELED)
-        .filter(ShipmentItem.id.is_(None))
+        .filter(~has_real_tracking)
         .order_by(Order.id.desc())
         .distinct()
         .all()
@@ -787,17 +801,6 @@ async def _run_import_job(
             return
 
         source = "scheduled" if scheduled else "manual"
-        _add_import_log(
-            db,
-            profile=profile,
-            job_id=job_id,
-            mode=mode,
-            scheduled=scheduled,
-            level="info",
-            event_type="check_started",
-            message=f"Started {mode_label} ({source}).",
-        )
-        db.commit()
 
         def log_finished(message: str) -> None:
             nonlocal finish_message
@@ -819,6 +822,17 @@ async def _run_import_job(
             if mode == "unshipped":
                 order_ids = _unshipped_store_order_numbers(db, store_account_id)
                 if not order_ids:
+                    _add_import_log(
+                        db,
+                        profile=profile,
+                        job_id=job_id,
+                        mode=mode,
+                        scheduled=scheduled,
+                        level="info",
+                        event_type="check_started",
+                        message=f"Started {mode_label} ({source}): 0 order(s) queued.",
+                    )
+                    db.commit()
                     now = datetime.now(timezone.utc)
                     _set_profile_status(
                         db,
@@ -836,6 +850,24 @@ async def _run_import_job(
                     log_finished("Finished: no unshipped orders to refresh.")
                     finished_ok = True
                     return
+
+            started_msg = f"Started {mode_label} ({source})."
+            if mode == "unshipped" and order_ids is not None:
+                started_msg = (
+                    f"Started {mode_label} ({source}): "
+                    f"{len(order_ids)} order(s) queued."
+                )
+            _add_import_log(
+                db,
+                profile=profile,
+                job_id=job_id,
+                mode=mode,
+                scheduled=scheduled,
+                level="info",
+                event_type="check_started",
+                message=started_msg,
+            )
+            db.commit()
 
             if retailer == "walmart":
                 orders = await run_walmart_import(

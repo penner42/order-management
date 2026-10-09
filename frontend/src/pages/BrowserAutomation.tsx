@@ -835,7 +835,7 @@ export default function BrowserAutomation() {
         Run a Camoufox (anti-detect Firefox) session on the server for each store account. Log in once
         in the embedded view (MFA supported); then import orders or schedule automatic checks. Full
         check scans the first N order-history pages; unshipped check refreshes every order on that
-        account that still has unshipped items. Login opens a blank page — use the address bar / Home
+        account that still lacks tracking (including placeholder shipments). Login opens a blank page — use the address bar / Home
         to open the store yourself.
       </p>
 
