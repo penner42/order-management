@@ -266,18 +266,27 @@ export interface BrowserJob {
   error?: string | null
 }
 
-export type BrowserImportLogEvent = 'order_imported' | 'tracking_updated'
+export type BrowserImportLogLevel = 'updates' | 'info'
+
+export type BrowserImportLogEvent =
+  | 'order_imported'
+  | 'tracking_updated'
+  | 'order_checked'
+  | 'check_started'
+  | 'check_finished'
 
 export interface BrowserImportLog {
   id: number
   browser_profile_id: number | null
   job_id: string | null
+  level: BrowserImportLogLevel | string
   event_type: BrowserImportLogEvent | string
   mode: 'full' | 'unshipped' | string
   scheduled: boolean
   retailer: string
-  store_order_number: string
+  store_order_number: string | null
   tracking_numbers: string[]
+  message: string | null
   store_name: string | null
   store_account_name: string | null
   created_at: string | null

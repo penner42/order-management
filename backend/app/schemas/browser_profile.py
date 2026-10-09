@@ -90,19 +90,28 @@ class BrowserJobRead(BaseModel):
     error: str | None = None
 
 
-BrowserImportLogEvent = Literal["order_imported", "tracking_updated"]
+BrowserImportLogLevel = Literal["updates", "info"]
+BrowserImportLogEvent = Literal[
+    "order_imported",
+    "tracking_updated",
+    "order_checked",
+    "check_started",
+    "check_finished",
+]
 
 
 class BrowserImportLogRead(BaseModel):
     id: int
     browser_profile_id: int | None = None
     job_id: str | None = None
+    level: BrowserImportLogLevel | str
     event_type: BrowserImportLogEvent | str
     mode: ImportMode | str
     scheduled: bool
     retailer: str
-    store_order_number: str
+    store_order_number: str | None = None
     tracking_numbers: list[str] = []
+    message: str | None = None
     store_name: str | None = None
     store_account_name: str | None = None
     created_at: datetime | None = None

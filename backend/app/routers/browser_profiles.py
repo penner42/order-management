@@ -151,6 +151,46 @@ def _external_order_id_from_payload(payload: StoreOrderImportPayload) -> str | N
     return raw or None
 
 
+def _profile_account_labels(profile: BrowserProfile) -> tuple[str | None, str | None]:
+    account = profile.store_account
+    store = account.store if account else None
+    return (store.name if store else None, account.name if account else None)
+
+
+def _add_import_log(
+    db: Session,
+    *,
+    profile: BrowserProfile,
+    job_id: str,
+    mode: str,
+    scheduled: bool,
+    level: str,
+    event_type: str,
+    store_order_number: str | None = None,
+    order_id: int | None = None,
+    tracking_numbers: list[str] | None = None,
+    message: str | None = None,
+) -> None:
+    store_name, store_account_name = _profile_account_labels(profile)
+    db.add(
+        BrowserImportLog(
+            browser_profile_id=profile.id,
+            job_id=job_id,
+            level=level,
+            event_type=event_type,
+            mode=mode,
+            scheduled=scheduled,
+            retailer=profile.retailer,
+            store_order_number=store_order_number,
+            order_id=order_id,
+            tracking_numbers=json.dumps(tracking_numbers) if tracking_numbers else None,
+            message=message,
+            store_name=store_name,
+            store_account_name=store_account_name,
+        )
+    )
+
+
 def _log_auto_apply_result(
     db: Session,
     *,
@@ -163,31 +203,34 @@ def _log_auto_apply_result(
     tracking_before: set[str],
     order_id: int,
     tracking_after: set[str],
-) -> None:
-    """Persist a log row when an order is created or gains tracking numbers."""
+) -> str:
+    """Log update or order_checked. Returns the event_type written."""
     added_tracking = sorted(tracking_after - tracking_before)
-    if existed_before and not added_tracking:
-        return
-    event_type = "tracking_updated" if existed_before else "order_imported"
-    # For new orders, include all tracking present at import time.
-    tracking_for_log = added_tracking if existed_before else sorted(tracking_after)
-    account = profile.store_account
-    store = account.store if account else None
-    db.add(
-        BrowserImportLog(
-            browser_profile_id=profile.id,
-            job_id=job_id,
-            event_type=event_type,
-            mode=mode,
-            scheduled=scheduled,
-            retailer=profile.retailer,
-            store_order_number=store_order_number,
-            order_id=order_id,
-            tracking_numbers=json.dumps(tracking_for_log) if tracking_for_log else None,
-            store_name=store.name if store else None,
-            store_account_name=account.name if account else None,
-        )
+    if not existed_before:
+        event_type = "order_imported"
+        level = "updates"
+        tracking_for_log = sorted(tracking_after)
+    elif added_tracking:
+        event_type = "tracking_updated"
+        level = "updates"
+        tracking_for_log = added_tracking
+    else:
+        event_type = "order_checked"
+        level = "info"
+        tracking_for_log = []
+    _add_import_log(
+        db,
+        profile=profile,
+        job_id=job_id,
+        mode=mode,
+        scheduled=scheduled,
+        level=level,
+        event_type=event_type,
+        store_order_number=store_order_number,
+        order_id=order_id,
+        tracking_numbers=tracking_for_log or None,
     )
+    return event_type
 
 
 def _parse_tracking_numbers(raw: str | None) -> list[str]:
@@ -209,12 +252,14 @@ def _import_log_read(row: BrowserImportLog) -> BrowserImportLogRead:
         id=row.id,
         browser_profile_id=row.browser_profile_id,
         job_id=row.job_id,
+        level=row.level or "info",
         event_type=row.event_type,
         mode=row.mode,
         scheduled=bool(row.scheduled),
         retailer=row.retailer,
         store_order_number=row.store_order_number,
         tracking_numbers=tracking,
+        message=row.message,
         store_name=row.store_name,
         store_account_name=row.store_account_name,
         created_at=row.created_at,
@@ -252,13 +297,22 @@ def list_browser_import_logs(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
     limit: int = Query(default=200, ge=1, le=1000),
+    level: str | None = Query(default=None),
     event_type: str | None = Query(default=None),
     scheduled_only: bool = Query(default=False),
     profile_id: int | None = Query(default=None),
 ):
-    """Recent auto-apply outcomes from browser automation (imports + tracking updates)."""
+    """Recent browser-automation log events (updates + info)."""
     q = db.query(BrowserImportLog)
-    if event_type in ("order_imported", "tracking_updated"):
+    if level in ("updates", "info"):
+        q = q.filter(BrowserImportLog.level == level)
+    if event_type in (
+        "order_imported",
+        "tracking_updated",
+        "order_checked",
+        "check_started",
+        "check_finished",
+    ):
         q = q.filter(BrowserImportLog.event_type == event_type)
     if scheduled_only:
         q = q.filter(BrowserImportLog.scheduled.is_(True))
@@ -719,6 +773,7 @@ async def _run_import_job(
         update_job(job_id, progress=data, message=data.get("message"))
 
     finished_ok = False
+    finish_message: str | None = None
     db = SessionLocal()
     try:
         profile = (
@@ -730,6 +785,34 @@ async def _run_import_job(
         if not profile:
             update_job(job_id, status="failed", error="Profile not found.")
             return
+
+        source = "scheduled" if scheduled else "manual"
+        _add_import_log(
+            db,
+            profile=profile,
+            job_id=job_id,
+            mode=mode,
+            scheduled=scheduled,
+            level="info",
+            event_type="check_started",
+            message=f"Started {mode_label} ({source}).",
+        )
+        db.commit()
+
+        def log_finished(message: str) -> None:
+            nonlocal finish_message
+            finish_message = message
+            _add_import_log(
+                db,
+                profile=profile,
+                job_id=job_id,
+                mode=mode,
+                scheduled=scheduled,
+                level="info",
+                event_type="check_finished",
+                message=message,
+            )
+            db.commit()
 
         try:
             order_ids: list[str] | None = None
@@ -750,6 +833,7 @@ async def _run_import_job(
                         message="No unshipped orders to refresh.",
                         order_count=0,
                     )
+                    log_finished("Finished: no unshipped orders to refresh.")
                     finished_ok = True
                     return
 
@@ -792,12 +876,20 @@ async def _run_import_job(
                     message="No orders captured." if mode != "full" else None,
                     order_count=0,
                 )
+                log_finished(
+                    "Finished: no orders captured."
+                    if mode == "full"
+                    else "Finished: no orders captured for unshipped check."
+                )
                 finished_ok = True
                 return
 
             if auto_apply:
                 apply_user = _apply_user(db)
                 applied = 0
+                imported = 0
+                tracking_updated = 0
+                checked = 0
                 errors: list[str] = []
                 for raw in orders:
                     try:
@@ -819,7 +911,7 @@ async def _run_import_job(
                         )
                         if store_order_number:
                             _, tracking_after = _order_tracking_numbers(db, store_order_number)
-                            _log_auto_apply_result(
+                            event = _log_auto_apply_result(
                                 db,
                                 profile=profile,
                                 job_id=job_id,
@@ -831,6 +923,12 @@ async def _run_import_job(
                                 order_id=order_id,
                                 tracking_after=tracking_after,
                             )
+                            if event == "order_imported":
+                                imported += 1
+                            elif event == "tracking_updated":
+                                tracking_updated += 1
+                            else:
+                                checked += 1
                         applied += 1
                     except Exception as exc:
                         logger.warning("Auto-apply failed for captured order: %s", exc)
@@ -859,6 +957,14 @@ async def _run_import_job(
                     order_count=applied,
                     error=errors[0] if applied == 0 and errors else None,
                 )
+                summary = (
+                    f"Finished: {imported} imported, {tracking_updated} tracking updated, "
+                    f"{checked} checked"
+                )
+                if errors:
+                    summary += f", {len(errors)} failed"
+                summary += "."
+                log_finished(summary)
                 finished_ok = True
             else:
                 token, review_url = post_bulk_session(orders)
@@ -879,17 +985,25 @@ async def _run_import_job(
                     review_url=review_url,
                     order_count=len(orders),
                 )
+                log_finished(f"Finished: captured {len(orders)} order(s) for import review.")
                 finished_ok = True
         except LoginRequiredError as exc:
             _set_profile_status(
                 db, profile_id, status="login_required", last_error=str(exc)
             )
             update_job(job_id, status="failed", error=str(exc))
+            if finish_message is None:
+                log_finished(f"Stopped: login required ({exc}).")
             finished_ok = True
         except Exception as exc:
             logger.exception("%s %s failed for profile %s", label, mode_label, profile_id)
             _set_profile_status(db, profile_id, status="error", last_error=str(exc))
             update_job(job_id, status="failed", error=str(exc))
+            if finish_message is None:
+                try:
+                    log_finished(f"Stopped: {exc}")
+                except Exception:
+                    logger.exception("Failed to write check_finished log for job %s", job_id)
             finished_ok = True
         finally:
             await session_manager.close_session(profile_id)
@@ -907,6 +1021,8 @@ async def _run_import_job(
                         status="failed",
                         error="Import ended unexpectedly.",
                     )
+                    if finish_message is None:
+                        log_finished("Stopped: import ended unexpectedly.")
                 except Exception:
                     logger.exception(
                         "Failed to clear stuck importing status for profile %s", profile_id

@@ -7,7 +7,7 @@ from app.database import Base
 
 
 class BrowserImportLog(Base):
-    """One row per meaningful auto-apply outcome (new order or new tracking)."""
+    """One row per browser-automation log event (updates + info)."""
 
     __tablename__ = "browser_import_logs"
 
@@ -19,21 +19,24 @@ class BrowserImportLog(Base):
         index=True,
     )
     job_id = Column(String(64), nullable=True, index=True)
-    # order_imported | tracking_updated
+    # updates | info
+    level = Column(String(16), nullable=False, default="info", server_default="info", index=True)
+    # order_imported | tracking_updated | order_checked | check_started | check_finished
     event_type = Column(String(32), nullable=False, index=True)
     # full | unshipped
     mode = Column(String(32), nullable=False)
     scheduled = Column(Boolean, nullable=False, default=False, server_default="false")
     retailer = Column(String(64), nullable=False)
-    store_order_number = Column(String(255), nullable=False, index=True)
+    store_order_number = Column(String(255), nullable=True, index=True)
     order_id = Column(
         Integer,
         ForeignKey("orders.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
-    # Comma-separated tracking numbers added (or present on import).
+    # JSON list of tracking numbers added (or present on import).
     tracking_numbers = Column(Text, nullable=True)
+    message = Column(Text, nullable=True)
     store_name = Column(String(255), nullable=True)
     store_account_name = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

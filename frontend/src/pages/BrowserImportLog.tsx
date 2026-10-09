@@ -1,9 +1,25 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
-import type { BrowserImportLog, BrowserImportLogEvent } from '../api/types'
+import type {
+  BrowserImportLog,
+  BrowserImportLogEvent,
+  BrowserImportLogLevel,
+} from '../api/types'
 
+type LevelFilter = 'all' | BrowserImportLogLevel
 type EventFilter = 'all' | BrowserImportLogEvent
+
+function levelLabel(level: string): string {
+  switch (level) {
+    case 'updates':
+      return 'Updates'
+    case 'info':
+      return 'Info'
+    default:
+      return level
+  }
+}
 
 function eventLabel(eventType: string): string {
   switch (eventType) {
@@ -11,6 +27,12 @@ function eventLabel(eventType: string): string {
       return 'Order imported'
     case 'tracking_updated':
       return 'Tracking updated'
+    case 'order_checked':
+      return 'Order checked'
+    case 'check_started':
+      return 'Check started'
+    case 'check_finished':
+      return 'Check finished'
     default:
       return eventType
   }
@@ -36,10 +58,18 @@ function formatWhen(iso: string | null): string {
   }
 }
 
+function levelBadgeClass(level: string): string {
+  if (level === 'updates') {
+    return 'bg-brand-100 text-brand-800 dark:bg-brand-900/40 dark:text-brand-200'
+  }
+  return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
+}
+
 export default function BrowserImportLogPage() {
   const [rows, setRows] = useState<BrowserImportLog[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
   const [eventFilter, setEventFilter] = useState<EventFilter>('all')
   const [scheduledOnly, setScheduledOnly] = useState(false)
 
@@ -48,6 +78,7 @@ export default function BrowserImportLogPage() {
     setError(null)
     const params = new URLSearchParams()
     params.set('limit', '300')
+    if (levelFilter !== 'all') params.set('level', levelFilter)
     if (eventFilter !== 'all') params.set('event_type', eventFilter)
     if (scheduledOnly) params.set('scheduled_only', 'true')
     api
@@ -58,7 +89,7 @@ export default function BrowserImportLogPage() {
         setError(err instanceof Error ? err.message : 'Failed to load import log')
       })
       .finally(() => setLoading(false))
-  }, [eventFilter, scheduledOnly])
+  }, [levelFilter, eventFilter, scheduledOnly])
 
   return (
     <div className="max-w-5xl">
@@ -72,10 +103,23 @@ export default function BrowserImportLogPage() {
         </Link>
       </div>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
-        Orders created or updated with tracking numbers by scheduled checks and Run now auto-apply.
+        Updates are new imports and tracking changes. Info covers check start/stop and orders
+        checked with no change.
       </p>
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
+        <label className="text-sm text-ink dark:text-gray-200">
+          <span className="sr-only">Level</span>
+          <select
+            className="rounded-lg border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-3 py-1.5 text-sm"
+            value={levelFilter}
+            onChange={(e) => setLevelFilter(e.target.value as LevelFilter)}
+          >
+            <option value="all">All levels</option>
+            <option value="updates">Updates</option>
+            <option value="info">Info</option>
+          </select>
+        </label>
         <label className="text-sm text-ink dark:text-gray-200">
           <span className="sr-only">Event type</span>
           <select
@@ -86,6 +130,9 @@ export default function BrowserImportLogPage() {
             <option value="all">All events</option>
             <option value="order_imported">Order imported</option>
             <option value="tracking_updated">Tracking updated</option>
+            <option value="order_checked">Order checked</option>
+            <option value="check_started">Check started</option>
+            <option value="check_finished">Check finished</option>
           </select>
         </label>
         <label className="inline-flex items-center gap-2 text-sm text-ink dark:text-gray-200">
@@ -112,9 +159,10 @@ export default function BrowserImportLogPage() {
               <thead className="bg-brand-100/50 dark:bg-gray-700/50 border-b border-brand-200/80 dark:border-gray-700">
                 <tr>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">When</th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-ink">Level</th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">Event</th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">Order</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-ink">Tracking</th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-ink">Details</th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">Account</th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">Check</th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">Source</th>
@@ -123,7 +171,7 @@ export default function BrowserImportLogPage() {
               <tbody>
                 {rows.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-12 text-center text-ink-muted">
+                    <td colSpan={8} className="py-12 text-center text-ink-muted">
                       No import activity logged yet.
                     </td>
                   </tr>
@@ -135,6 +183,13 @@ export default function BrowserImportLogPage() {
                     >
                       <td className="py-3 px-4 text-sm text-ink-muted whitespace-nowrap">
                         {formatWhen(row.created_at)}
+                      </td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${levelBadgeClass(row.level)}`}
+                        >
+                          {levelLabel(row.level)}
+                        </span>
                       </td>
                       <td className="py-3 px-4 text-sm text-ink dark:text-gray-200">
                         {eventLabel(row.event_type)}
@@ -151,6 +206,8 @@ export default function BrowserImportLogPage() {
                               </li>
                             ))}
                           </ul>
+                        ) : row.message ? (
+                          <span className="text-ink-muted">{row.message}</span>
                         ) : (
                           <span className="text-ink-muted">—</span>
                         )}
