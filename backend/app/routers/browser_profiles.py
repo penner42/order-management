@@ -36,6 +36,8 @@ from app.models import (
 from app.models.item import ItemStatus
 from app.models.user import get_default_app_user_id
 from app.schemas.browser_profile import (
+    DEFAULT_FULL_CHECK_CRON,
+    DEFAULT_UNSHIPPED_CHECK_CRON,
     BrowserImportLogRead,
     BrowserJobRead,
     BrowserProfileCreate,
@@ -66,11 +68,11 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
         last_error=profile.last_error,
         last_import_at=profile.last_import_at,
         full_check_enabled=bool(profile.full_check_enabled),
-        full_check_interval_hours=int(profile.full_check_interval_hours or 24),
+        full_check_cron=str(profile.full_check_cron or DEFAULT_FULL_CHECK_CRON),
         full_check_max_pages=int(profile.full_check_max_pages or 3),
         full_check_last_run_at=profile.full_check_last_run_at,
         unshipped_check_enabled=bool(profile.unshipped_check_enabled),
-        unshipped_check_interval_hours=int(profile.unshipped_check_interval_hours or 6),
+        unshipped_check_cron=str(profile.unshipped_check_cron or DEFAULT_UNSHIPPED_CHECK_CRON),
         unshipped_check_last_run_at=profile.unshipped_check_last_run_at,
         created_at=profile.created_at,
         updated_at=profile.updated_at,
@@ -382,14 +384,14 @@ def update_browser_profile_schedule(
     profile = _get_profile_or_404(db, profile_id)
     if data.full_check_enabled is not None:
         profile.full_check_enabled = data.full_check_enabled
-    if data.full_check_interval_hours is not None:
-        profile.full_check_interval_hours = data.full_check_interval_hours
+    if data.full_check_cron is not None:
+        profile.full_check_cron = data.full_check_cron
     if data.full_check_max_pages is not None:
         profile.full_check_max_pages = data.full_check_max_pages
     if data.unshipped_check_enabled is not None:
         profile.unshipped_check_enabled = data.unshipped_check_enabled
-    if data.unshipped_check_interval_hours is not None:
-        profile.unshipped_check_interval_hours = data.unshipped_check_interval_hours
+    if data.unshipped_check_cron is not None:
+        profile.unshipped_check_cron = data.unshipped_check_cron
     db.commit()
     return _profile_read(_get_profile_or_404(db, profile_id))
 

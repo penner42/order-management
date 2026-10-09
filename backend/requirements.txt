@@ -13,3 +13,4 @@ bcrypt>=4.2.0
 python-multipart==0.0.17
 playwright==1.61.0
 camoufox==0.5.8
+croniter==6.0.0

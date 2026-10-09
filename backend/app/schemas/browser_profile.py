@@ -2,7 +2,8 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from croniter import croniter
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 Retailer = Literal["amazon", "walmart"]
@@ -16,6 +17,20 @@ ProfileStatus = Literal[
     "error",
 ]
 
+DEFAULT_FULL_CHECK_CRON = "0 0 * * *"
+DEFAULT_UNSHIPPED_CHECK_CRON = "0 */6 * * *"
+
+
+def _normalize_cron(value: str) -> str:
+    expr = (value or "").strip()
+    if not expr:
+        raise ValueError("Cron expression is required")
+    if len(expr) > 64:
+        raise ValueError("Cron expression must be at most 64 characters")
+    if not croniter.is_valid(expr):
+        raise ValueError("Invalid cron expression (expected 5 fields: min hour day month weekday)")
+    return expr
+
 
 class BrowserProfileCreate(BaseModel):
     store_account_id: int
@@ -26,10 +41,17 @@ class BrowserProfileScheduleUpdate(BaseModel):
     """Partial update for per-profile import schedules."""
 
     full_check_enabled: bool | None = None
-    full_check_interval_hours: int | None = Field(default=None, ge=1, le=720)
+    full_check_cron: str | None = Field(default=None, max_length=64)
     full_check_max_pages: int | None = Field(default=None, ge=1, le=50)
     unshipped_check_enabled: bool | None = None
-    unshipped_check_interval_hours: int | None = Field(default=None, ge=1, le=720)
+    unshipped_check_cron: str | None = Field(default=None, max_length=64)
+
+    @field_validator("full_check_cron", "unshipped_check_cron")
+    @classmethod
+    def validate_cron(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_cron(value)
 
 
 class BrowserProfileRead(BaseModel):
@@ -40,11 +62,11 @@ class BrowserProfileRead(BaseModel):
     last_error: str | None = None
     last_import_at: datetime | None = None
     full_check_enabled: bool = False
-    full_check_interval_hours: int = 24
+    full_check_cron: str = DEFAULT_FULL_CHECK_CRON
     full_check_max_pages: int = 3
     full_check_last_run_at: datetime | None = None
     unshipped_check_enabled: bool = False
-    unshipped_check_interval_hours: int = 6
+    unshipped_check_cron: str = DEFAULT_UNSHIPPED_CHECK_CRON
     unshipped_check_last_run_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None

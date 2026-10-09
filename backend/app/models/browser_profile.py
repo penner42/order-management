@@ -26,15 +26,15 @@ class BrowserProfile(Base):
     last_error = Column(Text, nullable=True)
     last_import_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Full check: scan first N order-history pages on an interval.
+    # Full check: scan first N order-history pages on a cron schedule (UTC).
     full_check_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
-    full_check_interval_hours = Column(Integer, nullable=False, default=24, server_default="24")
+    full_check_cron = Column(String(64), nullable=False, default="0 0 * * *", server_default="0 0 * * *")
     full_check_max_pages = Column(Integer, nullable=False, default=3, server_default="3")
     full_check_last_run_at = Column(DateTime(timezone=True), nullable=True)
 
     # Unshipped check: re-fetch detail for all account orders with unshipped items.
     unshipped_check_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
-    unshipped_check_interval_hours = Column(Integer, nullable=False, default=6, server_default="6")
+    unshipped_check_cron = Column(String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *")
     unshipped_check_last_run_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

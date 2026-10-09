@@ -232,11 +232,11 @@ export interface BrowserProfile {
   last_error: string | null
   last_import_at: string | null
   full_check_enabled: boolean
-  full_check_interval_hours: number
+  full_check_cron: string
   full_check_max_pages: number
   full_check_last_run_at: string | null
   unshipped_check_enabled: boolean
-  unshipped_check_interval_hours: number
+  unshipped_check_cron: string
   unshipped_check_last_run_at: string | null
   created_at?: string | null
   updated_at?: string | null
@@ -247,10 +247,10 @@ export interface BrowserProfile {
 
 export interface BrowserProfileScheduleUpdate {
   full_check_enabled?: boolean
-  full_check_interval_hours?: number
+  full_check_cron?: string
   full_check_max_pages?: number
   unshipped_check_enabled?: boolean
-  unshipped_check_interval_hours?: number
+  unshipped_check_cron?: string
 }
 
 export interface BrowserJob {

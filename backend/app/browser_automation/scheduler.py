@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
+from croniter import croniter
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import BrowserProfile
+from app.schemas.browser_profile import (
+    DEFAULT_FULL_CHECK_CRON,
+    DEFAULT_UNSHIPPED_CHECK_CRON,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,17 +35,31 @@ def _as_aware(dt: datetime | None) -> datetime | None:
 def schedule_due(
     *,
     enabled: bool,
-    interval_hours: int,
+    cron_expr: str,
     last_run_at: datetime | None,
     now: datetime,
 ) -> bool:
+    """Return True when a cron schedule should fire.
+
+    Schedules are evaluated in UTC. A run is due when the most recent cron
+    fire time is after the last successful run (or when never run).
+    """
     if not enabled:
         return False
-    hours = max(1, int(interval_hours or 1))
+    expr = (cron_expr or "").strip()
+    if not expr or not croniter.is_valid(expr):
+        return False
     last = _as_aware(last_run_at)
     if last is None:
         return True
-    return last + timedelta(hours=hours) <= now
+    try:
+        # croniter returns naive datetimes when given a naive base; keep UTC.
+        base = now.astimezone(timezone.utc).replace(tzinfo=None)
+        prev_fire = croniter(expr, base).get_prev(datetime).replace(tzinfo=timezone.utc)
+    except (ValueError, KeyError, TypeError):
+        logger.warning("Invalid cron expression %r — skipping schedule", expr)
+        return False
+    return prev_fire > last
 
 
 def due_modes_for_profile(profile: BrowserProfile, now: datetime | None = None) -> list[str]:
@@ -49,14 +68,14 @@ def due_modes_for_profile(profile: BrowserProfile, now: datetime | None = None) 
     # Prefer full check when both are due — it covers recent history; unshipped can wait.
     if schedule_due(
         enabled=bool(profile.full_check_enabled),
-        interval_hours=int(profile.full_check_interval_hours or 24),
+        cron_expr=str(profile.full_check_cron or DEFAULT_FULL_CHECK_CRON),
         last_run_at=profile.full_check_last_run_at,
         now=now,
     ):
         return ["full"]
     if schedule_due(
         enabled=bool(profile.unshipped_check_enabled),
-        interval_hours=int(profile.unshipped_check_interval_hours or 6),
+        cron_expr=str(profile.unshipped_check_cron or DEFAULT_UNSHIPPED_CHECK_CRON),
         last_run_at=profile.unshipped_check_last_run_at,
         now=now,
     ):

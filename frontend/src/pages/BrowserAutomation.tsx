@@ -9,21 +9,24 @@ import type {
   StoreAccount,
 } from '../api/types'
 
+const DEFAULT_FULL_CHECK_CRON = '0 0 * * *'
+const DEFAULT_UNSHIPPED_CHECK_CRON = '0 */6 * * *'
+
 type ScheduleDraft = {
   full_check_enabled: boolean
-  full_check_interval_hours: number
+  full_check_cron: string
   full_check_max_pages: number
   unshipped_check_enabled: boolean
-  unshipped_check_interval_hours: number
+  unshipped_check_cron: string
 }
 
 function scheduleDraftFromProfile(p: BrowserProfile): ScheduleDraft {
   return {
     full_check_enabled: !!p.full_check_enabled,
-    full_check_interval_hours: p.full_check_interval_hours ?? 24,
+    full_check_cron: p.full_check_cron?.trim() || DEFAULT_FULL_CHECK_CRON,
     full_check_max_pages: p.full_check_max_pages ?? 3,
     unshipped_check_enabled: !!p.unshipped_check_enabled,
-    unshipped_check_interval_hours: p.unshipped_check_interval_hours ?? 6,
+    unshipped_check_cron: p.unshipped_check_cron?.trim() || DEFAULT_UNSHIPPED_CHECK_CRON,
   }
 }
 
@@ -607,10 +610,10 @@ export default function BrowserAutomation() {
             }
             const dirty =
               local.full_check_enabled !== server.full_check_enabled ||
-              local.full_check_interval_hours !== server.full_check_interval_hours ||
+              local.full_check_cron !== server.full_check_cron ||
               local.full_check_max_pages !== server.full_check_max_pages ||
               local.unshipped_check_enabled !== server.unshipped_check_enabled ||
-              local.unshipped_check_interval_hours !== server.unshipped_check_interval_hours
+              local.unshipped_check_cron !== server.unshipped_check_cron
             next[p.id] = dirty ? local : server
           }
           return next
@@ -757,10 +760,10 @@ export default function BrowserAutomation() {
             profiles.find((p) => p.id === profileId) ??
               ({
                 full_check_enabled: false,
-                full_check_interval_hours: 24,
+                full_check_cron: DEFAULT_FULL_CHECK_CRON,
                 full_check_max_pages: 3,
                 unshipped_check_enabled: false,
-                unshipped_check_interval_hours: 6,
+                unshipped_check_cron: DEFAULT_UNSHIPPED_CHECK_CRON,
               } as BrowserProfile)
           )),
         ...patch,
@@ -775,13 +778,10 @@ export default function BrowserAutomation() {
     setError(null)
     const body: BrowserProfileScheduleUpdate = {
       full_check_enabled: draft.full_check_enabled,
-      full_check_interval_hours: Math.min(720, Math.max(1, draft.full_check_interval_hours || 1)),
+      full_check_cron: draft.full_check_cron.trim() || DEFAULT_FULL_CHECK_CRON,
       full_check_max_pages: Math.min(50, Math.max(1, draft.full_check_max_pages || 1)),
       unshipped_check_enabled: draft.unshipped_check_enabled,
-      unshipped_check_interval_hours: Math.min(
-        720,
-        Math.max(1, draft.unshipped_check_interval_hours || 1)
-      ),
+      unshipped_check_cron: draft.unshipped_check_cron.trim() || DEFAULT_UNSHIPPED_CHECK_CRON,
     }
     try {
       const updated = await api.patch<BrowserProfile>(`/browser-profiles/${profileId}`, body)
@@ -910,10 +910,11 @@ export default function BrowserAutomation() {
               const busy = p.status === 'importing' || p.status === 'login_in_progress'
               const scheduleDirty =
                 schedule.full_check_enabled !== !!p.full_check_enabled ||
-                schedule.full_check_interval_hours !== (p.full_check_interval_hours ?? 24) ||
+                schedule.full_check_cron !== (p.full_check_cron?.trim() || DEFAULT_FULL_CHECK_CRON) ||
                 schedule.full_check_max_pages !== (p.full_check_max_pages ?? 3) ||
                 schedule.unshipped_check_enabled !== !!p.unshipped_check_enabled ||
-                schedule.unshipped_check_interval_hours !== (p.unshipped_check_interval_hours ?? 6)
+                schedule.unshipped_check_cron !==
+                  (p.unshipped_check_cron?.trim() || DEFAULT_UNSHIPPED_CHECK_CRON)
               return (
                 <li
                   key={p.id}
@@ -1018,23 +1019,17 @@ export default function BrowserAutomation() {
                         <span>Full check</span>
                       </label>
                       <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
-                        every
+                        cron
                         <input
-                          type="number"
-                          min={1}
-                          max={720}
-                          value={schedule.full_check_interval_hours}
+                          type="text"
+                          value={schedule.full_check_cron}
                           onChange={(e) =>
-                            updateScheduleDraft(p.id, {
-                              full_check_interval_hours: Math.min(
-                                720,
-                                Math.max(1, Number(e.target.value) || 1)
-                              ),
-                            })
+                            updateScheduleDraft(p.id, { full_check_cron: e.target.value })
                           }
-                          className="w-14 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1 py-1 text-sm text-ink dark:text-gray-100"
+                          placeholder={DEFAULT_FULL_CHECK_CRON}
+                          spellCheck={false}
+                          className="w-36 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 font-mono text-sm text-ink dark:text-gray-100"
                         />
-                        hours
                       </label>
                       <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
                         pages
@@ -1088,23 +1083,17 @@ export default function BrowserAutomation() {
                         <span>Check unshipped</span>
                       </label>
                       <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
-                        every
+                        cron
                         <input
-                          type="number"
-                          min={1}
-                          max={720}
-                          value={schedule.unshipped_check_interval_hours}
+                          type="text"
+                          value={schedule.unshipped_check_cron}
                           onChange={(e) =>
-                            updateScheduleDraft(p.id, {
-                              unshipped_check_interval_hours: Math.min(
-                                720,
-                                Math.max(1, Number(e.target.value) || 1)
-                              ),
-                            })
+                            updateScheduleDraft(p.id, { unshipped_check_cron: e.target.value })
                           }
-                          className="w-14 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1 py-1 text-sm text-ink dark:text-gray-100"
+                          placeholder={DEFAULT_UNSHIPPED_CHECK_CRON}
+                          spellCheck={false}
+                          className="w-36 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 font-mono text-sm text-ink dark:text-gray-100"
                         />
-                        hours
                       </label>
                       <span className="text-xs text-ink-muted dark:text-gray-500">
                         Last: {formatLastRun(p.unshipped_check_last_run_at)}
@@ -1119,8 +1108,11 @@ export default function BrowserAutomation() {
                       </button>
                     </div>
                     <p className="text-[11px] text-ink-muted dark:text-gray-500">
-                      Scheduled runs and Run buttons apply updates directly. Import now still opens
-                      Import Review for manual review.
+                      Cron is UTC (min hour day month weekday). Examples:{' '}
+                      <span className="font-mono">0 0 * * *</span> daily midnight,{' '}
+                      <span className="font-mono">0 */6 * * *</span> every 6 hours. Scheduled runs
+                      and Run buttons apply updates directly. Import now still opens Import Review
+                      for manual review.
                     </p>
                   </div>
 
