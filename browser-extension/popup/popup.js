@@ -1,6 +1,3 @@
-/** Order details from the content script (getOrderDetails). Stored after a successful fetch so "Send to Order Manager" can use it. */
-let lastOrderDetails = null;
-
 const WALMART_ORDER_DETAIL_STORAGE_KEY = "walmartOrderDetail";
 const WALMART_INVOICE_HTML_STORAGE_KEY = "walmartInvoiceHtml";
 const COSTCO_ORDER_DETAIL_STORAGE_KEY = "costcoOrderDetailsGraphqlCapture";
@@ -739,132 +736,87 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
   };
 }
 
-/** Render saved order payload as raw JSON in #results. */
-function renderOrderDetails(payload, resultsEl) {
-  if (!resultsEl) return;
-  const json = JSON.stringify(payload, null, 2);
-  resultsEl.innerHTML =
-    '<pre style="white-space:pre-wrap;margin:0;font-size:12px;">' +
-    escapeHtml(json) +
-    "</pre>";
-}
+(function setupWalmartOrderDetailSection() {
+  const section = document.getElementById("walmartOrderDetailSection");
+  const importBtn = document.getElementById("walmartImportThisOrder");
+  const resultsEl = document.getElementById("walmartOrderDetailResults");
 
-(function setupWalmartOrderSection() {
-  const section = document.getElementById("walmartOrderSection");
-  const getOrderDetailsBtn = document.getElementById("getOrderDetails");
-  const sendToAppBtn = document.getElementById("sendToApp");
-  const resultsEl = document.getElementById("results");
-
-  if (!section || !getOrderDetailsBtn || !resultsEl || !chrome.tabs) return;
+  if (!section || !importBtn || !resultsEl || !chrome.tabs) return;
 
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs && tabs[0];
     const url = tab && tab.url ? String(tab.url) : "";
     const onWalmartOrderPage = isWalmartOrderDetailUrl(url);
 
-    if (!onWalmartOrderPage) {
-      section.style.display = "none";
-      return;
-    }
+    section.style.display = onWalmartOrderPage ? "block" : "none";
+    if (!onWalmartOrderPage) return;
 
-    chrome.storage.local.get(WALMART_ORDER_DETAIL_STORAGE_KEY, (storage) => {
-      const stored = storage && storage[WALMART_ORDER_DETAIL_STORAGE_KEY];
-      const hasStoredData =
-        stored &&
-        stored.payload &&
-        stored.url &&
-        stored.url === url;
+    importBtn.addEventListener("click", () => {
+      resultsEl.style.display = "block";
+      resultsEl.innerHTML = '<div class="loading">Reading order…</div>';
 
-      section.style.display = hasStoredData ? "block" : "none";
-      if (!hasStoredData) return;
-
-      getOrderDetailsBtn.addEventListener("click", () => {
-        chrome.storage.local.get(WALMART_ORDER_DETAIL_STORAGE_KEY, (s) => {
+      chrome.storage.local.get(
+        [WALMART_ORDER_DETAIL_STORAGE_KEY, WALMART_INVOICE_HTML_STORAGE_KEY],
+        (s) => {
           const current = s && s[WALMART_ORDER_DETAIL_STORAGE_KEY];
           if (!current || current.url !== url || !current.payload) {
-            resultsEl.style.display = "block";
-            resultsEl.innerHTML = '<span class="error">No saved order data for this page.</span>';
+            resultsEl.innerHTML =
+              '<span class="error">No order data captured yet. Wait for the page to finish loading, or refresh and try again.</span>';
             return;
           }
-          lastOrderDetails = current.payload;
-          resultsEl.style.display = "block";
-          renderOrderDetails(current.payload, resultsEl);
-          if (sendToAppBtn) sendToAppBtn.style.display = "block";
-        });
-      });
 
-      if (sendToAppBtn) {
-        sendToAppBtn.addEventListener("click", () => {
-          resultsEl.style.display = "block";
-          resultsEl.textContent = "Opening Order Manager…";
+          const storedInvoice = s && s[WALMART_INVOICE_HTML_STORAGE_KEY];
+          const invoiceHtml =
+            storedInvoice && storedInvoice.url === url && typeof storedInvoice.html === "string"
+              ? storedInvoice.html
+              : null;
 
-          chrome.storage.local.get(
-            [WALMART_ORDER_DETAIL_STORAGE_KEY, WALMART_INVOICE_HTML_STORAGE_KEY],
-            (s) => {
-              const current = s && s[WALMART_ORDER_DETAIL_STORAGE_KEY];
-              if (!current || current.url !== url || !current.payload) {
-                resultsEl.innerHTML =
-                  '<span class="error">No saved order data for this page.</span>';
-                return;
-              }
-
-              const storedInvoice = s && s[WALMART_INVOICE_HTML_STORAGE_KEY];
-              const invoiceHtml =
-                storedInvoice && storedInvoice.url === url && typeof storedInvoice.html === "string"
-                  ? storedInvoice.html
-                  : null;
-
-              getOrderManagerApiBaseUrl((baseUrl) => {
-                if (!baseUrl) {
-                  resultsEl.innerHTML =
-                    '<div class="error">Order Manager base URL is not configured.</div>' +
-                    '<div style="margin-top: 8px;">' +
-                    '  <button id="openSettings" style="width: auto; padding: 8px 10px; font-size: 13px;">Open settings</button>' +
-                    "</div>";
-                  const btn = document.getElementById("openSettings");
-                  if (btn) {
-                    btn.addEventListener("click", () => {
-                      const ok = openExtensionOptionsPage();
-                      if (!ok) {
-                        resultsEl.innerHTML =
-                          '<span class="error">Could not open settings. Please open the extension details and choose “Extension options”.</span>';
-                      }
-                    });
+          getOrderManagerApiBaseUrl((baseUrl) => {
+            if (!baseUrl) {
+              resultsEl.innerHTML =
+                '<div class="error">Order Manager base URL is not configured.</div>' +
+                '<div style="margin-top: 8px;">' +
+                '  <button id="openSettingsWalmartSingle" style="width: auto; padding: 8px 10px; font-size: 13px;">Open settings</button>' +
+                "</div>";
+              const btn = document.getElementById("openSettingsWalmartSingle");
+              if (btn) {
+                btn.addEventListener("click", () => {
+                  const ok = openExtensionOptionsPage();
+                  if (!ok) {
+                    resultsEl.innerHTML =
+                      '<span class="error">Could not open settings. Please open the extension details and choose “Extension options”.</span>';
                   }
-                  return;
-                }
-
-                let body;
-                try {
-                  body = normalizeWalmartOrderDetailPayload(
-                    current.payload,
-                    current.url
-                  );
-                } catch (e) {
-                  resultsEl.innerHTML =
-                    '<span class="error">Could not normalize Walmart order data: ' +
-                    escapeHtml(String(e && e.message ? e.message : e)) +
-                    "</span>";
-                  return;
-                }
-
-                if (invoiceHtml) {
-                  body.invoiceHtml = invoiceHtml;
-                }
-
-                try {
-                  openBulkReviewForOrders([body], resultsEl);
-                } catch (e) {
-                  resultsEl.innerHTML =
-                    '<span class="error">Could not start bulk import review: ' +
-                    escapeHtml(String(e && e.message ? e.message : e)) +
-                    "</span>";
-                }
-              });
+                });
+              }
+              return;
             }
-          );
-        });
-      }
+
+            let body;
+            try {
+              body = normalizeWalmartOrderDetailPayload(current.payload, current.url);
+            } catch (e) {
+              resultsEl.innerHTML =
+                '<span class="error">Could not normalize Walmart order data: ' +
+                escapeHtml(String(e && e.message ? e.message : e)) +
+                "</span>";
+              return;
+            }
+
+            if (invoiceHtml) {
+              body.invoiceHtml = invoiceHtml;
+            }
+
+            try {
+              openBulkReviewForOrders([body], resultsEl);
+            } catch (e) {
+              resultsEl.innerHTML =
+                '<span class="error">Could not start bulk import review: ' +
+                escapeHtml(String(e && e.message ? e.message : e)) +
+                "</span>";
+            }
+          });
+        }
+      );
     });
   });
 })();

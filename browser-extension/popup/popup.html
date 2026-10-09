@@ -44,58 +44,10 @@
       font-size: 14px;
       font-family: inherit;
     }
-    #results {
-      font-size: 13px;
-      line-height: 1.4;
-      max-height: 320px;
-      overflow-y: auto;
-    }
-    #results .order-number {
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-    #results .order-date,
-    #results .account {
-      font-size: 12px;
-      color: #555;
-      margin-bottom: 4px;
-    }
-    #results .address {
-      font-size: 12px;
-      color: #555;
-      margin-bottom: 4px;
-      white-space: pre-line;
-    }
-    #results .payment {
-      font-size: 12px;
-      color: #555;
-      margin-bottom: 8px;
-    }
-    #results .item {
-      padding: 6px 0;
-      border-bottom: 1px solid #eee;
-    }
-    #results .item:last-child {
-      border-bottom: none;
-    }
-    #results .item-name {
-      font-weight: 500;
-    }
-    #results .item-meta {
-      font-size: 12px;
-      color: #555;
-      margin-top: 2px;
-    }
-    #results .order-total {
-      font-weight: 600;
-      margin-top: 8px;
-      padding-top: 8px;
-      border-top: 1px solid #eee;
-    }
-    #results .error {
+    .error {
       color: #c00;
     }
-    #results .loading {
+    .loading {
       color: #555;
       font-style: italic;
     }
@@ -192,6 +144,15 @@
     </button>
     <div id="walmartBulkResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
   </div>
+  <div id="walmartOrderDetailSection" style="display: none; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+    <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #333;">
+      Walmart single import (order detail)
+    </div>
+    <button id="walmartImportThisOrder" style="margin-top: 4px;">
+      Import this order
+    </button>
+    <div id="walmartOrderDetailResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
+  </div>
   <div id="costcoBulkSection" style="display: none; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
     <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #333;">
       Costco bulk import (this page)
@@ -209,15 +170,6 @@
       Import this order
     </button>
     <div id="costcoOrderDetailResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
-  </div>
-  <div id="walmartOrderSection" style="display: none;">
-    <button id="getOrderDetails">
-      Get Order Details
-    </button>
-    <button id="sendToApp" style="margin-top: 8px; display: none;">
-      Send to Order Manager
-    </button>
-    <div id="results" style="margin-top: 12px; display: none;"></div>
   </div>
   <div id="usabgSection" style="display: none;">
     <div id="usabgSectionTitle">USABG Buyer POs (app.usabuying.group only)</div>
