@@ -76,9 +76,9 @@ export default function Settings() {
       <section className="max-w-xl">
         <h2 className="text-lg font-medium text-ink dark:text-gray-100">Ignored zip codes</h2>
         <p className="text-sm text-ink-muted dark:text-gray-400 mt-1 mb-4">
-          Orders shipping to these zip codes are sorted to the bottom of bulk import review (above
-          canceled orders) so they can be skipped. Automated imports skip creating new orders for
-          these zip codes (existing orders still get tracking updates).
+          Orders shipping to these zip codes are marked as personal on import or automated update.
+          Personal orders are hidden from the main Orders list, reports, payments, shipments, and
+          unshipped checks. In bulk import review they sort to the bottom (above canceled orders).
         </p>
 
         {error && (

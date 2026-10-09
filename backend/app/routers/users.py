@@ -23,7 +23,10 @@ def get_my_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return all orders for the current user (for export)."""
+    """Return active orders for the current user (for export).
+
+    Excludes imported and personal orders from workflow exports.
+    """
     orders = (
         db.query(Order)
         .options(
@@ -34,6 +37,7 @@ def get_my_orders(
             joinedload(Order.order_payments).joinedload(OrderPaymentMethod.payment_method),
         )
         .filter(Order.user_id == current_user.id)
+        .filter(Order.status.notin_(("imported", "personal")))
         .order_by(Order.created_at.desc())
         .all()
     )

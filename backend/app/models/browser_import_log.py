@@ -21,7 +21,8 @@ class BrowserImportLog(Base):
     job_id = Column(String(64), nullable=True, index=True)
     # updates | info
     level = Column(String(16), nullable=False, default="info", server_default="info", index=True)
-    # order_imported | tracking_updated | order_checked | order_skipped_ignored_zip | check_started | check_finished
+    # order_imported | tracking_updated | order_checked | order_marked_personal |
+    # order_skipped_ignored_zip (legacy) | check_started | check_finished
     event_type = Column(String(32), nullable=False, index=True)
     # full | unshipped
     mode = Column(String(32), nullable=False)

@@ -1,11 +1,11 @@
-"""Ignored shipping zip codes — skipped on automated import of new orders."""
+"""Ignored shipping zip codes — orders shipping here are marked personal."""
 from sqlalchemy import Column, Integer, String, DateTime
 from sqlalchemy.sql import func
 from app.database import Base
 
 
 class IgnoredZipCode(Base):
-    """Postal code whose shipping addresses should be ignored on import."""
+    """Postal code whose shipping addresses mark orders as personal."""
 
     __tablename__ = "ignored_zip_codes"
 

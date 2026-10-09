@@ -45,6 +45,17 @@ def _effective_item_status(item: Item) -> str:
     return item.status.value
 
 
+# Order statuses excluded from default list / main workflows (Orders, Reports, Payments).
+_HIDDEN_ORDER_STATUSES = ("imported", "personal")
+
+
+def _filter_by_order_status(q, order_status: str | None):
+    """Filter by explicit order_status, or exclude imported/personal when unset."""
+    if order_status:
+        return q.filter(Order.status == order_status)
+    return q.filter(Order.status.notin_(_HIDDEN_ORDER_STATUSES))
+
+
 def _build_orders_query(
     *,
     db: Session,
@@ -59,15 +70,14 @@ def _build_orders_query(
     date_to_utc: str | None,
     search: str | None,
 ):
-    # Order-level filters: which orders to include
+    # Order-level filters: which orders to include.
+    # Default (no order_status): only active — hide imported + personal from main workflows.
     q = db.query(Order).order_by(Order.purchase_date.desc())
-    if order_status:
-        q = q.filter(Order.status == order_status)
+    q = _filter_by_order_status(q, order_status)
     if status:
         # Orders that have at least one item with one of these statuses (item or payment), or orders with no items.
         base = db.query(Order)
-        if order_status:
-            base = base.filter(Order.status == order_status)
+        base = _filter_by_order_status(base, order_status)
         item_statuses = [s for s in status if s not in ("payment_requested", "payment_sent", "payment_received")]
         payment_statuses = [s for s in status if s in ("payment_requested", "payment_sent", "payment_received")]
         queries = []
@@ -95,8 +105,7 @@ def _build_orders_query(
         ids_with_no_items = base.outerjoin(Item).filter(Item.id.is_(None)).with_entities(Order.id)
         order_ids = ids_with_matching_items.union(ids_with_no_items).subquery()
         q = db.query(Order).filter(Order.id.in_(order_ids)).order_by(Order.purchase_date.desc())
-        if order_status:
-            q = q.filter(Order.status == order_status)
+        q = _filter_by_order_status(q, order_status)
     if buying_group_id:
         q = q.filter(Order.buying_group_id.in_(buying_group_id))
     if store_id or store_account_id:
@@ -140,9 +149,7 @@ def _build_orders_query(
     if search and search.strip():
         term = f"%{_like_escape(search.strip())}%"
         escape = "\\"
-        base_order = db.query(Order)
-        if order_status:
-            base_order = base_order.filter(Order.status == order_status)
+        base_order = _filter_by_order_status(db.query(Order), order_status)
         # Order-level matches: show whole order
         by_order_number = (
             base_order.filter(Order.store_order_number.isnot(None))
@@ -288,7 +295,10 @@ def _materialize_orders(
 def list_orders(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
-    order_status: str | None = Query(default=None, alias="order_status"),  # when "imported", only imported; else exclude imported
+    order_status: str | None = Query(
+        default=None,
+        alias="order_status",
+    ),  # when set, only that status; else exclude imported + personal
     status: list[str] = Query(default=[], alias="status"),
     buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
     store_id: list[int] = Query(default=[], alias="store_id"),
@@ -324,7 +334,10 @@ def list_orders(
 def list_orders_paged(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
-    order_status: str | None = Query(default=None, alias="order_status"),  # when "imported", only imported; else exclude imported
+    order_status: str | None = Query(
+        default=None,
+        alias="order_status",
+    ),  # when set, only that status; else exclude imported + personal
     status: list[str] = Query(default=[], alias="status"),
     buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
     store_id: list[int] = Query(default=[], alias="store_id"),

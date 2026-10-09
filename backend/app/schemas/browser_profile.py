@@ -117,7 +117,8 @@ BrowserImportLogEvent = Literal[
     "order_imported",
     "tracking_updated",
     "order_checked",
-    "order_skipped_ignored_zip",
+    "order_marked_personal",
+    "order_skipped_ignored_zip",  # legacy
     "check_started",
     "check_finished",
 ]

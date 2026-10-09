@@ -27,7 +27,7 @@ class OrderPaymentMethodRead(OrderPaymentMethodBase, TimestampsMixin):
 
 
 class OrderBase(BaseModel):
-    status: str = "active"  # active | imported
+    status: str = "active"  # active | imported | personal
     purchase_date: datetime | None = None
     notes: str | None = None
     buying_group_id: int | None = None

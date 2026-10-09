@@ -118,7 +118,7 @@ export interface Item {
   return_refunded_at: string | null
 }
 
-export type OrderStatus = 'active' | 'imported'
+export type OrderStatus = 'active' | 'imported' | 'personal'
 
 export interface Order {
   id: number
@@ -272,7 +272,8 @@ export type BrowserImportLogEvent =
   | 'order_imported'
   | 'tracking_updated'
   | 'order_checked'
-  | 'order_skipped_ignored_zip'
+  | 'order_marked_personal'
+  | 'order_skipped_ignored_zip' // legacy
   | 'check_started'
   | 'check_finished'
 

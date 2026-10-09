@@ -837,7 +837,7 @@ export default function ImportReviewBulk() {
               )}
               {showIgnoredSeparator && (
                 <div className="pt-2 border-t border-dashed border-brand-200 dark:border-gray-700 text-xs text-ink-muted dark:text-gray-400">
-                  Orders that can be ignored
+                  Personal (ignored zip)
                 </div>
               )}
               {showCanceledSeparator && (
@@ -863,7 +863,7 @@ export default function ImportReviewBulk() {
                       )}
                       {showAsIgnoredZip && (
                         <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200 px-2 py-0.5 text-[11px]">
-                          Ignorable
+                          Personal
                         </span>
                       )}
                       {store && (

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Item, Shipment, ShipmentItem, User
+from app.models import Item, Order, Shipment, ShipmentItem, User
 from app.models.item import ItemStatus
 from app.models.user import get_default_app_user_id
 from app.schemas.shipment import ShipmentCreate, ShipmentRead, ShipmentUpdate
@@ -18,9 +18,27 @@ router = APIRouter(prefix="/shipments", tags=["shipments"])
 
 @router.get("", response_model=list[ShipmentRead])
 def list_shipments(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    """List shipments, excluding those whose items belong only to imported/personal orders."""
+    # Keep a shipment if it has no items, or at least one item on an active (non-hidden) order.
+    has_visible_item = (
+        db.query(ShipmentItem.id)
+        .join(Item, Item.id == ShipmentItem.item_id)
+        .join(Order, Order.id == Item.order_id)
+        .filter(ShipmentItem.shipment_id == Shipment.id)
+        .filter(Order.status.notin_(("imported", "personal")))
+        .correlate(Shipment)
+        .exists()
+    )
+    has_no_items = (
+        ~db.query(ShipmentItem.id)
+        .filter(ShipmentItem.shipment_id == Shipment.id)
+        .correlate(Shipment)
+        .exists()
+    )
     return (
         db.query(Shipment)
         .options(joinedload(Shipment.shipment_items).joinedload(ShipmentItem.item))
+        .filter(has_visible_item | has_no_items)
         .order_by(Shipment.created_at.desc())
         .all()
     )

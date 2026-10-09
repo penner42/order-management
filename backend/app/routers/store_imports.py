@@ -18,6 +18,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import (
     BuyingGroup,
+    IgnoredZipCode,
     Item,
     Order,
     OrderPaymentMethod,
@@ -39,6 +40,10 @@ from app.schemas.store_import import (
     BulkImportSessionCreate,
     BulkImportSessionResponse,
     BulkImportSessionPayloads,
+)
+from app.utils.ignored_zip_codes import (
+    is_ignored_postal_code,
+    shipping_postal_code_from_payload,
 )
 from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
 
@@ -1691,6 +1696,16 @@ def compute_order_diff_bulk(
     return BulkStoreOrderDiffResponse(diffs=diffs)
 
 
+def _mark_personal_if_ignored_zip(db: Session, order: Order, payload: object) -> bool:
+    """If shipping zip is ignored, set order status to personal. Returns True when personal."""
+    ignored_zips = [row.zip_code for row in db.query(IgnoredZipCode).all()]
+    postal = shipping_postal_code_from_payload(payload)
+    if is_ignored_postal_code(postal, ignored_zips):
+        order.status = "personal"
+        return True
+    return order.status == "personal"
+
+
 def apply_store_order_payload(
     db: Session,
     payload: StoreOrderImportPayload,
@@ -1705,6 +1720,7 @@ def apply_store_order_payload(
     """Create or update an order from a normalized payload. Returns order id.
 
     Callable from HTTP handlers and browser-automation jobs (no FastAPI Depends).
+    Orders shipping to an ignored zip code are moved to status ``personal``.
     """
     external_order_id, _ = _parse_external_order_fields(payload)
     normalized: dict[str, Any] = _sanitize_store_import_payload_dict(payload)
@@ -1737,6 +1753,8 @@ def apply_store_order_payload(
         incoming_discount = normalized.get("orderDiscount")
         if isinstance(incoming_discount, (int, float)) and math.isfinite(incoming_discount):
             order.order_discount = float(incoming_discount)
+
+    _mark_personal_if_ignored_zip(db, order, payload)
 
     _apply_items_and_shipments(
         db,

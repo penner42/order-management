@@ -26,7 +26,6 @@ from app.database import SessionLocal, get_db
 from app.models import (
     BrowserImportLog,
     BrowserProfile,
-    IgnoredZipCode,
     Item,
     Order,
     Shipment,
@@ -34,10 +33,7 @@ from app.models import (
     StoreAccount,
     User,
 )
-from app.utils.ignored_zip_codes import (
-    is_ignored_postal_code,
-    shipping_postal_code_from_payload,
-)
+from app.utils.ignored_zip_codes import shipping_postal_code_from_payload
 from app.models.item import ItemStatus
 from app.models.user import get_default_app_user_id
 from app.schemas.browser_profile import (
@@ -94,6 +90,8 @@ def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[s
     shipment with a non-empty tracking number. Amazon (and similar) imports
     often create placeholder shipments before tracking exists; those orders
     must still be included in the unshipped refresh.
+
+    Personal orders (ignored shipping zip) are excluded entirely.
     """
     # Postgres requires ORDER BY cols to appear in the SELECT list when using DISTINCT.
     # Select (id, store_order_number), order by id, then dedupe numbers in Python.
@@ -112,6 +110,7 @@ def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[s
         .filter(Order.store_account_id == store_account_id)
         .filter(Order.store_order_number.isnot(None))
         .filter(Order.store_order_number != "")
+        .filter(Order.status != "personal")
         .filter(Item.status != ItemStatus.CANCELED)
         .filter(~has_real_tracking)
         .order_by(Order.id.desc())
@@ -224,21 +223,36 @@ def _log_auto_apply_result(
     tracking_before: set[str],
     order_id: int,
     tracking_after: set[str],
+    marked_personal: bool = False,
+    postal_code: str | None = None,
 ) -> str:
     """Log update or order_checked. Returns the event_type written."""
     added_tracking = sorted(tracking_after - tracking_before)
-    if not existed_before:
+    if marked_personal:
+        event_type = "order_marked_personal"
+        level = "updates"
+        tracking_for_log = sorted(tracking_after) if not existed_before else added_tracking
+        zip_note = f" (ignored zip {postal_code})" if postal_code else ""
+        message = (
+            f"Imported as personal{zip_note}."
+            if not existed_before
+            else f"Moved to personal{zip_note}."
+        )
+    elif not existed_before:
         event_type = "order_imported"
         level = "updates"
         tracking_for_log = sorted(tracking_after)
+        message = None
     elif added_tracking:
         event_type = "tracking_updated"
         level = "updates"
         tracking_for_log = added_tracking
+        message = None
     else:
         event_type = "order_checked"
         level = "info"
         tracking_for_log = []
+        message = None
     _add_import_log(
         db,
         profile=profile,
@@ -250,6 +264,7 @@ def _log_auto_apply_result(
         store_order_number=store_order_number,
         order_id=order_id,
         tracking_numbers=tracking_for_log or None,
+        message=message,
     )
     return event_type
 
@@ -331,7 +346,8 @@ def list_browser_import_logs(
         "order_imported",
         "tracking_updated",
         "order_checked",
-        "order_skipped_ignored_zip",
+        "order_marked_personal",
+        "order_skipped_ignored_zip",  # legacy
         "check_started",
         "check_finished",
     ):
@@ -881,56 +897,33 @@ async def _run_import_job(
             imported = 0
             tracking_updated = 0
             checked = 0
-            skipped_ignored_zip = 0
+            marked_personal = 0
             errors: list[str] = []
             apply_user: User | None = None
-            ignored_zips: list[str] = []
             on_order = None
 
             if auto_apply:
                 apply_user = _apply_user(db)
-                ignored_zips = [row.zip_code for row in db.query(IgnoredZipCode).all()]
 
                 def on_order(raw: dict) -> None:
                     """Apply + log + commit one captured order immediately."""
-                    nonlocal applied, imported, tracking_updated, checked, skipped_ignored_zip
+                    nonlocal applied, imported, tracking_updated, checked, marked_personal
                     assert apply_user is not None
                     try:
                         payload = StoreOrderImportPayload.model_validate(raw)
                         store_order_number = _external_order_id_from_payload(payload)
                         existed_before = False
+                        was_personal = False
                         tracking_before: set[str] = set()
                         if store_order_number:
                             prior_id, tracking_before = _order_tracking_numbers(
                                 db, store_order_number
                             )
                             existed_before = prior_id is not None
+                            if prior_id is not None:
+                                prior = db.query(Order).filter(Order.id == prior_id).first()
+                                was_personal = prior is not None and prior.status == "personal"
                         postal = shipping_postal_code_from_payload(payload)
-                        if not existed_before and is_ignored_postal_code(postal, ignored_zips):
-                            skipped_ignored_zip += 1
-                            if store_order_number:
-                                _add_import_log(
-                                    db,
-                                    profile=profile,
-                                    job_id=job_id,
-                                    mode=mode,
-                                    scheduled=scheduled,
-                                    level="info",
-                                    event_type="order_skipped_ignored_zip",
-                                    store_order_number=store_order_number,
-                                    message=f"Skipped new order (ignored zip {postal}).",
-                                )
-                                db.commit()
-                            update_job(
-                                job_id,
-                                message=(
-                                    f"Skipped {store_order_number or 'order'} "
-                                    f"(ignored zip). "
-                                    f"{applied} applied, {skipped_ignored_zip} skipped…"
-                                ),
-                                order_count=applied,
-                            )
-                            return
                         order_id = apply_store_order_payload(
                             db,
                             payload,
@@ -938,6 +931,9 @@ async def _run_import_job(
                             store_account_id=store_account_id,
                             commit=False,
                         )
+                        order = db.query(Order).filter(Order.id == order_id).first()
+                        is_personal = order is not None and order.status == "personal"
+                        became_personal = is_personal and not was_personal
                         if store_order_number:
                             _, tracking_after = _order_tracking_numbers(db, store_order_number)
                             event = _log_auto_apply_result(
@@ -951,8 +947,12 @@ async def _run_import_job(
                                 tracking_before=tracking_before,
                                 order_id=order_id,
                                 tracking_after=tracking_after,
+                                marked_personal=became_personal,
+                                postal_code=postal if isinstance(postal, str) else None,
                             )
-                            if event == "order_imported":
+                            if event == "order_marked_personal":
+                                marked_personal += 1
+                            elif event == "order_imported":
                                 imported += 1
                             elif event == "tracking_updated":
                                 tracking_updated += 1
@@ -965,7 +965,8 @@ async def _run_import_job(
                             job_id,
                             message=(
                                 f"Processed {label_num} "
-                                f"({applied} applied, {skipped_ignored_zip} skipped)…"
+                                f"({applied} applied"
+                                f"{f', {marked_personal} personal' if marked_personal else ''})…"
                             ),
                             order_count=applied,
                         )
@@ -1002,7 +1003,7 @@ async def _run_import_job(
                 run_kwargs["unshipped_check_last_run_at"] = now
 
             if auto_apply:
-                if not orders and not applied and not skipped_ignored_zip:
+                if not orders and not applied:
                     _set_profile_status(
                         db,
                         profile_id,
@@ -1037,23 +1038,23 @@ async def _run_import_job(
                     **run_kwargs,
                 )
                 msg = f"Updated {applied} order(s)."
-                if skipped_ignored_zip:
-                    msg += f" Skipped {skipped_ignored_zip} ignored-zip."
+                if marked_personal:
+                    msg += f" {marked_personal} marked personal."
                 if errors:
                     msg += f" {len(errors)} failed."
                 update_job(
                     job_id,
-                    status="succeeded" if (applied or skipped_ignored_zip) else "failed",
+                    status="succeeded" if applied else "failed",
                     message=msg,
                     order_count=applied,
-                    error=errors[0] if applied == 0 and not skipped_ignored_zip and errors else None,
+                    error=errors[0] if applied == 0 and errors else None,
                 )
                 summary = (
                     f"Finished: {imported} imported, {tracking_updated} tracking updated, "
                     f"{checked} checked"
                 )
-                if skipped_ignored_zip:
-                    summary += f", {skipped_ignored_zip} skipped (ignored zip)"
+                if marked_personal:
+                    summary += f", {marked_personal} personal"
                 if errors:
                     summary += f", {len(errors)} failed"
                 summary += "."

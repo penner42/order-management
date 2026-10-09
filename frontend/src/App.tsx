@@ -15,6 +15,7 @@ import ImportPreview from './pages/ImportPreview'
 import ImportReview from './pages/ImportReview'
 import ImportReviewBulk from './pages/ImportReviewBulk'
 import ImportedOrders from './pages/ImportedOrders'
+import PersonalOrders from './pages/PersonalOrders'
 import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
 import Reports from './pages/Reports'
@@ -90,6 +91,7 @@ function AppShell() {
       { to: '/stores', label: 'Stores' },
       { to: '/portals', label: 'Portals' },
       { to: '/imported-orders', label: 'Imported Orders' },
+      { to: '/personal-orders', label: 'Personal Orders' },
       { to: '/extension', label: 'Extension' },
       { to: '/browser-automation', label: 'Browser automation' },
       { to: '/browser-import-log', label: 'Import log' },
@@ -238,6 +240,7 @@ function AppShell() {
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
           <Route path="/imported-orders" element={<ImportedOrders />} />
+          <Route path="/personal-orders" element={<PersonalOrders />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />
           <Route path="/payment-methods" element={<PaymentMethods />} />

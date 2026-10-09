@@ -29,6 +29,8 @@ function eventLabel(eventType: string): string {
       return 'Tracking updated'
     case 'order_checked':
       return 'Order checked'
+    case 'order_marked_personal':
+      return 'Marked personal'
     case 'order_skipped_ignored_zip':
       return 'Skipped (ignored zip)'
     case 'check_started':
@@ -160,6 +162,7 @@ export default function BrowserImportLogPage() {
             <option value="order_imported">Order imported</option>
             <option value="tracking_updated">Tracking updated</option>
             <option value="order_checked">Order checked</option>
+            <option value="order_marked_personal">Marked personal</option>
             <option value="order_skipped_ignored_zip">Skipped (ignored zip)</option>
             <option value="check_started">Check started</option>
             <option value="check_finished">Check finished</option>
