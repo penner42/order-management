@@ -877,63 +877,24 @@ async def _run_import_job(
             )
             db.commit()
 
-            if retailer == "walmart":
-                orders = await run_walmart_import(
-                    profile_id,
-                    max_pages=max_pages,
-                    order_ids=order_ids,
-                    on_progress=on_progress,
-                )
-            else:
-                orders = await run_amazon_import(
-                    profile_id,
-                    max_pages=max_pages,
-                    order_ids=order_ids,
-                    on_progress=on_progress,
-                )
-
-            now = datetime.now(timezone.utc)
-            run_kwargs: dict = {}
-            if mode == "full":
-                run_kwargs["full_check_last_run_at"] = now
-            else:
-                run_kwargs["unshipped_check_last_run_at"] = now
-
-            if not orders:
-                _set_profile_status(
-                    db,
-                    profile_id,
-                    status="ready",
-                    last_error="Import finished with zero orders." if mode == "full" else None,
-                    **run_kwargs,
-                )
-                update_job(
-                    job_id,
-                    status="failed" if mode == "full" else "succeeded",
-                    error="No orders captured. If you expect orders, try Log in again."
-                    if mode == "full"
-                    else None,
-                    message="No orders captured." if mode != "full" else None,
-                    order_count=0,
-                )
-                log_finished(
-                    "Finished: no orders captured."
-                    if mode == "full"
-                    else "Finished: no orders captured for unshipped check."
-                )
-                finished_ok = True
-                return
+            applied = 0
+            imported = 0
+            tracking_updated = 0
+            checked = 0
+            skipped_ignored_zip = 0
+            errors: list[str] = []
+            apply_user: User | None = None
+            ignored_zips: list[str] = []
+            on_order = None
 
             if auto_apply:
                 apply_user = _apply_user(db)
                 ignored_zips = [row.zip_code for row in db.query(IgnoredZipCode).all()]
-                applied = 0
-                imported = 0
-                tracking_updated = 0
-                checked = 0
-                skipped_ignored_zip = 0
-                errors: list[str] = []
-                for raw in orders:
+
+                def on_order(raw: dict) -> None:
+                    """Apply + log + commit one captured order immediately."""
+                    nonlocal applied, imported, tracking_updated, checked, skipped_ignored_zip
+                    assert apply_user is not None
                     try:
                         payload = StoreOrderImportPayload.model_validate(raw)
                         store_order_number = _external_order_id_from_payload(payload)
@@ -959,7 +920,17 @@ async def _run_import_job(
                                     store_order_number=store_order_number,
                                     message=f"Skipped new order (ignored zip {postal}).",
                                 )
-                            continue
+                                db.commit()
+                            update_job(
+                                job_id,
+                                message=(
+                                    f"Skipped {store_order_number or 'order'} "
+                                    f"(ignored zip). "
+                                    f"{applied} applied, {skipped_ignored_zip} skipped…"
+                                ),
+                                order_count=applied,
+                            )
+                            return
                         order_id = apply_store_order_payload(
                             db,
                             payload,
@@ -988,14 +959,74 @@ async def _run_import_job(
                             else:
                                 checked += 1
                         applied += 1
+                        db.commit()
+                        label_num = store_order_number or "order"
+                        update_job(
+                            job_id,
+                            message=(
+                                f"Processed {label_num} "
+                                f"({applied} applied, {skipped_ignored_zip} skipped)…"
+                            ),
+                            order_count=applied,
+                        )
                     except Exception as exc:
                         logger.warning("Auto-apply failed for captured order: %s", exc)
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
                         errors.append(str(exc))
-                try:
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                    raise
+
+            if retailer == "walmart":
+                orders = await run_walmart_import(
+                    profile_id,
+                    max_pages=max_pages,
+                    order_ids=order_ids,
+                    on_progress=on_progress,
+                    on_order=on_order,
+                )
+            else:
+                orders = await run_amazon_import(
+                    profile_id,
+                    max_pages=max_pages,
+                    order_ids=order_ids,
+                    on_progress=on_progress,
+                    on_order=on_order,
+                )
+
+            now = datetime.now(timezone.utc)
+            run_kwargs: dict = {}
+            if mode == "full":
+                run_kwargs["full_check_last_run_at"] = now
+            else:
+                run_kwargs["unshipped_check_last_run_at"] = now
+
+            if auto_apply:
+                if not orders and not applied and not skipped_ignored_zip:
+                    _set_profile_status(
+                        db,
+                        profile_id,
+                        status="ready",
+                        last_error="Import finished with zero orders." if mode == "full" else None,
+                        **run_kwargs,
+                    )
+                    update_job(
+                        job_id,
+                        status="failed" if mode == "full" else "succeeded",
+                        error="No orders captured. If you expect orders, try Log in again."
+                        if mode == "full"
+                        else None,
+                        message="No orders captured." if mode != "full" else None,
+                        order_count=0,
+                    )
+                    log_finished(
+                        "Finished: no orders captured."
+                        if mode == "full"
+                        else "Finished: no orders captured for unshipped check."
+                    )
+                    finished_ok = True
+                    return
+
                 _set_profile_status(
                     db,
                     profile_id,
@@ -1029,6 +1060,31 @@ async def _run_import_job(
                 log_finished(summary)
                 finished_ok = True
             else:
+                if not orders:
+                    _set_profile_status(
+                        db,
+                        profile_id,
+                        status="ready",
+                        last_error="Import finished with zero orders." if mode == "full" else None,
+                        **run_kwargs,
+                    )
+                    update_job(
+                        job_id,
+                        status="failed" if mode == "full" else "succeeded",
+                        error="No orders captured. If you expect orders, try Log in again."
+                        if mode == "full"
+                        else None,
+                        message="No orders captured." if mode != "full" else None,
+                        order_count=0,
+                    )
+                    log_finished(
+                        "Finished: no orders captured."
+                        if mode == "full"
+                        else "Finished: no orders captured for unshipped check."
+                    )
+                    finished_ok = True
+                    return
+
                 token, review_url = post_bulk_session(orders)
                 _set_profile_status(
                     db,

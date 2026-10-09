@@ -76,21 +76,48 @@ export default function BrowserImportLogPage() {
   const [scheduledOnly, setScheduledOnly] = useState(false)
 
   useEffect(() => {
-    setLoading(true)
-    setError(null)
-    const params = new URLSearchParams()
-    params.set('limit', '300')
-    if (levelFilter !== 'all') params.set('level', levelFilter)
-    if (eventFilter !== 'all') params.set('event_type', eventFilter)
-    if (scheduledOnly) params.set('scheduled_only', 'true')
-    api
-      .get<BrowserImportLog[]>(`/browser-profiles/import-logs?${params}`)
-      .then(setRows)
-      .catch((err) => {
-        console.error(err)
-        setError(err instanceof Error ? err.message : 'Failed to load import log')
-      })
-      .finally(() => setLoading(false))
+    let cancelled = false
+    let firstLoad = true
+
+    const load = () => {
+      if (firstLoad) {
+        setLoading(true)
+        setError(null)
+      }
+      const params = new URLSearchParams()
+      params.set('limit', '300')
+      if (levelFilter !== 'all') params.set('level', levelFilter)
+      if (eventFilter !== 'all') params.set('event_type', eventFilter)
+      if (scheduledOnly) params.set('scheduled_only', 'true')
+      return api
+        .get<BrowserImportLog[]>(`/browser-profiles/import-logs?${params}`)
+        .then((data) => {
+          if (!cancelled) setRows(data)
+        })
+        .catch((err) => {
+          console.error(err)
+          if (!cancelled && firstLoad) {
+            setError(err instanceof Error ? err.message : 'Failed to load import log')
+          }
+        })
+        .finally(() => {
+          if (!cancelled && firstLoad) {
+            setLoading(false)
+            firstLoad = false
+          }
+        })
+    }
+
+    void load()
+    // Live imports commit per order; poll so new rows appear without a manual refresh.
+    const intervalId = window.setInterval(() => {
+      void load()
+    }, 3000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
   }, [levelFilter, eventFilter, scheduledOnly])
 
   return (

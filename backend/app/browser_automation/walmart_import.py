@@ -17,6 +17,7 @@ from app.browser_automation.session_manager import (
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+OrderCallback = Callable[[dict[str, Any]], None]
 
 
 async def _inject_walmart_scripts(page: Page) -> None:
@@ -227,6 +228,7 @@ async def _capture_walmart_order_details(
     order_numbers: list[str],
     *,
     on_progress: ProgressCallback | None = None,
+    on_order: OrderCallback | None = None,
 ) -> list[dict[str, Any]]:
     def progress(**kwargs: Any) -> None:
         if on_progress:
@@ -255,6 +257,8 @@ async def _capture_walmart_order_details(
             except Exception:
                 pass
             captured.append(body)
+            if on_order:
+                on_order(body)
         except LoginRequiredError:
             raise
         except Exception as exc:
@@ -271,6 +275,7 @@ async def run_walmart_import(
     max_pages: int = 3,
     order_ids: list[str] | None = None,
     on_progress: ProgressCallback | None = None,
+    on_order: OrderCallback | None = None,
 ) -> list[dict[str, Any]]:
     """Capture Walmart orders for a profile (list pages → detail pages).
 
@@ -352,7 +357,10 @@ async def run_walmart_import(
         )
 
     captured = await _capture_walmart_order_details(
-        page, [str(n) for n in order_numbers], on_progress=on_progress
+        page,
+        [str(n) for n in order_numbers],
+        on_progress=on_progress,
+        on_order=on_order,
     )
     progress(phase="done", message=f"Captured {len(captured)} order(s)", captured=len(captured))
     return captured

@@ -17,6 +17,7 @@ from app.browser_automation.session_manager import (
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+OrderCallback = Callable[[dict[str, Any]], None]
 
 
 async def _inject_amazon_scripts(page: Page) -> None:
@@ -274,6 +275,7 @@ async def _capture_amazon_order_ids(
     account_email: str | None,
     *,
     on_progress: ProgressCallback | None = None,
+    on_order: OrderCallback | None = None,
 ) -> list[dict[str, Any]]:
     def progress(**kwargs: Any) -> None:
         if on_progress:
@@ -293,7 +295,10 @@ async def _capture_amazon_order_ids(
             if looks_like_amazon_signin(page.url):
                 raise LoginRequiredError("Amazon session requires login.")
             raw = await _parse_detail_page(page, skip_tracking=False)
-            orders.append(_normalize_order(raw, page.url, account_email))
+            body = _normalize_order(raw, page.url, account_email)
+            orders.append(body)
+            if on_order:
+                on_order(body)
         except LoginRequiredError:
             raise
         except Exception as exc:
@@ -307,6 +312,7 @@ async def run_amazon_import(
     max_pages: int = 3,
     order_ids: list[str] | None = None,
     on_progress: ProgressCallback | None = None,
+    on_order: OrderCallback | None = None,
 ) -> list[dict[str, Any]]:
     """Capture Amazon orders for a profile.
 
@@ -351,7 +357,11 @@ async def run_amazon_import(
             account_email=account_email,
         )
         orders = await _capture_amazon_order_ids(
-            page, ids, account_email, on_progress=on_progress
+            page,
+            ids,
+            account_email,
+            on_progress=on_progress,
+            on_order=on_order,
         )
         progress(phase="done", message=f"Captured {len(orders)} order(s)", captured=len(orders))
         return orders
@@ -362,6 +372,11 @@ async def run_amazon_import(
     seen_ids: set[str] = set()
     page_num = 1
     list_url = page.url or AMAZON_ORDERS_URL
+
+    def _emit_order(body: dict[str, Any]) -> None:
+        orders.append(body)
+        if on_order:
+            on_order(body)
 
     while page_num <= max_pages:
         if looks_like_amazon_signin(page.url):
@@ -412,15 +427,16 @@ async def run_amazon_import(
                 else:
                     raw = summary
                     source_url = detail_url or list_url
-                normalized = _normalize_order(raw, source_url, account_email)
-                orders.append(normalized)
+                _emit_order(_normalize_order(raw, source_url, account_email))
             except LoginRequiredError:
                 raise
             except Exception as exc:
                 logger.warning("Failed to capture Amazon order %s: %s", order_id, exc)
                 try:
                     if summary.get("orderId"):
-                        orders.append(_normalize_order(summary, detail_url or list_url, account_email))
+                        _emit_order(
+                            _normalize_order(summary, detail_url or list_url, account_email)
+                        )
                 except Exception:
                     pass
 
