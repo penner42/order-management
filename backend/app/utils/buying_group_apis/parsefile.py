@@ -7,10 +7,9 @@ import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urljoin
 
 
-DEFAULT_ADD_TRACKING_PATH = "/p/it@api@order-management/cmd/addtracking"
+ADD_TRACKING_CMD = "/cmd/addtracking"
 
 
 @dataclass
@@ -30,18 +29,42 @@ class ParsefileSubmitResult:
     raw: dict[str, Any]
 
 
-def build_url(base_url: str, api_url: str | None) -> str:
-    base = base_url.strip().rstrip("/") + "/"
-    path = (api_url or DEFAULT_ADD_TRACKING_PATH).strip() or DEFAULT_ADD_TRACKING_PATH
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    return urljoin(base, path.lstrip("/"))
+def build_url(base_url: str, api_url: str) -> str:
+    """Join base_url + api_url + command path for addtracking."""
+    base = (base_url or "").strip().rstrip("/")
+    api = (api_url or "").strip()
+    if not base:
+        raise ValueError("base_url is required")
+    if not api:
+        raise ValueError("api_url is required")
+    if not api.startswith("/"):
+        api = "/" + api
+    api = api.rstrip("/")
+    return f"{base}{api}{ADD_TRACKING_CMD}"
+
+
+def _message_from_payload(raw: dict[str, Any], *, success: bool) -> str:
+    for key in ("response", "message", "detail", "error"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    toast = raw.get("$mdToast")
+    if isinstance(toast, dict):
+        text = toast.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    if success:
+        return "Tracking numbers submitted successfully."
+    try:
+        return f"Submission failed: {json.dumps(raw)[:400]}"
+    except Exception:
+        return "Submission failed"
 
 
 def submit_trackings(
     *,
     base_url: str,
-    api_url: str | None,
+    api_url: str,
     bearer_token: str,
     user_id: int,
     email: str,
@@ -50,6 +73,10 @@ def submit_trackings(
 ) -> ParsefileSubmitResult:
     if not trackings:
         raise ValueError("At least one tracking entry is required")
+    if not (bearer_token or "").strip():
+        raise ValueError("bearer_token is required")
+    if not (email or "").strip():
+        raise ValueError("email is required")
 
     payload_trackings: list[dict[str, Any]] = []
     for entry in trackings:
@@ -90,21 +117,30 @@ def submit_trackings(
             status = getattr(resp, "status", 200)
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        detail = err_body.strip() or e.reason
-        raise RuntimeError(f"Parsefile API error {e.code}: {detail}") from e
+        parsed_msg = ""
+        if err_body.strip():
+            try:
+                err_json = json.loads(err_body)
+                if isinstance(err_json, dict):
+                    parsed_msg = _message_from_payload(err_json, success=False)
+            except json.JSONDecodeError:
+                parsed_msg = err_body.strip()[:400]
+        detail = parsed_msg or (str(e.reason).strip() if e.reason else "") or "empty response"
+        raise RuntimeError(f"Parsefile API error {e.code} at {url}: {detail}") from e
     except urllib.error.URLError as e:
-        raise RuntimeError(f"Parsefile API request failed: {e.reason}") from e
+        reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
+        raise RuntimeError(f"Parsefile API request failed ({url}): {reason}") from e
 
     try:
         raw = json.loads(raw_text) if raw_text else {}
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"Parsefile API returned non-JSON (HTTP {status}): {raw_text[:300]}") from e
+        raise RuntimeError(f"Parsefile API returned non-JSON (HTTP {status}) from {url}: {raw_text[:300]}") from e
 
     if not isinstance(raw, dict):
-        raise RuntimeError(f"Parsefile API returned unexpected payload: {raw_text[:300]}")
+        raise RuntimeError(f"Parsefile API returned unexpected payload from {url}: {raw_text[:300]}")
 
     success = bool(raw.get("success"))
-    message = str(raw.get("response") or raw.get("message") or ("OK" if success else "Submission failed"))
+    message = _message_from_payload(raw, success=success)
     affected_raw = raw.get("affected")
     affected = int(affected_raw) if isinstance(affected_raw, (int, float)) else None
     if not success:

@@ -8,7 +8,7 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
   { value: 'parsefile', label: 'Parsefile' },
 ]
 
-const PARSEFILE_DEFAULT_API_PATH = '/p/it@api@order-management/cmd/addtracking'
+const PARSEFILE_API_PATH_PLACEHOLDER = '/p/it@api@order-management'
 
 function AliasEditor({
   group,
@@ -296,13 +296,17 @@ export default function BuyingGroups() {
                         />
                       </label>
                       <label className="block">
-                        <span className="text-xs text-ink-muted">API URL (optional, relative to base)</span>
+                        <span className="text-xs text-ink-muted">
+                          {draft.api_framework === 'parsefile'
+                            ? 'API URL (path; commands like /cmd/addtracking are added automatically)'
+                            : 'API URL (optional, relative to base)'}
+                        </span>
                         <input
                           type="text"
                           className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
                           placeholder={
                             draft.api_framework === 'parsefile'
-                              ? PARSEFILE_DEFAULT_API_PATH
+                              ? PARSEFILE_API_PATH_PLACEHOLDER
                               : '/v1/tracking'
                           }
                           value={draft.api_url}

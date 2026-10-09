@@ -10,6 +10,38 @@ export function setStoredToken(token: string | null): void {
   else localStorage.removeItem(AUTH_TOKEN_KEY)
 }
 
+function formatApiErrorDetail(err: unknown, fallback: string): string {
+  if (typeof err === 'string' && err.trim()) return err.trim()
+  if (!err || typeof err !== 'object') return fallback
+  const detail = (err as { detail?: unknown }).detail
+  if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((entry) => {
+        if (typeof entry === 'string') return entry
+        if (entry && typeof entry === 'object' && 'msg' in entry) {
+          return String((entry as { msg: unknown }).msg ?? '')
+        }
+        try {
+          return JSON.stringify(entry)
+        } catch {
+          return ''
+        }
+      })
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (parts.length > 0) return parts.join('; ')
+  }
+  if (detail != null && detail !== '') {
+    try {
+      return JSON.stringify(detail)
+    } catch {
+      // fall through
+    }
+  }
+  return fallback
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getStoredToken()
   const headers: Record<string, string> = {
@@ -23,11 +55,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     setStoredToken(null)
     window.dispatchEvent(new CustomEvent('auth:401'))
     const err = await res.json().catch(() => ({ detail: 'Unauthorized' }))
-    throw new Error(err.detail || 'Unauthorized')
+    throw new Error(formatApiErrorDetail(err, 'Unauthorized'))
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || JSON.stringify(err))
+    throw new Error(formatApiErrorDetail(err, `Request failed (${res.status})`))
   }
   if (res.status === 204) return undefined as T
   return res.json()

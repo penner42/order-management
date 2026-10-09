@@ -215,6 +215,8 @@ def submit_item_tracking(
         raise HTTPException(status_code=400, detail="Buying group has no API token")
     if not (group.base_url or "").strip():
         raise HTTPException(status_code=400, detail="Buying group has no base URL")
+    if not (group.api_url or "").strip():
+        raise HTTPException(status_code=400, detail="Buying group has no API URL")
     if group.api_user_id is None:
         raise HTTPException(status_code=400, detail="Buying group is missing API user id")
     if not (group.api_email or "").strip():
@@ -228,6 +230,10 @@ def submit_item_tracking(
     amount = None
     if item.price_sold is not None:
         amount = item.price_sold * (item.quantity or 1)
+
+    def _http_detail(exc: BaseException, *, fallback: str) -> str:
+        text = str(exc).strip()
+        return text or fallback
 
     try:
         result = parsefile_api.submit_trackings(
@@ -246,14 +252,26 @@ def submit_item_tracking(
             ],
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail=_http_detail(e, fallback="Invalid tracking submit request")) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+        raise HTTPException(status_code=502, detail=_http_detail(e, fallback="Buying group API request failed")) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=_http_detail(e, fallback=f"Tracking submit failed ({e.__class__.__name__})"),
+        ) from e
 
     item.status = ItemStatus.SUBMITTED
     item.submitted_at = to_date_only(datetime.now(timezone.utc))
     db.commit()
-    db.refresh(item)
+    item = (
+        db.query(Item)
+        .filter(Item.id == item_id)
+        .options(selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment))
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found after submit")
     return ItemSubmitTrackingResponse(
         item=item,
         message=result.message,

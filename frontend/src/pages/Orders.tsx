@@ -1014,7 +1014,8 @@ export default function Orders() {
     return (
       bg.api_framework === 'parsefile' &&
       Boolean(bg.bearer_token?.trim()) &&
-      Boolean(bg.base_url?.trim())
+      Boolean(bg.base_url?.trim()) &&
+      Boolean(bg.api_url?.trim())
     )
   }
 
