@@ -6,23 +6,13 @@ URL hash.  The frontend calls these endpoints:
   POST /orders/diff   – read-only diff against an existing order
   POST /orders/apply  – create/update order, items, shipments in one shot
 """
-import json
-import logging
 import re
-import time
 from datetime import datetime, timezone
 from typing import Any, Dict
 import secrets
 import math
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
-
-logger = logging.getLogger(__name__)
-
-# #region agent log
-# Recent shipment-link decisions for production debugging (Import log / docker logs).
-_DBG_SHIP_TRACE: list[dict[str, Any]] = []
-# #endregion
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -1258,58 +1248,9 @@ def _apply_items_and_shipments(
                 return si
         return None
 
-    # #region agent log
-    def _dbg_ship_link(hypothesis_id: str, message: str, **data: Any) -> None:
-        entry = {
-            "sessionId": "659358",
-            "hypothesisId": hypothesis_id,
-            "location": "store_imports.py:link",
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        _DBG_SHIP_TRACE.append(entry)
-        if len(_DBG_SHIP_TRACE) > 50:
-            del _DBG_SHIP_TRACE[:-40]
-        logger.warning("[dbg-659358] %s %s", message, data)
-        try:
-            with open(
-                "/home/apenner/order-management/.cursor/debug-659358.log",
-                "a",
-                encoding="utf-8",
-            ) as _f:
-                _f.write(json.dumps(entry) + "\n")
-        except Exception:
-            pass
-    # #endregion
-
     def link_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
         # item_id is unique on shipment_items — never insert a second row.
         existing_si = _shipment_item_for_item(item)
-        # #region agent log
-        pending_si = [
-            {
-                "item_id": getattr(o, "item_id", None),
-                "shipment_id": getattr(o, "shipment_id", None),
-                "state": str(db.object_session(o) and "in_session"),
-            }
-            for o in list(db.new)
-            if isinstance(o, ShipmentItem)
-        ]
-        _dbg_ship_link(
-            "A",
-            "link_item_to_shipment",
-            item_id=item.id,
-            order_id=item.order_id,
-            target_shipment_id=shipment.id,
-            existing_si_id=getattr(existing_si, "id", None),
-            existing_shipment_id=getattr(existing_si, "shipment_id", None),
-            orm_si_count=len(item.shipment_items or []),
-            pending_shipment_items=pending_si,
-            will_insert=existing_si is None,
-            shipped=shipped,
-        )
-        # #endregion
         if existing_si is not None:
             if existing_si.shipment_id == shipment.id:
                 linked_item_ids.add(item.id)
@@ -1338,14 +1279,6 @@ def _apply_items_and_shipments(
         existing_si = _shipment_item_for_item(item)
         if existing_si is not None:
             if existing_si.shipment_id == shipment.id:
-                # #region agent log
-                _dbg_ship_link(
-                    "C",
-                    "relink_already_on_target",
-                    item_id=item.id,
-                    shipment_id=shipment.id,
-                )
-                # #endregion
                 linked_item_ids.add(item.id)
                 if shipped:
                     item.status = ItemStatus.SHIPPED
@@ -1357,43 +1290,13 @@ def _apply_items_and_shipments(
                     existing_shipments_by_id[old.id] = old
             if old is not None and (old.tracking_number or "").strip():
                 # Linked to a different real tracking — leave it; do not insert another row.
-                # #region agent log
-                _dbg_ship_link(
-                    "D",
-                    "relink_blocked_tracked",
-                    item_id=item.id,
-                    target_shipment_id=shipment.id,
-                    existing_shipment_id=existing_si.shipment_id,
-                    existing_tracking=(old.tracking_number or "")[:40],
-                )
-                # #endregion
                 linked_item_ids.add(item.id)
                 return
             # Drop placeholder / unknown link before inserting the new one.
-            # #region agent log
-            _dbg_ship_link(
-                "C",
-                "relink_delete_placeholder",
-                item_id=item.id,
-                old_shipment_id=existing_si.shipment_id,
-                target_shipment_id=shipment.id,
-                old_tracking=(old.tracking_number if old else None),
-            )
-            # #endregion
             if existing_si in item.shipment_items:
                 item.shipment_items.remove(existing_si)
             db.delete(existing_si)
             db.flush()
-        else:
-            # #region agent log
-            _dbg_ship_link(
-                "B",
-                "relink_no_existing_si",
-                item_id=item.id,
-                target_shipment_id=shipment.id,
-                order_id=item.order_id,
-            )
-            # #endregion
         link_item_to_shipment(item, shipment, shipped=shipped)
 
     def _apply_shipment_fields(
@@ -1601,53 +1504,12 @@ def _apply_items_and_shipments(
                     name, db_key, tracking_key
                 )
                 if not existing_item:
-                    # #region agent log
-                    _dbg_ship_link(
-                        "F",
-                        "match_no_candidate",
-                        name=name[:80],
-                        slice_key=slice_key,
-                        sid=sid,
-                        remaining=remaining,
-                        db_key=db_key,
-                        tracking_key=tracking_key,
-                        used_ids=sorted(used_existing_item_ids),
-                        linked_ids=sorted(linked_item_ids),
-                        candidates=[
-                            {
-                                "id": ei.id,
-                                "qty": ei.quantity,
-                                "status": getattr(ei.status, "value", str(ei.status)),
-                                "keys": sorted(item_tracking_keys(ei)),
-                                "used": ei.id in used_existing_item_ids,
-                            }
-                            for ei in existing_items
-                            if (ei.description or "").strip() == name
-                            and ei.id in pre_existing_item_ids
-                        ],
-                    )
-                    # #endregion
                     break
 
                 item_keys = item_tracking_keys(existing_item)
                 if (db_key and db_key in item_keys) or (
                     tracking_key and tracking_key in item_keys
                 ):
-                    # #region agent log
-                    _dbg_ship_link(
-                        "H",
-                        "match_tracking_consume_full_qty",
-                        item_id=existing_item.id,
-                        item_qty=existing_item.quantity,
-                        item_status=getattr(
-                            existing_item.status, "value", str(existing_item.status)
-                        ),
-                        slice_qty=slice_qty,
-                        remaining_before=remaining,
-                        item_keys=sorted(item_keys),
-                        sid=sid,
-                    )
-                    # #endregion
                     get_or_create_shipment_for_slice(
                         sid,
                         item_to_link=existing_item,
@@ -1671,17 +1533,6 @@ def _apply_items_and_shipments(
                         real_item_keys
                     )
                 if already_linked_elsewhere:
-                    # #region agent log
-                    _dbg_ship_link(
-                        "G",
-                        "match_burned_linked_elsewhere",
-                        item_id=existing_item.id,
-                        item_keys=sorted(item_keys),
-                        incoming_keys=sorted(incoming_keys),
-                        remaining=remaining,
-                        sid=sid,
-                    )
-                    # #endregion
                     # Same product on separate shipment slices (e.g. two Amazon
                     # line items with different tracking). Keep this row marked
                     # used and try another candidate; creating a new line for
@@ -1689,20 +1540,6 @@ def _apply_items_and_shipments(
                     continue
 
                 take = min(remaining, existing_item.quantity or 1)
-                # #region agent log
-                _dbg_ship_link(
-                    "I",
-                    "match_allocate_relink",
-                    item_id=existing_item.id,
-                    take=take,
-                    item_qty=existing_item.quantity,
-                    item_status=getattr(
-                        existing_item.status, "value", str(existing_item.status)
-                    ),
-                    item_keys=sorted(item_keys),
-                    sid=sid,
-                )
-                # #endregion
                 allocated_item = allocate_item_for_slice(
                     existing_item, take, name
                 )
@@ -1722,19 +1559,6 @@ def _apply_items_and_shipments(
                 existing_item_keys.discard((name, ""))
 
             if remaining > 0:
-                # #region agent log
-                _dbg_ship_link(
-                    "F",
-                    "create_new_item_for_remaining",
-                    name=name[:80],
-                    remaining=remaining,
-                    slice_key=slice_key,
-                    sid=sid,
-                    db_key=db_key,
-                    tracking_key=tracking_key,
-                    linked_any=linked_any,
-                )
-                # #endregion
                 # No (more) existing lines to attach — create the leftover
                 # quantity on this shipment (new import or partial match).
                 item = Item(
