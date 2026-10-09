@@ -1220,8 +1220,21 @@ def _apply_items_and_shipments(
         db.add(remainder)
         db.flush()
         existing_items.append(remainder)
+        # Later shipment slices must be able to attach to this peel (same
+        # payout/pricing as the original). Without this, find_existing_item
+        # skips the remainder and creates a new line with price_sold=None.
+        pre_existing_item_ids.add(remainder.id)
         existing_item_keys.add((item_name, ""))
         return item
+
+    def _inherited_payout_for_name(item_name: str):
+        """Reuse price_sold from an existing same-description line when payouts weren't sent."""
+        for ei in existing_items:
+            if (ei.description or "").strip() != item_name:
+                continue
+            if ei.price_sold is not None:
+                return ei.price_sold
+        return None
 
     def _shipment_item_for_item(item: Item) -> ShipmentItem | None:
         """Return the shipment_items row for this item (unique), including pending ORM state.
@@ -1561,10 +1574,15 @@ def _apply_items_and_shipments(
             if remaining > 0:
                 # No (more) existing lines to attach — create the leftover
                 # quantity on this shipment (new import or partial match).
+                # Existing-order applies omit item_payouts; inherit payout from
+                # a same-description line so split-off tracking rows stay filled.
+                effective_payout = (
+                    payout if payout is not None else _inherited_payout_for_name(name)
+                )
                 item = Item(
                     order_id=order.id,
                     price_paid=unit_price,
-                    price_sold=payout,
+                    price_sold=effective_payout,
                     status=status,
                     quantity=remaining,
                     description=name,
