@@ -118,7 +118,7 @@ export interface Item {
   return_refunded_at: string | null
 }
 
-export type OrderStatus = 'active' | 'imported' | 'personal'
+export type OrderStatus = 'imported' | 'personal'
 
 export interface Order {
   id: number

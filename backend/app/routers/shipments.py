@@ -18,14 +18,14 @@ router = APIRouter(prefix="/shipments", tags=["shipments"])
 
 @router.get("", response_model=list[ShipmentRead])
 def list_shipments(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    """List shipments, excluding those whose items belong only to imported/personal orders."""
-    # Keep a shipment if it has no items, or at least one item on an active (non-hidden) order.
+    """List shipments, excluding those whose items belong only to personal orders."""
+    # Keep a shipment if it has no items, or at least one item on a non-personal order.
     has_visible_item = (
         db.query(ShipmentItem.id)
         .join(Item, Item.id == ShipmentItem.item_id)
         .join(Order, Order.id == Item.order_id)
         .filter(ShipmentItem.shipment_id == Shipment.id)
-        .filter(Order.status.notin_(("imported", "personal")))
+        .filter(Order.status != "personal")
         .correlate(Shipment)
         .exists()
     )

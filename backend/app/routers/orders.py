@@ -45,12 +45,12 @@ def _effective_item_status(item: Item) -> str:
     return item.status.value
 
 
-# Order statuses excluded from default list / main workflows (Orders, Reports, Payments).
-_HIDDEN_ORDER_STATUSES = ("imported", "personal")
+# Personal (ignored-zip) orders are excluded from default list / main workflows.
+_HIDDEN_ORDER_STATUSES = ("personal",)
 
 
 def _filter_by_order_status(q, order_status: str | None):
-    """Filter by explicit order_status, or exclude imported/personal when unset."""
+    """Filter by explicit order_status, or exclude personal when unset."""
     if order_status:
         return q.filter(Order.status == order_status)
     return q.filter(Order.status.notin_(_HIDDEN_ORDER_STATUSES))
@@ -71,7 +71,7 @@ def _build_orders_query(
     search: str | None,
 ):
     # Order-level filters: which orders to include.
-    # Default (no order_status): only active — hide imported + personal from main workflows.
+    # Default (no order_status): hide personal (ignored-zip) from main workflows.
     q = db.query(Order).order_by(Order.purchase_date.desc())
     q = _filter_by_order_status(q, order_status)
     if status:
@@ -298,7 +298,7 @@ def list_orders(
     order_status: str | None = Query(
         default=None,
         alias="order_status",
-    ),  # when set, only that status; else exclude imported + personal
+    ),  # when set, only that status; else exclude personal
     status: list[str] = Query(default=[], alias="status"),
     buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
     store_id: list[int] = Query(default=[], alias="store_id"),
@@ -337,7 +337,7 @@ def list_orders_paged(
     order_status: str | None = Query(
         default=None,
         alias="order_status",
-    ),  # when set, only that status; else exclude imported + personal
+    ),  # when set, only that status; else exclude personal
     status: list[str] = Query(default=[], alias="status"),
     buying_group_id: list[int] = Query(default=[], alias="buying_group_id"),
     store_id: list[int] = Query(default=[], alias="store_id"),
@@ -433,7 +433,7 @@ def create_order(data: OrderCreate, db: Session = Depends(get_db), current_user:
         store_order_number=data.store_order_number,
         order_discount=data.order_discount,
         insurance_cost=data.insurance_cost,
-        status=getattr(data, "status", "active") or "active",
+        status=getattr(data, "status", "imported") or "imported",
     )
     db.add(order)
     db.flush()

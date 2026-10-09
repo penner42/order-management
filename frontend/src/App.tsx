@@ -14,7 +14,6 @@ import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
 import ImportReview from './pages/ImportReview'
 import ImportReviewBulk from './pages/ImportReviewBulk'
-import ImportedOrders from './pages/ImportedOrders'
 import PersonalOrders from './pages/PersonalOrders'
 import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
@@ -90,7 +89,6 @@ function AppShell() {
       { to: '/shipments', label: 'Shipments' },
       { to: '/stores', label: 'Stores' },
       { to: '/portals', label: 'Portals' },
-      { to: '/imported-orders', label: 'Imported Orders' },
       { to: '/personal-orders', label: 'Personal Orders' },
       { to: '/extension', label: 'Extension' },
       { to: '/browser-automation', label: 'Browser automation' },
@@ -239,7 +237,6 @@ function AppShell() {
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
-          <Route path="/imported-orders" element={<ImportedOrders />} />
           <Route path="/personal-orders" element={<PersonalOrders />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />

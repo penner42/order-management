@@ -1223,10 +1223,26 @@ def _apply_items_and_shipments(
         existing_item_keys.add((item_name, ""))
         return item
 
+    def _shipment_item_for_item(item: Item) -> ShipmentItem | None:
+        """Return the DB row for this item_id (unique), syncing the ORM collection."""
+        if item.id is None:
+            return None
+        si = (
+            db.query(ShipmentItem)
+            .filter(ShipmentItem.item_id == item.id)
+            .first()
+        )
+        if si is None:
+            return None
+        if si not in item.shipment_items:
+            item.shipment_items.append(si)
+        return si
+
     def link_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
         # item_id is unique on shipment_items — never insert a second row.
-        if item.shipment_items:
-            if any(si.shipment_id == shipment.id for si in item.shipment_items):
+        existing_si = _shipment_item_for_item(item)
+        if existing_si is not None:
+            if existing_si.shipment_id == shipment.id:
                 linked_item_ids.add(item.id)
                 if shipped:
                     item.status = ItemStatus.SHIPPED
@@ -1242,19 +1258,27 @@ def _apply_items_and_shipments(
 
     def relink_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
         """Move *item* onto *shipment*, dropping empty placeholder shipment links."""
-        for si in list(item.shipment_items):
-            if si.shipment_id == shipment.id:
+        existing_si = _shipment_item_for_item(item)
+        if existing_si is not None:
+            if existing_si.shipment_id == shipment.id:
                 linked_item_ids.add(item.id)
                 if shipped:
                     item.status = ItemStatus.SHIPPED
                 return
-            old = existing_shipments_by_id.get(si.shipment_id)
+            old = existing_shipments_by_id.get(existing_si.shipment_id)
+            if old is None:
+                old = db.query(Shipment).filter(Shipment.id == existing_si.shipment_id).first()
+                if old is not None:
+                    existing_shipments_by_id[old.id] = old
             if old is not None and (old.tracking_number or "").strip():
                 # Linked to a different real tracking — leave it; do not insert another row.
                 linked_item_ids.add(item.id)
                 return
-            db.delete(si)
-            item.shipment_items.remove(si)
+            # Drop placeholder / unknown link before inserting the new one.
+            if existing_si in item.shipment_items:
+                item.shipment_items.remove(existing_si)
+            db.delete(existing_si)
+            db.flush()
         link_item_to_shipment(item, shipment, shipped=shipped)
 
     def _apply_shipment_fields(
@@ -1505,6 +1529,9 @@ def _apply_items_and_shipments(
                     sid,
                     item_to_link=allocated_item,
                 )
+                # get_or_create links when it reuses an existing/placeholder
+                # shipment; for a newly created shipment it only returns the
+                # row — relink attaches the item in that case (no-op if already linked).
                 if shipment:
                     relink_item_to_shipment(
                         allocated_item, shipment, shipped=has_tracking
@@ -1534,7 +1561,9 @@ def _apply_items_and_shipments(
                     item_to_link=item,
                 )
                 if shipment:
-                    link_item_to_shipment(item, shipment, shipped=has_tracking)
+                    # New shipments are returned unlinked; relink is a no-op
+                    # when get_or_create already attached the item.
+                    relink_item_to_shipment(item, shipment, shipped=has_tracking)
 
             if linked_any or remaining > 0:
                 existing_item_keys.discard((name, ""))
