@@ -60,7 +60,7 @@ function formatWhen(iso: string | null): string {
 
 function levelBadgeClass(level: string): string {
   if (level === 'updates') {
-    return 'bg-brand-100 text-brand-800 dark:bg-brand-900/40 dark:text-brand-200'
+    return 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-brand-400'
   }
   return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
 }
