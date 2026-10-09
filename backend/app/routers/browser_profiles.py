@@ -980,6 +980,39 @@ async def _run_import_job(
                                 failed_order_number = str(ext.get("id") or "").strip() or None
                         except Exception:
                             pass
+                        # #region agent log
+                        try:
+                            import json as _json
+                            import time as _time
+                            with open(
+                                "/home/apenner/order-management/.cursor/debug-659358.log",
+                                "a",
+                                encoding="utf-8",
+                            ) as _f:
+                                _f.write(
+                                    _json.dumps(
+                                        {
+                                            "sessionId": "659358",
+                                            "hypothesisId": "E",
+                                            "location": "browser_profiles.py:on_order",
+                                            "message": "auto_apply_failed",
+                                            "data": {
+                                                "store_order_number": failed_order_number,
+                                                "error_type": type(exc).__name__,
+                                                "error": str(exc)[:800],
+                                                "link_guard_present": hasattr(
+                                                    apply_store_order_payload,
+                                                    "__code__",
+                                                ),
+                                            },
+                                            "timestamp": int(_time.time() * 1000),
+                                        }
+                                    )
+                                    + "\n"
+                                )
+                        except Exception:
+                            pass
+                        # #endregion
                         try:
                             db.rollback()
                         except Exception:

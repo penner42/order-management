@@ -1238,9 +1238,60 @@ def _apply_items_and_shipments(
             item.shipment_items.append(si)
         return si
 
+    # #region agent log
+    def _dbg_ship_link(hypothesis_id: str, message: str, **data: Any) -> None:
+        try:
+            import json as _json
+            import time as _time
+            with open(
+                "/home/apenner/order-management/.cursor/debug-659358.log",
+                "a",
+                encoding="utf-8",
+            ) as _f:
+                _f.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "659358",
+                            "hypothesisId": hypothesis_id,
+                            "location": "store_imports.py:link",
+                            "message": message,
+                            "data": data,
+                            "timestamp": int(_time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+    # #endregion
+
     def link_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
         # item_id is unique on shipment_items — never insert a second row.
         existing_si = _shipment_item_for_item(item)
+        # #region agent log
+        pending_si = [
+            {
+                "item_id": getattr(o, "item_id", None),
+                "shipment_id": getattr(o, "shipment_id", None),
+                "state": str(db.object_session(o) and "in_session"),
+            }
+            for o in list(db.new)
+            if isinstance(o, ShipmentItem)
+        ]
+        _dbg_ship_link(
+            "A",
+            "link_item_to_shipment",
+            item_id=item.id,
+            order_id=item.order_id,
+            target_shipment_id=shipment.id,
+            existing_si_id=getattr(existing_si, "id", None),
+            existing_shipment_id=getattr(existing_si, "shipment_id", None),
+            orm_si_count=len(item.shipment_items or []),
+            pending_shipment_items=pending_si,
+            will_insert=existing_si is None,
+            shipped=shipped,
+        )
+        # #endregion
         if existing_si is not None:
             if existing_si.shipment_id == shipment.id:
                 linked_item_ids.add(item.id)
@@ -1261,6 +1312,14 @@ def _apply_items_and_shipments(
         existing_si = _shipment_item_for_item(item)
         if existing_si is not None:
             if existing_si.shipment_id == shipment.id:
+                # #region agent log
+                _dbg_ship_link(
+                    "C",
+                    "relink_already_on_target",
+                    item_id=item.id,
+                    shipment_id=shipment.id,
+                )
+                # #endregion
                 linked_item_ids.add(item.id)
                 if shipped:
                     item.status = ItemStatus.SHIPPED
@@ -1272,13 +1331,43 @@ def _apply_items_and_shipments(
                     existing_shipments_by_id[old.id] = old
             if old is not None and (old.tracking_number or "").strip():
                 # Linked to a different real tracking — leave it; do not insert another row.
+                # #region agent log
+                _dbg_ship_link(
+                    "D",
+                    "relink_blocked_tracked",
+                    item_id=item.id,
+                    target_shipment_id=shipment.id,
+                    existing_shipment_id=existing_si.shipment_id,
+                    existing_tracking=(old.tracking_number or "")[:40],
+                )
+                # #endregion
                 linked_item_ids.add(item.id)
                 return
             # Drop placeholder / unknown link before inserting the new one.
+            # #region agent log
+            _dbg_ship_link(
+                "C",
+                "relink_delete_placeholder",
+                item_id=item.id,
+                old_shipment_id=existing_si.shipment_id,
+                target_shipment_id=shipment.id,
+                old_tracking=(old.tracking_number if old else None),
+            )
+            # #endregion
             if existing_si in item.shipment_items:
                 item.shipment_items.remove(existing_si)
             db.delete(existing_si)
             db.flush()
+        else:
+            # #region agent log
+            _dbg_ship_link(
+                "B",
+                "relink_no_existing_si",
+                item_id=item.id,
+                target_shipment_id=shipment.id,
+                order_id=item.order_id,
+            )
+            # #endregion
         link_item_to_shipment(item, shipment, shipped=shipped)
 
     def _apply_shipment_fields(
