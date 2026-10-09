@@ -1234,19 +1234,29 @@ def _apply_items_and_shipments(
         return item
 
     def _shipment_item_for_item(item: Item) -> ShipmentItem | None:
-        """Return the DB row for this item_id (unique), syncing the ORM collection."""
-        if item.id is None:
-            return None
-        si = (
-            db.query(ShipmentItem)
-            .filter(ShipmentItem.item_id == item.id)
-            .first()
-        )
-        if si is None:
-            return None
-        if si not in item.shipment_items:
-            item.shipment_items.append(si)
-        return si
+        """Return the shipment_items row for this item (unique), including pending ORM state.
+
+        Must check the collection / session.new before querying the DB: a prior
+        link in this same apply may have appended a pending ShipmentItem that a
+        SELECT would miss when autoflush has not run (double-relink → UniqueViolation).
+        """
+        for si in list(item.shipment_items or []):
+            return si
+        if item.id is not None:
+            for obj in db.new:
+                if isinstance(obj, ShipmentItem) and obj.item_id == item.id:
+                    item.shipment_items.append(obj)
+                    return obj
+            si = (
+                db.query(ShipmentItem)
+                .filter(ShipmentItem.item_id == item.id)
+                .first()
+            )
+            if si is not None:
+                if si not in item.shipment_items:
+                    item.shipment_items.append(si)
+                return si
+        return None
 
     # #region agent log
     def _dbg_ship_link(hypothesis_id: str, message: str, **data: Any) -> None:
@@ -1305,7 +1315,15 @@ def _apply_items_and_shipments(
                 linked_item_ids.add(item.id)
                 if shipped:
                     item.status = ItemStatus.SHIPPED
+            # Already linked (same or other shipment); never insert a second row.
             return
+        # Pending duplicate guard (same item_id already staged this flush).
+        for obj in db.new:
+            if isinstance(obj, ShipmentItem) and obj.item_id == item.id:
+                linked_item_ids.add(item.id)
+                if shipped:
+                    item.status = ItemStatus.SHIPPED
+                return
         si = ShipmentItem(shipment_id=shipment.id, item_id=item.id)
         db.add(si)
         # Keep ORM collections in sync within this import transaction.
