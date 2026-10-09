@@ -16,6 +16,8 @@ function levelLabel(level: string): string {
       return 'Updates'
     case 'info':
       return 'Info'
+    case 'error':
+      return 'Error'
     default:
       return level
   }
@@ -33,6 +35,8 @@ function eventLabel(eventType: string): string {
       return 'Marked personal'
     case 'order_skipped_ignored_zip':
       return 'Skipped (ignored zip)'
+    case 'order_error':
+      return 'Order error'
     case 'check_started':
       return 'Check started'
     case 'check_finished':
@@ -65,6 +69,9 @@ function formatWhen(iso: string | null): string {
 function levelBadgeClass(level: string): string {
   if (level === 'updates') {
     return 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-brand-400'
+  }
+  if (level === 'error') {
+    return 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'
   }
   return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
 }
@@ -135,7 +142,7 @@ export default function BrowserImportLogPage() {
       </div>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
         Updates are new imports and tracking changes. Info covers check start/stop and orders
-        checked with no change.
+        checked with no change. Errors are orders that failed to apply.
       </p>
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
@@ -149,6 +156,7 @@ export default function BrowserImportLogPage() {
             <option value="all">All levels</option>
             <option value="updates">Updates</option>
             <option value="info">Info</option>
+            <option value="error">Error</option>
           </select>
         </label>
         <label className="text-sm text-ink dark:text-gray-200">
@@ -164,6 +172,7 @@ export default function BrowserImportLogPage() {
             <option value="order_checked">Order checked</option>
             <option value="order_marked_personal">Marked personal</option>
             <option value="order_skipped_ignored_zip">Skipped (ignored zip)</option>
+            <option value="order_error">Order error</option>
             <option value="check_started">Check started</option>
             <option value="check_finished">Check finished</option>
           </select>
@@ -240,7 +249,15 @@ export default function BrowserImportLogPage() {
                             ))}
                           </ul>
                         ) : row.message ? (
-                          <span className="text-ink-muted">{row.message}</span>
+                          <span
+                            className={
+                              row.level === 'error'
+                                ? 'text-red-700 dark:text-red-300 break-words'
+                                : 'text-ink-muted'
+                            }
+                          >
+                            {row.message}
+                          </span>
                         ) : (
                           <span className="text-ink-muted">—</span>
                         )}

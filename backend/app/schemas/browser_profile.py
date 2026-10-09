@@ -112,13 +112,14 @@ class BrowserJobRead(BaseModel):
     error: str | None = None
 
 
-BrowserImportLogLevel = Literal["updates", "info"]
+BrowserImportLogLevel = Literal["updates", "info", "error"]
 BrowserImportLogEvent = Literal[
     "order_imported",
     "tracking_updated",
     "order_checked",
     "order_marked_personal",
     "order_skipped_ignored_zip",  # legacy
+    "order_error",
     "check_started",
     "check_finished",
 ]

@@ -266,7 +266,7 @@ export interface BrowserJob {
   error?: string | null
 }
 
-export type BrowserImportLogLevel = 'updates' | 'info'
+export type BrowserImportLogLevel = 'updates' | 'info' | 'error'
 
 export type BrowserImportLogEvent =
   | 'order_imported'
@@ -274,6 +274,7 @@ export type BrowserImportLogEvent =
   | 'order_checked'
   | 'order_marked_personal'
   | 'order_skipped_ignored_zip' // legacy
+  | 'order_error'
   | 'check_started'
   | 'check_finished'
 

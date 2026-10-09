@@ -1224,16 +1224,21 @@ def _apply_items_and_shipments(
         return item
 
     def link_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
-        already_linked = any(si.shipment_id == shipment.id for si in item.shipment_items)
-        if not already_linked:
-            si = ShipmentItem(shipment_id=shipment.id, item_id=item.id)
-            db.add(si)
-            # Keep ORM collections in sync within this import transaction.
-            item.shipment_items.append(si)
-            existing_shipments_by_id[shipment.id] = shipment
-            linked_item_ids.add(item.id)
-            if shipped:
-                item.status = ItemStatus.SHIPPED
+        # item_id is unique on shipment_items — never insert a second row.
+        if item.shipment_items:
+            if any(si.shipment_id == shipment.id for si in item.shipment_items):
+                linked_item_ids.add(item.id)
+                if shipped:
+                    item.status = ItemStatus.SHIPPED
+            return
+        si = ShipmentItem(shipment_id=shipment.id, item_id=item.id)
+        db.add(si)
+        # Keep ORM collections in sync within this import transaction.
+        item.shipment_items.append(si)
+        existing_shipments_by_id[shipment.id] = shipment
+        linked_item_ids.add(item.id)
+        if shipped:
+            item.status = ItemStatus.SHIPPED
 
     def relink_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
         """Move *item* onto *shipment*, dropping empty placeholder shipment links."""
@@ -1245,8 +1250,9 @@ def _apply_items_and_shipments(
                 return
             old = existing_shipments_by_id.get(si.shipment_id)
             if old is not None and (old.tracking_number or "").strip():
-                # Linked to a different real tracking — caller should not reuse.
-                continue
+                # Linked to a different real tracking — leave it; do not insert another row.
+                linked_item_ids.add(item.id)
+                return
             db.delete(si)
             item.shipment_items.remove(si)
         link_item_to_shipment(item, shipment, shipped=shipped)
@@ -1473,15 +1479,17 @@ def _apply_items_and_shipments(
                 # Only treat non-empty tracking keys as a real conflict.
                 # Empty placeholder shipments (common on first Amazon import
                 # before tracking exists) should be updated / relinked.
+                # Also skip when the item already has real tracking but this
+                # slice has none yet — otherwise relink would try to attach a
+                # second shipment_items row and hit uq_shipment_items_item_id.
                 real_item_keys = {k for k in item_keys if k}
-                already_linked_elsewhere = (
-                    (
-                        bool(real_item_keys)
-                        or existing_item.id in linked_item_ids
-                    )
-                    and bool(incoming_keys)
-                    and incoming_keys.isdisjoint(real_item_keys)
+                already_linked_elsewhere = bool(real_item_keys) and (
+                    not incoming_keys or incoming_keys.isdisjoint(real_item_keys)
                 )
+                if not already_linked_elsewhere and existing_item.id in linked_item_ids:
+                    already_linked_elsewhere = bool(incoming_keys) and incoming_keys.isdisjoint(
+                        real_item_keys
+                    )
                 if already_linked_elsewhere:
                     # Same product on separate shipment slices (e.g. two Amazon
                     # line items with different tracking). Keep this row marked

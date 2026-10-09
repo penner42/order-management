@@ -340,7 +340,7 @@ def list_browser_import_logs(
 ):
     """Recent browser-automation log events (updates + info)."""
     q = db.query(BrowserImportLog)
-    if level in ("updates", "info"):
+    if level in ("updates", "info", "error"):
         q = q.filter(BrowserImportLog.level == level)
     if event_type in (
         "order_imported",
@@ -348,6 +348,7 @@ def list_browser_import_logs(
         "order_checked",
         "order_marked_personal",
         "order_skipped_ignored_zip",  # legacy
+        "order_error",
         "check_started",
         "check_finished",
     ):
@@ -972,11 +973,39 @@ async def _run_import_job(
                         )
                     except Exception as exc:
                         logger.warning("Auto-apply failed for captured order: %s", exc)
+                        failed_order_number: str | None = None
+                        try:
+                            ext = raw.get("externalOrder") if isinstance(raw, dict) else None
+                            if isinstance(ext, dict):
+                                failed_order_number = str(ext.get("id") or "").strip() or None
+                        except Exception:
+                            pass
                         try:
                             db.rollback()
                         except Exception:
                             pass
                         errors.append(str(exc))
+                        try:
+                            _add_import_log(
+                                db,
+                                profile=profile,
+                                job_id=job_id,
+                                mode=mode,
+                                scheduled=scheduled,
+                                level="error",
+                                event_type="order_error",
+                                store_order_number=failed_order_number,
+                                message=str(exc),
+                            )
+                            db.commit()
+                        except Exception:
+                            logger.exception(
+                                "Failed to write order_error log for job %s", job_id
+                            )
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
 
             if retailer == "walmart":
                 orders = await run_walmart_import(
