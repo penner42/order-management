@@ -173,10 +173,14 @@ class SessionManager:
             try:
                 user_data = str(profile_user_data_dir(profile_id))
                 headless = bool(settings.browser_headless)
-                # Open the OS window at the stream cap so set_viewport_size can grow
-                # up to SCREENCAST_MAX without being clipped by a smaller window.
-                width = SCREENCAST_MAX["width"]
-                height = SCREENCAST_MAX["height"]
+                # Login/live view: open at stream cap so set_viewport_size can grow
+                # without being clipped. Import jobs use a smaller window to save RAM/CPU.
+                if mode == "login":
+                    width = SCREENCAST_MAX["width"]
+                    height = SCREENCAST_MAX["height"]
+                else:
+                    width = MIN_VIEWPORT["width"]
+                    height = MIN_VIEWPORT["height"]
                 context, camoufox = await self._launch_camoufox_context(
                     user_data,
                     headless=headless,
