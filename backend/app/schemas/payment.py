@@ -2,7 +2,7 @@
 from datetime import datetime
 
 from app.schemas.common import TimestampsMixin
-from app.schemas.buying_group import BuyingGroupRead
+from app.schemas.buying_group import BuyingGroupSummary
 from app.schemas.item import ItemRead
 from pydantic import BaseModel, ConfigDict
 
@@ -59,7 +59,7 @@ class PaymentLineItemUpdate(BaseModel):
 
 class PaymentRead(PaymentBase, TimestampsMixin):
     id: int
-    buying_group: BuyingGroupRead | None = None
+    buying_group: BuyingGroupSummary | None = None
     line_items: list[PaymentLineItemRead] = []
 
     model_config = ConfigDict(from_attributes=True)

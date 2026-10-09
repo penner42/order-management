@@ -14,6 +14,9 @@ class BuyingGroup(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)  # for multi-user
     name = Column(String(255), nullable=False)
     aliases = Column(JSON, nullable=False, default=list)
+    base_url = Column(String(500), nullable=True)
+    api_url = Column(String(500), nullable=True)  # optional path relative to base_url
+    bearer_token = Column(String(2000), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="buying_groups")

@@ -31,6 +31,10 @@ export interface BuyingGroup {
   user_id: number | null
   name: string
   aliases: string[]
+  /** Present on buying-groups CRUD responses; omitted when nested on orders/payments. */
+  base_url?: string | null
+  api_url?: string | null
+  bearer_token?: string | null
 }
 
 export interface Reward {

@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from app.schemas.item import ItemRead
 from app.schemas.payment_method import PaymentMethodRead
 from app.schemas.store import StoreRead, StoreAccountRead
-from app.schemas.buying_group import BuyingGroupRead
+from app.schemas.buying_group import BuyingGroupSummary
 
 
 class OrderPaymentMethodBase(BaseModel):
@@ -65,7 +65,7 @@ class OrderRead(OrderBase, TimestampsMixin):
     store_order_number: str | None = None
     store: StoreRead | None = None
     store_account: StoreAccountRead | None = None
-    buying_group: BuyingGroupRead | None = None
+    buying_group: BuyingGroupSummary | None = None
     items: list[ItemRead] = []
     order_payments: list[OrderPaymentMethodRead] = []
     # Internal: read from the ORM object, excluded from responses (has_invoice is exposed instead).

@@ -88,13 +88,34 @@ function AliasEditor({
   )
 }
 
+type EditDraft = {
+  name: string
+  base_url: string
+  api_url: string
+  bearer_token: string
+}
+
+function emptyDraft(): EditDraft {
+  return { name: '', base_url: '', api_url: '', bearer_token: '' }
+}
+
+function draftFromGroup(g: BuyingGroup): EditDraft {
+  return {
+    name: g.name,
+    base_url: g.base_url ?? '',
+    api_url: g.api_url ?? '',
+    bearer_token: g.bearer_token ?? '',
+  }
+}
+
 export default function BuyingGroups() {
   const [groups, setGroups] = useState<BuyingGroup[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<number | null>(null)
-  const [newName, setNewName] = useState('')
+  const [draft, setDraft] = useState<EditDraft>(emptyDraft())
   const [createName, setCreateName] = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     api.get<BuyingGroup[]>('/buying-groups').then(setGroups).catch(console.error).finally(() => setLoading(false))
@@ -102,16 +123,25 @@ export default function BuyingGroups() {
 
   const startEdit = (g: BuyingGroup) => {
     setEditing(g.id)
-    setNewName(g.name)
+    setDraft(draftFromGroup(g))
   }
   const saveEdit = async () => {
     if (editing == null) return
+    if (!draft.name.trim()) return
+    setSaving(true)
     try {
-      const updated = await api.patch<BuyingGroup>(`/buying-groups/${editing}`, { name: newName })
+      const updated = await api.patch<BuyingGroup>(`/buying-groups/${editing}`, {
+        name: draft.name.trim(),
+        base_url: draft.base_url.trim() || null,
+        api_url: draft.api_url.trim() || null,
+        bearer_token: draft.bearer_token.trim() || null,
+      })
       setGroups((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
       setEditing(null)
     } catch (e) {
       console.error(e)
+    } finally {
+      setSaving(false)
     }
   }
   const cancelEdit = () => setEditing(null)
@@ -145,7 +175,7 @@ export default function BuyingGroups() {
     <div>
       <h1 className="text-2xl font-semibold text-ink mb-2">Buying groups</h1>
       <p className="text-sm text-ink-muted mb-8">
-        Add aliases to match shipping names and address lines on store imports.
+        Add aliases to match shipping names and address lines on store imports. Configure API credentials to submit tracking numbers.
       </p>
       <form onSubmit={create} className="flex gap-2 mb-6">
         <input
@@ -166,59 +196,113 @@ export default function BuyingGroups() {
           ) : (
             groups.map((g) => (
               <li key={g.id} className="px-4 py-3">
-                <div className="flex items-center justify-between gap-3">
-                  {editing === g.id ? (
-                    <>
+                {editing === g.id ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-3">
                       <input
                         type="text"
                         className="rounded border border-brand-200 px-2 py-1 flex-1 max-w-sm"
-                        value={newName}
-                        onChange={(e) => setNewName(e.target.value)}
+                        value={draft.name}
+                        onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                        placeholder="Name"
                         autoFocus
                       />
-                      <div className="flex gap-2 ml-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={saveEdit}
-                          className="text-sm text-brand-600 hover:underline"
-                        >
-                          Save
-                        </button>
-                        <button type="button" onClick={cancelEdit} className="text-sm text-ink-muted hover:underline">
-                          Cancel
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <span className="font-medium text-ink">{g.name}</span>
                       <div className="flex gap-2 shrink-0">
                         <button
                           type="button"
-                          onClick={() => startEdit(g)}
-                          className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition"
-                          title="Edit"
-                          aria-label="Edit"
+                          onClick={saveEdit}
+                          disabled={saving || !draft.name.trim()}
+                          className="text-sm text-brand-600 hover:underline disabled:opacity-50"
                         >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                          </svg>
+                          Save
                         </button>
                         <button
                           type="button"
-                          onClick={() => setConfirmDeleteId(g.id)}
-                          className="p-1.5 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
-                          title="Delete"
-                          aria-label="Delete"
+                          onClick={cancelEdit}
+                          disabled={saving}
+                          className="text-sm text-ink-muted hover:underline disabled:opacity-50"
                         >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
+                          Cancel
                         </button>
                       </div>
-                    </>
-                  )}
-                </div>
+                    </div>
+                    <div className="grid gap-2 max-w-lg">
+                      <label className="block">
+                        <span className="text-xs text-ink-muted">Base URL</span>
+                        <input
+                          type="url"
+                          className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                          placeholder="https://api.example.com"
+                          value={draft.base_url}
+                          onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
+                          disabled={saving}
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-xs text-ink-muted">API URL (optional, relative to base)</span>
+                        <input
+                          type="text"
+                          className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                          placeholder="/v1/tracking"
+                          value={draft.api_url}
+                          onChange={(e) => setDraft((d) => ({ ...d, api_url: e.target.value }))}
+                          disabled={saving}
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-xs text-ink-muted">Bearer token</span>
+                        <input
+                          type="password"
+                          className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                          placeholder="Token"
+                          value={draft.bearer_token}
+                          onChange={(e) => setDraft((d) => ({ ...d, bearer_token: e.target.value }))}
+                          disabled={saving}
+                          autoComplete="off"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="font-medium text-ink">{g.name}</span>
+                      {g.base_url ? (
+                        <p className="text-xs text-ink-muted truncate mt-0.5" title={g.base_url}>
+                          {g.base_url}
+                          {g.api_url ? g.api_url : ''}
+                          {g.bearer_token ? ' · token set' : ''}
+                        </p>
+                      ) : g.bearer_token ? (
+                        <p className="text-xs text-ink-muted mt-0.5">Token set</p>
+                      ) : null}
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => startEdit(g)}
+                        className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition"
+                        title="Edit"
+                        aria-label="Edit"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(g.id)}
+                        className="p-1.5 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
+                        title="Delete"
+                        aria-label="Delete"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <AliasEditor
                   group={g}
                   onChange={(updated) => setGroups((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))}

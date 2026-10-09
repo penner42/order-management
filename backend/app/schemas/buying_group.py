@@ -2,9 +2,21 @@
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
+def _normalize_optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 class BuyingGroupBase(BaseModel):
     name: str
     aliases: list[str] = []
+    base_url: str | None = None
+    api_url: str | None = None
+    bearer_token: str | None = None
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -28,6 +40,11 @@ class BuyingGroupBase(BaseModel):
             normalized.append(alias)
         return normalized
 
+    @field_validator("base_url", "api_url", "bearer_token", mode="before")
+    @classmethod
+    def normalize_optional_str(cls, value: object) -> str | None:
+        return _normalize_optional_str(value)
+
 
 class BuyingGroupCreate(BuyingGroupBase):
     user_id: int | None = None
@@ -36,6 +53,9 @@ class BuyingGroupCreate(BuyingGroupBase):
 class BuyingGroupUpdate(BaseModel):
     name: str | None = None
     aliases: list[str] | None = None
+    base_url: str | None = None
+    api_url: str | None = None
+    bearer_token: str | None = None
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -44,9 +64,25 @@ class BuyingGroupUpdate(BaseModel):
             return None
         return BuyingGroupBase.normalize_aliases(value)
 
+    @field_validator("base_url", "api_url", "bearer_token", mode="before")
+    @classmethod
+    def normalize_optional_str(cls, value: object) -> str | None:
+        return _normalize_optional_str(value)
+
 
 class BuyingGroupRead(BuyingGroupBase):
     id: int
     user_id: int | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BuyingGroupSummary(BaseModel):
+    """Nested on orders/payments — omits API credentials."""
+
+    id: int
+    user_id: int | None = None
+    name: str
+    aliases: list[str] = []
 
     model_config = ConfigDict(from_attributes=True)
