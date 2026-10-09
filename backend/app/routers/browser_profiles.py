@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session, joinedload
@@ -22,9 +23,19 @@ from app.browser_automation.session_manager import (
 )
 from app.browser_automation.walmart_import import run_walmart_import
 from app.database import SessionLocal, get_db
-from app.models import BrowserProfile, Item, Order, ShipmentItem, StoreAccount, User
+from app.models import (
+    BrowserImportLog,
+    BrowserProfile,
+    Item,
+    Order,
+    Shipment,
+    ShipmentItem,
+    StoreAccount,
+    User,
+)
 from app.models.user import get_default_app_user_id
 from app.schemas.browser_profile import (
+    BrowserImportLogRead,
     BrowserJobRead,
     BrowserProfileCreate,
     BrowserProfileRead,
@@ -108,6 +119,106 @@ def _apply_user(db: Session) -> User:
     raise RuntimeError("No user available to apply imported orders.")
 
 
+def _order_tracking_numbers(db: Session, store_order_number: str) -> tuple[int | None, set[str]]:
+    """Return (order_id, tracking numbers) for a store order number, if present."""
+    order = (
+        db.query(Order)
+        .filter(Order.store_order_number == store_order_number)
+        .first()
+    )
+    if not order:
+        return None, set()
+    rows = (
+        db.query(Shipment.tracking_number)
+        .join(ShipmentItem, ShipmentItem.shipment_id == Shipment.id)
+        .join(Item, Item.id == ShipmentItem.item_id)
+        .filter(Item.order_id == order.id)
+        .all()
+    )
+    tracking = {
+        t.strip()
+        for (t,) in rows
+        if isinstance(t, str) and t.strip()
+    }
+    return order.id, tracking
+
+
+def _external_order_id_from_payload(payload: StoreOrderImportPayload) -> str | None:
+    ext = payload.externalOrder or {}
+    raw = str(ext.get("id") or "").strip()
+    return raw or None
+
+
+def _log_auto_apply_result(
+    db: Session,
+    *,
+    profile: BrowserProfile,
+    job_id: str,
+    mode: str,
+    scheduled: bool,
+    store_order_number: str,
+    existed_before: bool,
+    tracking_before: set[str],
+    order_id: int,
+    tracking_after: set[str],
+) -> None:
+    """Persist a log row when an order is created or gains tracking numbers."""
+    added_tracking = sorted(tracking_after - tracking_before)
+    if existed_before and not added_tracking:
+        return
+    event_type = "tracking_updated" if existed_before else "order_imported"
+    # For new orders, include all tracking present at import time.
+    tracking_for_log = added_tracking if existed_before else sorted(tracking_after)
+    account = profile.store_account
+    store = account.store if account else None
+    db.add(
+        BrowserImportLog(
+            browser_profile_id=profile.id,
+            job_id=job_id,
+            event_type=event_type,
+            mode=mode,
+            scheduled=scheduled,
+            retailer=profile.retailer,
+            store_order_number=store_order_number,
+            order_id=order_id,
+            tracking_numbers=json.dumps(tracking_for_log) if tracking_for_log else None,
+            store_name=store.name if store else None,
+            store_account_name=account.name if account else None,
+        )
+    )
+
+
+def _parse_tracking_numbers(raw: str | None) -> list[str]:
+    if not raw or not raw.strip():
+        return []
+    text = raw.strip()
+    try:
+        parsed: Any = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(t).strip() for t in parsed if str(t).strip()]
+    except json.JSONDecodeError:
+        pass
+    return [t.strip() for t in text.split(",") if t.strip()]
+
+
+def _import_log_read(row: BrowserImportLog) -> BrowserImportLogRead:
+    tracking = _parse_tracking_numbers(row.tracking_numbers)
+    return BrowserImportLogRead(
+        id=row.id,
+        browser_profile_id=row.browser_profile_id,
+        job_id=row.job_id,
+        event_type=row.event_type,
+        mode=row.mode,
+        scheduled=bool(row.scheduled),
+        retailer=row.retailer,
+        store_order_number=row.store_order_number,
+        tracking_numbers=tracking,
+        store_name=row.store_name,
+        store_account_name=row.store_account_name,
+        created_at=row.created_at,
+    )
+
+
 def _get_profile_or_404(db: Session, profile_id: int) -> BrowserProfile:
     profile = (
         db.query(BrowserProfile)
@@ -132,6 +243,27 @@ def list_browser_profiles(
         .all()
     )
     return [_profile_read(p) for p in rows]
+
+
+@router.get("/import-logs", response_model=list[BrowserImportLogRead])
+def list_browser_import_logs(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    limit: int = Query(default=200, ge=1, le=1000),
+    event_type: str | None = Query(default=None),
+    scheduled_only: bool = Query(default=False),
+    profile_id: int | None = Query(default=None),
+):
+    """Recent auto-apply outcomes from browser automation (imports + tracking updates)."""
+    q = db.query(BrowserImportLog)
+    if event_type in ("order_imported", "tracking_updated"):
+        q = q.filter(BrowserImportLog.event_type == event_type)
+    if scheduled_only:
+        q = q.filter(BrowserImportLog.scheduled.is_(True))
+    if profile_id is not None:
+        q = q.filter(BrowserImportLog.browser_profile_id == profile_id)
+    rows = q.order_by(BrowserImportLog.created_at.desc(), BrowserImportLog.id.desc()).limit(limit).all()
+    return [_import_log_read(r) for r in rows]
 
 
 @router.post("", response_model=BrowserProfileRead)
@@ -577,7 +709,6 @@ async def _run_import_job(
     scheduled: bool,
     store_account_id: int,
 ) -> None:
-    _ = scheduled
     label = retailer.capitalize()
     mode_label = "full check" if mode == "full" else "unshipped check"
     update_job(job_id, status="running", message=f"Starting {label} {mode_label}…")
@@ -588,7 +719,12 @@ async def _run_import_job(
     finished_ok = False
     db = SessionLocal()
     try:
-        profile = db.query(BrowserProfile).filter(BrowserProfile.id == profile_id).first()
+        profile = (
+            db.query(BrowserProfile)
+            .options(joinedload(BrowserProfile.store_account).joinedload(StoreAccount.store))
+            .filter(BrowserProfile.id == profile_id)
+            .first()
+        )
         if not profile:
             update_job(job_id, status="failed", error="Profile not found.")
             return
@@ -664,13 +800,35 @@ async def _run_import_job(
                 for raw in orders:
                     try:
                         payload = StoreOrderImportPayload.model_validate(raw)
-                        apply_store_order_payload(
+                        store_order_number = _external_order_id_from_payload(payload)
+                        existed_before = False
+                        tracking_before: set[str] = set()
+                        if store_order_number:
+                            prior_id, tracking_before = _order_tracking_numbers(
+                                db, store_order_number
+                            )
+                            existed_before = prior_id is not None
+                        order_id = apply_store_order_payload(
                             db,
                             payload,
                             apply_user,
                             store_account_id=store_account_id,
                             commit=False,
                         )
+                        if store_order_number:
+                            _, tracking_after = _order_tracking_numbers(db, store_order_number)
+                            _log_auto_apply_result(
+                                db,
+                                profile=profile,
+                                job_id=job_id,
+                                mode=mode,
+                                scheduled=scheduled,
+                                store_order_number=store_order_number,
+                                existed_before=existed_before,
+                                tracking_before=tracking_before,
+                                order_id=order_id,
+                                tracking_after=tracking_after,
+                            )
                         applied += 1
                     except Exception as exc:
                         logger.warning("Auto-apply failed for captured order: %s", exc)

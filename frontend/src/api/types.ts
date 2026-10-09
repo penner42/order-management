@@ -265,3 +265,20 @@ export interface BrowserJob {
   order_count?: number | null
   error?: string | null
 }
+
+export type BrowserImportLogEvent = 'order_imported' | 'tracking_updated'
+
+export interface BrowserImportLog {
+  id: number
+  browser_profile_id: number | null
+  job_id: string | null
+  event_type: BrowserImportLogEvent | string
+  mode: 'full' | 'unshipped' | string
+  scheduled: boolean
+  retailer: string
+  store_order_number: string
+  tracking_numbers: string[]
+  store_name: string | null
+  store_account_name: string | null
+  created_at: string | null
+}

@@ -21,6 +21,7 @@ import Reports from './pages/Reports'
 import BrowserExtension from './pages/BrowserExtension'
 import Settings from './pages/Settings'
 import BrowserAutomation from './pages/BrowserAutomation'
+import BrowserImportLog from './pages/BrowserImportLog'
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -91,6 +92,7 @@ function AppShell() {
       { to: '/imported-orders', label: 'Imported Orders' },
       { to: '/extension', label: 'Extension' },
       { to: '/browser-automation', label: 'Browser automation' },
+      { to: '/browser-import-log', label: 'Import log' },
       { to: '/settings', label: 'Settings' },
     ]
   }, [user])
@@ -245,6 +247,7 @@ function AppShell() {
           <Route path="/portals" element={<Portals />} />
           <Route path="/extension" element={<BrowserExtension />} />
           <Route path="/browser-automation" element={<BrowserAutomation />} />
+          <Route path="/browser-import-log" element={<BrowserImportLog />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/settings" element={<Settings />} />
           {user.role === 'admin' && <Route path="/admin" element={<Admin />} />}

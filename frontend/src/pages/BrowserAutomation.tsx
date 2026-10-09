@@ -822,7 +822,15 @@ export default function BrowserAutomation() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-ink dark:text-gray-100 mb-2">Browser automation</h1>
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-2">
+        <h1 className="text-2xl font-semibold text-ink dark:text-gray-100">Browser automation</h1>
+        <Link
+          to="/browser-import-log"
+          className="text-sm text-brand-600 dark:text-brand-400 hover:underline"
+        >
+          View import log
+        </Link>
+      </div>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
         Run a Camoufox (anti-detect Firefox) session on the server for each store account. Log in once
         in the embedded view (MFA supported); then import orders or schedule automatic checks. Full

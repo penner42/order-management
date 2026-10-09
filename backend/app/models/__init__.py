@@ -11,6 +11,7 @@ from app.models.shipment import Shipment, ShipmentItem
 from app.models.payment import Payment, PaymentLineItem
 from app.models.portal import Portal
 from app.models.browser_profile import BrowserProfile
+from app.models.browser_import_log import BrowserImportLog
 
 __all__ = [
     "User",
@@ -29,4 +30,5 @@ __all__ = [
     "PaymentLineItem",
     "Portal",
     "BrowserProfile",
+    "BrowserImportLog",
 ]

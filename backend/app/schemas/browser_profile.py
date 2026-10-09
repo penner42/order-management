@@ -88,3 +88,23 @@ class BrowserJobRead(BaseModel):
     token: str | None = None
     order_count: int | None = None
     error: str | None = None
+
+
+BrowserImportLogEvent = Literal["order_imported", "tracking_updated"]
+
+
+class BrowserImportLogRead(BaseModel):
+    id: int
+    browser_profile_id: int | None = None
+    job_id: str | None = None
+    event_type: BrowserImportLogEvent | str
+    mode: ImportMode | str
+    scheduled: bool
+    retailer: str
+    store_order_number: str
+    tracking_numbers: list[str] = []
+    store_name: str | None = None
+    store_account_name: str | None = None
+    created_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
