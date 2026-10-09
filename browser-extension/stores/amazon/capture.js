@@ -41,7 +41,16 @@
         }
       })
       const cachedContainer = cachedRow && cachedRow.cookieStoreId ? String(cachedRow.cookieStoreId) : 'default'
-      if (cachedRow && cachedRow.email && cachedRow.origin === origin && cachedContainer === cookieStoreId) {
+      const dCheck = dom()
+      const cachedEmailOk =
+        cachedRow &&
+        cachedRow.email &&
+        cachedRow.origin === origin &&
+        cachedContainer === cookieStoreId &&
+        (!dCheck ||
+          typeof dCheck.isPlausibleAccountEmail !== 'function' ||
+          dCheck.isPlausibleAccountEmail(cachedRow.email))
+      if (cachedEmailOk) {
         return cachedRow.email
       }
     }
@@ -51,7 +60,10 @@
     const email = await d.fetchAccountEmail(origin, {
       allowSlowLookup: !!opts.allowSlowLookup,
     })
-    if (email) {
+    if (
+      email &&
+      (typeof d.isPlausibleAccountEmail !== 'function' || d.isPlausibleAccountEmail(email))
+    ) {
       await new Promise((resolve) => {
         chrome.storage.local.set(
           {
@@ -100,6 +112,13 @@
 
     if (!pageAlreadyReady) {
       await d.waitForOrderDetailReady(35000)
+    }
+    if (typeof d.waitForPaymentMethodsInDocument === 'function') {
+      try {
+        await d.waitForPaymentMethodsInDocument(document, 10000)
+      } catch {
+        // optional enrichment
+      }
     }
     const parsed = d.parseOrderDetailPage()
 
@@ -221,6 +240,14 @@
 
             if (typeof d.waitForOrderDetailReadyInDocument === 'function') {
               await d.waitForOrderDetailReadyInDocument(frameDoc, frameUrl, 35000)
+            }
+            // Amazon Business payment instruments often hydrate after address/totals.
+            if (typeof d.waitForPaymentMethodsInDocument === 'function') {
+              try {
+                await d.waitForPaymentMethodsInDocument(frameDoc, 10000)
+              } catch {
+                // optional enrichment
+              }
             }
 
             const parsed = d.parseOrderDetailPage(frameDoc, frameUrl)

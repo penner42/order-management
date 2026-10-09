@@ -1169,6 +1169,18 @@ async function clearAmazonDetailStorage() {
   });
 }
 
+function isPlausibleCachedAmazonEmail(email) {
+  const am = globalThis.OrderManagerAmazon;
+  if (am && typeof am.isPlausibleAccountEmail === "function") {
+    return am.isPlausibleAccountEmail(email);
+  }
+  const value = String(email || "").trim();
+  if (!value || value.indexOf("@") < 0) return false;
+  const domain = value.toLowerCase().split("@")[1] || "";
+  if (!domain || /service|naecp|\.prod\./i.test(domain)) return false;
+  return true;
+}
+
 async function getAmazonAccountEmailAsync(cookieStoreId) {
   const containerKey = cookieStoreId ? String(cookieStoreId) : "default";
   return await new Promise((resolve) => {
@@ -1179,13 +1191,18 @@ async function getAmazonAccountEmailAsync(cookieStoreId) {
           resolve(null);
           return;
         }
+        const email = String(row.email).trim() || null;
+        if (!email || !isPlausibleCachedAmazonEmail(email)) {
+          resolve(null);
+          return;
+        }
         const rowContainer = row.cookieStoreId ? String(row.cookieStoreId) : "default";
         if (rowContainer === containerKey) {
-          resolve(String(row.email).trim() || null);
+          resolve(email);
           return;
         }
         // Same-origin fallback when container-specific cache is unavailable.
-        resolve(String(row.email).trim() || null);
+        resolve(email);
       });
     } catch {
       resolve(null);
@@ -2679,13 +2696,20 @@ function attachAmazonBulkPortHandlers(port) {
     port.postMessage({ type: "jobStarted" });
 
     try {
-      await sendAmazonTabMessage(msg.sourceTabId, {
+      const emailResp = await sendAmazonTabMessage(msg.sourceTabId, {
         store: "amazon",
         type: "amazonFetchAccountEmail",
         cookieStoreId: cookieStoreId || "default",
-        allowSlowLookup: false,
+        allowSlowLookup: true,
+        forceRefresh: true,
       });
-      let accountEmail = await getAmazonAccountEmailAsync(cookieStoreId);
+      let accountEmail =
+        emailResp && emailResp.success === true && emailResp.email
+          ? String(emailResp.email).trim()
+          : null;
+      if (!accountEmail || !isPlausibleCachedAmazonEmail(accountEmail)) {
+        accountEmail = await getAmazonAccountEmailAsync(cookieStoreId);
+      }
 
       const sourceOrigin = (() => {
         try {

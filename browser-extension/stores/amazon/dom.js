@@ -673,16 +673,37 @@
     }
   }
 
+  function isPlausibleShippingAddress(addr) {
+    if (!addr || typeof addr !== 'object') return false
+    if (!addr.fullName && !addr.addressLine1) return false
+    if (addr.postalCode && /^\d{5}(?:-\d{4})?$/.test(String(addr.postalCode))) return true
+    const blob = [addr.fullName, addr.addressLine1, addr.addressLine2, addr.city, addr.state, addr.postalCode]
+      .filter(Boolean)
+      .join(' ')
+    if (/,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(blob)) return true
+    // Obfuscated CSD text often looks like "…, ID UXANF" (fake state + non-digit zip).
+    if (/,\s*[A-Z]{2}\s+[A-Z]{3,}\b/.test(blob)) return false
+    // Street line with digit/letter swaps and no ZIP is usually still encrypted.
+    if (addr.addressLine1 && !addr.postalCode && !addr.city) return false
+    return !!(addr.city && addr.state)
+  }
+
   function resolveShippingAddress(root) {
-    let addr = parseAddressFromHorizonteComponent(root)
-    if (addr && (addr.fullName || addr.addressLine1)) return addr
-    addr = parseAddressRoot(root)
-    if (addr && (addr.fullName || addr.addressLine1)) return addr
-    addr = parseAddressFromPopover(root)
-    if (addr) return addr
-    addr = parseAddressFromShipToScript(root)
-    if (addr) return addr
-    return parseAddressFromRecipientText(root)
+    const candidates = [
+      parseAddressFromPopover(root),
+      parseAddressFromShipToScript(root),
+      parseAddressFromHorizonteComponent(root),
+      parseAddressRoot(root),
+      parseAddressFromRecipientText(root),
+    ]
+    let fallback = null
+    for (let i = 0; i < candidates.length; i++) {
+      const addr = candidates[i]
+      if (!addr || !(addr.fullName || addr.addressLine1)) continue
+      if (isPlausibleShippingAddress(addr)) return addr
+      if (!fallback) fallback = addr
+    }
+    return fallback
   }
 
   function parseItemQuantityFromText(text) {
@@ -1326,26 +1347,143 @@
   }
 
   function parsePaymentMethods(root) {
+    if (!root || !root.querySelectorAll) return []
     const sel = getSelectors()
     const methods = []
-    root.querySelectorAll(sel.PAYMENT_LOGO.join(',')).forEach((img) => {
+    const seen = {}
+
+    function addMethod(description, last4, cardType) {
+      const desc = coerceString(description)
+      const digits = coerceString(last4)
+      let normalizedLast4 = null
+      if (digits) {
+        const onlyDigits = digits.replace(/\D/g, '')
+        if (onlyDigits.length >= 4) normalizedLast4 = onlyDigits.slice(-4)
+        else if (/^\d{3,4}$/.test(onlyDigits)) normalizedLast4 = onlyDigits
+      }
+      if (!desc && !normalizedLast4) return
+      const key = (normalizedLast4 || '') + '|' + (desc || '')
+      if (seen[key]) return
+      seen[key] = true
+      methods.push({
+        description: desc,
+        cardType: coerceString(cardType) || desc,
+        last4: normalizedLast4,
+      })
+    }
+
+    function last4FromText(text) {
+      const s = coerceString(text) || ''
+      if (!s) return null
+      const ending = /(?:ending\s+in|ends?\s+in|••••|···|\*{4}|•{4}|\u2022{4})\s*(\d{3,4})\b/i.exec(s)
+      if (ending) return ending[1]
+      const bare = /^\s*(\d{3,4})\s*$/.exec(s)
+      if (bare) return bare[1]
+      const brand = /(?:visa|mastercard|master\s*card|amex|american\s*express|discover|amazon\s*(?:store\s*)?card|chase|debit|credit|business)\s*[^\d]{0,16}(\d{3,4})\b/i.exec(
+        s
+      )
+      if (brand) return brand[1]
+      return null
+    }
+
+    function accessibleTextOf(el) {
+      if (!el) return null
+      // Prefer screen-reader / offscreen cleartext — Amazon Business CSD often
+      // leaves visible glyphs remapped while a-offscreen / aria stays real.
+      const offscreen = el.querySelector && el.querySelector('.a-offscreen, .aok-offscreen')
+      const fromOffscreen = offscreen ? textOf(offscreen) : null
+      if (fromOffscreen) return fromOffscreen
+      const aria =
+        coerceString(el.getAttribute && el.getAttribute('aria-label')) ||
+        coerceString(el.getAttribute && el.getAttribute('title'))
+      if (aria) return aria
+      const labelledBy = el.getAttribute && el.getAttribute('aria-labelledby')
+      if (labelledBy && el.ownerDocument) {
+        const parts = String(labelledBy)
+          .split(/\s+/)
+          .map((id) => {
+            const node = el.ownerDocument.getElementById(id)
+            return node ? textOf(node) : null
+          })
+          .filter(Boolean)
+        if (parts.length) return parts.join(' ')
+      }
+      return textOf(el)
+    }
+
+    // Amazon Business / modern OD: dedicated instrument name + number test ids.
+    const nameSelectors = (sel.PAYMENT_INSTRUMENT_NAME && sel.PAYMENT_INSTRUMENT_NAME.length
+      ? sel.PAYMENT_INSTRUMENT_NAME
+      : ['[data-testid="payment-instrument-name"]']
+    ).join(',')
+    const numberSelectors = (sel.PAYMENT_INSTRUMENT_NUMBER && sel.PAYMENT_INSTRUMENT_NUMBER.length
+      ? sel.PAYMENT_INSTRUMENT_NUMBER
+      : ['[data-testid="payment-instrument-number"]']
+    ).join(',')
+    const nameEls = root.querySelectorAll(nameSelectors)
+    const numberEls = root.querySelectorAll(numberSelectors)
+    if (nameEls.length || numberEls.length) {
+      const count = Math.max(nameEls.length, numberEls.length)
+      for (let i = 0; i < count; i++) {
+        const nameEl = nameEls[i] || null
+        const numberEl = numberEls[i] || null
+        const nameText = accessibleTextOf(nameEl)
+        const numberText = accessibleTextOf(numberEl)
+        const last4 = last4FromText(numberText) || last4FromText(nameText)
+        addMethod(nameText || (last4 ? 'Card ending in ' + last4 : null), last4, nameText)
+      }
+    }
+
+    const logoSelectors = (sel.PAYMENT_LOGO && sel.PAYMENT_LOGO.length
+      ? sel.PAYMENT_LOGO
+      : ['img.pmts-payment-credit-card-instrument-logo']
+    ).join(',')
+    root.querySelectorAll(logoSelectors).forEach((img) => {
       const alt = coerceString(img.getAttribute('alt'))
       let last4 = null
       let parent = img.parentElement
-      for (let i = 0; i < 3 && parent; i++) {
-        const m = /\b(\d{4})\b/.exec(textOf(parent))
-        if (m) {
-          last4 = m[1]
+      for (let i = 0; i < 5 && parent; i++) {
+        const fromParent = last4FromText(textOf(parent)) || (/\b(\d{4})\b/.exec(textOf(parent)) || [])[1]
+        if (fromParent) {
+          last4 = fromParent
           break
         }
         parent = parent.parentElement
       }
-      methods.push({
-        description: alt,
-        cardType: alt,
-        last4,
-      })
+      addMethod(alt, last4, alt)
     })
+
+    const payRootSelectors = (sel.PAYMENT_ROOT && sel.PAYMENT_ROOT.length
+      ? sel.PAYMENT_ROOT
+      : ['[data-component="paymentMethod"]', '.pmts-instrument-details']
+    ).join(',')
+    root.querySelectorAll(payRootSelectors).forEach((el) => {
+      const text = textOf(el)
+      const last4 = last4FromText(text)
+      if (!last4 && methods.length > 0) return
+      let description = null
+      const brand = text.match(
+        /\b(Visa|MasterCard|Mastercard|Amex|American Express|Discover|Amazon(?: Store| Business)? Card|Chase|Debit|Credit Card|Pay by Invoice|Invoice)\b/i
+      )
+      if (brand) description = brand[1]
+      else if (last4) description = 'Card ending in ' + last4
+      addMethod(description, last4, description)
+    })
+
+    if (methods.length === 0) {
+      const bodyText = textOf(root)
+      const globalEnding = /(?:ending\s+in|ends?\s+in)\s*(\d{3,4})\b/gi
+      let match
+      while ((match = globalEnding.exec(bodyText)) !== null) {
+        const idx = match.index
+        const slice = bodyText.slice(Math.max(0, idx - 40), idx + match[0].length)
+        const brand = slice.match(
+          /\b(Visa|MasterCard|Mastercard|Amex|American Express|Discover|Amazon(?: Store| Business)? Card|Chase)\b/i
+        )
+        addMethod(brand ? brand[1] : 'Card ending in ' + match[1], match[1], brand ? brand[1] : null)
+      }
+    }
+
     return methods
   }
 
@@ -1750,24 +1888,27 @@
     if (!doc) return false
     if (hasPendingCsdEncryption(doc)) return false
 
+    const root = doc.body || doc.documentElement
+    const paymentsReady = parsePaymentMethods(root).length > 0
+    const addressReady = isPlausibleShippingAddress(resolveShippingAddress(root))
+
     if (hasProductLinks(doc)) {
       const urlOrderId = extractOrderIdFromUrl(pageUrl || '')
-      if (urlOrderId && ORDER_ID_RE.test(urlOrderId)) return true
+      // Product links alone can appear before CSD finishes decrypting address/payment.
+      if (urlOrderId && ORDER_ID_RE.test(urlOrderId) && (addressReady || paymentsReady)) {
+        return true
+      }
     }
 
     const parsed = parseOrderDetailPage(doc, pageUrl)
     if (!parsed || !parsed.orderId) return false
 
+    if (addressReady || paymentsReady) return true
+
     if (parsed.items && parsed.items.some((it) => (it.name && it.name.length > 3) || it.asin)) {
       return true
     }
     if (parsed.totals && (parsed.totals.grandTotal != null || parsed.totals.subtotal != null)) {
-      return true
-    }
-    if (
-      parsed.shippingAddress &&
-      (parsed.shippingAddress.fullName || parsed.shippingAddress.addressLine1)
-    ) {
       return true
     }
     if (parsed.status && parsed.status.length > 2) return true
@@ -1777,7 +1918,6 @@
     ) {
       return true
     }
-    if (parsePaymentMethods(doc.body || doc.documentElement).length > 0) return true
     return orderIdVisibleInDom(doc)
   }
 
@@ -1851,27 +1991,73 @@
     )
   }
 
+  /** Extra wait for Amazon Business payment widgets that hydrate after address/totals. */
+  function waitForPaymentMethodsInDocument(doc, timeoutMs) {
+    const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 8000
+    const root = doc && (doc.body || doc.documentElement)
+    if (!root) return Promise.resolve(false)
+    if (parsePaymentMethods(root).length > 0) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      let settled = false
+      let observer = null
+      let timer = null
+      const finish = (ok) => {
+        if (settled) return
+        settled = true
+        if (observer) {
+          try {
+            observer.disconnect()
+          } catch {
+            // ignore
+          }
+        }
+        if (timer != null) clearTimeout(timer)
+        resolve(!!ok)
+      }
+      const check = () => {
+        try {
+          if (parsePaymentMethods(root).length > 0) {
+            finish(true)
+            return true
+          }
+        } catch {
+          // ignore
+        }
+        return false
+      }
+      observer = new MutationObserver(() => {
+        check()
+      })
+      observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true })
+      timer = setTimeout(() => finish(false), timeout)
+      check()
+    })
+  }
+
   function isOrderDetailContentReady() {
     if (hasPendingCsdEncryption(document)) return false
 
+    const sel = getSelectors()
+    const root = queryFirst(document, sel.ORDER_DETAILS_ROOT) || document.body
+    const paymentsReady = parsePaymentMethods(root).length > 0
+    const addressReady = isPlausibleShippingAddress(resolveShippingAddress(root))
+
     if (hasProductLinks(document)) {
       const urlOrderId = extractOrderIdFromUrl(window.location.href)
-      if (urlOrderId && ORDER_ID_RE.test(urlOrderId)) return true
+      if (urlOrderId && ORDER_ID_RE.test(urlOrderId) && (addressReady || paymentsReady)) {
+        return true
+      }
     }
 
     const parsed = parseOrderDetailPage()
     if (!parsed || !parsed.orderId) return false
 
+    if (addressReady || paymentsReady) return true
+
     if (parsed.items && parsed.items.some((it) => (it.name && it.name.length > 3) || it.asin)) {
       return true
     }
     if (parsed.totals && (parsed.totals.grandTotal != null || parsed.totals.subtotal != null)) {
-      return true
-    }
-    if (
-      parsed.shippingAddress &&
-      (parsed.shippingAddress.fullName || parsed.shippingAddress.addressLine1)
-    ) {
       return true
     }
     if (parsed.status && parsed.status.length > 2) return true
@@ -1882,10 +2068,7 @@
       return true
     }
 
-    const sel = getSelectors()
-    const root = queryFirst(document, sel.ORDER_DETAILS_ROOT) || document.body
-    if (hasProductLinks(root)) return true
-    if (parsePaymentMethods(root).length > 0) return true
+    if (hasProductLinks(root) && (addressReady || paymentsReady)) return true
 
     if (!orderIdVisibleInDom(document)) return false
 
@@ -1999,13 +2182,10 @@
       if (!ORDER_ID_RE.test(textOf(root))) return false
     }
 
-    const horizonteAddr = parseAddressFromHorizonteComponent(root)
-    if (horizonteAddr && (horizonteAddr.fullName || horizonteAddr.addressLine1)) return true
+    const resolvedAddr = resolveShippingAddress(root)
+    if (isPlausibleShippingAddress(resolvedAddr)) return true
 
-    const addr = parseAddressRoot(root)
-    if (addr && (addr.fullName || addr.addressLine1)) return true
-
-    if (root.querySelector('script[id^="shipToData"]')) return true
+    if (parsePaymentMethods(root).length > 0) return true
 
     const itemContainers = findDetailItemContainers(root)
     for (let i = 0; i < itemContainers.length; i++) {
@@ -2036,6 +2216,50 @@
     return domain === 'amazon.com' || domain.endsWith('.amazon.com')
   }
 
+  /** Reject Amazon page-JSON false positives like user@ConfigurationRecsService.prod.NAECP */
+  function isPlausibleAccountEmail(email) {
+    const normalized = coerceString(email)
+    if (!normalized || !EMAIL_RE.test(normalized)) return false
+    if (isAmazonOwnedEmail(normalized)) return false
+    const domain = normalized.toLowerCase().split('@')[1] || ''
+    if (!domain || domain.indexOf('.') < 0) return false
+    const labels = domain.split('.')
+    const tld = labels[labels.length - 1]
+    const commonTlds = {
+      com: 1,
+      org: 1,
+      net: 1,
+      edu: 1,
+      gov: 1,
+      io: 1,
+      co: 1,
+      me: 1,
+      us: 1,
+      uk: 1,
+      ca: 1,
+      de: 1,
+      fr: 1,
+      au: 1,
+      info: 1,
+      biz: 1,
+      app: 1,
+      dev: 1,
+      email: 1,
+      mail: 1,
+    }
+    if (!commonTlds[tld] && !(tld.length === 2 && /^[a-z]{2}$/.test(tld))) {
+      if (!(tld.length >= 3 && tld.length <= 6 && /[aeiou]/.test(tld))) return false
+    }
+    for (let i = 0; i < labels.length; i++) {
+      const label = labels[i]
+      if (label.length > 24) return false
+      if (/service|internal|amazonaws|naecp|^prod$|^corp$|^stage$|^dev$/.test(label)) {
+        return false
+      }
+    }
+    return true
+  }
+
   function extractEmailsFromText(text) {
     const source = coerceString(text) || ''
     if (!source) return []
@@ -2044,7 +2268,9 @@
     let match
     while ((match = re.exec(source)) !== null) {
       const email = coerceString(match[0])
-      if (email && !results.includes(email)) results.push(email)
+      if (email && isPlausibleAccountEmail(email) && !results.includes(email)) {
+        results.push(email)
+      }
     }
     return results
   }
@@ -2074,7 +2300,7 @@
     for (let si = 0; si < sectionSelectors.length; si++) {
       const section = doc.querySelector(sectionSelectors[si])
       if (!section) continue
-      const emails = extractEmailsFromText(textOf(section)).filter((email) => !isAmazonOwnedEmail(email))
+      const emails = extractEmailsFromText(textOf(section))
       if (emails.length > 0) return emails[0]
     }
 
@@ -2084,7 +2310,7 @@
       if (!/^(e-?mail|email address)$/i.test(label)) continue
       const row = labelNodes[i].closest('.a-row, tr, li, .a-box, .a-section')
       if (!row) continue
-      const emails = extractEmailsFromText(textOf(row)).filter((email) => !isAmazonOwnedEmail(email))
+      const emails = extractEmailsFromText(textOf(row))
       if (emails.length > 0) return emails[0]
     }
 
@@ -2103,19 +2329,29 @@
   function parseEmailFromEmbeddedJson(html) {
     const source = decodeHtmlForEmailSearch(coerceString(html) || '')
     if (!source) return null
+    // Prefer Amazon Business buyer / account fields before generic "email" keys
+    // (generic keys often hit internal service hosts like ConfigurableRecsService.*).
     const patterns = [
-      /"email(?:Address)?"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /"buyingCustomer"\s*:\s*\{[^{}]{0,400}?"email"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /"buyer"\s*:\s*\{[^{}]{0,400}?"email"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /"buyerEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /"buyingCustomerEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
       /"customerEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /"emailAddress"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /"userEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
+      /"accountEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
       /data-email="([^"]+@[^"]+)"/gi,
-      /&quot;email(?:Address)?&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
+      /&quot;buyerEmail&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
       /&quot;customerEmail&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
+      /&quot;emailAddress&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
+      /"email"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
     ]
     for (let pi = 0; pi < patterns.length; pi++) {
       const re = new RegExp(patterns[pi].source, patterns[pi].flags)
       let match
       while ((match = re.exec(source)) !== null) {
         const email = coerceString(match[1])
-        if (email && EMAIL_RE.test(email) && !isAmazonOwnedEmail(email)) return email
+        if (email && isPlausibleAccountEmail(email)) return email
       }
     }
     return null
@@ -2133,9 +2369,7 @@
     for (let i = 0; i < flyoutSelectors.length; i++) {
       const flyout = doc.querySelector(flyoutSelectors[i])
       if (!flyout) continue
-      const emails = extractEmailsFromText(
-        (flyout.innerHTML || '') + ' ' + textOf(flyout)
-      ).filter((email) => !isAmazonOwnedEmail(email))
+      const emails = extractEmailsFromText((flyout.innerHTML || '') + ' ' + textOf(flyout))
       if (emails.length > 0) return emails[0]
     }
     return null
@@ -2155,9 +2389,7 @@
     for (let si = 0; si < selectors.length; si++) {
       const nodes = doc.querySelectorAll(selectors[si])
       for (let ni = 0; ni < nodes.length; ni++) {
-        const emails = extractEmailsFromText(
-          textOf(nodes[ni]) + ' ' + (nodes[ni].innerHTML || '')
-        ).filter((email) => !isAmazonOwnedEmail(email))
+        const emails = extractEmailsFromText(textOf(nodes[ni]) + ' ' + (nodes[ni].innerHTML || ''))
         if (emails.length > 0) return emails[0]
       }
     }
@@ -2166,9 +2398,7 @@
 
   function parseEmailFromLiveDocument(doc) {
     if (!doc || !doc.documentElement) return null
-    const html = doc.documentElement.outerHTML || ''
-    const fromJson = parseEmailFromEmbeddedJson(html)
-    if (fromJson) return fromJson
+    // Prefer visible account UI over embedded page JSON (JSON often has service hosts).
     const fromFlyout = parseEmailFromAccountFlyout(doc)
     if (fromFlyout) return fromFlyout
     const fromCvf = parseEmailFromCvfSwitcher(doc)
@@ -2177,6 +2407,9 @@
     if (fromNav) return fromNav
     const fromSection = parseEmailFromLoginSecuritySection(doc)
     if (fromSection) return fromSection
+    const html = doc.documentElement.outerHTML || ''
+    const fromJson = parseEmailFromEmbeddedJson(html)
+    if (fromJson) return fromJson
     return parseEmailFromAccountHtml(html)
   }
 
@@ -2306,7 +2539,7 @@
         el.getAttribute('data-nav-ref') || '',
         textOf(el),
       ].join(' ')
-      const emails = extractEmailsFromText(blob).filter((email) => !isAmazonOwnedEmail(email))
+      const emails = extractEmailsFromText(blob)
       if (emails.length > 0) return emails[0]
     }
     return null
@@ -2315,14 +2548,6 @@
   function parseEmailFromAccountHtml(html) {
     if (!html) return null
     try {
-      const fromJson = parseEmailFromEmbeddedJson(html)
-      if (fromJson) return fromJson
-
-      const fromRaw = extractEmailsFromText(decodeHtmlForEmailSearch(html)).filter(
-        (email) => !isAmazonOwnedEmail(email)
-      )
-      if (fromRaw.length > 0) return fromRaw[0]
-
       const doc = new DOMParser().parseFromString(html, 'text/html')
       if (isAmazonSignInHtml(doc)) return null
 
@@ -2340,21 +2565,27 @@
       )
       for (let i = 0; i < emailInputs.length; i++) {
         const val = coerceString(emailInputs[i].value)
-        if (val && EMAIL_RE.test(val) && !isAmazonOwnedEmail(val)) return val
+        if (val && isPlausibleAccountEmail(val)) return val
       }
 
       const fromSection = parseEmailFromLoginSecuritySection(doc)
       if (fromSection) return fromSection
 
+      const fromJson = parseEmailFromEmbeddedJson(html)
+      if (fromJson) return fromJson
+
+      const fromRaw = extractEmailsFromText(decodeHtmlForEmailSearch(html))
+      if (fromRaw.length > 0) return fromRaw[0]
+
       const bodyText = doc.body ? doc.body.textContent || '' : html
       const labelMatch = /\bemail\b/i.exec(bodyText)
       if (labelMatch && labelMatch.index >= 0) {
         const slice = bodyText.slice(labelMatch.index, labelMatch.index + 300)
-        const nearbyEmails = extractEmailsFromText(slice).filter((email) => !isAmazonOwnedEmail(email))
+        const nearbyEmails = extractEmailsFromText(slice)
         if (nearbyEmails.length > 0) return nearbyEmails[0]
       }
 
-      const allEmails = extractEmailsFromText(bodyText).filter((email) => !isAmazonOwnedEmail(email))
+      const allEmails = extractEmailsFromText(bodyText)
       return allEmails.length > 0 ? allEmails[0] : null
     } catch {
       return null
@@ -2379,6 +2610,13 @@
       origin + '/ax/account/manage',
       origin + '/gp/css/account/info/view.html',
       origin + '/hz/profilepicker',
+      // Amazon Business account / org profile surfaces
+      origin + '/bb/account',
+      origin + '/ab/manage-organization',
+      origin + '/business/register/org/landing',
+      'https://www.amazon.com/ax/account/manage',
+      'https://www.amazon.com/gp/css/account/info/view.html',
+      'https://business.amazon.com/bb/account',
     ]
 
     for (let ui = 0; ui < accountUrls.length; ui++) {
@@ -2388,19 +2626,29 @@
         if (!resp.ok) continue
         const html = await resp.text()
         const parsed = parseEmailFromAccountHtml(html)
-        if (parsed) return parsed
+        if (parsed) {
+          return parsed
+        }
       } catch {
         // try next URL
       }
     }
 
     if (allowSlowLookup) {
-      const iframeUrl = origin + '/ax/account/manage'
-      try {
-        const parsed = await fetchAccountEmailFromIframe(iframeUrl, 8000)
-        if (parsed) return parsed
-      } catch {
-        // ignore
+      const iframeCandidates = [
+        origin + '/ax/account/manage',
+        origin + '/gp/css/account/info/view.html',
+        origin + '/bb/account',
+      ]
+      for (let ii = 0; ii < iframeCandidates.length; ii++) {
+        try {
+          const parsed = await fetchAccountEmailFromIframe(iframeCandidates[ii], 10000)
+          if (parsed) {
+            return parsed
+          }
+        } catch {
+          // try next
+        }
       }
     }
 
@@ -2421,6 +2669,7 @@
     waitForParseableOrderList,
     waitForOrderDetailReady,
     waitForOrderDetailReadyInDocument,
+    waitForPaymentMethodsInDocument,
     isOrderDetailContentReady,
     isOrderDetailContentReadyInDocument,
     diagnoseOrderDetailContentReady,
@@ -2429,6 +2678,8 @@
     parseEmailFromEmbeddedJson,
     parseEmailFromNavAccount,
     parseEmailFromLiveDocument,
+    isPlausibleAccountEmail,
+    isPlausibleShippingAddress,
     fetchAccountEmailFromIframe,
     extractOrderIdFromUrl,
     enrichShipmentsWithTracking,

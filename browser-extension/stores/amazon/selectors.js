@@ -129,7 +129,36 @@
       '[data-component="shippingAddress"] ul li .a-list-item',
       '[data-component="shippingAddress"] ul li span',
     ],
-    PAYMENT_LOGO: ['img.pmts-payment-credit-card-instrument-logo'],
+    // Amazon Business / modern React order details prefer data-testid instruments.
+    PAYMENT_INSTRUMENT_NAME: [
+      '[data-testid="payment-instrument-name"]',
+      '[data-testid="paymentInstrumentName"]',
+    ],
+    PAYMENT_INSTRUMENT_NUMBER: [
+      '[data-testid="payment-instrument-number"]',
+      '[data-testid="paymentInstrumentNumber"]',
+    ],
+    PAYMENT_LOGO: [
+      'img.pmts-payment-credit-card-instrument-logo',
+      'img.pmts-credit-card-instrument-logo',
+      '.pmts-instrument-details img',
+      '.pmts-payments-instrument-details img',
+      '[data-component="paymentMethod"] img',
+      '[data-component="paymentMethods"] img',
+      '[data-component="paymentInformation"] img',
+    ],
+    PAYMENT_ROOT: [
+      '[data-testid="payment-instrument-name"]',
+      '[data-testid="payment-instrument-number"]',
+      '[data-component="paymentMethod"]',
+      '[data-component="paymentMethods"]',
+      '[data-component="paymentInformation"]',
+      '.pmts-instrument-details',
+      '.pmts-payments-instrument-details',
+      '.pmts-payment-instrument',
+      'div.a-box.payment-info',
+      '[class*="payment-info"]',
+    ],
     SUBTOTAL_ROWS: [
       '[data-component="orderSubtotals"] div.a-row',
       'div#od-subtotals div.a-row',

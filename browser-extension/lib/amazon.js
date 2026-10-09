@@ -255,6 +255,52 @@
     }
   }
 
+  /** Shared with DOM capture: reject Amazon JSON false-positive emails. */
+  function isPlausibleAccountEmail(email) {
+    const normalized = coerceString(email)
+    if (!normalized || !/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalized)) {
+      return false
+    }
+    const domain = normalized.toLowerCase().split('@')[1] || ''
+    if (!domain || domain.indexOf('.') < 0) return false
+    if (domain === 'amazon.com' || domain.endsWith('.amazon.com')) return false
+    const labels = domain.split('.')
+    const tld = labels[labels.length - 1]
+    const commonTlds = {
+      com: 1,
+      org: 1,
+      net: 1,
+      edu: 1,
+      gov: 1,
+      io: 1,
+      co: 1,
+      me: 1,
+      us: 1,
+      uk: 1,
+      ca: 1,
+      de: 1,
+      fr: 1,
+      au: 1,
+      info: 1,
+      biz: 1,
+      app: 1,
+      dev: 1,
+      email: 1,
+      mail: 1,
+    }
+    if (!commonTlds[tld] && !(tld.length === 2 && /^[a-z]{2}$/.test(tld))) {
+      if (!(tld.length >= 3 && tld.length <= 6 && /[aeiou]/.test(tld))) return false
+    }
+    for (let i = 0; i < labels.length; i++) {
+      const label = labels[i]
+      if (label.length > 24) return false
+      if (/service|internal|amazonaws|naecp|^prod$|^corp$|^stage$|^dev$/.test(label)) {
+        return false
+      }
+    }
+    return true
+  }
+
   if (typeof globalThis !== 'undefined') {
     globalThis.OrderManagerAmazon = {
       normalizeAmazonOrderPayload,
@@ -264,6 +310,7 @@
       isAmazonPageUrl,
       withDisableCsdParam,
       originFromUrl,
+      isPlausibleAccountEmail,
     }
   }
 })()

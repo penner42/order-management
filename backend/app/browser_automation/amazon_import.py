@@ -56,6 +56,9 @@ async def _parse_detail_page(page: Page, *, skip_tracking: bool = False) -> dict
           const d = globalThis.OrderManagerAmazonDom;
           if (!d) throw new Error('Amazon DOM helpers not loaded.');
           await d.waitForOrderDetailReady(35000);
+          if (typeof d.waitForPaymentMethodsInDocument === 'function') {
+            try { await d.waitForPaymentMethodsInDocument(document, 10000); } catch (e) {}
+          }
           const parsed = d.parseOrderDetailPage();
           if (!parsed || !parsed.orderId) throw new Error('Could not parse Amazon order detail page.');
           if (typeof d.repairShipmentTracking === 'function') {
@@ -77,7 +80,7 @@ async def _fetch_account_email(page: Page) -> str | None:
             """async () => {
               const d = globalThis.OrderManagerAmazonDom;
               if (!d || typeof d.fetchAccountEmail !== 'function') return null;
-              return await d.fetchAccountEmail(window.location.origin, { allowSlowLookup: false });
+              return await d.fetchAccountEmail(window.location.origin, { allowSlowLookup: true });
             }"""
         )
     except Exception as exc:

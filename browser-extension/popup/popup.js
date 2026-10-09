@@ -1022,7 +1022,14 @@ function renderOrderDetails(payload, resultsEl) {
           });
         }
 
-        function readCachedAccountEmail() {
+        function isPlausiblePopupEmail(candidate) {
+          const am = globalThis.OrderManagerAmazon;
+          if (!candidate) return false;
+          if (!am || typeof am.isPlausibleAccountEmail !== "function") return true;
+          return am.isPlausibleAccountEmail(candidate);
+        }
+
+        function resolveAccountEmailThenOpen() {
           const tabCookieStoreId = tab && tab.cookieStoreId ? String(tab.cookieStoreId) : "default";
           let tabOrigin = null;
           try {
@@ -1030,6 +1037,37 @@ function renderOrderDetails(payload, resultsEl) {
           } catch {
             tabOrigin = null;
           }
+
+          const openWithEmail = (accountEmail) => {
+            normalizeAndOpen(accountEmail || null);
+          };
+
+          const fetchFreshEmail = () => {
+            if (!(tab && typeof tab.id === "number")) {
+              openWithEmail(null);
+              return;
+            }
+            chrome.tabs.sendMessage(
+              tab.id,
+              {
+                store: "amazon",
+                type: "amazonFetchAccountEmail",
+                cookieStoreId: tabCookieStoreId,
+                allowSlowLookup: true,
+                forceRefresh: true,
+              },
+              (resp) => {
+                if (chrome.runtime && chrome.runtime.lastError) {
+                  openWithEmail(null);
+                  return;
+                }
+                const fetched =
+                  resp && resp.success === true && resp.email ? String(resp.email).trim() : null;
+                openWithEmail(isPlausiblePopupEmail(fetched) ? fetched : null);
+              }
+            );
+          };
+
           chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (emailData) => {
             const emailRow =
               emailData && emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
@@ -1039,30 +1077,24 @@ function renderOrderDetails(payload, resultsEl) {
             if (emailRow && emailRow.email) {
               const cachedContainer =
                 emailRow.cookieStoreId ? String(emailRow.cookieStoreId) : "default";
-              if (cachedContainer === tabCookieStoreId) {
-                accountEmail = String(emailRow.email);
-              } else if (tabOrigin && emailRow.origin === tabOrigin) {
-                accountEmail = String(emailRow.email);
+              const candidate = String(emailRow.email);
+              if (isPlausiblePopupEmail(candidate)) {
+                if (cachedContainer === tabCookieStoreId) {
+                  accountEmail = candidate;
+                } else if (tabOrigin && emailRow.origin === tabOrigin) {
+                  accountEmail = candidate;
+                }
               }
             }
-            normalizeAndOpen(accountEmail);
+            if (accountEmail) {
+              openWithEmail(accountEmail);
+              return;
+            }
+            fetchFreshEmail();
           });
         }
 
-        readCachedAccountEmail();
-
-        if (tab && typeof tab.id === "number") {
-          chrome.tabs.sendMessage(
-            tab.id,
-            {
-              store: "amazon",
-              type: "amazonFetchAccountEmail",
-              cookieStoreId: tab.cookieStoreId ? String(tab.cookieStoreId) : "default",
-              allowSlowLookup: false,
-            },
-            () => {}
-          );
-        }
+        resolveAccountEmailThenOpen();
       }
 
       function requestParsedOrder(pageUrl) {
