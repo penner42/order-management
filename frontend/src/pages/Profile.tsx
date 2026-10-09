@@ -58,6 +58,7 @@ function buildOrdersCsv(orders: Order[], shipments: Shipment[]): string {
     'item_return_sent_at',
     'item_return_received_at',
     'item_return_refunded_at',
+    'item_lost_package_at',
   ]
   const rows: string[][] = [headers]
   for (const order of orders) {
@@ -108,6 +109,7 @@ function buildOrdersCsv(orders: Order[], shipments: Shipment[]): string {
         escapeCsv(item.return_sent_at),
         escapeCsv(item.return_received_at),
         escapeCsv(item.return_refunded_at),
+        escapeCsv(item.lost_package_at),
       ])
     }
   }

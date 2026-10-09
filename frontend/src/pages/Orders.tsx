@@ -61,6 +61,7 @@ const STATUS_LABELS: Record<string, string> = {
   return_sent: 'Return sent',
   return_received: 'Return received',
   return_refunded: 'Refunded',
+  lost_package: 'Lost Package',
 }
 
 const STATUS_PROGRESSION: EffectiveItemStatus[] = [
@@ -105,6 +106,7 @@ function getStatusRowClass(status: string): string {
     case 'return_sent':
     case 'return_received':
     case 'return_refunded':
+    case 'lost_package':
       return 'bg-slate-100/70 dark:bg-slate-800/40'
     default:
       return 'bg-gray-100/80 dark:bg-gray-700/50'
@@ -131,6 +133,7 @@ function getStatusInputClass(status: string): string {
     case 'return_sent':
     case 'return_received':
     case 'return_refunded':
+    case 'lost_package':
       return 'bg-slate-50/90 dark:bg-slate-800/40'
     default:
       return 'bg-gray-50/90 dark:bg-gray-700/50'
@@ -166,12 +169,14 @@ const DEFAULT_STATUSES: EffectiveItemStatus[] = [
   'purchased', 'shipped', 'submitted', 'scanned',
   'payment_requested', 'payment_sent', 'payment_received',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
+  'lost_package',
 ]
 
 /** Item-only statuses (for status dropdown; payment status is on Payment). */
 const ITEM_STATUSES_FOR_EDIT: ItemStatus[] = [
   'purchased', 'shipped', 'submitted', 'scanned', 'canceled',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
+  'lost_package',
 ]
 
 const STATUS_FILTER_OPTIONS: [string, string][] = [
@@ -188,6 +193,7 @@ const STATUS_FILTER_OPTIONS: [string, string][] = [
   ['return_sent', 'Return sent'],
   ['return_received', 'Return received'],
   ['return_refunded', 'Refunded'],
+  ['lost_package', 'Lost Package'],
 ]
 
 function buildOrdersPath(opts: {

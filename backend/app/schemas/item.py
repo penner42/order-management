@@ -26,6 +26,7 @@ class ItemBase(BaseModel):
     return_sent_at: datetime | None = None
     return_received_at: datetime | None = None
     return_refunded_at: datetime | None = None
+    lost_package_at: datetime | None = None
 
 
 class ItemCreate(ItemBase):
@@ -56,6 +57,7 @@ class ItemUpdate(BaseModel):
     return_sent_at: datetime | None = None
     return_received_at: datetime | None = None
     return_refunded_at: datetime | None = None
+    lost_package_at: datetime | None = None
 
 
 class ItemRead(ItemBase, TimestampsMixin):
@@ -100,6 +102,7 @@ class ItemBulkUpdateEntry(BaseModel):
     return_sent_at: datetime | None = None
     return_received_at: datetime | None = None
     return_refunded_at: datetime | None = None
+    lost_package_at: datetime | None = None
 
 
 class ItemBulkUpdateRequest(BaseModel):

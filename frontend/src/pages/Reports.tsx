@@ -17,6 +17,7 @@ const STATUS_FILTER_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'return_sent', label: 'Return sent' },
   { value: 'return_received', label: 'Return received' },
   { value: 'return_refunded', label: 'Refunded' },
+  { value: 'lost_package', label: 'Lost Package' },
 ]
 
 const DEFAULT_STATUSES: EffectiveItemStatus[] = [
@@ -32,6 +33,7 @@ const DEFAULT_STATUSES: EffectiveItemStatus[] = [
   'return_sent',
   'return_received',
   'return_refunded',
+  'lost_package',
 ]
 
 const OPEN_ITEM_STATUSES = new Set<EffectiveItemStatus>([
@@ -45,6 +47,7 @@ const OPEN_ITEM_STATUSES = new Set<EffectiveItemStatus>([
   'return_started',
   'return_sent',
   'return_received',
+  'lost_package',
 ])
 
 function parseDecimal(value: string | null | undefined): number {

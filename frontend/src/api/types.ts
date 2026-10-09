@@ -9,6 +9,7 @@ export type ItemStatus =
   | 'return_sent'
   | 'return_received'
   | 'return_refunded'
+  | 'lost_package'
 
 /** Effective status for display: item status or payment status when item is on a payment. */
 export type EffectiveItemStatus = ItemStatus | 'payment_requested' | 'payment_sent' | 'payment_received'
@@ -116,6 +117,7 @@ export interface Item {
   return_sent_at: string | null
   return_received_at: string | null
   return_refunded_at: string | null
+  lost_package_at: string | null
 }
 
 export type OrderStatus = 'imported' | 'personal'

@@ -86,10 +86,10 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
 def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[str]:
     """Store order numbers for this account that still need tracking.
 
-    An item counts as unshipped when it is not canceled and has no linked
-    shipment with a non-empty tracking number. Amazon (and similar) imports
-    often create placeholder shipments before tracking exists; those orders
-    must still be included in the unshipped refresh.
+    An item counts as unshipped when it is not canceled or lost and has no
+    linked shipment with a non-empty tracking number. Amazon (and similar)
+    imports often create placeholder shipments before tracking exists; those
+    orders must still be included in the unshipped refresh.
 
     Personal orders (ignored shipping zip) are excluded entirely.
     """
@@ -111,7 +111,7 @@ def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[s
         .filter(Order.store_order_number.isnot(None))
         .filter(Order.store_order_number != "")
         .filter(Order.status != "personal")
-        .filter(Item.status != ItemStatus.CANCELED)
+        .filter(Item.status.notin_((ItemStatus.CANCELED, ItemStatus.LOST_PACKAGE)))
         .filter(~has_real_tracking)
         .order_by(Order.id.desc())
         .distinct()

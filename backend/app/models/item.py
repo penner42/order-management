@@ -17,6 +17,7 @@ class ItemStatus(str, enum.Enum):
     RETURN_SENT = "return_sent"
     RETURN_RECEIVED = "return_received"
     RETURN_REFUNDED = "return_refunded"
+    LOST_PACKAGE = "lost_package"
 
 
 def advance_item_to_shipped(item: "Item") -> None:
@@ -63,6 +64,7 @@ class Item(Base):
     return_sent_at = Column(DateTime(timezone=True), nullable=True)
     return_received_at = Column(DateTime(timezone=True), nullable=True)
     return_refunded_at = Column(DateTime(timezone=True), nullable=True)
+    lost_package_at = Column(DateTime(timezone=True), nullable=True)
 
     order = relationship("Order", back_populates="items")
     shipment_items = relationship("ShipmentItem", back_populates="item", cascade="all, delete-orphan")

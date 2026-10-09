@@ -27,6 +27,7 @@ const STATUS_LABELS: Record<string, string> = {
   return_sent: 'Return sent',
   return_received: 'Return received',
   return_refunded: 'Refunded',
+  lost_package: 'Lost Package',
 }
 
 function canMarkScanned(shipment: Shipment): boolean {

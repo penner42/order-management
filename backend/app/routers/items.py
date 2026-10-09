@@ -25,6 +25,7 @@ _ITEM_DATE_FIELDS = frozenset({
     "purchased_at", "submitted_at", "scanned_at",
     "canceled_at", "needs_return_at", "return_started_at",
     "return_sent_at", "return_received_at", "return_refunded_at",
+    "lost_package_at",
 })
 
 # Statuses that are "earlier" than payment_requested; moving item to these removes it from its payment
