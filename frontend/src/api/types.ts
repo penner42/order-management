@@ -272,8 +272,14 @@ export type BrowserImportLogEvent =
   | 'order_imported'
   | 'tracking_updated'
   | 'order_checked'
+  | 'order_skipped_ignored_zip'
   | 'check_started'
   | 'check_finished'
+
+export interface IgnoredZipCode {
+  id: number
+  zip_code: string
+}
 
 export interface BrowserImportLog {
   id: number

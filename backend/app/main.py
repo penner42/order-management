@@ -20,6 +20,7 @@ from app.routers import (
     store_imports,
     browser_extension,
     browser_profiles,
+    ignored_zip_codes,
 )
 from app.admin_bootstrap import ensure_admin_user
 
@@ -80,6 +81,7 @@ app.include_router(portals.router, prefix="/api")
 app.include_router(store_imports.router, prefix="/api")
 app.include_router(browser_extension.router, prefix="/api")
 app.include_router(browser_profiles.router, prefix="/api")
+app.include_router(ignored_zip_codes.router, prefix="/api")
 
 
 @app.get("/")

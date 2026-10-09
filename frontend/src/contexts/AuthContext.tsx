@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { api } from '../api/client'
 import { getStoredToken, setStoredToken } from '../api/client'
+import { migrateLegacyIgnoredZipCodes } from '../utils/ignoredZipCodes'
 
 export interface AuthUser {
   id: number
@@ -32,6 +33,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const me = await api.get<AuthUser>('/auth/me')
       setUser(me)
+      void migrateLegacyIgnoredZipCodes()
     } catch {
       setStoredToken(null)
       setUser(null)
@@ -59,6 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const me = await api.get<AuthUser>('/auth/me')
         setUser(me)
+        void migrateLegacyIgnoredZipCodes()
       } catch {
         setStoredToken(null)
         throw new Error('Failed to load user')

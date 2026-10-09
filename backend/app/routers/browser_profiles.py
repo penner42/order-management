@@ -26,12 +26,17 @@ from app.database import SessionLocal, get_db
 from app.models import (
     BrowserImportLog,
     BrowserProfile,
+    IgnoredZipCode,
     Item,
     Order,
     Shipment,
     ShipmentItem,
     StoreAccount,
     User,
+)
+from app.utils.ignored_zip_codes import (
+    is_ignored_postal_code,
+    shipping_postal_code_from_payload,
 )
 from app.models.item import ItemStatus
 from app.models.user import get_default_app_user_id
@@ -326,6 +331,7 @@ def list_browser_import_logs(
         "order_imported",
         "tracking_updated",
         "order_checked",
+        "order_skipped_ignored_zip",
         "check_started",
         "check_finished",
     ):
@@ -920,10 +926,12 @@ async def _run_import_job(
 
             if auto_apply:
                 apply_user = _apply_user(db)
+                ignored_zips = [row.zip_code for row in db.query(IgnoredZipCode).all()]
                 applied = 0
                 imported = 0
                 tracking_updated = 0
                 checked = 0
+                skipped_ignored_zip = 0
                 errors: list[str] = []
                 for raw in orders:
                     try:
@@ -936,6 +944,22 @@ async def _run_import_job(
                                 db, store_order_number
                             )
                             existed_before = prior_id is not None
+                        postal = shipping_postal_code_from_payload(payload)
+                        if not existed_before and is_ignored_postal_code(postal, ignored_zips):
+                            skipped_ignored_zip += 1
+                            if store_order_number:
+                                _add_import_log(
+                                    db,
+                                    profile=profile,
+                                    job_id=job_id,
+                                    mode=mode,
+                                    scheduled=scheduled,
+                                    level="info",
+                                    event_type="order_skipped_ignored_zip",
+                                    store_order_number=store_order_number,
+                                    message=f"Skipped new order (ignored zip {postal}).",
+                                )
+                            continue
                         order_id = apply_store_order_payload(
                             db,
                             payload,
@@ -982,19 +1006,23 @@ async def _run_import_job(
                     **run_kwargs,
                 )
                 msg = f"Updated {applied} order(s)."
+                if skipped_ignored_zip:
+                    msg += f" Skipped {skipped_ignored_zip} ignored-zip."
                 if errors:
                     msg += f" {len(errors)} failed."
                 update_job(
                     job_id,
-                    status="succeeded" if applied else "failed",
+                    status="succeeded" if (applied or skipped_ignored_zip) else "failed",
                     message=msg,
                     order_count=applied,
-                    error=errors[0] if applied == 0 and errors else None,
+                    error=errors[0] if applied == 0 and not skipped_ignored_zip and errors else None,
                 )
                 summary = (
                     f"Finished: {imported} imported, {tracking_updated} tracking updated, "
                     f"{checked} checked"
                 )
+                if skipped_ignored_zip:
+                    summary += f", {skipped_ignored_zip} skipped (ignored zip)"
                 if errors:
                     summary += f", {len(errors)} failed"
                 summary += "."

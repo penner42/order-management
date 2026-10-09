@@ -12,6 +12,7 @@ from app.models.payment import Payment, PaymentLineItem
 from app.models.portal import Portal
 from app.models.browser_profile import BrowserProfile
 from app.models.browser_import_log import BrowserImportLog
+from app.models.ignored_zip_code import IgnoredZipCode
 
 __all__ = [
     "User",
@@ -31,4 +32,5 @@ __all__ = [
     "Portal",
     "BrowserProfile",
     "BrowserImportLog",
+    "IgnoredZipCode",
 ]

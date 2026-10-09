@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
-import type { BuyingGroup, PaymentMethod, Store, StoreAccount } from '../api/types'
+import type { BuyingGroup, IgnoredZipCode, PaymentMethod, Store, StoreAccount } from '../api/types'
 import { autoMatchBuyingGroupIdForImport } from '../utils/buyingGroupMatch'
 import { matchStoreAccountIdForImport } from '../utils/storeAccountMatch'
 import {
@@ -10,7 +10,7 @@ import {
   getDefaultOrderTotal,
 } from '../utils/importDefaults'
 import { stripIgnoredWalmartImportSlices } from '../utils/stripIgnoredWalmartImport'
-import { getIgnoredZipCodes, isIgnoredPostalCode } from '../utils/ignoredZipCodes'
+import { isIgnoredPostalCode } from '../utils/ignoredZipCodes'
 import { normalizeTrackingForDisplay } from '../utils/walmartTracking'
 
 type NormalizedPayload = any
@@ -329,7 +329,7 @@ function getBulkImportSortGroup(
 function computeBulkImportDisplayOrder(
   payloads: NormalizedPayload[],
   diffs: Record<number, OrderDiff | null>,
-  ignoredZipCodes: string[] = getIgnoredZipCodes()
+  ignoredZipCodes: string[]
 ): number[] {
   const indexed = payloads.map((payload, index) => ({
     index,
@@ -371,6 +371,7 @@ export default function ImportReviewBulk() {
   const [selectedPaymentMethodIdByIndex, setSelectedPaymentMethodIdByIndex] = useState<Record<number, number | null>>({})
   const [itemPayoutsByIndex, setItemPayoutsByIndex] = useState<Record<number, string[]>>({})
   const [displayIndexOrder, setDisplayIndexOrder] = useState<number[] | null>(null)
+  const [ignoredZipCodes, setIgnoredZipCodes] = useState<string[]>([])
 
   useEffect(() => {
     if (!token) {
@@ -414,11 +415,13 @@ export default function ImportReviewBulk() {
           api.get<Store[]>('/stores'),
           api.get<BuyingGroup[]>('/buying-groups'),
           api.get<PaymentMethod[]>('/payment-methods'),
+          api.get<IgnoredZipCode[]>('/ignored-zip-codes'),
           api.post<{ diffs: OrderDiff[] }>('/integrations/stores/orders/diff-bulk', { orders }),
-        ]).then(async ([storesList, groups, methods, diffRes]) => {
+        ]).then(async ([storesList, groups, methods, ignoredZips, diffRes]) => {
           setStores(storesList)
           setBuyingGroups(groups)
           setPaymentMethods(methods)
+          setIgnoredZipCodes(ignoredZips.map((z) => z.zip_code))
           const byStore: Record<number, StoreAccount[]> = {}
           await Promise.all(
             storesList.map((s) =>
@@ -446,8 +449,8 @@ export default function ImportReviewBulk() {
   useEffect(() => {
     if (loading || payloads.length === 0) return
     if (displayIndexOrder != null) return
-    setDisplayIndexOrder(computeBulkImportDisplayOrder(payloads, diffs))
-  }, [loading, payloads.length, diffs, displayIndexOrder])
+    setDisplayIndexOrder(computeBulkImportDisplayOrder(payloads, diffs, ignoredZipCodes))
+  }, [loading, payloads.length, diffs, displayIndexOrder, ignoredZipCodes])
 
   const flattenedPaymentMethods = useMemo(
     () =>
@@ -515,7 +518,6 @@ export default function ImportReviewBulk() {
 
   useEffect(() => {
     if (!payloads || payloads.length === 0) return
-    const ignoredZipCodes = getIgnoredZipCodes()
     setCollapsedByIndex((prev) => {
       const next = { ...prev }
       for (let i = 0; i < payloads.length; i++) {
@@ -531,7 +533,7 @@ export default function ImportReviewBulk() {
       }
       return next
     })
-  }, [payloads, diffs])
+  }, [payloads, diffs, ignoredZipCodes])
 
   useEffect(() => {
     if (!payloads || payloads.length === 0 || flattenedPaymentMethods.length === 0) return
@@ -601,8 +603,6 @@ export default function ImportReviewBulk() {
       return changed ? next : prev
     })
   }, [payloads, stores, accountsByStore])
-
-  const ignoredZipCodes = useMemo(() => getIgnoredZipCodes(), [payloads.length])
 
   if (!token || payloads.length === 0) {
     return (

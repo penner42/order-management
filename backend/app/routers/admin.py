@@ -43,6 +43,7 @@ _BACKUP_TABLES = [
     "shipment_items",
     "payments",
     "payment_line_items",
+    "ignored_zip_codes",
 ]
 
 
@@ -68,6 +69,7 @@ _TABLES = [
     "payment_methods",
     "rewards",
     "buying_groups",
+    "ignored_zip_codes",
     "users",
 ]
 
