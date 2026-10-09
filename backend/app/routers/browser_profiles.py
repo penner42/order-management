@@ -405,6 +405,28 @@ def update_browser_profile_schedule(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
+    if data.store_account_id is not None and data.store_account_id != profile.store_account_id:
+        account = (
+            db.query(StoreAccount)
+            .filter(StoreAccount.id == data.store_account_id)
+            .first()
+        )
+        if not account:
+            raise HTTPException(status_code=404, detail="Store account not found.")
+        taken = (
+            db.query(BrowserProfile)
+            .filter(
+                BrowserProfile.store_account_id == data.store_account_id,
+                BrowserProfile.id != profile_id,
+            )
+            .first()
+        )
+        if taken:
+            raise HTTPException(
+                status_code=400,
+                detail="A browser profile already exists for this store account.",
+            )
+        profile.store_account_id = data.store_account_id
     if data.full_check_enabled is not None:
         profile.full_check_enabled = data.full_check_enabled
     if data.full_check_cron is not None:

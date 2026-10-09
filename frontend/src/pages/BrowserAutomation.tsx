@@ -585,6 +585,8 @@ export default function BrowserAutomation() {
   const [maxPagesByProfile, setMaxPagesByProfile] = useState<Record<number, number>>({})
   const [scheduleByProfile, setScheduleByProfile] = useState<Record<number, ScheduleDraft>>({})
   const [savingScheduleId, setSavingScheduleId] = useState<number | null>(null)
+  const [editingAccountProfileId, setEditingAccountProfileId] = useState<number | null>(null)
+  const [savingAccountProfileId, setSavingAccountProfileId] = useState<number | null>(null)
   const [jobsByProfile, setJobsByProfile] = useState<Record<number, BrowserJob>>({})
   const pollRef = useRef<number | null>(null)
 
@@ -643,6 +645,13 @@ export default function BrowserAutomation() {
   const accountOptions = accounts.filter(
     (a) => !profiles.some((p) => p.store_account_id === a.id)
   )
+
+  const accountsAvailableForProfile = (profile: BrowserProfile) =>
+    accounts.filter(
+      (a) =>
+        a.id === profile.store_account_id ||
+        !profiles.some((p) => p.store_account_id === a.id)
+    )
 
   const createProfile = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -798,6 +807,27 @@ export default function BrowserAutomation() {
     }
   }
 
+  const changeProfileAccount = async (profileId: number, storeAccountId: number) => {
+    const profile = profiles.find((p) => p.id === profileId)
+    if (!profile || profile.store_account_id === storeAccountId) {
+      setEditingAccountProfileId(null)
+      return
+    }
+    setSavingAccountProfileId(profileId)
+    setError(null)
+    try {
+      const updated = await api.patch<BrowserProfile>(`/browser-profiles/${profileId}`, {
+        store_account_id: storeAccountId,
+      })
+      setProfiles((prev) => prev.map((p) => (p.id === profileId ? updated : p)))
+      setEditingAccountProfileId(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSavingAccountProfileId(null)
+    }
+  }
+
   const deleteProfile = async (profileId: number) => {
     if (!confirm('Delete this browser profile? Stored cookies for this account will be removed from the server.')) {
       return
@@ -922,9 +952,66 @@ export default function BrowserAutomation() {
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <div className="font-medium text-ink dark:text-gray-100">
-                        {p.store_name ?? 'Store'} — {p.store_account_name ?? 'Account'}
-                      </div>
+                      {editingAccountProfileId === p.id ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <select
+                            autoFocus
+                            disabled={savingAccountProfileId === p.id}
+                            className="rounded-lg border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 text-sm font-medium text-ink dark:text-gray-100"
+                            value={p.store_account_id}
+                            onChange={(e) =>
+                              void changeProfileAccount(p.id, Number(e.target.value))
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === 'Escape') setEditingAccountProfileId(null)
+                            }}
+                            aria-label="Store account"
+                          >
+                            {accountsAvailableForProfile(p).map((a) => (
+                              <option key={a.id} value={a.id}>
+                                {storeNameForAccount(a.id)} — {a.name}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => setEditingAccountProfileId(null)}
+                            disabled={savingAccountProfileId === p.id}
+                            className="text-xs text-ink-muted hover:underline disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="font-medium text-ink dark:text-gray-100 flex items-center gap-1">
+                          <span>
+                            {p.store_name ?? 'Store'} — {p.store_account_name ?? 'Account'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setEditingAccountProfileId(p.id)}
+                            disabled={busy}
+                            className="p-1 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition disabled:opacity-50"
+                            title="Change account"
+                            aria-label="Change account"
+                          >
+                            <svg
+                              className="w-3.5 h-3.5"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                              aria-hidden
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                              />
+                            </svg>
+                          </button>
+                        </div>
+                      )}
                       <div className="text-xs text-ink-muted dark:text-gray-400 mt-0.5">
                         {p.retailer === 'walmart' ? 'Walmart' : p.retailer === 'amazon' ? 'Amazon' : p.retailer}
                         {' · '}

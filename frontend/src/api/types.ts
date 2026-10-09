@@ -246,6 +246,7 @@ export interface BrowserProfile {
 }
 
 export interface BrowserProfileScheduleUpdate {
+  store_account_id?: number
   full_check_enabled?: boolean
   full_check_cron?: string
   full_check_max_pages?: number

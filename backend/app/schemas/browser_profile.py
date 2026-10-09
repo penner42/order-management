@@ -38,8 +38,9 @@ class BrowserProfileCreate(BaseModel):
 
 
 class BrowserProfileScheduleUpdate(BaseModel):
-    """Partial update for per-profile import schedules."""
+    """Partial update for per-profile import schedules and linked store account."""
 
+    store_account_id: int | None = None
     full_check_enabled: bool | None = None
     full_check_cron: str | None = Field(default=None, max_length=64)
     full_check_max_pages: int | None = Field(default=None, ge=1, le=50)
