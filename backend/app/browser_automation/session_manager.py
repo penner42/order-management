@@ -580,24 +580,26 @@ def looks_like_walmart_signin(url: str) -> bool:
 
 
 async def walmart_session_logged_in(page: Page) -> bool:
-    url = page.url or ""
-    if looks_like_walmart_signin(url):
-        return False
+    """Probe /orders to verify the session — do not trust the live-view URL alone.
+
+    After a successful login the live view often still sits on identity.walmart.com
+    or an authorize redirect, which matches sign-in URL hints. Also, Walmart pages
+    keep generic "Sign in" links in the DOM even when logged in, and empty order
+    history has no /orders/ detail links — so DOM heuristics false-negative easily.
+    """
     try:
         await page.goto(WALMART_ORDERS_URL, wait_until="domcontentloaded", timeout=45_000)
-        if looks_like_walmart_signin(page.url):
+        # SPA may client-redirect to login after first paint.
+        for _ in range(10):
+            if looks_like_walmart_signin(page.url or ""):
+                return False
+            if "/orders" in (page.url or "").lower():
+                return True
+            await asyncio.sleep(0.4)
+        url = (page.url or "").lower()
+        if looks_like_walmart_signin(url):
             return False
-        sign_in = await page.query_selector(
-            'a[href*="login"], button:has-text("Sign in"), a:has-text("Sign in")'
-        )
-        if sign_in:
-            href = (await sign_in.get_attribute("href")) or ""
-            text = ((await sign_in.inner_text()) or "").lower()
-            if "login" in href.lower() or "sign in" in text:
-                order_link = await page.query_selector('a[href*="/orders/"]')
-                if not order_link:
-                    return False
-        return "/orders" in (page.url or "").lower()
+        return "/orders" in url
     except Exception:
         return False
 
