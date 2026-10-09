@@ -33,6 +33,7 @@ from app.models import (
     StoreAccount,
     User,
 )
+from app.models.item import ItemStatus
 from app.models.user import get_default_app_user_id
 from app.schemas.browser_profile import (
     BrowserImportLogRead,
@@ -80,7 +81,7 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
 
 
 def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[str]:
-    """Store order numbers for this account that still have at least one unshipped item."""
+    """Store order numbers for this account that still have at least one unshipped, non-canceled item."""
     # Postgres requires ORDER BY cols to appear in the SELECT list when using DISTINCT.
     # Select (id, store_order_number), order by id, then dedupe numbers in Python.
     rows = (
@@ -90,6 +91,7 @@ def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[s
         .filter(Order.store_account_id == store_account_id)
         .filter(Order.store_order_number.isnot(None))
         .filter(Order.store_order_number != "")
+        .filter(Item.status != ItemStatus.CANCELED)
         .filter(ShipmentItem.id.is_(None))
         .order_by(Order.id.desc())
         .distinct()
