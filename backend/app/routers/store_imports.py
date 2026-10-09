@@ -1601,12 +1601,53 @@ def _apply_items_and_shipments(
                     name, db_key, tracking_key
                 )
                 if not existing_item:
+                    # #region agent log
+                    _dbg_ship_link(
+                        "F",
+                        "match_no_candidate",
+                        name=name[:80],
+                        slice_key=slice_key,
+                        sid=sid,
+                        remaining=remaining,
+                        db_key=db_key,
+                        tracking_key=tracking_key,
+                        used_ids=sorted(used_existing_item_ids),
+                        linked_ids=sorted(linked_item_ids),
+                        candidates=[
+                            {
+                                "id": ei.id,
+                                "qty": ei.quantity,
+                                "status": getattr(ei.status, "value", str(ei.status)),
+                                "keys": sorted(item_tracking_keys(ei)),
+                                "used": ei.id in used_existing_item_ids,
+                            }
+                            for ei in existing_items
+                            if (ei.description or "").strip() == name
+                            and ei.id in pre_existing_item_ids
+                        ],
+                    )
+                    # #endregion
                     break
 
                 item_keys = item_tracking_keys(existing_item)
                 if (db_key and db_key in item_keys) or (
                     tracking_key and tracking_key in item_keys
                 ):
+                    # #region agent log
+                    _dbg_ship_link(
+                        "H",
+                        "match_tracking_consume_full_qty",
+                        item_id=existing_item.id,
+                        item_qty=existing_item.quantity,
+                        item_status=getattr(
+                            existing_item.status, "value", str(existing_item.status)
+                        ),
+                        slice_qty=slice_qty,
+                        remaining_before=remaining,
+                        item_keys=sorted(item_keys),
+                        sid=sid,
+                    )
+                    # #endregion
                     get_or_create_shipment_for_slice(
                         sid,
                         item_to_link=existing_item,
@@ -1630,6 +1671,17 @@ def _apply_items_and_shipments(
                         real_item_keys
                     )
                 if already_linked_elsewhere:
+                    # #region agent log
+                    _dbg_ship_link(
+                        "G",
+                        "match_burned_linked_elsewhere",
+                        item_id=existing_item.id,
+                        item_keys=sorted(item_keys),
+                        incoming_keys=sorted(incoming_keys),
+                        remaining=remaining,
+                        sid=sid,
+                    )
+                    # #endregion
                     # Same product on separate shipment slices (e.g. two Amazon
                     # line items with different tracking). Keep this row marked
                     # used and try another candidate; creating a new line for
@@ -1637,6 +1689,20 @@ def _apply_items_and_shipments(
                     continue
 
                 take = min(remaining, existing_item.quantity or 1)
+                # #region agent log
+                _dbg_ship_link(
+                    "I",
+                    "match_allocate_relink",
+                    item_id=existing_item.id,
+                    take=take,
+                    item_qty=existing_item.quantity,
+                    item_status=getattr(
+                        existing_item.status, "value", str(existing_item.status)
+                    ),
+                    item_keys=sorted(item_keys),
+                    sid=sid,
+                )
+                # #endregion
                 allocated_item = allocate_item_for_slice(
                     existing_item, take, name
                 )
@@ -1656,6 +1722,19 @@ def _apply_items_and_shipments(
                 existing_item_keys.discard((name, ""))
 
             if remaining > 0:
+                # #region agent log
+                _dbg_ship_link(
+                    "F",
+                    "create_new_item_for_remaining",
+                    name=name[:80],
+                    remaining=remaining,
+                    slice_key=slice_key,
+                    sid=sid,
+                    db_key=db_key,
+                    tracking_key=tracking_key,
+                    linked_any=linked_any,
+                )
+                # #endregion
                 # No (more) existing lines to attach — create the leftover
                 # quantity on this shipment (new import or partial match).
                 item = Item(
