@@ -1577,7 +1577,7 @@ def _apply_items_and_shipments(
 
     if existing_order:
         _sync_existing_item_quantities_and_prices(db, normalized, existing_items)
-        _apply_canceled_statuses(existing_items, normalized)
+    _apply_canceled_statuses(existing_items, normalized)
 
 
 # ---------------------------------------------------------------------------
