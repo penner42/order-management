@@ -29,7 +29,7 @@ from app.models import (
     StoreAccount,
     User,
 )
-from app.models.item import ItemStatus
+from app.models.item import ItemStatus, advance_item_to_shipped
 from app.schemas.store_import import (
     DirectApplyBody,
     DirectApplyResponse,
@@ -1255,7 +1255,7 @@ def _apply_items_and_shipments(
             if existing_si.shipment_id == shipment.id:
                 linked_item_ids.add(item.id)
                 if shipped:
-                    item.status = ItemStatus.SHIPPED
+                    advance_item_to_shipped(item)
             # Already linked (same or other shipment); never insert a second row.
             return
         # Pending duplicate guard (same item_id already staged this flush).
@@ -1263,7 +1263,7 @@ def _apply_items_and_shipments(
             if isinstance(obj, ShipmentItem) and obj.item_id == item.id:
                 linked_item_ids.add(item.id)
                 if shipped:
-                    item.status = ItemStatus.SHIPPED
+                    advance_item_to_shipped(item)
                 return
         si = ShipmentItem(shipment_id=shipment.id, item_id=item.id)
         db.add(si)
@@ -1272,7 +1272,7 @@ def _apply_items_and_shipments(
         existing_shipments_by_id[shipment.id] = shipment
         linked_item_ids.add(item.id)
         if shipped:
-            item.status = ItemStatus.SHIPPED
+            advance_item_to_shipped(item)
 
     def relink_item_to_shipment(item: Item, shipment: Shipment, *, shipped: bool) -> None:
         """Move *item* onto *shipment*, dropping empty placeholder shipment links."""
@@ -1281,7 +1281,7 @@ def _apply_items_and_shipments(
             if existing_si.shipment_id == shipment.id:
                 linked_item_ids.add(item.id)
                 if shipped:
-                    item.status = ItemStatus.SHIPPED
+                    advance_item_to_shipped(item)
                 return
             old = existing_shipments_by_id.get(existing_si.shipment_id)
             if old is None:

@@ -19,6 +19,16 @@ class ItemStatus(str, enum.Enum):
     RETURN_REFUNDED = "return_refunded"
 
 
+def advance_item_to_shipped(item: "Item") -> None:
+    """Advance status to shipped only from purchased.
+
+    Tracking presence must not demote statuses past shipped (submitted, scanned,
+    returns, canceled, etc.) back to shipped.
+    """
+    if item.status == ItemStatus.PURCHASED:
+        item.status = ItemStatus.SHIPPED
+
+
 class Item(Base):
     """Order item - resold with purchase/sell price and buying group."""
 

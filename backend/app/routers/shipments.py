@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Item, Order, Shipment, ShipmentItem, User
-from app.models.item import ItemStatus
+from app.models.item import advance_item_to_shipped
 from app.models.user import get_default_app_user_id
 from app.schemas.shipment import ShipmentCreate, ShipmentRead, ShipmentUpdate
 from app.utils.dates import to_date_only
@@ -75,7 +75,7 @@ def create_shipment(data: ShipmentCreate, db: Session = Depends(get_db), current
                 if data.tracking_number:
                     item = db.query(Item).filter(Item.id == item_id).first()
                     if item:
-                        item.status = ItemStatus.SHIPPED
+                        advance_item_to_shipped(item)
     else:
         shipment = Shipment(
             user_id=user_id,
@@ -99,7 +99,7 @@ def create_shipment(data: ShipmentCreate, db: Session = Depends(get_db), current
             if data.tracking_number:
                 item = db.query(Item).filter(Item.id == item_id).first()
                 if item:
-                    item.status = ItemStatus.SHIPPED
+                    advance_item_to_shipped(item)
     db.commit()
     db.refresh(shipment)
     return shipment
