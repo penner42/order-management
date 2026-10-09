@@ -22,15 +22,19 @@ from app.browser_automation.session_manager import (
 )
 from app.browser_automation.walmart_import import run_walmart_import
 from app.database import SessionLocal, get_db
-from app.models import BrowserProfile, StoreAccount, User
+from app.models import BrowserProfile, Item, Order, ShipmentItem, StoreAccount, User
+from app.models.user import get_default_app_user_id
 from app.schemas.browser_profile import (
     BrowserJobRead,
     BrowserProfileCreate,
     BrowserProfileRead,
+    BrowserProfileScheduleUpdate,
     ImportStartRequest,
     ImportStartResponse,
     LoginStartResponse,
 )
+from app.schemas.store_import import StoreOrderImportPayload
+from app.routers.store_imports import apply_store_order_payload
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +53,59 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
         status=profile.status,
         last_error=profile.last_error,
         last_import_at=profile.last_import_at,
+        full_check_enabled=bool(profile.full_check_enabled),
+        full_check_interval_hours=int(profile.full_check_interval_hours or 24),
+        full_check_max_pages=int(profile.full_check_max_pages or 3),
+        full_check_last_run_at=profile.full_check_last_run_at,
+        unshipped_check_enabled=bool(profile.unshipped_check_enabled),
+        unshipped_check_interval_hours=int(profile.unshipped_check_interval_hours or 6),
+        unshipped_check_last_run_at=profile.unshipped_check_last_run_at,
         created_at=profile.created_at,
         updated_at=profile.updated_at,
         store_id=store.id if store else None,
         store_name=store.name if store else None,
         store_account_name=account.name if account else None,
     )
+
+
+def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[str]:
+    """Store order numbers for this account that still have at least one unshipped item."""
+    # Postgres requires ORDER BY cols to appear in the SELECT list when using DISTINCT.
+    # Select (id, store_order_number), order by id, then dedupe numbers in Python.
+    rows = (
+        db.query(Order.id, Order.store_order_number)
+        .join(Item, Item.order_id == Order.id)
+        .outerjoin(ShipmentItem, ShipmentItem.item_id == Item.id)
+        .filter(Order.store_account_id == store_account_id)
+        .filter(Order.store_order_number.isnot(None))
+        .filter(Order.store_order_number != "")
+        .filter(ShipmentItem.id.is_(None))
+        .order_by(Order.id.desc())
+        .distinct()
+        .all()
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for _order_id, raw in rows:
+        s = str(raw or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _apply_user(db: Session) -> User:
+    """User used when auto-applying scheduled/manual capture results."""
+    user_id = get_default_app_user_id(db)
+    if user_id is not None:
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            return user
+    admin = db.query(User).filter(User.role == "admin").first()
+    if admin:
+        return admin
+    raise RuntimeError("No user available to apply imported orders.")
 
 
 def _get_profile_or_404(db: Session, profile_id: int) -> BrowserProfile:
@@ -117,6 +168,28 @@ def create_browser_profile(
     # Reload relationships for response
     profile = _get_profile_or_404(db, profile.id)
     return _profile_read(profile)
+
+
+@router.patch("/{profile_id}", response_model=BrowserProfileRead)
+def update_browser_profile_schedule(
+    profile_id: int,
+    data: BrowserProfileScheduleUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    profile = _get_profile_or_404(db, profile_id)
+    if data.full_check_enabled is not None:
+        profile.full_check_enabled = data.full_check_enabled
+    if data.full_check_interval_hours is not None:
+        profile.full_check_interval_hours = data.full_check_interval_hours
+    if data.full_check_max_pages is not None:
+        profile.full_check_max_pages = data.full_check_max_pages
+    if data.unshipped_check_enabled is not None:
+        profile.unshipped_check_enabled = data.unshipped_check_enabled
+    if data.unshipped_check_interval_hours is not None:
+        profile.unshipped_check_interval_hours = data.unshipped_check_interval_hours
+    db.commit()
+    return _profile_read(_get_profile_or_404(db, profile_id))
 
 
 @router.delete("/{profile_id}", status_code=204)
@@ -348,6 +421,45 @@ async def live_view(websocket: WebSocket, profile_id: int, token: str | None = Q
         await session_manager.stop_viewer(session, queue)
 
 
+def _queue_import(
+    db: Session,
+    profile: BrowserProfile,
+    *,
+    mode: str,
+    max_pages: int,
+    auto_apply: bool,
+    scheduled: bool,
+) -> ImportStartResponse:
+    if profile.retailer not in SUPPORTED_RETAILERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
+    if profile.status == "login_in_progress":
+        raise HTTPException(status_code=400, detail="Finish or cancel login before importing.")
+    if profile.status == "importing":
+        raise HTTPException(status_code=400, detail="An import is already running for this profile.")
+    if profile.status not in ("ready", "login_required", "error", "logged_out"):
+        raise HTTPException(status_code=400, detail=f"Profile is not ready to import (status={profile.status}).")
+
+    kind = "import" if mode == "full" else "unshipped"
+    job = create_job(profile.id, kind)
+    profile.status = "importing"
+    profile.last_error = None
+    db.commit()
+
+    asyncio.create_task(
+        _run_import_job(
+            job.id,
+            profile.id,
+            profile.retailer,
+            mode=mode,
+            max_pages=max_pages,
+            auto_apply=auto_apply,
+            scheduled=scheduled,
+            store_account_id=profile.store_account_id,
+        )
+    )
+    return ImportStartResponse(job_id=job.id, profile_id=profile.id, status="queued")
+
+
 @router.post("/{profile_id}/import", response_model=ImportStartResponse)
 async def start_import(
     profile_id: int,
@@ -356,22 +468,42 @@ async def start_import(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
-    if profile.retailer not in SUPPORTED_RETAILERS:
-        raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
-    if profile.status == "login_in_progress":
-        raise HTTPException(status_code=400, detail="Finish or cancel login before importing.")
-    if profile.status not in ("ready", "login_required", "error", "logged_out"):
-        if profile.status == "importing":
-            raise HTTPException(status_code=400, detail="An import is already running for this profile.")
+    mode = body.mode or "full"
+    # Unshipped checks always apply directly; full checks use Import Review unless asked.
+    auto_apply = True if mode == "unshipped" else bool(body.auto_apply)
+    return _queue_import(
+        db,
+        profile,
+        mode=mode,
+        max_pages=body.max_pages,
+        auto_apply=auto_apply,
+        scheduled=False,
+    )
 
-    job = create_job(profile_id, "import")
-    profile.status = "importing"
-    profile.last_error = None
-    db.commit()
 
-    asyncio.create_task(_run_import_job(job.id, profile_id, profile.retailer, body.max_pages))
-
-    return ImportStartResponse(job_id=job.id, profile_id=profile_id, status="queued")
+async def start_scheduled_import(profile_id: int, *, mode: str, max_pages: int) -> bool:
+    """Start a due scheduled job. Returns False if the profile is busy / missing."""
+    db = SessionLocal()
+    try:
+        profile = db.query(BrowserProfile).filter(BrowserProfile.id == profile_id).first()
+        if not profile:
+            return False
+        if profile.status == "importing" or profile.status == "login_in_progress":
+            return False
+        try:
+            _queue_import(
+                db,
+                profile,
+                mode=mode,
+                max_pages=max_pages,
+                auto_apply=True,
+                scheduled=True,
+            )
+        except HTTPException:
+            return False
+        return True
+    finally:
+        db.close()
 
 
 @router.get("/jobs/{job_id}", response_model=BrowserJobRead)
@@ -385,13 +517,75 @@ def get_browser_job(
     return BrowserJobRead(**job.to_dict())
 
 
-async def _run_import_job(job_id: str, profile_id: int, retailer: str, max_pages: int) -> None:
+def _set_profile_status(
+    db: Session,
+    profile_id: int,
+    *,
+    status: str,
+    last_error: str | None = None,
+    last_import_at: datetime | None = None,
+    full_check_last_run_at: datetime | None = None,
+    unshipped_check_last_run_at: datetime | None = None,
+    touch_last_import: bool = False,
+) -> None:
+    """Persist profile status in a fresh transaction (safe after prior failures)."""
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    profile = db.query(BrowserProfile).filter(BrowserProfile.id == profile_id).first()
+    if not profile:
+        return
+    profile.status = status
+    profile.last_error = last_error
+    if touch_last_import:
+        profile.last_import_at = last_import_at or datetime.now(timezone.utc)
+    if full_check_last_run_at is not None:
+        profile.full_check_last_run_at = full_check_last_run_at
+    if unshipped_check_last_run_at is not None:
+        profile.unshipped_check_last_run_at = unshipped_check_last_run_at
+    db.commit()
+
+
+def clear_stale_browser_profile_statuses(db: Session) -> int:
+    """Clear in-progress statuses left behind by a process restart (jobs are in-memory)."""
+    rows = (
+        db.query(BrowserProfile)
+        .filter(BrowserProfile.status.in_(("importing", "login_in_progress")))
+        .all()
+    )
+    for profile in rows:
+        if profile.status == "importing":
+            profile.status = "ready"
+            profile.last_error = None
+        else:
+            profile.status = "login_required"
+            profile.last_error = "Login interrupted by server restart."
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+async def _run_import_job(
+    job_id: str,
+    profile_id: int,
+    retailer: str,
+    *,
+    mode: str,
+    max_pages: int,
+    auto_apply: bool,
+    scheduled: bool,
+    store_account_id: int,
+) -> None:
+    _ = scheduled
     label = retailer.capitalize()
-    update_job(job_id, status="running", message=f"Starting {label} import…")
+    mode_label = "full check" if mode == "full" else "unshipped check"
+    update_job(job_id, status="running", message=f"Starting {label} {mode_label}…")
 
     def on_progress(data: dict) -> None:
         update_job(job_id, progress=data, message=data.get("message"))
 
+    finished_ok = False
     db = SessionLocal()
     try:
         profile = db.query(BrowserProfile).filter(BrowserProfile.id == profile_id).first()
@@ -400,50 +594,162 @@ async def _run_import_job(job_id: str, profile_id: int, retailer: str, max_pages
             return
 
         try:
+            order_ids: list[str] | None = None
+            if mode == "unshipped":
+                order_ids = _unshipped_store_order_numbers(db, store_account_id)
+                if not order_ids:
+                    now = datetime.now(timezone.utc)
+                    _set_profile_status(
+                        db,
+                        profile_id,
+                        status="ready",
+                        last_error=None,
+                        unshipped_check_last_run_at=now,
+                    )
+                    update_job(
+                        job_id,
+                        status="succeeded",
+                        message="No unshipped orders to refresh.",
+                        order_count=0,
+                    )
+                    finished_ok = True
+                    return
+
             if retailer == "walmart":
                 orders = await run_walmart_import(
-                    profile_id, max_pages=max_pages, on_progress=on_progress
+                    profile_id,
+                    max_pages=max_pages,
+                    order_ids=order_ids,
+                    on_progress=on_progress,
                 )
             else:
                 orders = await run_amazon_import(
-                    profile_id, max_pages=max_pages, on_progress=on_progress
+                    profile_id,
+                    max_pages=max_pages,
+                    order_ids=order_ids,
+                    on_progress=on_progress,
                 )
+
+            now = datetime.now(timezone.utc)
+            run_kwargs: dict = {}
+            if mode == "full":
+                run_kwargs["full_check_last_run_at"] = now
+            else:
+                run_kwargs["unshipped_check_last_run_at"] = now
+
             if not orders:
+                _set_profile_status(
+                    db,
+                    profile_id,
+                    status="ready",
+                    last_error="Import finished with zero orders." if mode == "full" else None,
+                    **run_kwargs,
+                )
                 update_job(
                     job_id,
-                    status="failed",
-                    error="No orders captured. If you expect orders, try Log in again.",
+                    status="failed" if mode == "full" else "succeeded",
+                    error="No orders captured. If you expect orders, try Log in again."
+                    if mode == "full"
+                    else None,
+                    message="No orders captured." if mode != "full" else None,
+                    order_count=0,
                 )
-                profile.status = "ready"
-                profile.last_error = "Import finished with zero orders."
-                db.commit()
+                finished_ok = True
                 return
 
-            token, review_url = post_bulk_session(orders)
-            profile.status = "ready"
-            profile.last_error = None
-            profile.last_import_at = datetime.now(timezone.utc)
-            db.commit()
-            update_job(
-                job_id,
-                status="succeeded",
-                message=f"Captured {len(orders)} order(s).",
-                token=token,
-                review_url=review_url,
-                order_count=len(orders),
-            )
+            if auto_apply:
+                apply_user = _apply_user(db)
+                applied = 0
+                errors: list[str] = []
+                for raw in orders:
+                    try:
+                        payload = StoreOrderImportPayload.model_validate(raw)
+                        apply_store_order_payload(
+                            db,
+                            payload,
+                            apply_user,
+                            store_account_id=store_account_id,
+                            commit=False,
+                        )
+                        applied += 1
+                    except Exception as exc:
+                        logger.warning("Auto-apply failed for captured order: %s", exc)
+                        errors.append(str(exc))
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                _set_profile_status(
+                    db,
+                    profile_id,
+                    status="ready",
+                    last_error=None if not errors else f"{len(errors)} apply error(s).",
+                    touch_last_import=True,
+                    last_import_at=now,
+                    **run_kwargs,
+                )
+                msg = f"Updated {applied} order(s)."
+                if errors:
+                    msg += f" {len(errors)} failed."
+                update_job(
+                    job_id,
+                    status="succeeded" if applied else "failed",
+                    message=msg,
+                    order_count=applied,
+                    error=errors[0] if applied == 0 and errors else None,
+                )
+                finished_ok = True
+            else:
+                token, review_url = post_bulk_session(orders)
+                _set_profile_status(
+                    db,
+                    profile_id,
+                    status="ready",
+                    last_error=None,
+                    touch_last_import=True,
+                    last_import_at=now,
+                    **run_kwargs,
+                )
+                update_job(
+                    job_id,
+                    status="succeeded",
+                    message=f"Captured {len(orders)} order(s).",
+                    token=token,
+                    review_url=review_url,
+                    order_count=len(orders),
+                )
+                finished_ok = True
         except LoginRequiredError as exc:
-            profile.status = "login_required"
-            profile.last_error = str(exc)
-            db.commit()
+            _set_profile_status(
+                db, profile_id, status="login_required", last_error=str(exc)
+            )
             update_job(job_id, status="failed", error=str(exc))
+            finished_ok = True
         except Exception as exc:
-            logger.exception("%s import failed for profile %s", label, profile_id)
-            profile.status = "error"
-            profile.last_error = str(exc)
-            db.commit()
+            logger.exception("%s %s failed for profile %s", label, mode_label, profile_id)
+            _set_profile_status(db, profile_id, status="error", last_error=str(exc))
             update_job(job_id, status="failed", error=str(exc))
+            finished_ok = True
         finally:
             await session_manager.close_session(profile_id)
+            # Never leave the profile stuck in "importing" if the task ends unexpectedly.
+            if not finished_ok:
+                try:
+                    _set_profile_status(
+                        db,
+                        profile_id,
+                        status="error",
+                        last_error="Import ended unexpectedly.",
+                    )
+                    update_job(
+                        job_id,
+                        status="failed",
+                        error="Import ended unexpectedly.",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to clear stuck importing status for profile %s", profile_id
+                    )
     finally:
         db.close()

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 Retailer = Literal["amazon", "walmart"]
+ImportMode = Literal["full", "unshipped"]
 ProfileStatus = Literal[
     "logged_out",
     "ready",
@@ -21,6 +22,16 @@ class BrowserProfileCreate(BaseModel):
     retailer: Retailer = "walmart"
 
 
+class BrowserProfileScheduleUpdate(BaseModel):
+    """Partial update for per-profile import schedules."""
+
+    full_check_enabled: bool | None = None
+    full_check_interval_hours: int | None = Field(default=None, ge=1, le=720)
+    full_check_max_pages: int | None = Field(default=None, ge=1, le=50)
+    unshipped_check_enabled: bool | None = None
+    unshipped_check_interval_hours: int | None = Field(default=None, ge=1, le=720)
+
+
 class BrowserProfileRead(BaseModel):
     id: int
     store_account_id: int
@@ -28,6 +39,13 @@ class BrowserProfileRead(BaseModel):
     status: str
     last_error: str | None = None
     last_import_at: datetime | None = None
+    full_check_enabled: bool = False
+    full_check_interval_hours: int = 24
+    full_check_max_pages: int = 3
+    full_check_last_run_at: datetime | None = None
+    unshipped_check_enabled: bool = False
+    unshipped_check_interval_hours: int = 6
+    unshipped_check_last_run_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     # Nested display helpers (populated by router)
@@ -46,7 +64,11 @@ class LoginStartResponse(BaseModel):
 
 
 class ImportStartRequest(BaseModel):
+    mode: ImportMode = "full"
     max_pages: int = Field(default=3, ge=1, le=50)
+    # When True, apply captures directly to orders (used by schedules / Run now).
+    # When False (default for full), create an Import Review bulk session.
+    auto_apply: bool = False
 
 
 class ImportStartResponse(BaseModel):

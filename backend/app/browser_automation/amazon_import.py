@@ -263,22 +263,70 @@ async def _detail_url_for_summary(page: Page, summary: dict[str, Any]) -> str | 
     return f"{origin}/your-orders/order-details?orderID={order_id}&disableCsd=missing-library"
 
 
+async def _detail_url_for_order_id(page: Page, order_id: str) -> str:
+    origin = await page.evaluate("() => window.location.origin")
+    return f"{origin}/your-orders/order-details?orderID={order_id}&disableCsd=missing-library"
+
+
+async def _capture_amazon_order_ids(
+    page: Page,
+    order_ids: list[str],
+    account_email: str | None,
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> list[dict[str, Any]]:
+    def progress(**kwargs: Any) -> None:
+        if on_progress:
+            on_progress(kwargs)
+
+    orders: list[dict[str, Any]] = []
+    for idx, order_id in enumerate(order_ids):
+        progress(
+            phase="detail",
+            message=f"Capturing order {order_id} ({idx + 1}/{len(order_ids)})",
+            order_id=order_id,
+            captured=len(orders),
+        )
+        detail_url = await _detail_url_for_order_id(page, order_id)
+        try:
+            await page.goto(detail_url, wait_until="domcontentloaded", timeout=60_000)
+            if looks_like_amazon_signin(page.url):
+                raise LoginRequiredError("Amazon session requires login.")
+            raw = await _parse_detail_page(page, skip_tracking=False)
+            orders.append(_normalize_order(raw, page.url, account_email))
+        except LoginRequiredError:
+            raise
+        except Exception as exc:
+            logger.warning("Failed to capture Amazon order %s: %s", order_id, exc)
+    return orders
+
+
 async def run_amazon_import(
     profile_id: int,
     *,
     max_pages: int = 3,
+    order_ids: list[str] | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
-    """Capture up to max_pages of Amazon order history for a profile."""
+    """Capture Amazon orders for a profile.
+
+    Default: up to *max_pages* of order history. When *order_ids* is set, skip
+    the list and capture those order IDs directly (unshipped refresh).
+    """
 
     def progress(**kwargs: Any) -> None:
         if on_progress:
             on_progress(kwargs)
 
+    start_url = AMAZON_ORDERS_URL
+    if order_ids:
+        # Landing on orders hub is enough to establish origin / session cookies.
+        start_url = AMAZON_ORDERS_URL
+
     session = await session_manager.ensure_session(
         profile_id,
         mode="import",
-        start_url=AMAZON_ORDERS_URL,
+        start_url=start_url,
     )
     page = session.page
 
@@ -286,6 +334,28 @@ async def run_amazon_import(
         raise LoginRequiredError("Amazon session requires login.")
 
     account_email = await _fetch_account_email(page)
+
+    if order_ids is not None:
+        seen: set[str] = set()
+        ids: list[str] = []
+        for raw in order_ids:
+            s = str(raw or "").strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            ids.append(s)
+        progress(
+            phase="list",
+            message=f"Refreshing {len(ids)} unshipped order(s)…",
+            list_count=len(ids),
+            account_email=account_email,
+        )
+        orders = await _capture_amazon_order_ids(
+            page, ids, account_email, on_progress=on_progress
+        )
+        progress(phase="done", message=f"Captured {len(orders)} order(s)", captured=len(orders))
+        return orders
+
     progress(phase="list", page=1, message="Scanning order list…", account_email=account_email)
 
     orders: list[dict[str, Any]] = []

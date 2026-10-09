@@ -165,8 +165,12 @@ def render_invoice_pdf(html: str, order_id: int) -> str | None:
                 order_id,
             )
 
+    # Always render off the calling thread. Sync Playwright cannot run inside an
+    # asyncio loop (browser-automation auto-apply), and the dedicated pool also
+    # keeps Chromium off the request worker.
     try:
-        _render_html_to_pdf(html, target)
+        future = _prerender_executor.submit(_render_html_to_pdf, html, target)
+        future.result(timeout=_PRERENDER_WAIT_SECONDS)
         return filename
     except Exception:
         logger.warning("Could not render invoice PDF for order %s", order_id, exc_info=True)

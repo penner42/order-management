@@ -231,11 +231,26 @@ export interface BrowserProfile {
   status: BrowserProfileStatus | string
   last_error: string | null
   last_import_at: string | null
+  full_check_enabled: boolean
+  full_check_interval_hours: number
+  full_check_max_pages: number
+  full_check_last_run_at: string | null
+  unshipped_check_enabled: boolean
+  unshipped_check_interval_hours: number
+  unshipped_check_last_run_at: string | null
   created_at?: string | null
   updated_at?: string | null
   store_id?: number | null
   store_name?: string | null
   store_account_name?: string | null
+}
+
+export interface BrowserProfileScheduleUpdate {
+  full_check_enabled?: boolean
+  full_check_interval_hours?: number
+  full_check_max_pages?: number
+  unshipped_check_enabled?: boolean
+  unshipped_check_interval_hours?: number
 }
 
 export interface BrowserJob {

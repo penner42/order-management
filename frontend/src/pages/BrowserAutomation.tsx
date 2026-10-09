@@ -1,7 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, getStoredToken } from '../api/client'
-import type { BrowserJob, BrowserProfile, Store, StoreAccount } from '../api/types'
+import type {
+  BrowserJob,
+  BrowserProfile,
+  BrowserProfileScheduleUpdate,
+  Store,
+  StoreAccount,
+} from '../api/types'
+
+type ScheduleDraft = {
+  full_check_enabled: boolean
+  full_check_interval_hours: number
+  full_check_max_pages: number
+  unshipped_check_enabled: boolean
+  unshipped_check_interval_hours: number
+}
+
+function scheduleDraftFromProfile(p: BrowserProfile): ScheduleDraft {
+  return {
+    full_check_enabled: !!p.full_check_enabled,
+    full_check_interval_hours: p.full_check_interval_hours ?? 24,
+    full_check_max_pages: p.full_check_max_pages ?? 3,
+    unshipped_check_enabled: !!p.unshipped_check_enabled,
+    unshipped_check_interval_hours: p.unshipped_check_interval_hours ?? 6,
+  }
+}
+
+function formatLastRun(iso: string | null | undefined): string {
+  if (!iso) return 'Never'
+  try {
+    return new Date(iso).toLocaleString()
+  } catch {
+    return 'Never'
+  }
+}
 
 function statusLabel(status: string): string {
   switch (status) {
@@ -547,6 +580,8 @@ export default function BrowserAutomation() {
   const [loginProfileId, setLoginProfileId] = useState<number | null>(null)
   const [loginSuggestedUrl, setLoginSuggestedUrl] = useState('https://www.walmart.com/')
   const [maxPagesByProfile, setMaxPagesByProfile] = useState<Record<number, number>>({})
+  const [scheduleByProfile, setScheduleByProfile] = useState<Record<number, ScheduleDraft>>({})
+  const [savingScheduleId, setSavingScheduleId] = useState<number | null>(null)
   const [jobsByProfile, setJobsByProfile] = useState<Record<number, BrowserJob>>({})
   const pollRef = useRef<number | null>(null)
 
@@ -561,6 +596,32 @@ export default function BrowserAutomation() {
         setProfiles(plist)
         setStores(slist)
         setAccounts(alist)
+        setScheduleByProfile((prev) => {
+          const next: Record<number, ScheduleDraft> = {}
+          for (const p of plist) {
+            const server = scheduleDraftFromProfile(p)
+            const local = prev[p.id]
+            if (!local) {
+              next[p.id] = server
+              continue
+            }
+            const dirty =
+              local.full_check_enabled !== server.full_check_enabled ||
+              local.full_check_interval_hours !== server.full_check_interval_hours ||
+              local.full_check_max_pages !== server.full_check_max_pages ||
+              local.unshipped_check_enabled !== server.unshipped_check_enabled ||
+              local.unshipped_check_interval_hours !== server.unshipped_check_interval_hours
+            next[p.id] = dirty ? local : server
+          }
+          return next
+        })
+        setMaxPagesByProfile((prev) => {
+          const next = { ...prev }
+          for (const p of plist) {
+            if (next[p.id] == null) next[p.id] = p.full_check_max_pages ?? 3
+          }
+          return next
+        })
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false))
@@ -651,19 +712,31 @@ export default function BrowserAutomation() {
     }, 1000)
   }
 
-  const startImport = async (profileId: number) => {
+  const startImport = async (
+    profileId: number,
+    opts?: { mode?: 'full' | 'unshipped'; autoApply?: boolean; maxPages?: number }
+  ) => {
     setError(null)
-    const maxPages = maxPagesByProfile[profileId] ?? 3
+    const mode = opts?.mode ?? 'full'
+    const schedule = scheduleByProfile[profileId]
+    const maxPages =
+      opts?.maxPages ??
+      (mode === 'full'
+        ? (schedule?.full_check_max_pages ?? maxPagesByProfile[profileId] ?? 3)
+        : 1)
+    const autoApply = opts?.autoApply ?? mode === 'unshipped'
     try {
       const res = await api.post<{ job_id: string }>(`/browser-profiles/${profileId}/import`, {
+        mode,
         max_pages: maxPages,
+        auto_apply: autoApply,
       })
       setJobsByProfile((prev) => ({
         ...prev,
         [profileId]: {
           id: res.job_id,
           profile_id: profileId,
-          kind: 'import',
+          kind: mode === 'unshipped' ? 'unshipped' : 'import',
           status: 'queued',
           message: 'Queued…',
         },
@@ -672,6 +745,56 @@ export default function BrowserAutomation() {
       load()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const updateScheduleDraft = (profileId: number, patch: Partial<ScheduleDraft>) => {
+    setScheduleByProfile((prev) => ({
+      ...prev,
+      [profileId]: {
+        ...(prev[profileId] ??
+          scheduleDraftFromProfile(
+            profiles.find((p) => p.id === profileId) ??
+              ({
+                full_check_enabled: false,
+                full_check_interval_hours: 24,
+                full_check_max_pages: 3,
+                unshipped_check_enabled: false,
+                unshipped_check_interval_hours: 6,
+              } as BrowserProfile)
+          )),
+        ...patch,
+      },
+    }))
+  }
+
+  const saveSchedule = async (profileId: number) => {
+    const draft = scheduleByProfile[profileId]
+    if (!draft) return
+    setSavingScheduleId(profileId)
+    setError(null)
+    const body: BrowserProfileScheduleUpdate = {
+      full_check_enabled: draft.full_check_enabled,
+      full_check_interval_hours: Math.min(720, Math.max(1, draft.full_check_interval_hours || 1)),
+      full_check_max_pages: Math.min(50, Math.max(1, draft.full_check_max_pages || 1)),
+      unshipped_check_enabled: draft.unshipped_check_enabled,
+      unshipped_check_interval_hours: Math.min(
+        720,
+        Math.max(1, draft.unshipped_check_interval_hours || 1)
+      ),
+    }
+    try {
+      const updated = await api.patch<BrowserProfile>(`/browser-profiles/${profileId}`, body)
+      setProfiles((prev) => prev.map((p) => (p.id === profileId ? updated : p)))
+      setScheduleByProfile((prev) => ({ ...prev, [profileId]: scheduleDraftFromProfile(updated) }))
+      setMaxPagesByProfile((prev) => ({
+        ...prev,
+        [profileId]: updated.full_check_max_pages ?? 3,
+      }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSavingScheduleId(null)
     }
   }
 
@@ -702,9 +825,10 @@ export default function BrowserAutomation() {
       <h1 className="text-2xl font-semibold text-ink dark:text-gray-100 mb-2">Browser automation</h1>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
         Run a Camoufox (anti-detect Firefox) session on the server for each store account. Log in once
-        in the embedded view (MFA supported); then use Import now to capture Walmart or Amazon orders
-        into Import Review. Login opens a blank page — use the address bar / Home to open the store
-        yourself. If a profile is blocked, delete it and create a new one after Camoufox is deployed.
+        in the embedded view (MFA supported); then import orders or schedule automatic checks. Full
+        check scans the first N order-history pages; unshipped check refreshes every order on that
+        account that still has unshipped items. Login opens a blank page — use the address bar / Home
+        to open the store yourself.
       </p>
 
       {error && (
@@ -773,7 +897,15 @@ export default function BrowserAutomation() {
           <ul className="space-y-3">
             {profiles.map((p) => {
               const job = jobsByProfile[p.id]
-              const maxPages = maxPagesByProfile[p.id] ?? 3
+              const maxPages = maxPagesByProfile[p.id] ?? p.full_check_max_pages ?? 3
+              const schedule = scheduleByProfile[p.id] ?? scheduleDraftFromProfile(p)
+              const busy = p.status === 'importing' || p.status === 'login_in_progress'
+              const scheduleDirty =
+                schedule.full_check_enabled !== !!p.full_check_enabled ||
+                schedule.full_check_interval_hours !== (p.full_check_interval_hours ?? 24) ||
+                schedule.full_check_max_pages !== (p.full_check_max_pages ?? 3) ||
+                schedule.unshipped_check_enabled !== !!p.unshipped_check_enabled ||
+                schedule.unshipped_check_interval_hours !== (p.unshipped_check_interval_hours ?? 6)
               return (
                 <li
                   key={p.id}
@@ -806,7 +938,7 @@ export default function BrowserAutomation() {
                       <button
                         type="button"
                         onClick={() => startLogin(p.id)}
-                        disabled={p.status === 'importing' || p.status === 'login_in_progress'}
+                        disabled={busy}
                         className="rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm hover:bg-brand-50 dark:hover:bg-gray-800 disabled:opacity-50"
                       >
                         Log in
@@ -829,8 +961,14 @@ export default function BrowserAutomation() {
                       </label>
                       <button
                         type="button"
-                        onClick={() => startImport(p.id)}
-                        disabled={p.status === 'importing' || p.status === 'login_in_progress'}
+                        onClick={() =>
+                          startImport(p.id, {
+                            mode: 'full',
+                            autoApply: false,
+                            maxPages,
+                          })
+                        }
+                        disabled={busy}
                         className="rounded-lg bg-brand-600 text-white px-3 py-1.5 text-sm font-medium hover:bg-brand-700 disabled:opacity-50"
                       >
                         Import now
@@ -845,6 +983,139 @@ export default function BrowserAutomation() {
                       </button>
                     </div>
                   </div>
+
+                  <div className="mt-4 rounded-md border border-brand-100 dark:border-gray-700/80 bg-brand-50/40 dark:bg-gray-900/40 p-3 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-sm font-medium text-ink dark:text-gray-100">Schedule</h3>
+                      <button
+                        type="button"
+                        onClick={() => saveSchedule(p.id)}
+                        disabled={savingScheduleId === p.id || !scheduleDirty}
+                        className="rounded-md border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-ink dark:text-gray-100 hover:bg-brand-50 dark:hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        {savingScheduleId === p.id ? 'Saving…' : 'Save schedule'}
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-ink dark:text-gray-200">
+                      <label className="inline-flex items-center gap-1.5">
+                        <input
+                          type="checkbox"
+                          checked={schedule.full_check_enabled}
+                          onChange={(e) =>
+                            updateScheduleDraft(p.id, { full_check_enabled: e.target.checked })
+                          }
+                          className="rounded border-brand-300 dark:border-gray-600"
+                        />
+                        <span>Full check</span>
+                      </label>
+                      <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
+                        every
+                        <input
+                          type="number"
+                          min={1}
+                          max={720}
+                          value={schedule.full_check_interval_hours}
+                          onChange={(e) =>
+                            updateScheduleDraft(p.id, {
+                              full_check_interval_hours: Math.min(
+                                720,
+                                Math.max(1, Number(e.target.value) || 1)
+                              ),
+                            })
+                          }
+                          className="w-14 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1 py-1 text-sm text-ink dark:text-gray-100"
+                        />
+                        hours
+                      </label>
+                      <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
+                        pages
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={schedule.full_check_max_pages}
+                          onChange={(e) =>
+                            updateScheduleDraft(p.id, {
+                              full_check_max_pages: Math.min(
+                                50,
+                                Math.max(1, Number(e.target.value) || 1)
+                              ),
+                            })
+                          }
+                          className="w-14 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1 py-1 text-sm text-ink dark:text-gray-100"
+                        />
+                      </label>
+                      <span className="text-xs text-ink-muted dark:text-gray-500">
+                        Last: {formatLastRun(p.full_check_last_run_at)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          startImport(p.id, {
+                            mode: 'full',
+                            autoApply: true,
+                            maxPages: schedule.full_check_max_pages,
+                          })
+                        }
+                        disabled={busy}
+                        className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs hover:bg-white dark:hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        Run full check
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-ink dark:text-gray-200">
+                      <label className="inline-flex items-center gap-1.5">
+                        <input
+                          type="checkbox"
+                          checked={schedule.unshipped_check_enabled}
+                          onChange={(e) =>
+                            updateScheduleDraft(p.id, {
+                              unshipped_check_enabled: e.target.checked,
+                            })
+                          }
+                          className="rounded border-brand-300 dark:border-gray-600"
+                        />
+                        <span>Check unshipped</span>
+                      </label>
+                      <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
+                        every
+                        <input
+                          type="number"
+                          min={1}
+                          max={720}
+                          value={schedule.unshipped_check_interval_hours}
+                          onChange={(e) =>
+                            updateScheduleDraft(p.id, {
+                              unshipped_check_interval_hours: Math.min(
+                                720,
+                                Math.max(1, Number(e.target.value) || 1)
+                              ),
+                            })
+                          }
+                          className="w-14 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1 py-1 text-sm text-ink dark:text-gray-100"
+                        />
+                        hours
+                      </label>
+                      <span className="text-xs text-ink-muted dark:text-gray-500">
+                        Last: {formatLastRun(p.unshipped_check_last_run_at)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => startImport(p.id, { mode: 'unshipped', autoApply: true })}
+                        disabled={busy}
+                        className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs hover:bg-white dark:hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        Run unshipped check
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-ink-muted dark:text-gray-500">
+                      Scheduled runs and Run buttons apply updates directly. Import now still opens
+                      Import Review for manual review.
+                    </p>
+                  </div>
+
                   {job && (
                     <div className="mt-3 text-sm text-ink-muted dark:text-gray-400">
                       <div>

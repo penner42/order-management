@@ -222,66 +222,15 @@ async def _try_capture_invoice_html(page: Page, timeout_ms: int = 8000) -> str |
         return None
 
 
-async def run_walmart_import(
-    profile_id: int,
+async def _capture_walmart_order_details(
+    page: Page,
+    order_numbers: list[str],
     *,
-    max_pages: int = 3,
     on_progress: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
-    """Capture Walmart orders for a profile (list pages → detail pages)."""
-
     def progress(**kwargs: Any) -> None:
         if on_progress:
             on_progress(kwargs)
-
-    session = await session_manager.ensure_session(
-        profile_id,
-        mode="import",
-        start_url=WALMART_ORDERS_URL,
-    )
-    page = session.page
-
-    if looks_like_walmart_signin(page.url):
-        raise LoginRequiredError("Walmart session requires login.")
-
-    # Give SPA a moment, then inject hooks.
-    try:
-        await page.wait_for_load_state("domcontentloaded", timeout=30_000)
-    except Exception:
-        pass
-    await _ensure_orders_hook(page)
-
-    progress(phase="list", message="Collecting order numbers from Walmart…", page=1)
-    order_numbers = await _collect_order_numbers(page, max_pages)
-    if not order_numbers:
-        # Fallback: DOM links on current page only
-        order_numbers = await page.evaluate(
-            """() => {
-              const out = [];
-              const seen = new Set();
-              document.querySelectorAll('a[href*="/orders/"]').forEach((a) => {
-                const href = a.getAttribute('href') || '';
-                const m = /\\/orders\\/([^/?#]+)/.exec(href);
-                if (!m) return;
-                const id = String(m[1]);
-                if (seen.has(id)) return;
-                seen.add(id);
-                out.push(id);
-              });
-              return out;
-            }"""
-        )
-        if not isinstance(order_numbers, list):
-            order_numbers = []
-
-    if looks_like_walmart_signin(page.url):
-        raise LoginRequiredError("Walmart session requires login.")
-
-    progress(
-        phase="list",
-        message=f"Found {len(order_numbers)} order(s)",
-        list_count=len(order_numbers),
-    )
 
     captured: list[dict[str, Any]] = []
     for idx, order_number in enumerate(order_numbers):
@@ -313,6 +262,97 @@ async def run_walmart_import(
 
         if idx < len(order_numbers) - 1:
             await page.wait_for_timeout(1200)
+    return captured
 
+
+async def run_walmart_import(
+    profile_id: int,
+    *,
+    max_pages: int = 3,
+    order_ids: list[str] | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> list[dict[str, Any]]:
+    """Capture Walmart orders for a profile (list pages → detail pages).
+
+    When *order_ids* is provided, skip list pagination and capture those order
+    numbers directly (used for unshipped refresh).
+    """
+
+    def progress(**kwargs: Any) -> None:
+        if on_progress:
+            on_progress(kwargs)
+
+    start_url = WALMART_ORDERS_URL
+    if order_ids:
+        start_url = f"https://www.walmart.com/orders/{order_ids[0]}"
+
+    session = await session_manager.ensure_session(
+        profile_id,
+        mode="import",
+        start_url=start_url,
+    )
+    page = session.page
+
+    if looks_like_walmart_signin(page.url):
+        raise LoginRequiredError("Walmart session requires login.")
+
+    # Give SPA a moment, then inject hooks.
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=30_000)
+    except Exception:
+        pass
+    await _ensure_orders_hook(page)
+
+    if order_ids is not None:
+        # Preserve caller order; drop empties / dupes.
+        seen: set[str] = set()
+        order_numbers: list[str] = []
+        for raw in order_ids:
+            s = str(raw or "").strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            order_numbers.append(s)
+        progress(
+            phase="list",
+            message=f"Refreshing {len(order_numbers)} unshipped order(s)…",
+            list_count=len(order_numbers),
+        )
+    else:
+        progress(phase="list", message="Collecting order numbers from Walmart…", page=1)
+        order_numbers = await _collect_order_numbers(page, max_pages)
+        if not order_numbers:
+            # Fallback: DOM links on current page only
+            order_numbers = await page.evaluate(
+                """() => {
+                  const out = [];
+                  const seen = new Set();
+                  document.querySelectorAll('a[href*="/orders/"]').forEach((a) => {
+                    const href = a.getAttribute('href') || '';
+                    const m = /\\/orders\\/([^/?#]+)/.exec(href);
+                    if (!m) return;
+                    const id = String(m[1]);
+                    if (seen.has(id)) return;
+                    seen.add(id);
+                    out.push(id);
+                  });
+                  return out;
+                }"""
+            )
+            if not isinstance(order_numbers, list):
+                order_numbers = []
+
+        if looks_like_walmart_signin(page.url):
+            raise LoginRequiredError("Walmart session requires login.")
+
+        progress(
+            phase="list",
+            message=f"Found {len(order_numbers)} order(s)",
+            list_count=len(order_numbers),
+        )
+
+    captured = await _capture_walmart_order_details(
+        page, [str(n) for n in order_numbers], on_progress=on_progress
+    )
     progress(phase="done", message=f"Captured {len(captured)} order(s)", captured=len(captured))
     return captured

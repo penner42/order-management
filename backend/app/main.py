@@ -34,17 +34,35 @@ app.add_middleware(
 )
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     from app.database import SessionLocal
     from app.utils.browser_extension import ensure_signed_async
+    from app.browser_automation.scheduler import start_scheduler
+    from app.routers.browser_profiles import clear_stale_browser_profile_statuses
 
     db = SessionLocal()
     try:
         ensure_admin_user(db)
+        cleared = clear_stale_browser_profile_statuses(db)
+        if cleared:
+            import logging
+
+            logging.getLogger(__name__).info(
+                "Cleared %s browser profile(s) stuck in importing/login_in_progress",
+                cleared,
+            )
     finally:
         db.close()
 
     ensure_signed_async()
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    from app.browser_automation.scheduler import stop_scheduler
+
+    await stop_scheduler()
 
 app.include_router(admin.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")

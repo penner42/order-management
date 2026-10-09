@@ -1691,25 +1691,29 @@ def compute_order_diff_bulk(
     return BulkStoreOrderDiffResponse(diffs=diffs)
 
 
-@router.post("/orders/apply", response_model=DirectApplyResponse)
-def apply_store_order_direct(
-    body: DirectApplyBody,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Create or update an order directly from a normalized payload (no staging row)."""
-    payload = body.payload
+def apply_store_order_payload(
+    db: Session,
+    payload: StoreOrderImportPayload,
+    current_user: User,
+    *,
+    store_account_id: int | None = None,
+    buying_group_id: int | None = None,
+    item_payouts: list[float | None] | None = None,
+    payment_methods: list | None = None,
+    commit: bool = True,
+) -> int:
+    """Create or update an order from a normalized payload. Returns order id.
+
+    Callable from HTTP handlers and browser-automation jobs (no FastAPI Depends).
+    """
     external_order_id, _ = _parse_external_order_fields(payload)
     normalized: dict[str, Any] = _sanitize_store_import_payload_dict(payload)
 
-
-    store_account_id = body.store_account_id
     if store_account_id is not None:
         account = db.query(StoreAccount).filter(StoreAccount.id == store_account_id).first()
         if not account:
             raise HTTPException(status_code=400, detail="Store account not found")
 
-    buying_group_id = body.buying_group_id
     if buying_group_id is not None:
         group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()
         if not group:
@@ -1739,12 +1743,12 @@ def apply_store_order_direct(
         normalized,
         payload.store,
         order,
-        None if is_existing_order else body.item_payouts,
+        None if is_existing_order else item_payouts,
         external_order_id,
         existing_order=is_existing_order,
     )
 
-    payment_methods_payload = body.payment_methods
+    payment_methods_payload = payment_methods
     if payment_methods_payload is not None and not is_existing_order:
         seen_ids: set[int] = set()
         for pm in payment_methods_payload:
@@ -1785,8 +1789,31 @@ def apply_store_order_direct(
         if filename:
             order.invoice_pdf_path = filename
 
-    db.commit()
-    return DirectApplyResponse(order_id=order.id)
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return order.id
+
+
+@router.post("/orders/apply", response_model=DirectApplyResponse)
+def apply_store_order_direct(
+    body: DirectApplyBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create or update an order directly from a normalized payload (no staging row)."""
+    order_id = apply_store_order_payload(
+        db,
+        body.payload,
+        current_user,
+        store_account_id=body.store_account_id,
+        buying_group_id=body.buying_group_id,
+        item_payouts=body.item_payouts,
+        payment_methods=body.payment_methods,
+        commit=True,
+    )
+    return DirectApplyResponse(order_id=order_id)
 
 
 @router.post("/orders/bulk-session", response_model=BulkImportSessionResponse)
