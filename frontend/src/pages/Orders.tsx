@@ -234,6 +234,7 @@ export default function Orders() {
   const [bulkActionShippingOrderId, setBulkActionShippingOrderId] = useState<number | null>(null)
   const [bulkStatusModal, setBulkStatusModal] = useState<{ order: Order; itemIds: number[] } | null>(null)
   const [bulkScanModal, setBulkScanModal] = useState<{ order: Order; itemIds: number[] } | null>(null)
+  const [bulkSubmitModal, setBulkSubmitModal] = useState<{ order: Order; itemIds: number[] } | null>(null)
   const [scanSingleItemModal, setScanSingleItemModal] = useState<Item | null>(null)
   const [scanReceiptModal, setScanReceiptModal] = useState<{
     group: { key: string; label: string; trackingNumber: string | null; items: Item[] }
@@ -1152,6 +1153,28 @@ export default function Orders() {
         const next = new Set(prev); itemIds.forEach((id) => next.delete(id)); return next
       })
       setBulkScanModal(null)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const applyBulkSubmitted = async (itemIds: number[], submissionId: string, date: string) => {
+    if (!date.trim() || itemIds.length === 0) return
+    const submittedAt = dateInputToNoonUtcIso(date)
+    try {
+      const res = await api.post<{ items: Item[] }>('/items/bulk-update', {
+        updates: itemIds.map((itemId) => ({
+          item_id: itemId,
+          status: 'submitted',
+          submitted_at: submittedAt,
+          submission_id: submissionId.trim() || null,
+        })),
+      })
+      mergeUpdatedItemsIntoOrders(res.items)
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev); itemIds.forEach((id) => next.delete(id)); return next
+      })
+      setBulkSubmitModal(null)
     } catch (e) {
       console.error(e)
     }
@@ -3234,6 +3257,12 @@ export default function Orders() {
                                   setBulkStatusModal({ order: o, itemIds: ids })
                                   setBulkActionState(o.id, { action: '' })
                                 }
+                              } else if (v === 'mark_submitted') {
+                                const ids = getSelectedIdsForOrder(o)
+                                if (ids.length > 0) {
+                                  setBulkSubmitModal({ order: o, itemIds: ids })
+                                  setBulkActionState(o.id, { action: '' })
+                                }
                               } else if (v === 'mark_scanned') {
                                 const ids = getSelectedIdsForOrder(o)
                                 if (ids.length > 0) {
@@ -3279,6 +3308,7 @@ export default function Orders() {
                             <option value="copy_tracking_usabg">Copy Tracking Numbers (USABG)</option>
                             <option value="input_tracking">Input Tracking</option>
                             <option value="mark_received">Mark as Received</option>
+                            <option value="mark_submitted">Mark as Submitted</option>
                             <option value="mark_scanned">Mark scanned</option>
                             <option disabled>────────────</option>
                             <option value="delete_items">Delete items</option>
@@ -3439,6 +3469,14 @@ export default function Orders() {
           itemIds={bulkScanModal.itemIds}
           onApply={(receiptIds, date) => applyBulkScanned(Object.keys(receiptIds).map(Number), receiptIds, date)}
           onClose={() => setBulkScanModal(null)}
+        />
+      )}
+      {bulkSubmitModal && (
+        <BulkSubmitModal
+          order={bulkSubmitModal.order}
+          itemIds={bulkSubmitModal.itemIds}
+          onApply={(submissionId, date, eligibleIds) => applyBulkSubmitted(eligibleIds, submissionId, date)}
+          onClose={() => setBulkSubmitModal(null)}
         />
       )}
       {scanSingleItemModal && (
@@ -3628,6 +3666,99 @@ function ScanSingleItemModal({
               setApplying(true)
               try {
                 await onApply(receiptId, date)
+              } finally {
+                setApplying(false)
+              }
+            }}
+            disabled={applying || !date.trim()}
+            className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
+          >
+            {applying ? 'Applying…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BulkSubmitModal({
+  order,
+  itemIds,
+  onApply,
+  onClose,
+}: {
+  order: Order
+  itemIds: number[]
+  onApply: (submissionId: string, date: string, eligibleIds: number[]) => Promise<void>
+  onClose: () => void
+}) {
+  const items = (order.items ?? []).filter((i) => itemIds.includes(i.id) && getNextStatus(getEffectiveItemStatus(i)) === 'submitted')
+  const [submissionId, setSubmissionId] = useState('')
+  const [date, setDate] = useState(() => toYyyyMmDd(new Date()))
+  const [applying, setApplying] = useState(false)
+  if (items.length === 0) {
+    return (
+      <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+        <div
+          className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-md w-full mx-4 border border-brand-200/80 dark:border-gray-700"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 className="text-lg font-medium text-ink mb-2">Mark as Submitted</h3>
+          <p className="text-sm text-ink-muted mb-4">None of the selected items can be marked submitted (they must be in Shipped status).</p>
+          <div className="flex justify-end">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm text-ink hover:bg-brand-50 dark:hover:bg-gray-700">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-md w-full mx-4 border border-brand-200/80 dark:border-gray-700"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-lg font-medium text-ink mb-2">
+          Mark {items.length} item{items.length !== 1 ? 's' : ''} as Submitted
+        </h3>
+        <p className="text-sm text-ink-muted mb-4">
+          {items.length < itemIds.length
+            ? `${itemIds.length - items.length} selected item${itemIds.length - items.length !== 1 ? 's' : ''} skipped (not Shipped).`
+            : 'Set the submission date and optional ID for the selected items.'}
+        </p>
+        <label htmlFor="bulk-submit-date" className="block text-sm font-medium text-ink mb-1">
+          Date
+        </label>
+        <input
+          id="bulk-submit-date"
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-ink mb-4"
+        />
+        <label htmlFor="bulk-submit-id" className="block text-sm font-medium text-ink mb-2">
+          Submission ID (optional)
+        </label>
+        <input
+          id="bulk-submit-id"
+          type="text"
+          value={submissionId}
+          onChange={(e) => setSubmissionId(e.target.value)}
+          placeholder="ID the buying group assigns to this submission"
+          className="w-full h-10 rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-2 text-sm bg-white dark:bg-gray-700 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 mb-6"
+        />
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm text-ink hover:bg-brand-50 dark:hover:bg-gray-700">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              setApplying(true)
+              try {
+                await onApply(submissionId, date, items.map((i) => i.id))
               } finally {
                 setApplying(false)
               }

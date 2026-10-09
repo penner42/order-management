@@ -130,7 +130,7 @@ export default function BrowserImportLogPage() {
   }, [levelFilter, eventFilter, scheduledOnly])
 
   return (
-    <div className="max-w-5xl">
+    <div className="w-full">
       <div className="flex flex-wrap items-start justify-between gap-4 mb-2">
         <h1 className="text-2xl font-semibold text-ink dark:text-gray-100">Browser import log</h1>
         <Link
