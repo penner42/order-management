@@ -6,6 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { api, getStoredToken } from '../api/client'
+import { AlertDialog } from '../components/AlertDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
 import type {
@@ -250,6 +251,8 @@ export default function Orders() {
   } | null>(null)
   const [trackingEdits, setTrackingEdits] = useState<Record<number, string>>({})
   const [savingTrackingId, setSavingTrackingId] = useState<number | null>(null)
+  const [submittingTrackingItemId, setSubmittingTrackingItemId] = useState<number | null>(null)
+  const [trackingSubmitAlert, setTrackingSubmitAlert] = useState<string | null>(null)
   const [shipments, setShipments] = useState<Shipment[]>([])
   const [copyingId, setCopyingId] = useState<number | null>(null)
   const [copiedAllTracking, setCopiedAllTracking] = useState(false)
@@ -1000,6 +1003,34 @@ export default function Orders() {
       console.error(e)
     } finally {
       setSavingTrackingId(null)
+    }
+  }
+
+  const canSubmitTrackingToApi = (order: Order, item: Item, tracking: string) => {
+    if (item.status !== 'shipped') return false
+    if (!tracking.trim()) return false
+    const bg = groups.find((g) => g.id === order.buying_group_id)
+    if (!bg) return false
+    return (
+      bg.api_framework === 'parsefile' &&
+      Boolean(bg.bearer_token?.trim()) &&
+      Boolean(bg.base_url?.trim())
+    )
+  }
+
+  const submitTrackingToApi = async (itemId: number) => {
+    setSubmittingTrackingItemId(itemId)
+    try {
+      const res = await api.post<{ item: Item; message: string; affected: number | null }>(
+        `/items/${itemId}/submit-tracking`,
+        {}
+      )
+      mergeUpdatedItemsIntoOrders([res.item])
+    } catch (e) {
+      console.error(e)
+      setTrackingSubmitAlert(e instanceof Error ? e.message : 'Failed to submit tracking')
+    } finally {
+      setSubmittingTrackingItemId(null)
     }
   }
 
@@ -2794,40 +2825,54 @@ export default function Orders() {
                                       />
                                     </div>
 
-                                    <div className="mt-2 flex items-stretch min-w-0 h-9 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500 overflow-hidden">
-                                      <input
-                                        type="text"
-                                        value={trackingRaw}
-                                        onChange={(e) => setTrackingEdits((prev) => ({ ...prev, [item.id]: e.target.value }))}
-                                        onBlur={(e) => {
-                                          const v = e.target.value
-                                          const current = getTracking(item.id)
-                                          if (v.trim() !== current.trim() || (v === '' && current !== '')) saveItemTracking(item.id, v)
-                                          else
-                                            setTrackingEdits((prev) => {
-                                              const next = { ...prev }
-                                              delete next[item.id]
-                                              return next
-                                            })
-                                        }}
-                                        disabled={savingTrackingId === item.id}
-                                        className="flex-1 min-w-0 h-9 border-0 px-3 py-1.5 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
-                                        placeholder="Tracking"
-                                      />
-                                      {trackingInfo && trackingInfo.url && (
-                                        <a
-                                          href={trackingInfo.url}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          className="shrink-0 inline-flex items-center gap-1 px-3 text-sm font-medium text-brand-600 dark:text-brand-400 border-l border-brand-200 dark:border-gray-600 hover:bg-brand-50 dark:hover:bg-gray-700/50"
-                                          title={`Track via ${trackingInfo.carrier}`}
-                                          aria-label={`Track via ${trackingInfo.carrier}`}
+                                    <div className="mt-2 flex items-center gap-2 min-w-0">
+                                      <div className="flex flex-1 items-stretch min-w-0 h-9 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500 overflow-hidden">
+                                        <input
+                                          type="text"
+                                          value={trackingRaw}
+                                          onChange={(e) => setTrackingEdits((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                                          onBlur={(e) => {
+                                            const v = e.target.value
+                                            const current = getTracking(item.id)
+                                            if (v.trim() !== current.trim() || (v === '' && current !== '')) saveItemTracking(item.id, v)
+                                            else
+                                              setTrackingEdits((prev) => {
+                                                const next = { ...prev }
+                                                delete next[item.id]
+                                                return next
+                                              })
+                                          }}
+                                          disabled={savingTrackingId === item.id}
+                                          className="flex-1 min-w-0 h-9 border-0 px-3 py-1.5 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
+                                          placeholder="Tracking"
+                                        />
+                                        {trackingInfo && trackingInfo.url && (
+                                          <a
+                                            href={trackingInfo.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="shrink-0 inline-flex items-center gap-1 px-3 text-sm font-medium text-brand-600 dark:text-brand-400 border-l border-brand-200 dark:border-gray-600 hover:bg-brand-50 dark:hover:bg-gray-700/50"
+                                            title={`Track via ${trackingInfo.carrier}`}
+                                            aria-label={`Track via ${trackingInfo.carrier}`}
+                                          >
+                                            <span className="whitespace-nowrap">{trackingInfo.carrier}</span>
+                                            <svg className="w-4 h-4 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                            </svg>
+                                          </a>
+                                        )}
+                                      </div>
+                                      {canSubmitTrackingToApi(o, item, trackingRaw) && (
+                                        <button
+                                          type="button"
+                                          onClick={() => submitTrackingToApi(item.id)}
+                                          disabled={submittingTrackingItemId === item.id}
+                                          className="shrink-0 px-2 py-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
+                                          title="Submit tracking to buying group"
+                                          aria-label="Submit tracking to buying group"
                                         >
-                                          <span className="whitespace-nowrap">{trackingInfo.carrier}</span>
-                                          <svg className="w-4 h-4 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                                          </svg>
-                                        </a>
+                                          {submittingTrackingItemId === item.id ? '…' : 'Submit'}
+                                        </button>
                                       )}
                                     </div>
                                   </div>
@@ -3051,34 +3096,48 @@ export default function Orders() {
                                       />
                                     </td>
                                     <td className="py-1 px-2">
-                                      <div className="flex items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500">
-                                        <input
-                                          type="text"
-                                          value={trackingRaw}
-                                          onChange={(e) => setTrackingEdits((prev) => ({ ...prev, [item.id]: e.target.value }))}
-                                          onBlur={(e) => {
-                                            const v = e.target.value
-                                            const current = getTracking(item.id)
-                                            if (v.trim() !== current.trim() || (v === '' && current !== '')) saveItemTracking(item.id, v)
-                                            else setTrackingEdits((prev) => { const next = { ...prev }; delete next[item.id]; return next })
-                                          }}
-                                          placeholder=""
-                                          disabled={savingTrackingId === item.id}
-                                          className="flex-1 min-w-[5rem] h-5 border-0 rounded-l px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
-                                        />
-                                        {trackingInfo && trackingInfo.url && (
-                                          <a
-                                            href={trackingInfo.url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="shrink-0 flex items-center gap-1 h-5 border-l border-brand-200 dark:border-gray-600 pl-2 pr-2 py-0 text-xs font-medium text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-gray-700/50"
-                                            title={`Track via ${trackingInfo.carrier}`}
+                                      <div className="flex items-center gap-1.5 min-w-0">
+                                        <div className="flex flex-1 items-stretch min-w-0 h-5 rounded border border-brand-200 dark:border-gray-600 focus-within:border-brand-500">
+                                          <input
+                                            type="text"
+                                            value={trackingRaw}
+                                            onChange={(e) => setTrackingEdits((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                                            onBlur={(e) => {
+                                              const v = e.target.value
+                                              const current = getTracking(item.id)
+                                              if (v.trim() !== current.trim() || (v === '' && current !== '')) saveItemTracking(item.id, v)
+                                              else setTrackingEdits((prev) => { const next = { ...prev }; delete next[item.id]; return next })
+                                            }}
+                                            placeholder=""
+                                            disabled={savingTrackingId === item.id}
+                                            className="flex-1 min-w-[5rem] h-5 border-0 rounded-l px-2 py-0 text-sm focus:ring-0 focus:outline-none disabled:opacity-60"
+                                          />
+                                          {trackingInfo && trackingInfo.url && (
+                                            <a
+                                              href={trackingInfo.url}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="shrink-0 flex items-center gap-1 h-5 border-l border-brand-200 dark:border-gray-600 pl-2 pr-2 py-0 text-xs font-medium text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-gray-700/50"
+                                              title={`Track via ${trackingInfo.carrier}`}
+                                            >
+                                              <span className="whitespace-nowrap">{trackingInfo.carrier}</span>
+                                              <svg className="w-3.5 h-3.5 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                              </svg>
+                                            </a>
+                                          )}
+                                        </div>
+                                        {canSubmitTrackingToApi(o, item, trackingRaw) && (
+                                          <button
+                                            type="button"
+                                            onClick={() => submitTrackingToApi(item.id)}
+                                            disabled={submittingTrackingItemId === item.id}
+                                            className="shrink-0 px-1.5 py-0.5 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
+                                            title="Submit tracking to buying group"
+                                            aria-label="Submit tracking to buying group"
                                           >
-                                            <span className="whitespace-nowrap">{trackingInfo.carrier}</span>
-                                            <svg className="w-3.5 h-3.5 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                                            </svg>
-                                          </a>
+                                            {submittingTrackingItemId === item.id ? '…' : 'Submit'}
+                                          </button>
                                         )}
                                       </div>
                                     </td>
@@ -3460,6 +3519,11 @@ export default function Orders() {
           }
         }}
         onCancel={() => setConfirmDeleteOrderId(null)}
+      />
+      <AlertDialog
+        open={trackingSubmitAlert !== null}
+        message={trackingSubmitAlert ?? ''}
+        onClose={() => setTrackingSubmitAlert(null)}
       />
       {bulkStatusModal && (
         <BulkStatusModal

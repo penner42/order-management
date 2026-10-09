@@ -120,3 +120,9 @@ class ItemBulkUpdateResponse(BaseModel):
 class ItemSplitResponse(BaseModel):
     kept: ItemRead
     split_off: ItemRead
+
+
+class ItemSubmitTrackingResponse(BaseModel):
+    item: ItemRead
+    message: str
+    affected: int | None = None

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, selectinload, joinedload
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Item, Shipment, ShipmentItem, User, Payment, PaymentLineItem
+from app.models import Item, Order, Shipment, ShipmentItem, User, Payment, PaymentLineItem
 from app.models.item import ItemStatus
 from app.schemas.item import (
     ItemBulkDeleteRequest,
@@ -16,8 +16,10 @@ from app.schemas.item import (
     ItemRead,
     ItemSplitRequest,
     ItemSplitResponse,
+    ItemSubmitTrackingResponse,
     ItemUpdate,
 )
+from app.utils.buying_group_apis import parsefile as parsefile_api
 from app.utils.dates import to_date_only
 
 # Item status date fields: date-only (shipped_at/delivered_at live on Shipment; payment dates on Payment)
@@ -169,6 +171,94 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
     db.refresh(item)
     db.refresh(new_item)
     return ItemSplitResponse(kept=item, split_off=new_item)
+
+
+@router.post("/{item_id}/submit-tracking", response_model=ItemSubmitTrackingResponse)
+def submit_item_tracking(
+    item_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Submit this item's tracking number to the order's buying-group API (Parsefile for now)."""
+    item = (
+        db.query(Item)
+        .filter(Item.id == item_id)
+        .options(
+            selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment),
+            selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
+            joinedload(Item.order).joinedload(Order.buying_group),
+        )
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if item.status != ItemStatus.SHIPPED:
+        raise HTTPException(status_code=400, detail="Item must be in shipped status to submit tracking")
+
+    tracking = None
+    for si in item.shipment_items or []:
+        if si.shipment and (si.shipment.tracking_number or "").strip():
+            tracking = si.shipment.tracking_number.strip()
+            break
+    if not tracking:
+        raise HTTPException(status_code=400, detail="Item has no tracking number")
+
+    order = item.order
+    if not order or not order.buying_group_id or not order.buying_group:
+        raise HTTPException(status_code=400, detail="Order has no buying group")
+    group = order.buying_group
+
+    framework = (group.api_framework or "").strip().casefold()
+    if framework != "parsefile":
+        raise HTTPException(status_code=400, detail="Buying group API framework is not configured for submission")
+    if not (group.bearer_token or "").strip():
+        raise HTTPException(status_code=400, detail="Buying group has no API token")
+    if not (group.base_url or "").strip():
+        raise HTTPException(status_code=400, detail="Buying group has no base URL")
+    if group.api_user_id is None:
+        raise HTTPException(status_code=400, detail="Buying group is missing API user id")
+    if not (group.api_email or "").strip():
+        raise HTTPException(status_code=400, detail="Buying group is missing API email")
+
+    notes = None
+    desc = (item.description or "").strip()
+    if desc:
+        notes = f"{item.quantity or 1}-{desc}"
+
+    amount = None
+    if item.price_sold is not None:
+        amount = item.price_sold * (item.quantity or 1)
+
+    try:
+        result = parsefile_api.submit_trackings(
+            base_url=group.base_url,
+            api_url=group.api_url,
+            bearer_token=group.bearer_token,
+            user_id=int(group.api_user_id),
+            email=group.api_email,
+            trackings=[
+                parsefile_api.ParsefileTrackingEntry(
+                    tracking=tracking,
+                    order=(order.store_order_number or None),
+                    amount=amount,
+                    notes=notes,
+                )
+            ],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    item.status = ItemStatus.SUBMITTED
+    item.submitted_at = to_date_only(datetime.now(timezone.utc))
+    db.commit()
+    db.refresh(item)
+    return ItemSubmitTrackingResponse(
+        item=item,
+        message=result.message,
+        affected=result.affected,
+    )
 
 
 @router.get("/{item_id}", response_model=ItemRead)

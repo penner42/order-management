@@ -1,7 +1,14 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import type { BuyingGroup } from '../api/types'
+import type { BuyingGroup, BuyingGroupApiFramework } from '../api/types'
+
+const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: string }[] = [
+  { value: '', label: 'None' },
+  { value: 'parsefile', label: 'Parsefile' },
+]
+
+const PARSEFILE_DEFAULT_API_PATH = '/p/it@api@order-management/cmd/addtracking'
 
 function AliasEditor({
   group,
@@ -90,22 +97,42 @@ function AliasEditor({
 
 type EditDraft = {
   name: string
+  api_framework: '' | BuyingGroupApiFramework
   base_url: string
   api_url: string
   bearer_token: string
+  api_user_id: string
+  api_email: string
 }
 
 function emptyDraft(): EditDraft {
-  return { name: '', base_url: '', api_url: '', bearer_token: '' }
+  return {
+    name: '',
+    api_framework: '',
+    base_url: '',
+    api_url: '',
+    bearer_token: '',
+    api_user_id: '',
+    api_email: '',
+  }
 }
 
 function draftFromGroup(g: BuyingGroup): EditDraft {
   return {
     name: g.name,
+    api_framework: g.api_framework ?? '',
     base_url: g.base_url ?? '',
     api_url: g.api_url ?? '',
     bearer_token: g.bearer_token ?? '',
+    api_user_id: g.api_user_id != null ? String(g.api_user_id) : '',
+    api_email: g.api_email ?? '',
   }
+}
+
+function frameworkLabel(framework: string | null | undefined): string | null {
+  if (!framework) return null
+  const opt = API_FRAMEWORK_OPTIONS.find((o) => o.value === framework)
+  return opt?.label ?? framework
 }
 
 export default function BuyingGroups() {
@@ -128,13 +155,23 @@ export default function BuyingGroups() {
   const saveEdit = async () => {
     if (editing == null) return
     if (!draft.name.trim()) return
+    const userIdRaw = draft.api_user_id.trim()
+    let apiUserId: number | null = null
+    if (userIdRaw) {
+      const n = parseInt(userIdRaw, 10)
+      if (Number.isNaN(n)) return
+      apiUserId = n
+    }
     setSaving(true)
     try {
       const updated = await api.patch<BuyingGroup>(`/buying-groups/${editing}`, {
         name: draft.name.trim(),
+        api_framework: draft.api_framework || null,
         base_url: draft.base_url.trim() || null,
         api_url: draft.api_url.trim() || null,
         bearer_token: draft.bearer_token.trim() || null,
+        api_user_id: apiUserId,
+        api_email: draft.api_email.trim() || null,
       })
       setGroups((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
       setEditing(null)
@@ -228,11 +265,31 @@ export default function BuyingGroups() {
                     </div>
                     <div className="grid gap-2 max-w-lg">
                       <label className="block">
+                        <span className="text-xs text-ink-muted">API framework</span>
+                        <select
+                          className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                          value={draft.api_framework}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              api_framework: e.target.value as '' | BuyingGroupApiFramework,
+                            }))
+                          }
+                          disabled={saving}
+                        >
+                          {API_FRAMEWORK_OPTIONS.map((opt) => (
+                            <option key={opt.value || 'none'} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
                         <span className="text-xs text-ink-muted">Base URL</span>
                         <input
                           type="url"
                           className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                          placeholder="https://api.example.com"
+                          placeholder="https://www.powerbuynetwork.com"
                           value={draft.base_url}
                           onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
                           disabled={saving}
@@ -243,7 +300,11 @@ export default function BuyingGroups() {
                         <input
                           type="text"
                           className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                          placeholder="/v1/tracking"
+                          placeholder={
+                            draft.api_framework === 'parsefile'
+                              ? PARSEFILE_DEFAULT_API_PATH
+                              : '/v1/tracking'
+                          }
                           value={draft.api_url}
                           onChange={(e) => setDraft((d) => ({ ...d, api_url: e.target.value }))}
                           disabled={saving}
@@ -261,21 +322,49 @@ export default function BuyingGroups() {
                           autoComplete="off"
                         />
                       </label>
+                      {draft.api_framework === 'parsefile' && (
+                        <>
+                          <label className="block">
+                            <span className="text-xs text-ink-muted">API user id</span>
+                            <input
+                              type="number"
+                              className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                              placeholder="8546"
+                              value={draft.api_user_id}
+                              onChange={(e) => setDraft((d) => ({ ...d, api_user_id: e.target.value }))}
+                              disabled={saving}
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="text-xs text-ink-muted">API email</span>
+                            <input
+                              type="email"
+                              className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                              placeholder="you@example.com"
+                              value={draft.api_email}
+                              onChange={(e) => setDraft((d) => ({ ...d, api_email: e.target.value }))}
+                              disabled={saving}
+                            />
+                          </label>
+                        </>
+                      )}
                     </div>
                   </div>
                 ) : (
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <span className="font-medium text-ink">{g.name}</span>
-                      {g.base_url ? (
-                        <p className="text-xs text-ink-muted truncate mt-0.5" title={g.base_url}>
-                          {g.base_url}
-                          {g.api_url ? g.api_url : ''}
-                          {g.bearer_token ? ' · token set' : ''}
+                      {(g.api_framework || g.base_url || g.bearer_token) && (
+                        <p className="text-xs text-ink-muted truncate mt-0.5" title={g.base_url ?? undefined}>
+                          {[
+                            frameworkLabel(g.api_framework),
+                            g.base_url ? `${g.base_url}${g.api_url ?? ''}` : null,
+                            g.bearer_token ? 'token set' : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
                         </p>
-                      ) : g.bearer_token ? (
-                        <p className="text-xs text-ink-muted mt-0.5">Token set</p>
-                      ) : null}
+                      )}
                     </div>
                     <div className="flex gap-2 shrink-0">
                       <button

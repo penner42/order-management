@@ -14,9 +14,12 @@ class BuyingGroup(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)  # for multi-user
     name = Column(String(255), nullable=False)
     aliases = Column(JSON, nullable=False, default=list)
+    api_framework = Column(String(50), nullable=True)  # e.g. "parsefile"
     base_url = Column(String(500), nullable=True)
     api_url = Column(String(500), nullable=True)  # optional path relative to base_url
     bearer_token = Column(String(2000), nullable=True)
+    api_user_id = Column(Integer, nullable=True)  # Parsefile account user id
+    api_email = Column(String(255), nullable=True)  # Parsefile account email
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="buying_groups")

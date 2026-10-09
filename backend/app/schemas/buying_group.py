@@ -1,5 +1,12 @@
 """Buying group schemas."""
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, field_validator
+
+
+ApiFramework = Literal["parsefile"]
+
+ALLOWED_API_FRAMEWORKS = frozenset({"parsefile"})
 
 
 def _normalize_optional_str(value: object) -> str | None:
@@ -11,12 +18,25 @@ def _normalize_optional_str(value: object) -> str | None:
     return stripped or None
 
 
+def _normalize_api_framework(value: object) -> str | None:
+    normalized = _normalize_optional_str(value)
+    if normalized is None:
+        return None
+    key = normalized.casefold()
+    if key not in ALLOWED_API_FRAMEWORKS:
+        raise ValueError(f"Unsupported api_framework: {normalized}")
+    return key
+
+
 class BuyingGroupBase(BaseModel):
     name: str
     aliases: list[str] = []
+    api_framework: ApiFramework | None = None
     base_url: str | None = None
     api_url: str | None = None
     bearer_token: str | None = None
+    api_user_id: int | None = None
+    api_email: str | None = None
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -40,7 +60,12 @@ class BuyingGroupBase(BaseModel):
             normalized.append(alias)
         return normalized
 
-    @field_validator("base_url", "api_url", "bearer_token", mode="before")
+    @field_validator("api_framework", mode="before")
+    @classmethod
+    def normalize_api_framework(cls, value: object) -> str | None:
+        return _normalize_api_framework(value)
+
+    @field_validator("base_url", "api_url", "bearer_token", "api_email", mode="before")
     @classmethod
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
@@ -53,9 +78,12 @@ class BuyingGroupCreate(BuyingGroupBase):
 class BuyingGroupUpdate(BaseModel):
     name: str | None = None
     aliases: list[str] | None = None
+    api_framework: ApiFramework | None = None
     base_url: str | None = None
     api_url: str | None = None
     bearer_token: str | None = None
+    api_user_id: int | None = None
+    api_email: str | None = None
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -64,7 +92,12 @@ class BuyingGroupUpdate(BaseModel):
             return None
         return BuyingGroupBase.normalize_aliases(value)
 
-    @field_validator("base_url", "api_url", "bearer_token", mode="before")
+    @field_validator("api_framework", mode="before")
+    @classmethod
+    def normalize_api_framework(cls, value: object) -> str | None:
+        return _normalize_api_framework(value)
+
+    @field_validator("base_url", "api_url", "bearer_token", "api_email", mode="before")
     @classmethod
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
@@ -84,5 +117,6 @@ class BuyingGroupSummary(BaseModel):
     user_id: int | None = None
     name: str
     aliases: list[str] = []
+    api_framework: ApiFramework | None = None
 
     model_config = ConfigDict(from_attributes=True)

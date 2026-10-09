@@ -26,15 +26,20 @@ export interface User {
   updated_at?: string
 }
 
+export type BuyingGroupApiFramework = 'parsefile'
+
 export interface BuyingGroup {
   id: number
   user_id: number | null
   name: string
   aliases: string[]
+  api_framework?: BuyingGroupApiFramework | null
   /** Present on buying-groups CRUD responses; omitted when nested on orders/payments. */
   base_url?: string | null
   api_url?: string | null
   bearer_token?: string | null
+  api_user_id?: number | null
+  api_email?: string | null
 }
 
 export interface Reward {
