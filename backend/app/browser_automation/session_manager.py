@@ -164,7 +164,7 @@ class SessionManager:
         width: int,
         height: int,
     ) -> tuple[BrowserContext, Any]:
-        """Launch Chromium persistent context (Costco Azure B2C is broken on Firefox)."""
+        """Launch Chromium persistent context (Costco Azure B2C / Amazon automations)."""
         from playwright.async_api import async_playwright
 
         pw = await async_playwright().start()

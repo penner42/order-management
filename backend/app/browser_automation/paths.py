@@ -14,14 +14,14 @@ def profiles_root() -> Path:
 
 
 def browser_engine_for_retailer(retailer: str) -> str:
-    """Costco Azure B2C login fails on Firefox (SelfAsserted XHR interrupt); use Chromium."""
-    if (retailer or "").strip().lower() == "costco":
+    """Costco Azure B2C and Amazon automations use Chromium; Walmart stays on Camoufox."""
+    if (retailer or "").strip().lower() in {"amazon", "costco"}:
         return "chromium"
     return "camoufox"
 
 
 def profile_user_data_dir(profile_id: int, *, browser: str = "camoufox") -> Path:
-    # Keep engine-specific dirs so switching Costco → Chromium does not reuse a Firefox profile.
+    # Keep engine-specific dirs so switching retailers → Chromium does not reuse a Firefox profile.
     prefix = "chromium-profile" if browser == "chromium" else "camoufox-profile"
     path = profiles_root() / f"{prefix}-{profile_id}"
     path.mkdir(parents=True, exist_ok=True)
