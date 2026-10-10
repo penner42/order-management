@@ -2,22 +2,35 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable, TypeVar
+from urllib.parse import urlencode
 
 
 DEFAULT_BASE_URL = "https://api.usabuying.group/buyers"
 TRACKINGS_PATH = "/trackings"
+NOTES_PATH = "/notes"
 LOGIN_PATH = "/login"
+
+_T = TypeVar("_T")
 
 
 @dataclass
 class UsabgTrackingEntry:
     tracking: str
     amount: Decimal | float | None = None
+    note: str | None = None
+
+
+@dataclass
+class UsabgTrackingRow:
+    tracking_id: str
+    tracking_number: str
+    note_id: str | None = None
 
 
 @dataclass
@@ -26,6 +39,8 @@ class UsabgSubmitResult:
     message: str
     affected: int | None
     raw: dict[str, Any]
+    notes_updated: int = 0
+    notes_errors: list[str] = field(default_factory=list)
 
 
 def resolve_base_url(base_url: str | None) -> str:
@@ -235,6 +250,190 @@ class _SessionExpired(RuntimeError):
     pass
 
 
+def _authorized_json(
+    *,
+    method: str,
+    url: str,
+    bearer_token: str,
+    body: dict[str, Any] | None = None,
+    timeout_seconds: float = 30.0,
+) -> tuple[int, dict[str, Any] | list[Any] | None, str]:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {bearer_token}",
+        "from-bubble": "1",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            raw_text = resp.read().decode("utf-8", errors="replace")
+            status = getattr(resp, "status", 200)
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        raw: dict[str, Any] | None = None
+        if err_body.strip():
+            try:
+                parsed = json.loads(err_body)
+                if isinstance(parsed, dict):
+                    raw = parsed
+            except json.JSONDecodeError:
+                pass
+        if _is_session_expired(e.code, raw, err_body):
+            raise _SessionExpired(f"USABG session expired (HTTP {e.code})") from e
+        detail = ""
+        if isinstance(raw, dict):
+            detail = _message_from_payload(raw, success=False)
+        if not detail:
+            detail = err_body.strip()[:400] or (str(e.reason).strip() if e.reason else "") or "empty response"
+        raise RuntimeError(f"USABG API error {e.code} at {url}: {detail}") from e
+    except urllib.error.URLError as e:
+        reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
+        raise RuntimeError(f"USABG API request failed ({url}): {reason}") from e
+
+    if not raw_text.strip():
+        return status, None, raw_text
+    try:
+        parsed_body = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"USABG API returned non-JSON (HTTP {status}): {raw_text[:300]}") from e
+    return status, parsed_body, raw_text
+
+
+def _with_relogin(
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    token: str,
+    timeout_seconds: float,
+    call: Callable[[str], _T],
+) -> tuple[_T, str]:
+    """Run ``call(token)``; on session expiry, login once and retry. Returns (result, token)."""
+    try:
+        return call(token), token
+    except _SessionExpired:
+        token = login(
+            base_url=base_url,
+            username=username,
+            password=password,
+            timeout_seconds=timeout_seconds,
+        )
+        return call(token), token
+
+
+def _rows_from_trackings_payload(payload: dict[str, Any] | list[Any] | None) -> list[dict[str, Any]]:
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if isinstance(data, dict):
+        nested = data.get("data")
+        if isinstance(nested, list):
+            return [r for r in nested if isinstance(r, dict)]
+        # Sometimes the list is under another key.
+        for key in ("trackings", "items", "results"):
+            val = data.get(key)
+            if isinstance(val, list):
+                return [r for r in val if isinstance(r, dict)]
+    for key in ("trackings", "items", "results"):
+        val = payload.get(key)
+        if isinstance(val, list):
+            return [r for r in val if isinstance(r, dict)]
+    return []
+
+
+def _parse_tracking_row(row: dict[str, Any]) -> UsabgTrackingRow | None:
+    # WeWeb/Bubble shortened keys: a=id, b=tracking number, w=note id.
+    tracking_id = row.get("a") if row.get("a") is not None else row.get("id")
+    tracking_number = row.get("b") if row.get("b") is not None else row.get("tracking_number")
+    note_id = row.get("w") if row.get("w") is not None else row.get("note_id")
+    if tracking_id is None or tracking_number is None:
+        return None
+    tn = str(tracking_number).strip()
+    tid = str(tracking_id).strip()
+    if not tn or not tid:
+        return None
+    nid = None
+    if note_id is not None and str(note_id).strip() and str(note_id).strip().casefold() not in ("null", "none", "0", "false"):
+        nid = str(note_id).strip()
+    return UsabgTrackingRow(tracking_id=tid, tracking_number=tn, note_id=nid)
+
+
+def find_tracking(
+    *,
+    base_url: str,
+    bearer_token: str,
+    tracking_number: str,
+    timeout_seconds: float = 30.0,
+) -> UsabgTrackingRow | None:
+    """Look up a buyer tracking row by tracking number (GET /trackings?tracking_number=…)."""
+    tn = (tracking_number or "").strip()
+    if not tn:
+        return None
+
+    qs = urlencode({"tracking_number": tn, "limit": 20, "start": 0})
+    url = f"{base_url}{TRACKINGS_PATH}?{qs}"
+    _status, payload, _text = _authorized_json(
+        method="GET",
+        url=url,
+        bearer_token=bearer_token,
+        body=None,
+        timeout_seconds=timeout_seconds,
+    )
+    rows = _rows_from_trackings_payload(payload)
+    tn_key = tn.casefold()
+    for row in rows:
+        parsed = _parse_tracking_row(row)
+        if parsed and parsed.tracking_number.casefold() == tn_key:
+            return parsed
+    # Fallback: first row if the API filtered exactly.
+    if len(rows) == 1:
+        return _parse_tracking_row(rows[0])
+    return None
+
+
+def upsert_tracking_note(
+    *,
+    base_url: str,
+    bearer_token: str,
+    tracking_id: str,
+    note_id: str | None,
+    comment: str,
+    timeout_seconds: float = 30.0,
+) -> None:
+    """Create or update the Note column for a tracking (POST /notes or PUT /notes/{id})."""
+    comment = (comment or "").strip()
+    if not comment:
+        raise ValueError("comment is required")
+    body = {
+        "module": "buyers_portal",
+        "model": "trackings",
+        "model_id": tracking_id,
+        "comment": comment,
+    }
+    if note_id:
+        url = f"{base_url}{NOTES_PATH}/{note_id}"
+        method = "PUT"
+    else:
+        url = f"{base_url}{NOTES_PATH}"
+        method = "POST"
+    _authorized_json(
+        method=method,
+        url=url,
+        bearer_token=bearer_token,
+        body=body,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def submit_trackings(
     *,
     base_url: str | None,
@@ -260,29 +459,24 @@ def submit_trackings(
         timeout_seconds=timeout_seconds,
     )
 
-    try:
-        status, raw = _post_trackings(
+    def _do_post(tok: str) -> tuple[int, dict[str, Any]]:
+        return _post_trackings(
             url=url,
-            bearer_token=token,
-            trackings_text=trackings_text,
-            timeout_seconds=timeout_seconds,
-        )
-    except _SessionExpired:
-        token = login(
-            base_url=base,
-            username=username,
-            password=password,
-            timeout_seconds=timeout_seconds,
-        )
-        status, raw = _post_trackings(
-            url=url,
-            bearer_token=token,
+            bearer_token=tok,
             trackings_text=trackings_text,
             timeout_seconds=timeout_seconds,
         )
 
+    (status, raw), token = _with_relogin(
+        base_url=base,
+        username=username,
+        password=password,
+        token=token,
+        timeout_seconds=timeout_seconds,
+        call=_do_post,
+    )
+
     if _is_session_expired(status, raw, ""):
-        # Unexpected: HTTP 200 with expiry message — treat as failure.
         raise RuntimeError("USABG session expired after submit")
 
     message = _message_from_payload(raw, success=True)
@@ -299,14 +493,85 @@ def submit_trackings(
             if isinstance(ok, str):
                 success_text = ok.strip()
 
-    # Fail hard when the API only reported errors and no successes.
     if errors_text and not success_text:
         raise RuntimeError(errors_text or message)
 
     affected = len(trackings) if success_text or not errors_text else None
+
+    notes_updated = 0
+    notes_errors: list[str] = []
+    for entry in trackings:
+        note = (entry.note or "").strip()
+        if not note:
+            continue
+        tn = (entry.tracking or "").strip()
+        try:
+
+            def _lookup(tok: str, *, _tn: str = tn) -> UsabgTrackingRow | None:
+                return find_tracking(
+                    base_url=base,
+                    bearer_token=tok,
+                    tracking_number=_tn,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            row: UsabgTrackingRow | None = None
+            for attempt in range(3):
+                row, token = _with_relogin(
+                    base_url=base,
+                    username=username,
+                    password=password,
+                    token=token,
+                    timeout_seconds=timeout_seconds,
+                    call=_lookup,
+                )
+                if row is not None:
+                    break
+                if attempt < 2:
+                    time.sleep(0.75)
+            if row is None:
+                notes_errors.append(f"{tn}: tracking not found after submit")
+                continue
+
+            def _note(
+                tok: str,
+                *,
+                _row: UsabgTrackingRow = row,
+                _comment: str = note,
+            ) -> None:
+                upsert_tracking_note(
+                    base_url=base,
+                    bearer_token=tok,
+                    tracking_id=_row.tracking_id,
+                    note_id=_row.note_id,
+                    comment=_comment,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            _, token = _with_relogin(
+                base_url=base,
+                username=username,
+                password=password,
+                token=token,
+                timeout_seconds=timeout_seconds,
+                call=_note,
+            )
+            notes_updated += 1
+        except Exception as exc:
+            notes_errors.append(f"{tn}: {exc}")
+
+    if notes_updated and notes_errors:
+        message = f"{message}\nUpdated notes on {notes_updated} tracking(s); {len(notes_errors)} note error(s)."
+    elif notes_updated:
+        message = f"{message}\nUpdated notes on {notes_updated} tracking(s)."
+    elif notes_errors:
+        message = f"{message}\nNote update failed: {'; '.join(notes_errors[:3])}"
+
     return UsabgSubmitResult(
         success=True,
         message=message,
         affected=affected,
         raw=raw,
+        notes_updated=notes_updated,
+        notes_errors=notes_errors,
     )

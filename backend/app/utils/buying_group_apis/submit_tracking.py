@@ -90,8 +90,8 @@ def _sum_amounts(items: Sequence[Item]) -> Decimal | float | None:
     return total
 
 
-def _parsefile_notes(items: Sequence[Item]) -> str | None:
-    """All item quantities (+ descriptions) for Parsefile notes, e.g. ``2-Widget; 1-Gadget``."""
+def _product_notes(items: Sequence[Item]) -> str | None:
+    """Item quantities (+ descriptions), e.g. ``2-Widget; 1-Gadget``."""
     parts: list[str] = []
     for item in items:
         qty = item.quantity or 1
@@ -100,7 +100,7 @@ def _parsefile_notes(items: Sequence[Item]) -> str | None:
     return "; ".join(parts) if parts else None
 
 
-def _parsefile_order_numbers(pairs: Sequence[tuple[Item, Order]]) -> str | None:
+def _order_numbers(pairs: Sequence[tuple[Item, Order]]) -> str | None:
     """Unique store order numbers in first-seen order, comma-separated."""
     seen: set[str] = set()
     orders: list[str] = []
@@ -114,6 +114,18 @@ def _parsefile_order_numbers(pairs: Sequence[tuple[Item, Order]]) -> str | None:
         seen.add(key)
         orders.append(num)
     return ",".join(orders) if orders else None
+
+
+def _tracking_note_text(pairs: Sequence[tuple[Item, Order]]) -> str | None:
+    """Note body with order numbers and products (USABG Note column / Parsefile notes)."""
+    orders = _order_numbers(pairs)
+    products = _product_notes([item for item, _order in pairs])
+    parts = [p for p in (orders, products) if p]
+    return "\n".join(parts) if parts else None
+
+# Back-compat aliases used by Parsefile builders.
+_parsefile_notes = _product_notes
+_parsefile_order_numbers = _order_numbers
 
 
 def build_parsefile_entry(
@@ -253,23 +265,30 @@ def submit_item_tracking_to_group(
     item_ids = [i.id for i in items]
     amount = _sum_amounts(items)
 
+    pairs: list[tuple[Item, Order]] = []
+    for it in items:
+        ord_ = it.order if it.order is not None else (order if it.id == item.id else None)
+        if ord_ is None:
+            continue
+        pairs.append((it, ord_))
+    if not pairs:
+        pairs = [(item, order)]
+
     framework = (group.api_framework or "").strip().casefold()
     if framework == "parsefile":
-        pairs: list[tuple[Item, Order]] = []
-        for it in items:
-            ord_ = it.order if it.order is not None else (order if it.id == item.id else None)
-            if ord_ is None:
-                continue
-            pairs.append((it, ord_))
-        if not pairs:
-            pairs = [(item, order)]
         entry = build_parsefile_entry_from_items(pairs, tracking)
         result = submit_parsefile_trackings(group, [entry])
         return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
     if framework == "usabg":
         result = submit_usabg_trackings(
             group,
-            [usabg_api.UsabgTrackingEntry(tracking=tracking, amount=amount)],
+            [
+                usabg_api.UsabgTrackingEntry(
+                    tracking=tracking,
+                    amount=amount,
+                    note=_tracking_note_text(pairs),
+                )
+            ],
         )
         return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
     raise ValueError("Buying group API framework is not configured for submission")
@@ -278,24 +297,21 @@ def submit_item_tracking_to_group(
 def _aggregate_usabg_entries(
     pending: Sequence[tuple[Item, Order, str]],
 ) -> list[usabg_api.UsabgTrackingEntry]:
-    """One entry per tracking number; sum amounts when items share a tracking."""
-    amounts: OrderedDict[str, Decimal | float | None] = OrderedDict()
-    for item, _order, tracking in pending:
-        amount = _item_amount(item)
-        if tracking not in amounts:
-            amounts[tracking] = amount
-            continue
-        existing = amounts[tracking]
-        if amount is None:
-            continue
-        if existing is None:
-            amounts[tracking] = amount
-        else:
-            amounts[tracking] = existing + amount
-    return [
-        usabg_api.UsabgTrackingEntry(tracking=tn, amount=amt)
-        for tn, amt in amounts.items()
-    ]
+    """One entry per tracking number; sum amounts and build notes when items share a tracking."""
+    groups: OrderedDict[str, list[tuple[Item, Order]]] = OrderedDict()
+    for item, order, tracking in pending:
+        groups.setdefault(tracking, []).append((item, order))
+    entries: list[usabg_api.UsabgTrackingEntry] = []
+    for tracking, pairs in groups.items():
+        items = [item for item, _order in pairs]
+        entries.append(
+            usabg_api.UsabgTrackingEntry(
+                tracking=tracking,
+                amount=_sum_amounts(items),
+                note=_tracking_note_text(pairs),
+            )
+        )
+    return entries
 
 
 def _aggregate_parsefile_entries(
