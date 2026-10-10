@@ -124,5 +124,7 @@ class ItemSplitResponse(BaseModel):
 
 class ItemSubmitTrackingResponse(BaseModel):
     item: ItemRead
+    """All items marked submitted (includes siblings that shared the tracking)."""
+    items: list[ItemRead] = []
     message: str
     affected: int | None = None

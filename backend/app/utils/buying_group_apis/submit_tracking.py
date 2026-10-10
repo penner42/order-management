@@ -80,17 +80,63 @@ def _item_amount(item: Item) -> Decimal | float | None:
     return item.price_sold * (item.quantity or 1)
 
 
-def build_parsefile_entry(item: Item, order: Order, tracking: str) -> parsefile_api.ParsefileTrackingEntry:
-    notes = None
-    desc = (item.description or "").strip()
-    if desc:
-        notes = f"{item.quantity or 1}-{desc}"
+def _sum_amounts(items: Sequence[Item]) -> Decimal | float | None:
+    total: Decimal | float | None = None
+    for item in items:
+        amount = _item_amount(item)
+        if amount is None:
+            continue
+        total = amount if total is None else total + amount
+    return total
 
+
+def _parsefile_notes(items: Sequence[Item]) -> str | None:
+    """All item quantities (+ descriptions) for Parsefile notes, e.g. ``2-Widget; 1-Gadget``."""
+    parts: list[str] = []
+    for item in items:
+        qty = item.quantity or 1
+        desc = (item.description or "").strip()
+        parts.append(f"{qty}-{desc}" if desc else str(qty))
+    return "; ".join(parts) if parts else None
+
+
+def _parsefile_order_numbers(pairs: Sequence[tuple[Item, Order]]) -> str | None:
+    """Unique store order numbers in first-seen order, comma-separated."""
+    seen: set[str] = set()
+    orders: list[str] = []
+    for _item, order in pairs:
+        num = (order.store_order_number or "").strip()
+        if not num:
+            continue
+        key = num.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        orders.append(num)
+    return ",".join(orders) if orders else None
+
+
+def build_parsefile_entry(
+    item: Item,
+    order: Order,
+    tracking: str,
+) -> parsefile_api.ParsefileTrackingEntry:
+    return build_parsefile_entry_from_items([(item, order)], tracking)
+
+
+def build_parsefile_entry_from_items(
+    pairs: Sequence[tuple[Item, Order]],
+    tracking: str,
+) -> parsefile_api.ParsefileTrackingEntry:
+    """One Parsefile entry for a tracking: summed amount, comma-joined orders, all notes."""
+    if not pairs:
+        raise ValueError("At least one item is required")
+    items = [item for item, _order in pairs]
     return parsefile_api.ParsefileTrackingEntry(
         tracking=tracking,
-        order=(order.store_order_number or None),
-        amount=_item_amount(item),
-        notes=notes,
+        order=_parsefile_order_numbers(pairs),
+        amount=_sum_amounts(items),
+        notes=_parsefile_notes(items),
     )
 
 
@@ -112,6 +158,7 @@ class SubmitResult:
 
     message: str
     affected: int | None = None
+    item_ids: list[int] = field(default_factory=list)
 
 
 def submit_parsefile_trackings(
@@ -150,20 +197,81 @@ def submit_usabg_trackings(
     )
 
 
+def find_shipped_items_sharing_tracking(
+    db: Session,
+    *,
+    buying_group_id: int,
+    tracking: str,
+) -> list[Item]:
+    """All SHIPPED items on this buying group that share the tracking number."""
+    from app.models import Shipment
+    from sqlalchemy import func
+
+    tn = (tracking or "").strip()
+    if not tn:
+        return []
+
+    rows = (
+        db.query(Item)
+        .join(Order, Order.id == Item.order_id)
+        .join(ShipmentItem, ShipmentItem.item_id == Item.id)
+        .join(Shipment, Shipment.id == ShipmentItem.shipment_id)
+        .filter(Item.status == ItemStatus.SHIPPED)
+        .filter(Order.buying_group_id == buying_group_id)
+        .filter(Order.status != "personal")
+        .filter(Shipment.tracking_number.isnot(None))
+        .filter(Shipment.tracking_number != "")
+        .filter(func.trim(Shipment.tracking_number) == tn)
+        .options(
+            joinedload(Item.order),
+            selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
+            selectinload(Item.payment_line_items),
+        )
+        .distinct()
+        .all()
+    )
+    return list(rows)
+
+
 def submit_item_tracking_to_group(
     group: BuyingGroup,
     item: Item,
     order: Order,
     tracking: str,
+    *,
+    sibling_items: Sequence[Item] | None = None,
 ) -> SubmitResult:
-    """Submit a single item's tracking via the group's configured framework."""
+    """Submit tracking for an item, summing amounts across siblings that share it.
+
+    When ``sibling_items`` is provided (shipped items with the same tracking on
+    the same buying group), the submitted amount is the sum of all siblings and
+    ``item_ids`` lists every sibling so the caller can mark them all submitted.
+    """
+    items = list(sibling_items) if sibling_items is not None else [item]
+    if not any(i.id == item.id for i in items):
+        items = [item, *items]
+    item_ids = [i.id for i in items]
+    amount = _sum_amounts(items)
+
     framework = (group.api_framework or "").strip().casefold()
     if framework == "parsefile":
-        result = submit_parsefile_trackings(group, [build_parsefile_entry(item, order, tracking)])
-        return SubmitResult(message=result.message, affected=result.affected)
+        pairs: list[tuple[Item, Order]] = []
+        for it in items:
+            ord_ = it.order if it.order is not None else (order if it.id == item.id else None)
+            if ord_ is None:
+                continue
+            pairs.append((it, ord_))
+        if not pairs:
+            pairs = [(item, order)]
+        entry = build_parsefile_entry_from_items(pairs, tracking)
+        result = submit_parsefile_trackings(group, [entry])
+        return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
     if framework == "usabg":
-        result = submit_usabg_trackings(group, [build_usabg_entry(item, tracking)])
-        return SubmitResult(message=result.message, affected=result.affected)
+        result = submit_usabg_trackings(
+            group,
+            [usabg_api.UsabgTrackingEntry(tracking=tracking, amount=amount)],
+        )
+        return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
     raise ValueError("Buying group API framework is not configured for submission")
 
 
@@ -187,6 +295,19 @@ def _aggregate_usabg_entries(
     return [
         usabg_api.UsabgTrackingEntry(tracking=tn, amount=amt)
         for tn, amt in amounts.items()
+    ]
+
+
+def _aggregate_parsefile_entries(
+    pending: Sequence[tuple[Item, Order, str]],
+) -> list[parsefile_api.ParsefileTrackingEntry]:
+    """One Parsefile entry per tracking: summed amount, comma-joined orders, merged notes."""
+    groups: OrderedDict[str, list[tuple[Item, Order]]] = OrderedDict()
+    for item, order, tracking in pending:
+        groups.setdefault(tracking, []).append((item, order))
+    return [
+        build_parsefile_entry_from_items(pairs, tracking)
+        for tracking, pairs in groups.items()
     ]
 
 
@@ -296,7 +417,8 @@ def batch_submit_pending_trackings(
             bearer_token = str(group.bearer_token)
             api_user_id = int(group.api_user_id)
             api_email = str(group.api_email)
-            entries = [build_parsefile_entry(item, order, tracking) for item, order, tracking in pending]
+            entries = _aggregate_parsefile_entries(pending)
+            tracking_numbers = [e.tracking for e in entries]
             api_result = parsefile_api.submit_trackings(
                 base_url=base_url,
                 api_url=api_url,

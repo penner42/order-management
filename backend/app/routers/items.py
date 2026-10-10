@@ -1,4 +1,6 @@
 """Items API (order line items)."""
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload, joinedload
 
@@ -18,6 +20,7 @@ from app.schemas.item import (
     ItemUpdate,
 )
 from app.utils.buying_group_apis.submit_tracking import (
+    find_shipped_items_sharing_tracking,
     group_ready,
     mark_item_submitted,
     submit_item_tracking_to_group,
@@ -214,8 +217,22 @@ def submit_item_tracking(
         text = str(exc).strip()
         return text or fallback
 
+    siblings = find_shipped_items_sharing_tracking(
+        db,
+        buying_group_id=int(order.buying_group_id),
+        tracking=tracking,
+    )
+    if not any(s.id == item.id for s in siblings):
+        siblings = [item, *siblings]
+
     try:
-        result = submit_item_tracking_to_group(group, item, order, tracking)
+        result = submit_item_tracking_to_group(
+            group,
+            item,
+            order,
+            tracking,
+            sibling_items=siblings,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=_http_detail(e, fallback="Invalid tracking submit request")) from e
     except RuntimeError as e:
@@ -226,18 +243,37 @@ def submit_item_tracking(
             detail=_http_detail(e, fallback=f"Tracking submit failed ({e.__class__.__name__})"),
         ) from e
 
-    mark_item_submitted(item)
-    db.commit()
-    item = (
+    mark_ids = result.item_ids or [item.id]
+    now = datetime.now(timezone.utc)
+    items_to_mark = (
         db.query(Item)
-        .filter(Item.id == item_id)
-        .options(selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment))
-        .first()
+        .filter(Item.id.in_(mark_ids))
+        .filter(Item.status == ItemStatus.SHIPPED)
+        .all()
     )
+    for it in items_to_mark:
+        mark_item_submitted(it, when=now)
+    db.commit()
+
+    updated_items = (
+        db.query(Item)
+        .filter(Item.id.in_(mark_ids))
+        .options(selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment))
+        .all()
+    )
+    item = next((it for it in updated_items if it.id == item_id), None)
+    if not item:
+        item = (
+            db.query(Item)
+            .filter(Item.id == item_id)
+            .options(selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment))
+            .first()
+        )
     if not item:
         raise HTTPException(status_code=404, detail="Item not found after submit")
     return ItemSubmitTrackingResponse(
         item=item,
+        items=updated_items or [item],
         message=result.message,
         affected=result.affected,
     )

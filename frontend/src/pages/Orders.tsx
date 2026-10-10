@@ -1030,11 +1030,14 @@ export default function Orders() {
   const submitTrackingToApi = async (itemId: number) => {
     setSubmittingTrackingItemId(itemId)
     try {
-      const res = await api.post<{ item: Item; message: string; affected: number | null }>(
-        `/items/${itemId}/submit-tracking`,
-        {}
-      )
-      mergeUpdatedItemsIntoOrders([res.item])
+      const res = await api.post<{
+        item: Item
+        items?: Item[]
+        message: string
+        affected: number | null
+      }>(`/items/${itemId}/submit-tracking`, {})
+      const updated = res.items?.length ? res.items : [res.item]
+      mergeUpdatedItemsIntoOrders(updated)
     } catch (e) {
       console.error(e)
       setTrackingSubmitAlert(e instanceof Error ? e.message : 'Failed to submit tracking')
