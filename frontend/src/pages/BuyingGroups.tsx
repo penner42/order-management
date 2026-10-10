@@ -447,7 +447,7 @@ export default function BuyingGroups() {
                             </label>
                             <label className="block">
                               <span className="text-xs text-ink-muted">
-                                Cron (UTC; min hour day month weekday)
+                                Cron (local time; min hour day month weekday)
                               </span>
                               <input
                                 type="text"

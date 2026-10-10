@@ -26,7 +26,7 @@ class BrowserProfile(Base):
     last_error = Column(Text, nullable=True)
     last_import_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Full check: scan first N order-history pages on a cron schedule (UTC).
+    # Full check: scan first N order-history pages on a cron schedule (local time).
     full_check_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
     full_check_cron = Column(String(64), nullable=False, default="0 0 * * *", server_default="0 0 * * *")
     full_check_max_pages = Column(Integer, nullable=False, default=3, server_default="3")

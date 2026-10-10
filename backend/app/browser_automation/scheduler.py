@@ -24,11 +24,17 @@ _task: asyncio.Task | None = None
 _lock = asyncio.Lock()
 
 
+def _local_tz():
+    """Server local timezone (from the host clock)."""
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
 def _as_aware(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        # Naive timestamps are treated as local wall time.
+        return dt.replace(tzinfo=_local_tz())
     return dt
 
 
@@ -41,8 +47,9 @@ def schedule_due(
 ) -> bool:
     """Return True when a cron schedule should fire.
 
-    Schedules are evaluated in UTC. A run is due when the most recent cron
-    fire time is after the last successful run (or when never run).
+    Schedules are evaluated in the server's local timezone. A run is due when
+    the most recent cron fire time is after the last successful run (or when
+    never run).
     """
     if not enabled:
         return False
@@ -53,13 +60,15 @@ def schedule_due(
     if last is None:
         return True
     try:
-        # croniter returns naive datetimes when given a naive base; keep UTC.
-        base = now.astimezone(timezone.utc).replace(tzinfo=None)
-        prev_fire = croniter(expr, base).get_prev(datetime).replace(tzinfo=timezone.utc)
+        local_tz = _local_tz()
+        # croniter returns naive datetimes when given a naive base; use local wall time.
+        now_local = now.astimezone(local_tz) if now.tzinfo else now.replace(tzinfo=local_tz)
+        base = now_local.replace(tzinfo=None)
+        prev_fire = croniter(expr, base).get_prev(datetime).replace(tzinfo=local_tz)
     except (ValueError, KeyError, TypeError):
         logger.warning("Invalid cron expression %r — skipping schedule", expr)
         return False
-    return prev_fire > last
+    return prev_fire > last.astimezone(prev_fire.tzinfo)
 
 
 def due_modes_for_profile(profile: BrowserProfile, now: datetime | None = None) -> list[str]:

@@ -1195,7 +1195,7 @@ export default function BrowserAutomation() {
                       </button>
                     </div>
                     <p className="text-[11px] text-ink-muted dark:text-gray-500">
-                      Cron is UTC (min hour day month weekday). Examples:{' '}
+                      Cron is local server time (min hour day month weekday). Examples:{' '}
                       <span className="font-mono">0 0 * * *</span> daily midnight,{' '}
                       <span className="font-mono">0 */6 * * *</span> every 6 hours. Scheduled runs
                       and Run buttons apply updates directly. Import now still opens Import Review

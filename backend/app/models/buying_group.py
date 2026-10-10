@@ -20,7 +20,7 @@ class BuyingGroup(Base):
     bearer_token = Column(String(2000), nullable=True)
     api_user_id = Column(Integer, nullable=True)  # Parsefile account user id
     api_email = Column(String(255), nullable=True)  # Parsefile account email
-    # Batch-submit shipped tracking numbers to the buying-group API on a cron (UTC).
+    # Batch-submit shipped tracking numbers to the buying-group API on a cron (local time).
     tracking_submit_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
     tracking_submit_cron = Column(
         String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *"
