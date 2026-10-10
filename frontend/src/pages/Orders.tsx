@@ -209,8 +209,13 @@ function buildOrdersPath(opts: {
   perPage: number
 }): string {
   const params = new URLSearchParams()
+  // When searching, include canceled so matches aren't hidden by the default status set.
   const statuses =
-    opts.filterStatuses.size > 0 ? [...opts.filterStatuses] : DEFAULT_STATUSES
+    opts.filterStatuses.size > 0
+      ? [...opts.filterStatuses]
+      : opts.searchText.trim()
+        ? [...DEFAULT_STATUSES, 'canceled']
+        : DEFAULT_STATUSES
   statuses.forEach((s) => params.append('status', s))
   opts.filterBuyingGroups.forEach((id) => params.append('buying_group_id', String(id)))
   opts.filterStores.forEach((id) => params.append('store_id', String(id)))
