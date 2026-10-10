@@ -5,6 +5,7 @@ import asyncio
 import base64
 import logging
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,13 +35,14 @@ WALMART_SIGNIN_HINTS = (
 
 COSTCO_HOME_URL = "https://www.costco.com/"
 COSTCO_MYACCOUNT_URL = "https://www.costco.com/myaccount/"
-COSTCO_SIGNIN_HINTS = (
+# Only real SSO hosts / LogonForm. Do NOT match OAuthLogonCmd — that is the
+# successful post-login callback on www.costco.com (substring "/logon"/"oauthlogon").
+COSTCO_SIGNIN_HOST_HINTS = (
     "signin.costco.com",
     "signin-ui.costco.com",
+)
+COSTCO_SIGNIN_PATH_HINTS = (
     "/logonform",
-    "/logon",
-    "oauthlogon",
-    "b2c_1a_sso",
 )
 
 DEFAULT_VIEWPORT = {"width": 1920, "height": 1080}
@@ -798,33 +800,57 @@ async def walmart_session_logged_in(page: Page) -> bool:
 
 
 def looks_like_costco_signin(url: str) -> bool:
+    """True only when the browser is on Costco's real SSO UI — not OAuth callbacks."""
     u = (url or "").lower()
-    return any(hint in u for hint in COSTCO_SIGNIN_HINTS)
+    if any(host in u for host in COSTCO_SIGNIN_HOST_HINTS):
+        return True
+    # OAuthLogonCmd is the success redirect; never treat it as signed-out.
+    if "oauthlogon" in u:
+        return False
+    return any(path in u for path in COSTCO_SIGNIN_PATH_HINTS)
 
 
-async def costco_session_logged_in(page: Page) -> bool:
-    """Probe myaccount — Costco redirects unauthenticated sessions to sign-in SSO."""
+async def establish_costco_session(page: Page, *, timeout_s: float = 25.0) -> bool:
+    """Home → myaccount so cookie SSO can hydrate before we judge login state.
+
+    Costco often still paints a Sign In affordance on first paint; going home
+    first then myaccount lets the session establish. Returns True when the SPA
+    lands on /myaccount/#/app/... .
+    """
     try:
-        await page.goto(COSTCO_MYACCOUNT_URL, wait_until="domcontentloaded", timeout=45_000)
-        for _ in range(12):
-            if looks_like_costco_signin(page.url or ""):
-                return False
+        await page.goto(COSTCO_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(1500)
+        await page.goto(COSTCO_MYACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
             url = page.url or ""
             lower = url.lower()
-            # Logged-in SPA uses /myaccount/#/app/<clientId>/...
+            # Logged-in SPA
             if "/myaccount" in lower and "#/app/" in url:
                 return True
-            if "/myaccount" in lower and "signin" not in lower:
-                # Still bootstrapping the hash router — give it a moment.
+            # Still on silent SSO / OAuth callback — keep waiting.
+            if "oauthlogon" in lower or (
+                looks_like_costco_signin(url) and "authorize" in lower
+            ):
                 await asyncio.sleep(0.4)
                 continue
+            # Settled on interactive SSO (email/password) → not logged in.
+            if looks_like_costco_signin(url):
+                # Give redirects a moment; only fail if we stay on SSO.
+                await asyncio.sleep(0.8)
+                if looks_like_costco_signin(page.url or "") and "#/app/" not in (page.url or ""):
+                    return False
+                continue
             await asyncio.sleep(0.4)
-        if looks_like_costco_signin(page.url or ""):
-            return False
         url = page.url or ""
         return "/myaccount" in url.lower() and "#/app/" in url
     except Exception:
         return False
+
+
+async def costco_session_logged_in(page: Page) -> bool:
+    """Probe via home → myaccount (cookie SSO needs the homepage hop)."""
+    return await establish_costco_session(page)
 
 
 def login_start_url_for_retailer(retailer: str) -> str:

@@ -20,8 +20,7 @@ from playwright.async_api import Page, Response
 from app.browser_automation.common import LoginRequiredError, inject_scripts_for_evaluate
 from app.browser_automation.paths import costco_script_paths
 from app.browser_automation.session_manager import (
-    COSTCO_HOME_URL,
-    COSTCO_MYACCOUNT_URL,
+    establish_costco_session,
     looks_like_costco_signin,
     session_manager,
 )
@@ -217,12 +216,11 @@ async def _ensure_orders_and_purchases_route(page: Page) -> None:
         return
     app_id = await _extract_app_id(page)
     if not app_id:
-        # Land on myaccount and wait for the hash router to assign an app id.
-        if "/myaccount" not in url.lower():
-            await page.goto(COSTCO_MYACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
-        for _ in range(20):
-            if looks_like_costco_signin(page.url or ""):
-                raise LoginRequiredError("Costco session requires login.")
+        # Caller should already have run establish_costco_session; wait for hash.
+        for _ in range(25):
+            if looks_like_costco_signin(page.url or "") and "#/app/" not in (page.url or ""):
+                await page.wait_for_timeout(400)
+                continue
             app_id = await _extract_app_id(page)
             if app_id:
                 break
@@ -297,30 +295,27 @@ async def run_costco_import(
         if on_progress:
             on_progress(kwargs)
 
+    # Start on a blank session tab; we explicitly do home → myaccount below so
+    # cookie SSO can hydrate (Costco still shows Sign In on first paint).
     session = await session_manager.ensure_session(
         profile_id,
         mode="import",
-        warm_url=COSTCO_HOME_URL,
-        start_url=COSTCO_MYACCOUNT_URL,
         retailer="costco",
     )
     page = session.page
 
-    if looks_like_costco_signin(page.url):
-        raise LoginRequiredError("Costco session requires login.")
-
-    try:
-        await page.wait_for_load_state("domcontentloaded", timeout=30_000)
-    except Exception:
-        pass
-
     capture = _CostcoGraphqlCapture(page)
     try:
         await capture.clear_orders()
+        progress(phase="list", message="Warming Costco session (home → account)…", page=1)
+        if not await establish_costco_session(page):
+            raise LoginRequiredError("Costco session requires login.")
+
         progress(phase="list", message="Opening Costco Orders & Purchases…", page=1)
         await _ensure_orders_and_purchases_route(page)
 
-        if looks_like_costco_signin(page.url):
+        # Only fail if we settled on interactive SSO — ignore OAuthLogonCmd hops.
+        if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
             raise LoginRequiredError("Costco session requires login.")
 
         # If the SPA already fired GraphQL before the listener attached, reload once.
@@ -330,7 +325,7 @@ async def run_costco_import(
             progress(phase="list", message="Refreshing Costco orders list…")
             await capture.clear_orders()
             await page.reload(wait_until="domcontentloaded", timeout=60_000)
-            if looks_like_costco_signin(page.url):
+            if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
                 raise LoginRequiredError("Costco session requires login.")
             orders_payload, orders_url = await capture.wait_for_orders(timeout_ms=45_000)
 
@@ -378,7 +373,7 @@ async def run_costco_import(
                 await capture.clear_details()
                 detail_url = _order_details_url(app_id, header_id)
                 await page.goto(detail_url, wait_until="domcontentloaded", timeout=60_000)
-                if looks_like_costco_signin(page.url):
+                if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
                     raise LoginRequiredError("Costco session requires login.")
                 detail_payload, _detail_url = await capture.wait_for_details(
                     header_id, timeout_ms=35_000
