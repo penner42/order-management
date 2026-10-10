@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
 
 from playwright.async_api import Page
@@ -73,16 +74,71 @@ async def _parse_detail_page(page: Page, *, skip_tracking: bool = False) -> dict
     )
 
 
+def _is_plausible_account_email(email: str | None) -> bool:
+    """Mirror browser-extension isPlausibleAccountEmail for a final Python gate."""
+    if not email or not isinstance(email, str):
+        return False
+    normalized = email.strip()
+    if not normalized or "@" not in normalized:
+        return False
+    local, _, domain = normalized.rpartition("@")
+    domain = domain.lower()
+    if not local or not domain or "." not in domain:
+        return False
+    if domain == "amazon.com" or domain.endswith(".amazon.com"):
+        return False
+    if re.search(r"service$|recommendations|configdriven", local, re.I):
+        return False
+    if re.search(r"\.prod\.|\.corp\.|\.stage\.|\.internal\.", domain, re.I):
+        return False
+    labels = domain.split(".")
+    tld = labels[-1]
+    common_tlds = {
+        "com",
+        "org",
+        "net",
+        "edu",
+        "gov",
+        "io",
+        "co",
+        "me",
+        "us",
+        "uk",
+        "ca",
+        "de",
+        "fr",
+        "au",
+        "info",
+        "biz",
+        "app",
+        "email",
+        "mail",
+    }
+    if tld not in common_tlds and not (len(tld) == 2 and tld.isalpha()):
+        return False
+    for label in labels:
+        if len(label) > 24:
+            return False
+        if re.search(r"service|internal|amazonaws|naecp|^prod$|^corp$|^stage$|^dev$", label):
+            return False
+    return True
+
+
 async def _fetch_account_email(page: Page) -> str | None:
     await _ensure_scripts(page)
     try:
-        return await page.evaluate(
+        email = await page.evaluate(
             """async () => {
               const d = globalThis.OrderManagerAmazonDom;
               if (!d || typeof d.fetchAccountEmail !== 'function') return null;
               return await d.fetchAccountEmail(window.location.origin, { allowSlowLookup: true });
             }"""
         )
+        if isinstance(email, str) and _is_plausible_account_email(email):
+            return email.strip()
+        if email:
+            logger.info("Rejected implausible Amazon account email: %s", email)
+        return None
     except Exception as exc:
         logger.info("Account email lookup failed: %s", exc)
         return None
@@ -232,7 +288,11 @@ def _normalize_order(raw: dict[str, Any], source_url: str, account_email: str | 
             "url": source_url or coerce(raw.get("detailUrl")),
             "statusType": coerce(raw.get("status")),
         },
-        "customer": {"email": coerce(account_email)},
+        "customer": {
+            "email": coerce(account_email)
+            if _is_plausible_account_email(coerce(account_email))
+            else None
+        },
         "shippingAddress": shipping_address,
         "shipments": shipments,
         "items": items,

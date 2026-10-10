@@ -153,7 +153,8 @@
     }
 
     const externalUrl = sourceUrl || coerceString(raw.detailUrl) || null
-    const email = coerceString(accountEmail) || null
+    const rawEmail = coerceString(accountEmail)
+    const email = rawEmail && isPlausibleAccountEmail(rawEmail) ? rawEmail : null
 
     const payload = {
       store: 'amazon',
@@ -261,9 +262,13 @@
     if (!normalized || !/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalized)) {
       return false
     }
-    const domain = normalized.toLowerCase().split('@')[1] || ''
+    const at = normalized.lastIndexOf('@')
+    const local = normalized.slice(0, at)
+    const domain = normalized.slice(at + 1).toLowerCase()
     if (!domain || domain.indexOf('.') < 0) return false
     if (domain === 'amazon.com' || domain.endsWith('.amazon.com')) return false
+    if (/service$|recommendations|configdriven/i.test(local)) return false
+    if (/\.prod\.|\.corp\.|\.stage\.|\.internal\./i.test(domain)) return false
     const labels = domain.split('.')
     const tld = labels[labels.length - 1]
     const commonTlds = {
@@ -284,12 +289,11 @@
       info: 1,
       biz: 1,
       app: 1,
-      dev: 1,
       email: 1,
       mail: 1,
     }
     if (!commonTlds[tld] && !(tld.length === 2 && /^[a-z]{2}$/.test(tld))) {
-      if (!(tld.length >= 3 && tld.length <= 6 && /[aeiou]/.test(tld))) return false
+      return false
     }
     for (let i = 0; i < labels.length; i++) {
       const label = labels[i]

@@ -2216,13 +2216,20 @@
     return domain === 'amazon.com' || domain.endsWith('.amazon.com')
   }
 
-  /** Reject Amazon page-JSON false positives like user@ConfigurationRecsService.prod.NAECP */
+  /** Reject Amazon page-JSON false positives like ConfigDrivenRecommendationsService@ConfigurableRecsService.prod.NAECP */
   function isPlausibleAccountEmail(email) {
     const normalized = coerceString(email)
-    if (!normalized || !EMAIL_RE.test(normalized)) return false
+    if (!normalized) return false
+    // Full-string match only (EMAIL_RE is unanchored for extractors).
+    if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalized)) return false
     if (isAmazonOwnedEmail(normalized)) return false
-    const domain = normalized.toLowerCase().split('@')[1] || ''
+    const at = normalized.lastIndexOf('@')
+    const local = normalized.slice(0, at)
+    const domain = normalized.slice(at + 1).toLowerCase()
     if (!domain || domain.indexOf('.') < 0) return false
+    // Internal Amazon hosts often use CamelCase*Service locals and .prod. segments.
+    if (/service$|recommendations|configdriven/i.test(local)) return false
+    if (/\.prod\.|\.corp\.|\.stage\.|\.internal\./i.test(domain)) return false
     const labels = domain.split('.')
     const tld = labels[labels.length - 1]
     const commonTlds = {
@@ -2243,12 +2250,13 @@
       info: 1,
       biz: 1,
       app: 1,
-      dev: 1,
       email: 1,
       mail: 1,
     }
+    // Require a real public TLD (or 2-letter country). No vowel heuristic —
+    // that previously let invented TLDs like "naecp" through.
     if (!commonTlds[tld] && !(tld.length === 2 && /^[a-z]{2}$/.test(tld))) {
-      if (!(tld.length >= 3 && tld.length <= 6 && /[aeiou]/.test(tld))) return false
+      return false
     }
     for (let i = 0; i < labels.length; i++) {
       const label = labels[i]

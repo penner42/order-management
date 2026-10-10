@@ -534,7 +534,10 @@ function normalizeAmazonOrderPayloadFallback(raw, sourceUrl, accountEmail) {
       statusType: coerceString(raw.status) || null,
     },
     customer: {
-      email: coerceString(accountEmail) || null,
+      email: (() => {
+        const raw = coerceString(accountEmail);
+        return raw && isPlausibleCachedAmazonEmail(raw) ? raw : null;
+      })(),
     },
     shippingAddress,
     shipments,
