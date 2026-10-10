@@ -27,10 +27,10 @@ TOKEN_REFRESH_PATH = "/v2/token/refresh"
 GET_ORDERS_PATH = "/v1/order/get_orders"
 UPDATE_ORDER_PATH = "/v1/order/update_order"
 
-# BG's edge / WAF rejects bare urllib clients; mirror the site's browser requests.
+# Match dealsbot's working BuyingGroup client (WAF rejects non-browser UAs).
 _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 _SITE_ORIGIN = "https://buyinggroup.com"
 
@@ -89,9 +89,15 @@ def _encode_multipart(fields: list[tuple[str, str]]) -> tuple[bytes, str]:
 
 
 def resolve_base_url(base_url: str | None) -> str:
+    """Return API host root (no trailing slash), e.g. https://api.prod.buyinggroup.com.
+
+    Accepts either the host root or dealsbot-style ``.../v1`` base URL.
+    """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         base = DEFAULT_BASE_URL
+    if base.endswith("/v1"):
+        base = base[:-3]
     return base.rstrip("/")
 
 
@@ -185,26 +191,27 @@ def _is_auth_failure(status: int, raw: Any, body_text: str) -> bool:
     return False
 
 
-def _default_headers() -> dict[str, str]:
-    return {
+def _default_headers(*, content_type: str | None = None) -> dict[str, str]:
+    headers = {
         "Accept": "application/json",
         "User-Agent": _BROWSER_USER_AGENT,
         "Origin": _SITE_ORIGIN,
         "Referer": f"{_SITE_ORIGIN}/",
-        "X-DJANGO-TIMEZONE": "America/Los_Angeles",
     }
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
 
 
-def _multipart_request(
+def _http_post(
     *,
     url: str,
-    fields: list[tuple[str, str]],
+    body: bytes,
+    content_type: str,
     headers: dict[str, str] | None = None,
     timeout_seconds: float = 30.0,
 ) -> tuple[int, str, Any]:
-    body, content_type = _encode_multipart(fields)
-    req_headers = _default_headers()
-    req_headers["Content-Type"] = content_type
+    req_headers = _default_headers(content_type=content_type)
     if headers:
         req_headers.update(headers)
     req = urllib.request.Request(url, data=body, method="POST", headers=req_headers)
@@ -229,6 +236,40 @@ def _multipart_request(
     except urllib.error.URLError as e:
         reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
         raise RuntimeError(f"BuyingGroup API request failed ({url}): {reason}") from e
+
+
+def _multipart_request(
+    *,
+    url: str,
+    fields: list[tuple[str, str]],
+    headers: dict[str, str] | None = None,
+    timeout_seconds: float = 30.0,
+) -> tuple[int, str, Any]:
+    body, content_type = _encode_multipart(fields)
+    return _http_post(
+        url=url,
+        body=body,
+        content_type=content_type,
+        headers=headers,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _json_request(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout_seconds: float = 30.0,
+) -> tuple[int, str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    return _http_post(
+        url=url,
+        body=body,
+        content_type="application/json",
+        headers=headers,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _raise_if_fail_status(raw: Any, *, url: str, raw_text: str = "") -> None:
@@ -256,19 +297,19 @@ def login(
     if not (password or "").strip():
         raise ValueError("password is required")
 
-    base = resolve_base_url(base_url)
-    url = f"{base}{TOKEN_GET_PATH}"
-    fields = [
-        ("username", username.strip()),
-        ("password", password),
-        ("device_type", "desktop"),
-        ("browser_name", "Chrome"),
-        ("browser_version", "120"),
-        ("hostname", _SITE_ORIGIN),
-    ]
-    status, raw_text, raw = _multipart_request(
+    # Same contract as dealsbot internal/sources/buyinggroup/auth.go:
+    # JSON POST to {host}/v2/token/get.
+    url = f"{resolve_base_url(base_url)}{TOKEN_GET_PATH}"
+    status, raw_text, raw = _json_request(
         url=url,
-        fields=fields,
+        payload={
+            "username": username.strip(),
+            "password": password,
+            "device_type": "web",
+            "browser_name": "Chrome",
+            "browser_version": "126",
+            "hostname": "buyinggroup.com",
+        },
         timeout_seconds=timeout_seconds,
     )
 
@@ -326,11 +367,10 @@ def refresh_access_token(
 ) -> _AuthTokens:
     if not (refresh_token or "").strip():
         raise ValueError("refresh_token is required")
-    base = resolve_base_url(base_url)
-    url = f"{base}{TOKEN_REFRESH_PATH}"
-    status, raw_text, raw = _multipart_request(
+    url = f"{resolve_base_url(base_url)}{TOKEN_REFRESH_PATH}"
+    status, raw_text, raw = _json_request(
         url=url,
-        fields=[("refresh", refresh_token.strip())],
+        payload={"refresh": refresh_token.strip()},
         timeout_seconds=timeout_seconds,
     )
     if not isinstance(raw, dict):
