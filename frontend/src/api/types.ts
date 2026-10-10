@@ -283,6 +283,8 @@ export type BrowserImportLogLevel = 'updates' | 'info' | 'error'
 export type BrowserImportLogEvent =
   | 'order_imported'
   | 'tracking_updated'
+  | 'tracking_submitted'
+  | 'tracking_submit_error'
   | 'order_checked'
   | 'order_marked_personal'
   | 'order_skipped_ignored_zip' // legacy

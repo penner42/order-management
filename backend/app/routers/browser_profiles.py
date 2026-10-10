@@ -50,6 +50,7 @@ from app.schemas.browser_profile import (
 )
 from app.schemas.store_import import StoreOrderImportPayload
 from app.routers.store_imports import apply_store_order_payload
+from app.utils.buying_group_apis.submit_tracking import batch_submit_pending_trackings
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,96 @@ def _add_import_log(
             store_account_name=store_account_name,
         )
     )
+
+
+def _submit_pending_trackings_after_unshipped(
+    db: Session,
+    *,
+    profile: BrowserProfile,
+    job_id: str,
+    scheduled: bool,
+    store_account_id: int,
+) -> str | None:
+    """Batch-submit SHIPPED trackings to API-enabled buying groups.
+
+    Never raises; submit failures are logged and do not fail the unshipped check.
+    Returns a short summary fragment to append to the finish message, or None.
+    """
+    try:
+        result = batch_submit_pending_trackings(db, store_account_id=store_account_id)
+    except Exception as exc:
+        logger.exception(
+            "Batch tracking submit after unshipped check failed for profile %s: %s",
+            profile.id,
+            exc,
+        )
+        try:
+            _add_import_log(
+                db,
+                profile=profile,
+                job_id=job_id,
+                mode="unshipped",
+                scheduled=scheduled,
+                level="error",
+                event_type="tracking_submit_error",
+                message=str(exc).strip() or "Batch tracking submit failed",
+            )
+            db.commit()
+        except Exception:
+            logger.exception("Failed to write tracking_submit_error log for job %s", job_id)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return None
+
+    if not result.groups:
+        return None
+
+    for g in result.groups:
+        if g.error:
+            _add_import_log(
+                db,
+                profile=profile,
+                job_id=job_id,
+                mode="unshipped",
+                scheduled=scheduled,
+                level="error",
+                event_type="tracking_submit_error",
+                tracking_numbers=g.tracking_numbers or None,
+                message=f"{g.buying_group_name}: {g.error}",
+            )
+        else:
+            msg = f"Submitted {g.submitted_count} tracking number(s) to {g.buying_group_name}"
+            if g.message:
+                msg = f"{msg}: {g.message}"
+            else:
+                msg = f"{msg}."
+            _add_import_log(
+                db,
+                profile=profile,
+                job_id=job_id,
+                mode="unshipped",
+                scheduled=scheduled,
+                level="updates",
+                event_type="tracking_submitted",
+                tracking_numbers=g.tracking_numbers or None,
+                message=msg,
+            )
+    try:
+        db.commit()
+    except Exception:
+        logger.exception("Failed to commit tracking submit logs for job %s", job_id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    if result.submitted_count:
+        return f" submitted {result.submitted_count} tracking number(s)"
+    if result.error_groups:
+        return f" tracking submit failed for {len(result.error_groups)} group(s)"
+    return None
 
 
 def _log_auto_apply_result(
@@ -894,7 +985,17 @@ async def _run_import_job(
                         message="No unshipped orders to refresh.",
                         order_count=0,
                     )
-                    log_finished("Finished: no unshipped orders to refresh.")
+                    finish_msg = "Finished: no unshipped orders to refresh."
+                    submit_note = _submit_pending_trackings_after_unshipped(
+                        db,
+                        profile=profile,
+                        job_id=job_id,
+                        scheduled=scheduled,
+                        store_account_id=store_account_id,
+                    )
+                    if submit_note:
+                        finish_msg = finish_msg.rstrip(".") + ";" + submit_note + "."
+                    log_finished(finish_msg)
                     finished_ok = True
                     return
 
@@ -1071,11 +1172,22 @@ async def _run_import_job(
                         message="No orders captured." if mode != "full" else None,
                         order_count=0,
                     )
-                    log_finished(
+                    finish_msg = (
                         "Finished: no orders captured."
                         if mode == "full"
                         else "Finished: no orders captured for unshipped check."
                     )
+                    if mode == "unshipped":
+                        submit_note = _submit_pending_trackings_after_unshipped(
+                            db,
+                            profile=profile,
+                            job_id=job_id,
+                            scheduled=scheduled,
+                            store_account_id=store_account_id,
+                        )
+                        if submit_note:
+                            finish_msg = finish_msg.rstrip(".") + ";" + submit_note + "."
+                    log_finished(finish_msg)
                     finished_ok = True
                     return
 
@@ -1109,6 +1221,16 @@ async def _run_import_job(
                 if errors:
                     summary += f", {len(errors)} failed"
                 summary += "."
+                if mode == "unshipped":
+                    submit_note = _submit_pending_trackings_after_unshipped(
+                        db,
+                        profile=profile,
+                        job_id=job_id,
+                        scheduled=scheduled,
+                        store_account_id=store_account_id,
+                    )
+                    if submit_note:
+                        summary = summary.rstrip(".") + ";" + submit_note + "."
                 log_finished(summary)
                 finished_ok = True
             else:

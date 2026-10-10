@@ -1,6 +1,4 @@
 """Items API (order line items)."""
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload, joinedload
 
@@ -19,7 +17,13 @@ from app.schemas.item import (
     ItemSubmitTrackingResponse,
     ItemUpdate,
 )
-from app.utils.buying_group_apis import parsefile as parsefile_api
+from app.utils.buying_group_apis.submit_tracking import (
+    build_parsefile_entry,
+    mark_item_submitted,
+    parsefile_group_ready,
+    submit_parsefile_trackings,
+    tracking_number_for_item,
+)
 from app.utils.dates import to_date_only
 
 # Item status date fields: date-only (shipped_at/delivered_at live on Shipment; payment dates on Payment)
@@ -195,11 +199,7 @@ def submit_item_tracking(
     if item.status != ItemStatus.SHIPPED:
         raise HTTPException(status_code=400, detail="Item must be in shipped status to submit tracking")
 
-    tracking = None
-    for si in item.shipment_items or []:
-        if si.shipment and (si.shipment.tracking_number or "").strip():
-            tracking = si.shipment.tracking_number.strip()
-            break
+    tracking = tracking_number_for_item(item)
     if not tracking:
         raise HTTPException(status_code=400, detail="Item has no tracking number")
 
@@ -207,49 +207,18 @@ def submit_item_tracking(
     if not order or not order.buying_group_id or not order.buying_group:
         raise HTTPException(status_code=400, detail="Order has no buying group")
     group = order.buying_group
-
-    framework = (group.api_framework or "").strip().casefold()
-    if framework != "parsefile":
-        raise HTTPException(status_code=400, detail="Buying group API framework is not configured for submission")
-    if not (group.bearer_token or "").strip():
-        raise HTTPException(status_code=400, detail="Buying group has no API token")
-    if not (group.base_url or "").strip():
-        raise HTTPException(status_code=400, detail="Buying group has no base URL")
-    if not (group.api_url or "").strip():
-        raise HTTPException(status_code=400, detail="Buying group has no API URL")
-    if group.api_user_id is None:
-        raise HTTPException(status_code=400, detail="Buying group is missing API user id")
-    if not (group.api_email or "").strip():
-        raise HTTPException(status_code=400, detail="Buying group is missing API email")
-
-    notes = None
-    desc = (item.description or "").strip()
-    if desc:
-        notes = f"{item.quantity or 1}-{desc}"
-
-    amount = None
-    if item.price_sold is not None:
-        amount = item.price_sold * (item.quantity or 1)
+    ready, reason = parsefile_group_ready(group)
+    if not ready:
+        raise HTTPException(status_code=400, detail=reason or "Buying group API is not configured")
 
     def _http_detail(exc: BaseException, *, fallback: str) -> str:
         text = str(exc).strip()
         return text or fallback
 
     try:
-        result = parsefile_api.submit_trackings(
-            base_url=group.base_url,
-            api_url=group.api_url,
-            bearer_token=group.bearer_token,
-            user_id=int(group.api_user_id),
-            email=group.api_email,
-            trackings=[
-                parsefile_api.ParsefileTrackingEntry(
-                    tracking=tracking,
-                    order=(order.store_order_number or None),
-                    amount=amount,
-                    notes=notes,
-                )
-            ],
+        result = submit_parsefile_trackings(
+            group,
+            [build_parsefile_entry(item, order, tracking)],
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=_http_detail(e, fallback="Invalid tracking submit request")) from e
@@ -261,8 +230,7 @@ def submit_item_tracking(
             detail=_http_detail(e, fallback=f"Tracking submit failed ({e.__class__.__name__})"),
         ) from e
 
-    item.status = ItemStatus.SUBMITTED
-    item.submitted_at = to_date_only(datetime.now(timezone.utc))
+    mark_item_submitted(item)
     db.commit()
     item = (
         db.query(Item)
