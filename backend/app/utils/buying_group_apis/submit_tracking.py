@@ -1,4 +1,4 @@
-"""Submit item tracking numbers to buying-group APIs (Parsefile, USABG)."""
+"""Submit item tracking numbers to buying-group APIs (Parsefile, USABG, BuyingGroup.com)."""
 from __future__ import annotations
 
 import logging
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import BuyingGroup, Item, Order, ShipmentItem
 from app.models.item import ItemStatus
+from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
 from app.utils.buying_group_apis import parsefile as parsefile_api
 from app.utils.buying_group_apis import usabg as usabg_api
 from app.utils.dates import to_date_only
@@ -53,6 +54,21 @@ def usabg_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
     return True, None
 
 
+def buyinggroup_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
+    """Return (ready, error_detail) for BuyingGroup.com tracking submission."""
+    if group is None:
+        return False, "Order has no buying group"
+    framework = (group.api_framework or "").strip().casefold()
+    if framework != "buyinggroup":
+        return False, "Buying group API framework is not configured for submission"
+    if not (group.api_username or "").strip():
+        return False, "Buying group is missing API username"
+    if not (group.api_password or "").strip():
+        return False, "Buying group is missing API password"
+    # Blank base_url / api_url fall back to BuyingGroup.com defaults.
+    return True, None
+
+
 def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
     """Return (ready, error_detail) for whatever framework the group uses."""
     if group is None:
@@ -62,6 +78,8 @@ def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
         return parsefile_group_ready(group)
     if framework == "usabg":
         return usabg_group_ready(group)
+    if framework == "buyinggroup":
+        return buyinggroup_group_ready(group)
     if not framework:
         return False, "Buying group API framework is not configured for submission"
     return False, f"Unsupported buying group API framework: {group.api_framework}"
@@ -159,6 +177,22 @@ def build_usabg_entry(item: Item, tracking: str) -> usabg_api.UsabgTrackingEntry
     )
 
 
+def build_buyinggroup_entry_from_items(
+    pairs: Sequence[tuple[Item, Order]],
+    tracking: str,
+) -> buyinggroup_api.BuyinggroupTrackingEntry:
+    """One BuyingGroup.com entry: summed amount, order numbers, note."""
+    if not pairs:
+        raise ValueError("At least one item is required")
+    items = [item for item, _order in pairs]
+    return buyinggroup_api.BuyinggroupTrackingEntry(
+        tracking=tracking,
+        amount=_sum_amounts(items),
+        order_num=_order_numbers(pairs),
+        note=_tracking_note_text(pairs),
+    )
+
+
 def mark_item_submitted(item: Item, when: datetime | None = None) -> None:
     item.status = ItemStatus.SUBMITTED
     item.submitted_at = to_date_only(when or datetime.now(timezone.utc))
@@ -203,6 +237,24 @@ def submit_usabg_trackings(
         raise ValueError("At least one tracking entry is required")
     return usabg_api.submit_trackings(
         base_url=group.base_url,
+        username=str(group.api_username),
+        password=str(group.api_password),
+        trackings=list(entries),
+    )
+
+
+def submit_buyinggroup_trackings(
+    group: BuyingGroup,
+    entries: Sequence[buyinggroup_api.BuyinggroupTrackingEntry],
+) -> buyinggroup_api.BuyinggroupSubmitResult:
+    ready, reason = buyinggroup_group_ready(group)
+    if not ready:
+        raise ValueError(reason or "Buying group API is not configured")
+    if not entries:
+        raise ValueError("At least one tracking entry is required")
+    return buyinggroup_api.submit_trackings(
+        base_url=group.base_url,
+        api_url=group.api_url,
         username=str(group.api_username),
         password=str(group.api_password),
         trackings=list(entries),
@@ -291,6 +343,12 @@ def submit_item_tracking_to_group(
             ],
         )
         return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
+    if framework == "buyinggroup":
+        entry = build_buyinggroup_entry_from_items(pairs, tracking)
+        # Prefer summed amount already computed for siblings.
+        entry.amount = amount
+        result = submit_buyinggroup_trackings(group, [entry])
+        return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
     raise ValueError("Buying group API framework is not configured for submission")
 
 
@@ -323,6 +381,19 @@ def _aggregate_parsefile_entries(
         groups.setdefault(tracking, []).append((item, order))
     return [
         build_parsefile_entry_from_items(pairs, tracking)
+        for tracking, pairs in groups.items()
+    ]
+
+
+def _aggregate_buyinggroup_entries(
+    pending: Sequence[tuple[Item, Order, str]],
+) -> list[buyinggroup_api.BuyinggroupTrackingEntry]:
+    """One BuyingGroup.com entry per tracking number."""
+    groups: OrderedDict[str, list[tuple[Item, Order]]] = OrderedDict()
+    for item, order, tracking in pending:
+        groups.setdefault(tracking, []).append((item, order))
+    return [
+        build_buyinggroup_entry_from_items(pairs, tracking)
         for tracking, pairs in groups.items()
     ]
 
@@ -452,6 +523,21 @@ def batch_submit_pending_trackings(
             tracking_numbers = [e.tracking for e in entries]
             api_result = usabg_api.submit_trackings(
                 base_url=base_url,
+                username=username,
+                password=password,
+                trackings=entries,
+            )
+            message = api_result.message
+        elif framework == "buyinggroup":
+            base_url = group.base_url
+            api_url = group.api_url
+            username = str(group.api_username)
+            password = str(group.api_password)
+            entries = _aggregate_buyinggroup_entries(pending)
+            tracking_numbers = [e.tracking for e in entries]
+            api_result = buyinggroup_api.submit_trackings(
+                base_url=base_url,
+                api_url=api_url,
                 username=username,
                 password=password,
                 trackings=entries,

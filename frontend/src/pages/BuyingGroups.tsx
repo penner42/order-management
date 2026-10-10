@@ -8,11 +8,19 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
   { value: '', label: 'None' },
   { value: 'parsefile', label: 'Parsefile' },
   { value: 'usabg', label: 'USABG' },
+  { value: 'buyinggroup', label: 'BuyingGroup.com' },
 ]
 
 const PARSEFILE_DEFAULT_API_URL = '/p/it@api@order-management'
 const USABG_DEFAULT_BASE_URL = 'https://api.usabuying.group/buyers'
+const BUYINGGROUP_DEFAULT_BASE_URL = 'https://api.prod.buyinggroup.com'
+const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_URL =
+  'https://prod-buyinggroup-ar3jdliyeq-wl.a.run.app/api/order/add_trackings'
 const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
+
+function usesUsernamePassword(framework: string | null | undefined): boolean {
+  return framework === 'usabg' || framework === 'buyinggroup'
+}
 
 function formatLastRun(iso: string | null | undefined): string {
   if (!iso) return 'never'
@@ -33,8 +41,8 @@ function canSubmitTrackings(g: BuyingGroup): boolean {
       Boolean(g.api_email?.trim())
     )
   }
-  if (g.api_framework === 'usabg') {
-    // Blank base_url uses the USABG default.
+  if (usesUsernamePassword(g.api_framework)) {
+    // Blank base_url uses the framework default.
     return Boolean(g.api_username?.trim()) && Boolean(g.api_password?.trim())
   }
   return false
@@ -44,12 +52,26 @@ function effectiveBaseUrl(g: BuyingGroup): string {
   const base = g.base_url?.trim()
   if (base) return base
   if (g.api_framework === 'usabg') return USABG_DEFAULT_BASE_URL
+  if (g.api_framework === 'buyinggroup') return BUYINGGROUP_DEFAULT_BASE_URL
   return ''
 }
 
 function effectiveApiUrl(g: BuyingGroup): string {
   if (g.api_framework === 'usabg') return '/trackings'
+  if (g.api_framework === 'buyinggroup') {
+    // Shown separately from base URL (full Cloud Run URL, not a path suffix).
+    return g.api_url?.trim() || BUYINGGROUP_DEFAULT_ADD_TRACKINGS_URL
+  }
   return g.api_url?.trim() || (g.api_framework === 'parsefile' ? PARSEFILE_DEFAULT_API_URL : '')
+}
+
+function endpointSummary(g: BuyingGroup): string | null {
+  const base = effectiveBaseUrl(g)
+  if (!base && g.api_framework !== 'buyinggroup') return null
+  if (g.api_framework === 'buyinggroup') {
+    return [base || BUYINGGROUP_DEFAULT_BASE_URL, effectiveApiUrl(g)].filter(Boolean).join(' · ')
+  }
+  return `${base}${effectiveApiUrl(g)}`
 }
 
 function AliasEditor({
@@ -224,12 +246,22 @@ export default function BuyingGroups() {
         name: draft.name.trim(),
         api_framework: draft.api_framework || null,
         base_url: draft.base_url.trim() || null,
-        api_url: draft.api_framework === 'usabg' ? null : draft.api_url.trim() || null,
-        bearer_token: draft.api_framework === 'usabg' ? null : draft.bearer_token.trim() || null,
+        api_url: usesUsernamePassword(draft.api_framework)
+          ? draft.api_framework === 'buyinggroup'
+            ? draft.api_url.trim() || null
+            : null
+          : draft.api_url.trim() || null,
+        bearer_token: usesUsernamePassword(draft.api_framework)
+          ? null
+          : draft.bearer_token.trim() || null,
         api_user_id: draft.api_framework === 'parsefile' ? apiUserId : null,
         api_email: draft.api_framework === 'parsefile' ? draft.api_email.trim() || null : null,
-        api_username: draft.api_framework === 'usabg' ? draft.api_username.trim() || null : null,
-        api_password: draft.api_framework === 'usabg' ? draft.api_password.trim() || null : null,
+        api_username: usesUsernamePassword(draft.api_framework)
+          ? draft.api_username.trim() || null
+          : null,
+        api_password: usesUsernamePassword(draft.api_framework)
+          ? draft.api_password.trim() || null
+          : null,
         tracking_submit_enabled: draft.tracking_submit_enabled,
         tracking_submit_cron: draft.tracking_submit_cron.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
       })
@@ -395,7 +427,9 @@ export default function BuyingGroups() {
                         <span className="text-xs text-ink-muted">
                           {draft.api_framework === 'usabg'
                             ? 'Base URL (optional; blank uses USABG default)'
-                            : 'Base URL'}
+                            : draft.api_framework === 'buyinggroup'
+                              ? 'Base URL (optional; blank uses BuyingGroup.com default)'
+                              : 'Base URL'}
                         </span>
                         <input
                           type="url"
@@ -403,14 +437,31 @@ export default function BuyingGroups() {
                           placeholder={
                             draft.api_framework === 'usabg'
                               ? USABG_DEFAULT_BASE_URL
-                              : 'https://www.powerbuynetwork.com'
+                              : draft.api_framework === 'buyinggroup'
+                                ? BUYINGGROUP_DEFAULT_BASE_URL
+                                : 'https://www.powerbuynetwork.com'
                           }
                           value={draft.base_url}
                           onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
                           disabled={saving}
                         />
                       </label>
-                      {draft.api_framework !== 'usabg' && (
+                      {draft.api_framework === 'buyinggroup' && (
+                        <label className="block">
+                          <span className="text-xs text-ink-muted">
+                            Add-trackings URL (optional; blank uses BuyingGroup.com default)
+                          </span>
+                          <input
+                            type="url"
+                            className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                            placeholder={BUYINGGROUP_DEFAULT_ADD_TRACKINGS_URL}
+                            value={draft.api_url}
+                            onChange={(e) => setDraft((d) => ({ ...d, api_url: e.target.value }))}
+                            disabled={saving}
+                          />
+                        </label>
+                      )}
+                      {!usesUsernamePassword(draft.api_framework) && (
                         <label className="block">
                           <span className="text-xs text-ink-muted">
                             {draft.api_framework === 'parsefile'
@@ -431,7 +482,7 @@ export default function BuyingGroups() {
                           />
                         </label>
                       )}
-                      {draft.api_framework !== 'usabg' && (
+                      {!usesUsernamePassword(draft.api_framework) && (
                         <label className="block">
                           <span className="text-xs text-ink-muted">Bearer token</span>
                           <input
@@ -471,14 +522,18 @@ export default function BuyingGroups() {
                           </label>
                         </>
                       )}
-                      {draft.api_framework === 'usabg' && (
+                      {usesUsernamePassword(draft.api_framework) && (
                         <>
                           <label className="block">
                             <span className="text-xs text-ink-muted">Username</span>
                             <input
                               type="text"
                               className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                              placeholder="USABG username"
+                              placeholder={
+                                draft.api_framework === 'buyinggroup'
+                                  ? 'BuyingGroup.com username'
+                                  : 'USABG username'
+                              }
                               value={draft.api_username}
                               onChange={(e) => setDraft((d) => ({ ...d, api_username: e.target.value }))}
                               disabled={saving}
@@ -490,7 +545,11 @@ export default function BuyingGroups() {
                             <input
                               type="password"
                               className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                              placeholder="USABG password"
+                              placeholder={
+                                draft.api_framework === 'buyinggroup'
+                                  ? 'BuyingGroup.com password'
+                                  : 'USABG password'
+                              }
                               value={draft.api_password}
                               onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}
                               disabled={saving}
@@ -499,7 +558,8 @@ export default function BuyingGroups() {
                           </label>
                         </>
                       )}
-                      {(draft.api_framework === 'parsefile' || draft.api_framework === 'usabg') && (
+                      {(draft.api_framework === 'parsefile' ||
+                        usesUsernamePassword(draft.api_framework)) && (
                         <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
                           <label className="inline-flex items-center gap-2 text-sm text-ink">
                             <input
@@ -547,18 +607,12 @@ export default function BuyingGroups() {
                         {(g.api_framework || g.base_url || g.bearer_token || g.api_username) && (
                           <p
                             className="text-xs text-ink-muted truncate mt-0.5"
-                            title={
-                              effectiveBaseUrl(g)
-                                ? `${effectiveBaseUrl(g)}${effectiveApiUrl(g)}`
-                                : undefined
-                            }
+                            title={endpointSummary(g) ?? undefined}
                           >
                             {[
                               frameworkLabel(g.api_framework),
-                              effectiveBaseUrl(g)
-                                ? `${effectiveBaseUrl(g)}${effectiveApiUrl(g)}`
-                                : null,
-                              g.api_framework === 'usabg'
+                              endpointSummary(g),
+                              usesUsernamePassword(g.api_framework)
                                 ? g.api_username
                                   ? 'credentials set'
                                   : null
@@ -596,7 +650,7 @@ export default function BuyingGroups() {
                         </button>
                       </div>
                     </div>
-                    {(g.api_framework === 'parsefile' || g.api_framework === 'usabg') && (
+                    {(g.api_framework === 'parsefile' || usesUsernamePassword(g.api_framework)) && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
                         <span>
                           Auto-submit:{' '}

@@ -1,1 +1,1 @@
-"""Buying-group API framework clients (Parsefile, USABG, etc.)."""
+"""Buying-group API framework clients (Parsefile, USABG, BuyingGroup.com, etc.)."""

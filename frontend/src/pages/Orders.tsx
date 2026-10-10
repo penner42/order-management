@@ -1020,8 +1020,8 @@ export default function Orders() {
       // Blank api_url uses the Parsefile framework default.
       return Boolean(bg.bearer_token?.trim()) && Boolean(bg.base_url?.trim())
     }
-    if (bg.api_framework === 'usabg') {
-      // Blank base_url uses the USABG default; login uses username/password.
+    if (bg.api_framework === 'usabg' || bg.api_framework === 'buyinggroup') {
+      // Blank base_url uses the framework default; login uses username/password.
       return Boolean(bg.api_username?.trim()) && Boolean(bg.api_password?.trim())
     }
     return false

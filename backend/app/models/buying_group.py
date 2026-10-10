@@ -14,13 +14,13 @@ class BuyingGroup(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)  # for multi-user
     name = Column(String(255), nullable=False)
     aliases = Column(JSON, nullable=False, default=list)
-    api_framework = Column(String(50), nullable=True)  # e.g. "parsefile", "usabg"
+    api_framework = Column(String(50), nullable=True)  # e.g. "parsefile", "usabg", "buyinggroup"
     base_url = Column(String(500), nullable=True)
     api_url = Column(String(500), nullable=True)  # optional path relative to base_url
     bearer_token = Column(String(2000), nullable=True)
     api_user_id = Column(Integer, nullable=True)  # Parsefile account user id
     api_email = Column(String(255), nullable=True)  # Parsefile account email
-    api_username = Column(String(255), nullable=True)  # USABG login credentials
+    api_username = Column(String(255), nullable=True)  # USABG / BuyingGroup.com login
     api_password = Column(String(500), nullable=True)
     # Batch-submit shipped tracking numbers to the buying-group API on a cron (local time).
     tracking_submit_enabled = Column(Boolean, nullable=False, default=False, server_default="false")

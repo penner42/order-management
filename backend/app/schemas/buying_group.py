@@ -6,9 +6,9 @@ from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-ApiFramework = Literal["parsefile", "usabg"]
+ApiFramework = Literal["parsefile", "usabg", "buyinggroup"]
 
-ALLOWED_API_FRAMEWORKS = frozenset({"parsefile", "usabg"})
+ALLOWED_API_FRAMEWORKS = frozenset({"parsefile", "usabg", "buyinggroup"})
 
 DEFAULT_TRACKING_SUBMIT_CRON = "0 */6 * * *"
 
