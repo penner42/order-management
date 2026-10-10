@@ -1,17 +1,20 @@
 """BuyingGroup.com tracking submission client.
 
 Flow:
-1. Login via ``POST /v2/token/get`` (username/password → access token) — JSON, same as dealsbot
+1. Use a cached access token when available; otherwise login via ``POST /v2/token/get``
+   (username/password → access/refresh). Re-auth only on auth failure (refresh, then login).
 2. Add trackings via ``POST /v1/order/add_trackings`` (``auth_token`` + Bearer)
 3. Enrich each tracking via ``/v1/order/get_orders`` + ``/v1/order/update_order``
    (order_num, amount, buyer_note)
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import logging
 import ssl
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -36,6 +39,11 @@ _BROWSER_USER_AGENT = (
 _SITE_ORIGIN = "https://buyinggroup.com"
 
 _T = TypeVar("_T")
+
+# Process-local access/refresh tokens keyed by (base_url, username, password hash).
+# Reused across submits; refreshed or replaced only on auth failure.
+_token_cache: dict[tuple[str, str, str], "_AuthTokens"] = {}
+_token_lock = threading.Lock()
 
 
 @dataclass
@@ -70,6 +78,87 @@ class _AuthTokens:
 
 class _SessionExpired(RuntimeError):
     pass
+
+
+def _cache_key(base_url: str, username: str, password: str) -> tuple[str, str, str]:
+    pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return (resolve_base_url(base_url), username.strip().casefold(), pw_hash)
+
+
+def _ensure_tokens(
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    timeout_seconds: float,
+) -> _AuthTokens:
+    """Return cached tokens, logging in only when none are cached."""
+    key = _cache_key(base_url, username, password)
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached and cached.access:
+            return cached
+    tokens = login(
+        base_url=base_url,
+        username=username,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached and cached.access:
+            return cached
+        _token_cache[key] = tokens
+        return tokens
+
+
+def _reauth_tokens(
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    stale: _AuthTokens,
+    timeout_seconds: float,
+) -> _AuthTokens:
+    """Refresh or re-login after auth failure; prefer a fresher concurrent cache entry."""
+    key = _cache_key(base_url, username, password)
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached and cached.access and cached.access != stale.access:
+            return cached
+        _token_cache.pop(key, None)
+
+    if stale.refresh:
+        try:
+            tokens = refresh_access_token(
+                base_url=base_url,
+                refresh_token=stale.refresh,
+                timeout_seconds=timeout_seconds,
+            )
+            with _token_lock:
+                cached = _token_cache.get(key)
+                if cached and cached.access and cached.access != stale.access:
+                    return cached
+                _token_cache[key] = tokens
+                return tokens
+        except Exception:
+            logger.debug(
+                "BuyingGroup refresh failed; falling back to full login",
+                exc_info=True,
+            )
+
+    tokens = login(
+        base_url=base_url,
+        username=username,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached and cached.access and cached.access != stale.access:
+            return cached
+        _token_cache[key] = tokens
+        return tokens
 
 
 def _encode_multipart(fields: list[tuple[str, str]]) -> tuple[bytes, str]:
@@ -428,23 +517,15 @@ def _with_reauth(
     timeout_seconds: float,
     call: Callable[[_AuthTokens], _T],
 ) -> tuple[_T, _AuthTokens]:
+    """Run ``call(tokens)``; on auth failure, refresh/re-login, cache, and retry."""
     try:
         return call(tokens), tokens
     except _SessionExpired:
-        if tokens.refresh:
-            try:
-                tokens = refresh_access_token(
-                    base_url=base_url,
-                    refresh_token=tokens.refresh,
-                    timeout_seconds=timeout_seconds,
-                )
-                return call(tokens), tokens
-            except Exception:
-                logger.debug("BuyingGroup refresh failed; falling back to full login", exc_info=True)
-        tokens = login(
+        tokens = _reauth_tokens(
             base_url=base_url,
             username=username,
             password=password,
+            stale=tokens,
             timeout_seconds=timeout_seconds,
         )
         return call(tokens), tokens
@@ -719,7 +800,7 @@ def submit_trackings(
     if not tracking_list:
         raise ValueError("At least one tracking number is required")
 
-    tokens = login(
+    tokens = _ensure_tokens(
         base_url=base,
         username=username,
         password=password,

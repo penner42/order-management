@@ -1,7 +1,9 @@
 """USABG (api.usabuying.group) tracking submission client."""
 from __future__ import annotations
 
+import hashlib
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -17,6 +19,72 @@ NOTES_PATH = "/notes"
 LOGIN_PATH = "/login"
 
 _T = TypeVar("_T")
+
+# Process-local bearer tokens keyed by (base_url, username, password hash).
+# Reused across submits; cleared and replaced only on session expiry / re-login.
+_token_cache: dict[tuple[str, str, str], str] = {}
+_token_lock = threading.Lock()
+
+
+def _cache_key(base_url: str, username: str, password: str) -> tuple[str, str, str]:
+    pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return (resolve_base_url(base_url), username.strip().casefold(), pw_hash)
+
+
+def _ensure_token(
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    timeout_seconds: float,
+) -> str:
+    """Return a cached bearer token, logging in only when none is cached."""
+    key = _cache_key(base_url, username, password)
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached:
+            return cached
+    token = login(
+        base_url=base_url,
+        username=username,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached:
+            return cached
+        _token_cache[key] = token
+        return token
+
+
+def _rellogin_token(
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    stale_token: str,
+    timeout_seconds: float,
+) -> str:
+    """Replace a failed token. Prefer a fresher cache entry from a concurrent re-login."""
+    key = _cache_key(base_url, username, password)
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached and cached != stale_token:
+            return cached
+        _token_cache.pop(key, None)
+    token = login(
+        base_url=base_url,
+        username=username,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached and cached != stale_token:
+            return cached
+        _token_cache[key] = token
+        return token
 
 
 @dataclass
@@ -311,14 +379,15 @@ def _with_relogin(
     timeout_seconds: float,
     call: Callable[[str], _T],
 ) -> tuple[_T, str]:
-    """Run ``call(token)``; on session expiry, login once and retry. Returns (result, token)."""
+    """Run ``call(token)``; on session expiry, re-login once, cache, and retry."""
     try:
         return call(token), token
     except _SessionExpired:
-        token = login(
+        token = _rellogin_token(
             base_url=base_url,
             username=username,
             password=password,
+            stale_token=token,
             timeout_seconds=timeout_seconds,
         )
         return call(token), token
@@ -452,7 +521,7 @@ def submit_trackings(
 
     base = resolve_base_url(base_url)
     url = f"{base}{TRACKINGS_PATH}"
-    token = login(
+    token = _ensure_token(
         base_url=base,
         username=username,
         password=password,
