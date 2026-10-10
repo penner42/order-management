@@ -1,4 +1,5 @@
 """Items API (order line items)."""
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +28,8 @@ from app.utils.buying_group_apis.submit_tracking import (
     tracking_number_for_item,
 )
 from app.utils.dates import to_date_only
+
+logger = logging.getLogger(__name__)
 
 # Item status date fields: date-only (shipped_at/delivered_at live on Shipment; payment dates on Payment)
 _ITEM_DATE_FIELDS = frozenset({
@@ -236,12 +239,17 @@ def submit_item_tracking(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=_http_detail(e, fallback="Invalid tracking submit request")) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=_http_detail(e, fallback="Buying group API request failed")) from e
+        detail = _http_detail(e, fallback="Buying group API request failed")
+        logger.warning("Tracking submit failed for item %s: %s", item_id, detail)
+        # Credential / login problems are client config, not an upstream outage.
+        lower = detail.casefold()
+        if "invalid credentials" in lower or "login requires interactive verification" in lower:
+            raise HTTPException(status_code=400, detail=detail) from e
+        raise HTTPException(status_code=502, detail=detail) from e
     except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=_http_detail(e, fallback=f"Tracking submit failed ({e.__class__.__name__})"),
-        ) from e
+        detail = _http_detail(e, fallback=f"Tracking submit failed ({e.__class__.__name__})")
+        logger.exception("Tracking submit failed for item %s: %s", item_id, detail)
+        raise HTTPException(status_code=502, detail=detail) from e
 
     mark_ids = result.item_ids or [item.id]
     now = datetime.now(timezone.utc)

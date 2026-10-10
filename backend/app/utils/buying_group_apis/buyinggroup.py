@@ -1,22 +1,23 @@
 """BuyingGroup.com tracking submission client.
 
 Flow:
-1. Login via ``POST /v2/token/get`` (username/password → access token)
-2. Add trackings via Cloud Run ``/api/order/add_trackings`` (``auth_token`` header)
+1. Login via ``POST /v2/token/get`` (username/password → access token) — JSON, same as dealsbot
+2. Add trackings via ``POST /v1/order/add_trackings`` (``auth_token`` + Bearer)
 3. Enrich each tracking via ``/v1/order/get_orders`` + ``/v1/order/update_order``
    (order_num, amount, buyer_note)
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
+import ssl
 import time
 import uuid
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, TypeVar
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -130,18 +131,15 @@ def _format_amount(amount: Decimal | float | None) -> str | None:
     return text
 
 
-def _read_json_response(resp) -> tuple[int, str, Any]:
-    raw_text = resp.read().decode("utf-8", errors="replace")
-    status = getattr(resp, "status", 200)
+def _parse_json_body(status: int, raw_text: str) -> Any:
     if not raw_text.strip():
-        return status, raw_text, None
+        return None
     try:
-        raw = json.loads(raw_text)
+        return json.loads(raw_text)
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"BuyingGroup API returned non-JSON (HTTP {status}): {raw_text[:300]}"
         ) from e
-    return status, raw_text, raw
 
 
 def _error_detail(raw: Any, body_text: str, fallback: str = "empty response") -> str:
@@ -211,31 +209,64 @@ def _http_post(
     headers: dict[str, str] | None = None,
     timeout_seconds: float = 30.0,
 ) -> tuple[int, str, Any]:
+    """POST via http.client so header names like ``auth_token`` stay exact.
+
+    ``urllib.request.Request`` capitalizes headers (``auth_token`` → ``Auth_Token``),
+    which BuyingGroup's API does not accept.
+    """
     req_headers = _default_headers(content_type=content_type)
     if headers:
         req_headers.update(headers)
-    req = urllib.request.Request(url, data=body, method="POST", headers=req_headers)
     authed = bool(
         (headers or {}).get("Authorization") or (headers or {}).get("auth_token")
     )
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise RuntimeError(f"BuyingGroup API invalid URL: {url}")
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            return _read_json_response(resp)
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        raw: Any = None
-        if err_body.strip():
-            try:
-                raw = json.loads(err_body)
-            except json.JSONDecodeError:
-                pass
-        if authed and _is_auth_failure(e.code, raw, err_body):
-            raise _SessionExpired(f"BuyingGroup session expired (HTTP {e.code})") from e
-        detail = _error_detail(raw, err_body)
-        raise RuntimeError(f"BuyingGroup API error {e.code} at {url}: {detail}") from e
-    except urllib.error.URLError as e:
-        reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
+        if parsed.scheme == "https":
+            conn: http.client.HTTPConnection = http.client.HTTPSConnection(
+                parsed.hostname,
+                parsed.port or 443,
+                timeout=timeout_seconds,
+                context=ssl.create_default_context(),
+            )
+        else:
+            conn = http.client.HTTPConnection(
+                parsed.hostname,
+                parsed.port or 80,
+                timeout=timeout_seconds,
+            )
+        try:
+            conn.request("POST", path, body=body, headers=req_headers)
+            resp = conn.getresponse()
+            status = int(resp.status)
+            raw_text = resp.read().decode("utf-8", errors="replace")
+        finally:
+            conn.close()
+    except (OSError, http.client.HTTPException) as e:
+        reason = str(e).strip() or e.__class__.__name__
         raise RuntimeError(f"BuyingGroup API request failed ({url}): {reason}") from e
+
+    try:
+        raw = _parse_json_body(status, raw_text)
+    except RuntimeError:
+        if status >= 400:
+            detail = raw_text.strip()[:400] or f"HTTP {status}"
+            raise RuntimeError(f"BuyingGroup API error {status} at {url}: {detail}")
+        raise
+
+    if status >= 400:
+        if authed and _is_auth_failure(status, raw, raw_text):
+            raise _SessionExpired(f"BuyingGroup session expired (HTTP {status})")
+        detail = _error_detail(raw, raw_text)
+        raise RuntimeError(f"BuyingGroup API error {status} at {url}: {detail}")
+    return status, raw_text, raw
 
 
 def _multipart_request(
