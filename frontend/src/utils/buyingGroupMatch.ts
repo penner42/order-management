@@ -50,7 +50,7 @@ export function matchBuyingGroupByAddressName(
   return best?.id ?? null
 }
 
-/** Costco-style: shipping name/address fields exactly match a buying group name or alias. */
+/** Exact equality against buying group name or alias (legacy Costco helper). */
 export function matchBuyingGroupByExactNames(
   names: Array<string | null | undefined>,
   groups: BuyingGroup[]
@@ -95,19 +95,9 @@ export function autoMatchBuyingGroupIdForImport(
   const shippingAddress = payload.shippingAddress ?? null
   const addressFields = shippingAddressMatchFields(shippingAddress)
 
-  if (storeName === 'costco') {
-    return matchBuyingGroupByExactNames(addressFields, groups)
-  }
-
-  if (storeName === 'walmart' || storeName === 'amazon') {
-    return matchBuyingGroupByAddressName(
-      [
-        shippingAddress?.fullName as string | null | undefined,
-        shippingAddress?.addressLine1 as string | null | undefined,
-        shippingAddress?.addressLine2 as string | null | undefined,
-      ],
-      groups
-    )
+  // Costco/Walmart/Amazon: name or address line contains buying group name or alias.
+  if (storeName === 'costco' || storeName === 'walmart' || storeName === 'amazon') {
+    return matchBuyingGroupByAddressName(addressFields, groups)
   }
 
   return null

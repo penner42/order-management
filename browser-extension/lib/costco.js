@@ -123,6 +123,62 @@
     return safeNumber(discountObj)
   }
 
+  function primaryShipToFromDetails(details) {
+    const shipTo = Array.isArray(details && details.shipToAddress) ? details.shipToAddress : []
+    return shipTo.length > 0 ? shipTo[0] || {} : null
+  }
+
+  function buildShippingAddressFromShipTo(primaryShipTo) {
+    if (!primaryShipTo || typeof primaryShipTo !== 'object') return null
+    return {
+      firstName: coerceString(primaryShipTo.firstName) || null,
+      lastName: coerceString(primaryShipTo.lastName) || null,
+      fullName: [coerceString(primaryShipTo.firstName), coerceString(primaryShipTo.lastName)]
+        .filter(Boolean)
+        .join(' ')
+        .trim() || null,
+      addressLine1: coerceString(primaryShipTo.line1) || null,
+      addressLine2: coerceString(primaryShipTo.line2) || null,
+      city: coerceString(primaryShipTo.city) || null,
+      state: coerceString(primaryShipTo.state) || null,
+      postalCode: coerceString(primaryShipTo.postalCode) || null,
+      country: coerceString(primaryShipTo.countryCode) || null,
+      phoneNumber: coerceString(primaryShipTo.phoneNumber) || null,
+    }
+  }
+
+  function buildCustomerFromDetails(details, primaryShipTo) {
+    return {
+      email:
+        coerceString(details && details.emailAddress) ||
+        coerceString(primaryShipTo && primaryShipTo.emailAddress) ||
+        null,
+      firstName: coerceString(details && details.firstName) || null,
+      lastName: coerceString(details && details.lastName) || null,
+    }
+  }
+
+  function buildPaymentMethodsFromDetails(details) {
+    const paymentMethodsRaw = Array.isArray(details && details.orderPayment) ? details.orderPayment : []
+    return paymentMethodsRaw.map((pm) => {
+      const paymentType = coerceString(pm && pm.paymentType)
+      const last4 = (() => {
+        const v = coerceString(pm && pm.cardNumber)
+        if (!v) return null
+        const digits = v.replace(/\D+/g, '')
+        if (digits.length >= 4) return digits.slice(-4)
+        if (v.length >= 4) return v.slice(-4)
+        return null
+      })()
+      return {
+        description: paymentType || null,
+        cardType: paymentType || null,
+        paymentType: paymentType || null,
+        last4,
+      }
+    })
+  }
+
   function normalizeCostcoOrderDetailsGraphqlPayload(graphqlPayload, sourceUrl) {
     const details = extractOrderDetailsFromCostcoGraphql(graphqlPayload)
     if (!details) {
@@ -140,26 +196,8 @@
       (typeof document !== 'undefined' ? (document.location && document.location.href) : null) ||
       null
 
-    const shipTo = Array.isArray(details.shipToAddress) ? details.shipToAddress : []
-    const primaryShipTo = shipTo.length > 0 ? shipTo[0] || {} : {}
-
-    const shippingAddress = shipTo.length
-      ? {
-          firstName: coerceString(primaryShipTo.firstName) || null,
-          lastName: coerceString(primaryShipTo.lastName) || null,
-          fullName: [coerceString(primaryShipTo.firstName), coerceString(primaryShipTo.lastName)]
-            .filter(Boolean)
-            .join(' ')
-            .trim() || null,
-          addressLine1: coerceString(primaryShipTo.line1) || null,
-          addressLine2: coerceString(primaryShipTo.line2) || null,
-          city: coerceString(primaryShipTo.city) || null,
-          state: coerceString(primaryShipTo.state) || null,
-          postalCode: coerceString(primaryShipTo.postalCode) || null,
-          country: coerceString(primaryShipTo.countryCode) || null,
-          phoneNumber: coerceString(primaryShipTo.phoneNumber) || null,
-        }
-      : null
+    const primaryShipTo = primaryShipToFromDetails(details)
+    const shippingAddress = primaryShipTo ? buildShippingAddressFromShipTo(primaryShipTo) : null
 
     const items = []
     const shipmentsById = {}
@@ -200,26 +238,7 @@
     }
 
     const orderTotal = safeNumber(details.orderTotal) != null ? safeNumber(details.orderTotal) : safeNumber(details.merchandiseTotal)
-
-    const paymentMethodsRaw = Array.isArray(details.orderPayment) ? details.orderPayment : []
-    const paymentMethods = paymentMethodsRaw.map((pm) => {
-      const paymentType = coerceString(pm && pm.paymentType)
-      const last4 = (() => {
-        const v = coerceString(pm && pm.cardNumber)
-        if (!v) return null
-        const digits = v.replace(/\D+/g, '')
-        if (digits.length >= 4) return digits.slice(-4)
-        if (v.length >= 4) return v.slice(-4)
-        return null
-      })()
-      return {
-        description: paymentType || null,
-        cardType: paymentType || null,
-        paymentType: paymentType || null,
-        last4,
-      }
-    })
-
+    const paymentMethods = buildPaymentMethodsFromDetails(details)
     const orderDiscount = extractOrderDiscountFromCostcoOrderDetails(details)
 
     return {
@@ -233,11 +252,7 @@
         url: externalUrl,
         statusType: coerceString(details.status) || null,
       },
-      customer: {
-        email: coerceString(details.emailAddress) || coerceString(primaryShipTo.emailAddress) || null,
-        firstName: coerceString(details.firstName) || null,
-        lastName: coerceString(details.lastName) || null,
-      },
+      customer: buildCustomerFromDetails(details, primaryShipTo),
       shippingAddress,
       shipments: shipmentsListFromMap(shipmentsById),
       paymentMethods,
@@ -305,6 +320,27 @@
       if (!orderNumber) continue
       const detailsPayload = detailsMap[orderNumber]
       if (!detailsPayload) continue
+
+      const details = extractOrderDetailsFromCostcoGraphql(detailsPayload)
+      const primaryShipTo = details ? primaryShipToFromDetails(details) : null
+
+      // List capture omits address/email/payments; detail payload has them for subaccount + BG matching.
+      if (details) {
+        const detailCustomer = buildCustomerFromDetails(details, primaryShipTo)
+        if (!order.customer || typeof order.customer !== 'object') order.customer = {}
+        if (!order.customer.email && detailCustomer.email) order.customer.email = detailCustomer.email
+        if (!order.customer.firstName && detailCustomer.firstName) order.customer.firstName = detailCustomer.firstName
+        if (!order.customer.lastName && detailCustomer.lastName) order.customer.lastName = detailCustomer.lastName
+
+        if (!order.shippingAddress && primaryShipTo) {
+          order.shippingAddress = buildShippingAddressFromShipTo(primaryShipTo)
+        }
+
+        const existingPayments = Array.isArray(order.paymentMethods) ? order.paymentMethods : []
+        if (existingPayments.length === 0) {
+          order.paymentMethods = buildPaymentMethodsFromDetails(details)
+        }
+      }
 
       const idx = buildDetailIndexByLineItemId(detailsPayload)
       if (!idx || !idx.byId) continue
