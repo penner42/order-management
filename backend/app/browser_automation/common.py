@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from playwright.async_api import Page
 
 from app.config import settings
+
+# store_order_number, error message
+OrderErrorCallback = Callable[[str, str], None]
 
 
 class LoginRequiredError(Exception):

@@ -17,7 +17,11 @@ from urllib.parse import quote
 
 from playwright.async_api import Page, Response
 
-from app.browser_automation.common import LoginRequiredError, inject_scripts_for_evaluate
+from app.browser_automation.common import (
+    LoginRequiredError,
+    OrderErrorCallback,
+    inject_scripts_for_evaluate,
+)
 from app.browser_automation.paths import costco_script_paths
 from app.browser_automation.session_manager import (
     establish_costco_session,
@@ -284,6 +288,7 @@ async def run_costco_import(
     order_ids: list[str] | None = None,
     on_progress: ProgressCallback | None = None,
     on_order: OrderCallback | None = None,
+    on_order_error: OrderErrorCallback | None = None,
 ) -> list[dict[str, Any]]:
     """Capture Costco orders for a profile (orders GraphQL → detail GraphQL).
 
@@ -383,6 +388,8 @@ async def run_costco_import(
                 raise
             except Exception as exc:
                 logger.warning("Failed to capture Costco order %s: %s", order_number, exc)
+                if on_order_error:
+                    on_order_error(order_number, str(exc))
 
             if idx < len(pairs) - 1:
                 await page.wait_for_timeout(800)

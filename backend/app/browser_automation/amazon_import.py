@@ -7,7 +7,11 @@ from typing import Any, Callable
 
 from playwright.async_api import Page
 
-from app.browser_automation.common import LoginRequiredError, inject_scripts_for_evaluate
+from app.browser_automation.common import (
+    LoginRequiredError,
+    OrderErrorCallback,
+    inject_scripts_for_evaluate,
+)
 from app.browser_automation.paths import amazon_script_paths
 from app.browser_automation.session_manager import (
     AMAZON_ORDERS_URL,
@@ -339,6 +343,7 @@ async def _capture_amazon_order_ids(
     *,
     on_progress: ProgressCallback | None = None,
     on_order: OrderCallback | None = None,
+    on_order_error: OrderErrorCallback | None = None,
 ) -> list[dict[str, Any]]:
     def progress(**kwargs: Any) -> None:
         if on_progress:
@@ -366,6 +371,8 @@ async def _capture_amazon_order_ids(
             raise
         except Exception as exc:
             logger.warning("Failed to capture Amazon order %s: %s", order_id, exc)
+            if on_order_error:
+                on_order_error(order_id, str(exc))
     return orders
 
 
@@ -376,6 +383,7 @@ async def run_amazon_import(
     order_ids: list[str] | None = None,
     on_progress: ProgressCallback | None = None,
     on_order: OrderCallback | None = None,
+    on_order_error: OrderErrorCallback | None = None,
 ) -> list[dict[str, Any]]:
     """Capture Amazon orders for a profile.
 
@@ -426,6 +434,7 @@ async def run_amazon_import(
             account_email,
             on_progress=on_progress,
             on_order=on_order,
+            on_order_error=on_order_error,
         )
         progress(phase="done", message=f"Captured {len(orders)} order(s)", captured=len(orders))
         return orders
@@ -496,13 +505,17 @@ async def run_amazon_import(
                 raise
             except Exception as exc:
                 logger.warning("Failed to capture Amazon order %s: %s", order_id, exc)
+                emitted = False
                 try:
                     if summary.get("orderId"):
                         _emit_order(
                             _normalize_order(summary, detail_url or list_url, account_email)
                         )
+                        emitted = True
                 except Exception:
                     pass
+                if not emitted and on_order_error:
+                    on_order_error(order_id, str(exc))
 
         if page_num >= max_pages or not next_url:
             break

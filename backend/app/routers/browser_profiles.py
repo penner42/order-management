@@ -933,6 +933,33 @@ async def _run_import_job(
             apply_user: User | None = None
             on_order = None
 
+            def on_order_error(store_order_number: str, message: str) -> None:
+                """Persist capture failures (timeouts, missing orders, etc.) to the import log."""
+                errors.append(message)
+                try:
+                    _add_import_log(
+                        db,
+                        profile=profile,
+                        job_id=job_id,
+                        mode=mode,
+                        scheduled=scheduled,
+                        level="error",
+                        event_type="order_error",
+                        store_order_number=store_order_number or None,
+                        message=message,
+                    )
+                    db.commit()
+                except Exception:
+                    logger.exception(
+                        "Failed to write order_error log for job %s order %s",
+                        job_id,
+                        store_order_number,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+
             if auto_apply:
                 apply_user = _apply_user(db)
 
@@ -1044,6 +1071,7 @@ async def _run_import_job(
                     order_ids=order_ids,
                     on_progress=on_progress,
                     on_order=on_order,
+                    on_order_error=on_order_error,
                 )
             elif retailer == "costco":
                 orders = await run_costco_import(
@@ -1052,6 +1080,7 @@ async def _run_import_job(
                     order_ids=order_ids,
                     on_progress=on_progress,
                     on_order=on_order,
+                    on_order_error=on_order_error,
                 )
             else:
                 orders = await run_amazon_import(
@@ -1060,6 +1089,7 @@ async def _run_import_job(
                     order_ids=order_ids,
                     on_progress=on_progress,
                     on_order=on_order,
+                    on_order_error=on_order_error,
                 )
 
             now = datetime.now(timezone.utc)
@@ -1071,27 +1101,40 @@ async def _run_import_job(
 
             if auto_apply:
                 if not orders and not applied:
-                    _set_profile_status(
-                        db,
-                        profile_id,
-                        status="ready",
-                        last_error="Import finished with zero orders." if mode == "full" else None,
-                        **run_kwargs,
-                    )
-                    update_job(
-                        job_id,
-                        status="failed" if mode == "full" else "succeeded",
-                        error="No orders captured. If you expect orders, try Log in again."
-                        if mode == "full"
-                        else None,
-                        message="No orders captured." if mode != "full" else None,
-                        order_count=0,
-                    )
-                    log_finished(
+                    zero_msg = (
                         "Finished: no orders captured."
                         if mode == "full"
                         else "Finished: no orders captured for unshipped check."
                     )
+                    if errors:
+                        zero_msg = zero_msg.rstrip(".") + f" ({len(errors)} failed)."
+                    _set_profile_status(
+                        db,
+                        profile_id,
+                        status="ready",
+                        last_error=(
+                            f"{len(errors)} capture error(s)."
+                            if errors
+                            else ("Import finished with zero orders." if mode == "full" else None)
+                        ),
+                        **run_kwargs,
+                    )
+                    update_job(
+                        job_id,
+                        status="failed" if mode == "full" or errors else "succeeded",
+                        error=(
+                            errors[0]
+                            if errors
+                            else (
+                                "No orders captured. If you expect orders, try Log in again."
+                                if mode == "full"
+                                else None
+                            )
+                        ),
+                        message="No orders captured." if mode != "full" and not errors else None,
+                        order_count=0,
+                    )
+                    log_finished(zero_msg)
                     finished_ok = True
                     return
 
@@ -1129,27 +1172,40 @@ async def _run_import_job(
                 finished_ok = True
             else:
                 if not orders:
-                    _set_profile_status(
-                        db,
-                        profile_id,
-                        status="ready",
-                        last_error="Import finished with zero orders." if mode == "full" else None,
-                        **run_kwargs,
-                    )
-                    update_job(
-                        job_id,
-                        status="failed" if mode == "full" else "succeeded",
-                        error="No orders captured. If you expect orders, try Log in again."
-                        if mode == "full"
-                        else None,
-                        message="No orders captured." if mode != "full" else None,
-                        order_count=0,
-                    )
-                    log_finished(
+                    zero_msg = (
                         "Finished: no orders captured."
                         if mode == "full"
                         else "Finished: no orders captured for unshipped check."
                     )
+                    if errors:
+                        zero_msg = zero_msg.rstrip(".") + f" ({len(errors)} failed)."
+                    _set_profile_status(
+                        db,
+                        profile_id,
+                        status="ready",
+                        last_error=(
+                            f"{len(errors)} capture error(s)."
+                            if errors
+                            else ("Import finished with zero orders." if mode == "full" else None)
+                        ),
+                        **run_kwargs,
+                    )
+                    update_job(
+                        job_id,
+                        status="failed" if mode == "full" or errors else "succeeded",
+                        error=(
+                            errors[0]
+                            if errors
+                            else (
+                                "No orders captured. If you expect orders, try Log in again."
+                                if mode == "full"
+                                else None
+                            )
+                        ),
+                        message="No orders captured." if mode != "full" and not errors else None,
+                        order_count=0,
+                    )
+                    log_finished(zero_msg)
                     finished_ok = True
                     return
 
@@ -1158,20 +1214,26 @@ async def _run_import_job(
                     db,
                     profile_id,
                     status="ready",
-                    last_error=None,
+                    last_error=f"{len(errors)} capture error(s)." if errors else None,
                     touch_last_import=True,
                     last_import_at=now,
                     **run_kwargs,
                 )
+                msg = f"Captured {len(orders)} order(s)."
+                if errors:
+                    msg += f" {len(errors)} failed."
                 update_job(
                     job_id,
                     status="succeeded",
-                    message=f"Captured {len(orders)} order(s).",
+                    message=msg,
                     token=token,
                     review_url=review_url,
                     order_count=len(orders),
                 )
-                log_finished(f"Finished: captured {len(orders)} order(s) for import review.")
+                finish_msg = f"Finished: captured {len(orders)} order(s) for import review."
+                if errors:
+                    finish_msg = finish_msg.rstrip(".") + f" ({len(errors)} failed)."
+                log_finished(finish_msg)
                 finished_ok = True
         except LoginRequiredError as exc:
             _set_profile_status(
