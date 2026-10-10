@@ -9,6 +9,27 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
 ]
 
 const PARSEFILE_API_PATH_PLACEHOLDER = '/p/it@api@order-management'
+const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
+
+function formatLastRun(iso: string | null | undefined): string {
+  if (!iso) return 'never'
+  try {
+    return new Date(iso).toLocaleString()
+  } catch {
+    return 'never'
+  }
+}
+
+function canSubmitTrackings(g: BuyingGroup): boolean {
+  return (
+    g.api_framework === 'parsefile' &&
+    Boolean(g.bearer_token?.trim()) &&
+    Boolean(g.base_url?.trim()) &&
+    Boolean(g.api_url?.trim()) &&
+    g.api_user_id != null &&
+    Boolean(g.api_email?.trim())
+  )
+}
 
 function AliasEditor({
   group,
@@ -103,6 +124,8 @@ type EditDraft = {
   bearer_token: string
   api_user_id: string
   api_email: string
+  tracking_submit_enabled: boolean
+  tracking_submit_cron: string
 }
 
 function emptyDraft(): EditDraft {
@@ -114,6 +137,8 @@ function emptyDraft(): EditDraft {
     bearer_token: '',
     api_user_id: '',
     api_email: '',
+    tracking_submit_enabled: false,
+    tracking_submit_cron: DEFAULT_TRACKING_SUBMIT_CRON,
   }
 }
 
@@ -126,6 +151,8 @@ function draftFromGroup(g: BuyingGroup): EditDraft {
     bearer_token: g.bearer_token ?? '',
     api_user_id: g.api_user_id != null ? String(g.api_user_id) : '',
     api_email: g.api_email ?? '',
+    tracking_submit_enabled: !!g.tracking_submit_enabled,
+    tracking_submit_cron: g.tracking_submit_cron?.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
   }
 }
 
@@ -143,6 +170,8 @@ export default function BuyingGroups() {
   const [createName, setCreateName] = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
+  const [submittingGroupId, setSubmittingGroupId] = useState<number | null>(null)
+  const [submitAlert, setSubmitAlert] = useState<string | null>(null)
 
   useEffect(() => {
     api.get<BuyingGroup[]>('/buying-groups').then(setGroups).catch(console.error).finally(() => setLoading(false))
@@ -172,6 +201,8 @@ export default function BuyingGroups() {
         bearer_token: draft.bearer_token.trim() || null,
         api_user_id: apiUserId,
         api_email: draft.api_email.trim() || null,
+        tracking_submit_enabled: draft.tracking_submit_enabled,
+        tracking_submit_cron: draft.tracking_submit_cron.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
       })
       setGroups((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
       setEditing(null)
@@ -182,6 +213,32 @@ export default function BuyingGroups() {
     }
   }
   const cancelEdit = () => setEditing(null)
+
+  const runTrackingSubmit = async (groupId: number) => {
+    setSubmittingGroupId(groupId)
+    setSubmitAlert(null)
+    try {
+      const res = await api.post<{
+        buying_group_id: number
+        submitted_count: number
+        message: string | null
+        tracking_submit_last_run_at: string | null
+      }>(`/buying-groups/${groupId}/submit-trackings`, {})
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === groupId
+            ? { ...g, tracking_submit_last_run_at: res.tracking_submit_last_run_at }
+            : g
+        )
+      )
+      setSubmitAlert(res.message || `Submitted ${res.submitted_count} tracking number(s).`)
+    } catch (e) {
+      console.error(e)
+      setSubmitAlert(e instanceof Error ? e.message : 'Failed to submit tracking numbers')
+    } finally {
+      setSubmittingGroupId(null)
+    }
+  }
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -212,8 +269,21 @@ export default function BuyingGroups() {
     <div>
       <h1 className="text-2xl font-semibold text-ink mb-2">Buying groups</h1>
       <p className="text-sm text-ink-muted mb-8">
-        Add aliases to match shipping names and address lines on store imports. Configure API credentials to submit tracking numbers.
+        Add aliases to match shipping names and address lines on store imports. Configure API
+        credentials and an optional schedule to batch-submit tracking numbers.
       </p>
+      {submitAlert && (
+        <p className="mb-4 text-sm text-ink dark:text-gray-200 rounded-lg border border-brand-200 dark:border-gray-600 bg-brand-50/50 dark:bg-gray-700/40 px-3 py-2">
+          {submitAlert}
+          <button
+            type="button"
+            onClick={() => setSubmitAlert(null)}
+            className="ml-2 text-ink-muted hover:underline"
+          >
+            Dismiss
+          </button>
+        </p>
+      )}
       <form onSubmit={create} className="flex gap-2 mb-6">
         <input
           type="text"
@@ -350,50 +420,107 @@ export default function BuyingGroups() {
                               disabled={saving}
                             />
                           </label>
+                          <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
+                            <label className="inline-flex items-center gap-2 text-sm text-ink">
+                              <input
+                                type="checkbox"
+                                checked={draft.tracking_submit_enabled}
+                                onChange={(e) =>
+                                  setDraft((d) => ({
+                                    ...d,
+                                    tracking_submit_enabled: e.target.checked,
+                                  }))
+                                }
+                                disabled={saving}
+                                className="rounded border-brand-300"
+                              />
+                              <span>Auto-submit tracking</span>
+                            </label>
+                            <label className="block">
+                              <span className="text-xs text-ink-muted">
+                                Cron (UTC; min hour day month weekday)
+                              </span>
+                              <input
+                                type="text"
+                                className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm font-mono"
+                                placeholder={DEFAULT_TRACKING_SUBMIT_CRON}
+                                value={draft.tracking_submit_cron}
+                                onChange={(e) =>
+                                  setDraft((d) => ({ ...d, tracking_submit_cron: e.target.value }))
+                                }
+                                disabled={saving}
+                                spellCheck={false}
+                              />
+                            </label>
+                            <p className="text-[11px] text-ink-muted">
+                              Last run: {formatLastRun(g.tracking_submit_last_run_at)}
+                            </p>
+                          </div>
                         </>
                       )}
                     </div>
                   </div>
                 ) : (
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <span className="font-medium text-ink">{g.name}</span>
-                      {(g.api_framework || g.base_url || g.bearer_token) && (
-                        <p className="text-xs text-ink-muted truncate mt-0.5" title={g.base_url ?? undefined}>
-                          {[
-                            frameworkLabel(g.api_framework),
-                            g.base_url ? `${g.base_url}${g.api_url ?? ''}` : null,
-                            g.bearer_token ? 'token set' : null,
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
-                        </p>
-                      )}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <span className="font-medium text-ink">{g.name}</span>
+                        {(g.api_framework || g.base_url || g.bearer_token) && (
+                          <p className="text-xs text-ink-muted truncate mt-0.5" title={g.base_url ?? undefined}>
+                            {[
+                              frameworkLabel(g.api_framework),
+                              g.base_url ? `${g.base_url}${g.api_url ?? ''}` : null,
+                              g.bearer_token ? 'token set' : null,
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => startEdit(g)}
+                          className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition"
+                          title="Edit"
+                          aria-label="Edit"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(g.id)}
+                          className="p-1.5 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
+                          title="Delete"
+                          aria-label="Delete"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => startEdit(g)}
-                        className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition"
-                        title="Edit"
-                        aria-label="Edit"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                        </svg>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDeleteId(g.id)}
-                        className="p-1.5 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
-                        title="Delete"
-                        aria-label="Delete"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                    </div>
+                    {g.api_framework === 'parsefile' && (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
+                        <span>
+                          Auto-submit:{' '}
+                          {g.tracking_submit_enabled
+                            ? `on (${g.tracking_submit_cron?.trim() || DEFAULT_TRACKING_SUBMIT_CRON})`
+                            : 'off'}
+                        </span>
+                        <span>Last: {formatLastRun(g.tracking_submit_last_run_at)}</span>
+                        <button
+                          type="button"
+                          onClick={() => runTrackingSubmit(g.id)}
+                          disabled={!canSubmitTrackings(g) || submittingGroupId === g.id}
+                          className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs text-ink hover:bg-brand-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                        >
+                          {submittingGroupId === g.id ? 'Submitting…' : 'Submit trackings now'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
                 <AliasEditor

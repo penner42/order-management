@@ -107,10 +107,15 @@ def list_due_profile_jobs(db: Session) -> list[tuple[int, str, int]]:
 async def _tick() -> None:
     # Import here to avoid circular imports at module load.
     from app.routers.browser_profiles import start_scheduled_import
+    from app.routers.buying_groups import (
+        list_due_tracking_submit_group_ids,
+        run_scheduled_tracking_submit,
+    )
 
     db = SessionLocal()
     try:
         due = list_due_profile_jobs(db)
+        due_groups = list_due_tracking_submit_group_ids(db)
     finally:
         db.close()
 
@@ -129,6 +134,20 @@ async def _tick() -> None:
                 "Failed to start scheduled %s check for browser profile %s",
                 mode,
                 profile_id,
+            )
+
+    for group_id in due_groups:
+        try:
+            started = await asyncio.to_thread(run_scheduled_tracking_submit, group_id)
+            if started:
+                logger.info(
+                    "Ran scheduled tracking submit for buying group %s",
+                    group_id,
+                )
+        except Exception:
+            logger.exception(
+                "Failed scheduled tracking submit for buying group %s",
+                group_id,
             )
 
 

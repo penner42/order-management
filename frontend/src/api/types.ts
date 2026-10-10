@@ -40,6 +40,9 @@ export interface BuyingGroup {
   bearer_token?: string | null
   api_user_id?: number | null
   api_email?: string | null
+  tracking_submit_enabled?: boolean
+  tracking_submit_cron?: string
+  tracking_submit_last_run_at?: string | null
 }
 
 export interface Reward {
@@ -283,8 +286,6 @@ export type BrowserImportLogLevel = 'updates' | 'info' | 'error'
 export type BrowserImportLogEvent =
   | 'order_imported'
   | 'tracking_updated'
-  | 'tracking_submitted'
-  | 'tracking_submit_error'
   | 'order_checked'
   | 'order_marked_personal'
   | 'order_skipped_ignored_zip' // legacy

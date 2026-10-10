@@ -1,12 +1,16 @@
 """Buying group schemas."""
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from croniter import croniter
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 ApiFramework = Literal["parsefile"]
 
 ALLOWED_API_FRAMEWORKS = frozenset({"parsefile"})
+
+DEFAULT_TRACKING_SUBMIT_CRON = "0 */6 * * *"
 
 
 def _normalize_optional_str(value: object) -> str | None:
@@ -28,6 +32,17 @@ def _normalize_api_framework(value: object) -> str | None:
     return key
 
 
+def _normalize_cron(value: str) -> str:
+    expr = (value or "").strip()
+    if not expr:
+        raise ValueError("Cron expression is required")
+    if len(expr) > 64:
+        raise ValueError("Cron expression must be at most 64 characters")
+    if not croniter.is_valid(expr):
+        raise ValueError("Invalid cron expression (expected 5 fields: min hour day month weekday)")
+    return expr
+
+
 class BuyingGroupBase(BaseModel):
     name: str
     aliases: list[str] = []
@@ -37,6 +52,8 @@ class BuyingGroupBase(BaseModel):
     bearer_token: str | None = None
     api_user_id: int | None = None
     api_email: str | None = None
+    tracking_submit_enabled: bool = False
+    tracking_submit_cron: str = DEFAULT_TRACKING_SUBMIT_CRON
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -70,6 +87,11 @@ class BuyingGroupBase(BaseModel):
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
 
+    @field_validator("tracking_submit_cron")
+    @classmethod
+    def validate_cron(cls, value: str) -> str:
+        return _normalize_cron(value)
+
 
 class BuyingGroupCreate(BuyingGroupBase):
     user_id: int | None = None
@@ -84,6 +106,8 @@ class BuyingGroupUpdate(BaseModel):
     bearer_token: str | None = None
     api_user_id: int | None = None
     api_email: str | None = None
+    tracking_submit_enabled: bool | None = None
+    tracking_submit_cron: str | None = Field(default=None, max_length=64)
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -102,10 +126,18 @@ class BuyingGroupUpdate(BaseModel):
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
 
+    @field_validator("tracking_submit_cron")
+    @classmethod
+    def validate_cron(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_cron(value)
+
 
 class BuyingGroupRead(BuyingGroupBase):
     id: int
     user_id: int | None = None
+    tracking_submit_last_run_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -120,3 +152,11 @@ class BuyingGroupSummary(BaseModel):
     api_framework: ApiFramework | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class BuyingGroupSubmitTrackingResponse(BaseModel):
+    buying_group_id: int
+    submitted_count: int
+    message: str | None = None
+    tracking_numbers: list[str] = []
+    tracking_submit_last_run_at: datetime | None = None

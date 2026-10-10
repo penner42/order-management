@@ -1,5 +1,5 @@
 """Buying group model - group items are sold to."""
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, JSON
+from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, DateTime, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -20,6 +20,12 @@ class BuyingGroup(Base):
     bearer_token = Column(String(2000), nullable=True)
     api_user_id = Column(Integer, nullable=True)  # Parsefile account user id
     api_email = Column(String(255), nullable=True)  # Parsefile account email
+    # Batch-submit shipped tracking numbers to the buying-group API on a cron (UTC).
+    tracking_submit_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    tracking_submit_cron = Column(
+        String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *"
+    )
+    tracking_submit_last_run_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="buying_groups")
