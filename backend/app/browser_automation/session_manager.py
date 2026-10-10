@@ -133,10 +133,10 @@ class SessionManager:
             # Needed for predictable live-view click mapping; Camoufox still spoofs other signals.
             window=(width, height),
             block_webrtc=True,
-            # Costco/Azure B2C (and similar) reveal UI during finite CSS animations
-            # (e.g. press-and-hold). Instant-animation collapse hides that UI and
-            # login appears to hang after submit.
-            config={"disableInstantAnimations": True},
+            # Camoufox ≥156.0.1-beta.32 renamed disableInstantAnimations → instantAnimations.
+            # When true, finite CSS animations complete instantly (hides press-and-hold /
+            # B2C challenge UI). Keep false so Costco/Azure login animations paint.
+            config={"instantAnimations": False},
             firefox_user_prefs={
                 "security.sandbox.content.level": 0,
                 "security.sandbox.gpu.level": 0,
@@ -226,6 +226,7 @@ class SessionManager:
                     browser="camoufox",
                 )
                 self._sessions[profile_id] = session
+                self._attach_page_listeners(session)
                 logger.info(
                     "Started browser profile=%s browser=camoufox headless=%s mode=%s",
                     profile_id,
@@ -268,6 +269,49 @@ class SessionManager:
         except Exception as exc:
             logger.warning("Error closing browser context for profile %s: %s", profile_id, exc)
         self.release_slot()
+
+    def _attach_page_listeners(self, session: LiveSession) -> None:
+        """Follow SSO popups / new tabs so live view isn't stuck on a dimmed opener."""
+
+        def on_page(page: Page) -> None:
+            try:
+                asyncio.create_task(self._adopt_page(session, page))
+            except Exception as exc:
+                logger.debug("Failed to schedule page adopt: %s", exc)
+
+        try:
+            session.context.on("page", on_page)
+        except Exception as exc:
+            logger.debug("context.on(page) failed: %s", exc)
+
+    async def _adopt_page(self, session: LiveSession, page: Page) -> None:
+        if session.page is page:
+            return
+        async with session.lock:
+            if session.page is page:
+                return
+            old = session.page
+            logger.info(
+                "Adopting new browser page for profile %s (was %s)",
+                session.profile_id,
+                (old.url if old else "")[:120],
+            )
+            try:
+                if session.screencast_on:
+                    await self._stop_screencast_locked(session)
+            except Exception as exc:
+                logger.debug("stop screencast before adopt failed: %s", exc)
+            session.page = page
+            try:
+                if session.viewers:
+                    await self._start_screencast_locked(session)
+            except Exception as exc:
+                logger.warning("restart screencast after adopt failed: %s", exc)
+            # Best-effort: bring popup to front for input focus.
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
 
     def _broadcast_frame(self, session: LiveSession, msg: dict) -> None:
         dead: list[asyncio.Queue] = []
@@ -423,7 +467,12 @@ class SessionManager:
             await action(x, y)
 
     async def _snap_to_nearby_input(self, page: Page, x: float, y: float) -> tuple[float, float]:
-        """Widen hit targets for tiny OTP/digit inputs (Walmart MFA, etc.)."""
+        """Widen hit targets for tiny OTP/digit inputs (Walmart MFA, etc.).
+
+        Never steal clicks from buttons/links near text fields — Costco Azure B2C
+        puts Send code / Sign in immediately beside inputs; snapping those clicks
+        into the field makes login look like a hung overlay.
+        """
         try:
             snapped = await page.evaluate(
                 """([x, y]) => {
@@ -435,6 +484,23 @@ class SessionManager:
                     if (tag !== 'input') return false;
                     const type = (el.type || 'text').toLowerCase();
                     return !['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image'].includes(type);
+                  };
+                  const isClickable = (el) => {
+                    if (!el || el === document.body || el === document.documentElement) return false;
+                    const tag = (el.tagName || '').toLowerCase();
+                    if (['button', 'a', 'summary', 'label'].includes(tag)) return true;
+                    const role = (el.getAttribute && el.getAttribute('role')) || '';
+                    if (['button', 'link', 'tab', 'menuitem'].includes(role)) return true;
+                    if (tag === 'input') {
+                      const type = (el.type || 'text').toLowerCase();
+                      if (['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image'].includes(type)) {
+                        return true;
+                      }
+                    }
+                    try {
+                      if (el.onclick != null) return true;
+                    } catch (e) {}
+                    return false;
                   };
                   const center = (el) => {
                     const r = el.getBoundingClientRect();
@@ -448,6 +514,8 @@ class SessionManager:
                       const c = center(el);
                       if (c) return { x: c.x, y: c.y };
                     }
+                    // Clicking Sign in / Send code / social buttons must not retarget.
+                    if (isClickable(el)) return null;
                     el = el.parentElement;
                   }
                   // Visual OTP boxes are often wrappers; the real input may sit under/near them.
@@ -478,6 +546,43 @@ class SessionManager:
         except Exception as exc:
             logger.debug("input snap failed: %s", exc)
         return x, y
+
+    async def _paste_into_focused(self, page: Page, text: str) -> None:
+        """Paste via insert_text, then nudge Angular/React controlled inputs."""
+        await page.keyboard.insert_text(text)
+        try:
+            await page.evaluate(
+                """() => {
+                  const el = document.activeElement;
+                  if (!el) return;
+                  const tag = (el.tagName || '').toLowerCase();
+                  if (tag !== 'input' && tag !== 'textarea') return;
+                  const proto =
+                    tag === 'textarea'
+                      ? window.HTMLTextAreaElement.prototype
+                      : window.HTMLInputElement.prototype;
+                  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                  const value = el.value;
+                  if (desc && typeof desc.set === 'function') {
+                    desc.set.call(el, value);
+                  }
+                  try {
+                    el.dispatchEvent(
+                      new InputEvent('input', {
+                        bubbles: true,
+                        cancelable: true,
+                        inputType: 'insertFromPaste',
+                        data: value,
+                      })
+                    );
+                  } catch (e) {
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                  }
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                }"""
+            )
+        except Exception as exc:
+            logger.debug("paste SPA nudge failed: %s", exc)
 
     async def dispatch_input(self, session: LiveSession, message: dict) -> None:
         """Forward mouse/keyboard events from the UI into Playwright."""
@@ -568,18 +673,11 @@ class SessionManager:
             if len(text) > 100_000:
                 text = text[:100_000]
             try:
-                # Short pastes (email/password/OTP): type() so SPA form state updates.
-                # Long pastes: insert_text to avoid flooding key events.
-                if len(text) <= 256:
-                    await page.keyboard.type(text, delay=0)
-                else:
-                    await page.keyboard.insert_text(text)
+                # insert_text is one CDP round-trip (type() on a whole password stalls
+                # the live-view loop and often looks like paste "did nothing").
+                await self._paste_into_focused(page, text)
             except Exception as exc:
                 logger.debug("paste failed: %s", exc)
-                try:
-                    await page.keyboard.insert_text(text)
-                except Exception as exc2:
-                    logger.debug("paste insert_text failed: %s", exc2)
 
 
 session_manager = SessionManager()
