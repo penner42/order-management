@@ -9,16 +9,18 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
   { value: 'parsefile', label: 'Parsefile' },
   { value: 'usabg', label: 'USABG' },
   { value: 'buyinggroup', label: 'BuyingGroup.com' },
+  { value: 'dealandrunner', label: 'Deal & Runner' },
 ]
 
 const PARSEFILE_DEFAULT_API_URL = '/p/it@api@order-management'
 const USABG_DEFAULT_BASE_URL = 'https://api.usabuying.group/buyers'
 const BUYINGGROUP_DEFAULT_BASE_URL = 'https://api.prod.buyinggroup.com'
 const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH = '/v1/order/add_trackings'
+const DEALANDRUNNER_DEFAULT_BASE_URL = 'https://api.dealandrunner.com'
 const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
 
 function usesUsernamePassword(framework: string | null | undefined): boolean {
-  return framework === 'usabg' || framework === 'buyinggroup'
+  return framework === 'usabg' || framework === 'buyinggroup' || framework === 'dealandrunner'
 }
 
 function formatLastRun(iso: string | null | undefined): string {
@@ -52,11 +54,13 @@ function effectiveBaseUrl(g: BuyingGroup): string {
   if (base) return base
   if (g.api_framework === 'usabg') return USABG_DEFAULT_BASE_URL
   if (g.api_framework === 'buyinggroup') return BUYINGGROUP_DEFAULT_BASE_URL
+  if (g.api_framework === 'dealandrunner') return DEALANDRUNNER_DEFAULT_BASE_URL
   return ''
 }
 
 function effectiveApiUrl(g: BuyingGroup): string {
   if (g.api_framework === 'usabg') return '/trackings'
+  if (g.api_framework === 'dealandrunner') return '/tracking'
   if (g.api_framework === 'buyinggroup') {
     return g.api_url?.trim() || BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH
   }
@@ -431,7 +435,9 @@ export default function BuyingGroups() {
                             ? 'Base URL (optional; blank uses USABG default)'
                             : draft.api_framework === 'buyinggroup'
                               ? 'Base URL (optional; blank uses BuyingGroup.com default)'
-                              : 'Base URL'}
+                              : draft.api_framework === 'dealandrunner'
+                                ? 'Base URL (optional; blank uses Deal & Runner default)'
+                                : 'Base URL'}
                         </span>
                         <input
                           type="url"
@@ -441,7 +447,9 @@ export default function BuyingGroups() {
                               ? USABG_DEFAULT_BASE_URL
                               : draft.api_framework === 'buyinggroup'
                                 ? BUYINGGROUP_DEFAULT_BASE_URL
-                                : 'https://www.powerbuynetwork.com'
+                                : draft.api_framework === 'dealandrunner'
+                                  ? DEALANDRUNNER_DEFAULT_BASE_URL
+                                  : 'https://www.powerbuynetwork.com'
                           }
                           value={draft.base_url}
                           onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
@@ -527,14 +535,18 @@ export default function BuyingGroups() {
                       {usesUsernamePassword(draft.api_framework) && (
                         <>
                           <label className="block">
-                            <span className="text-xs text-ink-muted">Username</span>
+                            <span className="text-xs text-ink-muted">
+                              {draft.api_framework === 'dealandrunner' ? 'Email' : 'Username'}
+                            </span>
                             <input
-                              type="text"
+                              type={draft.api_framework === 'dealandrunner' ? 'email' : 'text'}
                               className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
                               placeholder={
                                 draft.api_framework === 'buyinggroup'
                                   ? 'BuyingGroup.com username'
-                                  : 'USABG username'
+                                  : draft.api_framework === 'dealandrunner'
+                                    ? 'you@example.com'
+                                    : 'USABG username'
                               }
                               value={draft.api_username}
                               onChange={(e) => setDraft((d) => ({ ...d, api_username: e.target.value }))}
@@ -550,7 +562,9 @@ export default function BuyingGroups() {
                               placeholder={
                                 draft.api_framework === 'buyinggroup'
                                   ? 'BuyingGroup.com password'
-                                  : 'USABG password'
+                                  : draft.api_framework === 'dealandrunner'
+                                    ? 'Deal & Runner password'
+                                    : 'USABG password'
                               }
                               value={draft.api_password}
                               onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}

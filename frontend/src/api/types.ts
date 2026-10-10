@@ -26,7 +26,7 @@ export interface User {
   updated_at?: string
 }
 
-export type BuyingGroupApiFramework = 'parsefile' | 'usabg' | 'buyinggroup'
+export type BuyingGroupApiFramework = 'parsefile' | 'usabg' | 'buyinggroup' | 'dealandrunner'
 
 export interface BuyingGroup {
   id: number

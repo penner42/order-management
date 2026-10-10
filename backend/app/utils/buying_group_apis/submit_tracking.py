@@ -1,4 +1,4 @@
-"""Submit item tracking numbers to buying-group APIs (Parsefile, USABG, BuyingGroup.com)."""
+"""Submit item tracking numbers to buying-group APIs (Parsefile, USABG, BuyingGroup.com, Deal & Runner)."""
 from __future__ import annotations
 
 import logging
@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.models import BuyingGroup, Item, Order, ShipmentItem
 from app.models.item import ItemStatus
 from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
+from app.utils.buying_group_apis import dealandrunner as dealandrunner_api
 from app.utils.buying_group_apis import parsefile as parsefile_api
 from app.utils.buying_group_apis import usabg as usabg_api
 from app.utils.dates import to_date_only
@@ -69,6 +70,21 @@ def buyinggroup_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None
     return True, None
 
 
+def dealandrunner_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
+    """Return (ready, error_detail) for Deal & Runner tracking submission."""
+    if group is None:
+        return False, "Order has no buying group"
+    framework = (group.api_framework or "").strip().casefold()
+    if framework != "dealandrunner":
+        return False, "Buying group API framework is not configured for submission"
+    if not (group.api_username or "").strip():
+        return False, "Buying group is missing API email"
+    if not (group.api_password or "").strip():
+        return False, "Buying group is missing API password"
+    # Blank base_url falls back to the Deal & Runner default.
+    return True, None
+
+
 def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
     """Return (ready, error_detail) for whatever framework the group uses."""
     if group is None:
@@ -80,6 +96,8 @@ def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
         return usabg_group_ready(group)
     if framework == "buyinggroup":
         return buyinggroup_group_ready(group)
+    if framework == "dealandrunner":
+        return dealandrunner_group_ready(group)
     if not framework:
         return False, "Buying group API framework is not configured for submission"
     return False, f"Unsupported buying group API framework: {group.api_framework}"
@@ -261,6 +279,23 @@ def submit_buyinggroup_trackings(
     )
 
 
+def submit_dealandrunner_trackings(
+    group: BuyingGroup,
+    entries: Sequence[dealandrunner_api.DealandrunnerTrackingEntry],
+) -> dealandrunner_api.DealandrunnerSubmitResult:
+    ready, reason = dealandrunner_group_ready(group)
+    if not ready:
+        raise ValueError(reason or "Buying group API is not configured")
+    if not entries:
+        raise ValueError("At least one tracking entry is required")
+    return dealandrunner_api.submit_trackings(
+        base_url=group.base_url,
+        email=str(group.api_username),
+        password=str(group.api_password),
+        trackings=list(entries),
+    )
+
+
 def find_shipped_items_sharing_tracking(
     db: Session,
     *,
@@ -349,6 +384,12 @@ def submit_item_tracking_to_group(
         entry.amount = amount
         result = submit_buyinggroup_trackings(group, [entry])
         return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
+    if framework == "dealandrunner":
+        result = submit_dealandrunner_trackings(
+            group,
+            [dealandrunner_api.DealandrunnerTrackingEntry(tracking=tracking)],
+        )
+        return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
     raise ValueError("Buying group API framework is not configured for submission")
 
 
@@ -396,6 +437,19 @@ def _aggregate_buyinggroup_entries(
         build_buyinggroup_entry_from_items(pairs, tracking)
         for tracking, pairs in groups.items()
     ]
+
+
+def _aggregate_dealandrunner_entries(
+    pending: Sequence[tuple[Item, Order, str]],
+) -> list[dealandrunner_api.DealandrunnerTrackingEntry]:
+    """One Deal & Runner entry per unique tracking number (API has no amount field)."""
+    seen: OrderedDict[str, None] = OrderedDict()
+    for _item, _order, tracking in pending:
+        tn = (tracking or "").strip()
+        if not tn:
+            continue
+        seen.setdefault(tn, None)
+    return [dealandrunner_api.DealandrunnerTrackingEntry(tracking=tn) for tn in seen]
 
 
 @dataclass
@@ -543,6 +597,29 @@ def batch_submit_pending_trackings(
                 trackings=entries,
             )
             message = api_result.message
+        elif framework == "dealandrunner":
+            base_url = group.base_url
+            email = str(group.api_username)
+            password = str(group.api_password)
+            entries = _aggregate_dealandrunner_entries(pending)
+            tracking_numbers = [e.tracking for e in entries]
+            api_result = dealandrunner_api.submit_trackings(
+                base_url=base_url,
+                email=email,
+                password=password,
+                trackings=entries,
+            )
+            message = api_result.message
+            # Only mark items whose tracking succeeded or was already present.
+            ok_tns = {tn.casefold() for tn in (api_result.succeeded + api_result.duplicates)}
+            if ok_tns and api_result.failed:
+                item_ids = [
+                    item.id
+                    for item, _order, tracking in pending
+                    if (tracking or "").strip().casefold() in ok_tns
+                ]
+            if api_result.failed and not item_ids:
+                raise RuntimeError(api_result.message or "Deal & Runner tracking submit failed")
         else:
             return BatchSubmitResult(
                 buying_group_id=buying_group_id,
