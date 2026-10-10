@@ -24,6 +24,7 @@ from app.browser_automation.common import (
 )
 from app.browser_automation.paths import costco_script_paths
 from app.browser_automation.session_manager import (
+    COSTCO_MYACCOUNT_URL,
     establish_costco_session,
     looks_like_costco_signin,
     session_manager,
@@ -92,6 +93,29 @@ def _extract_order_header_pairs(payload: dict[str, Any]) -> list[dict[str, str]]
         return []
 
 
+def _detail_order_number(payload: dict[str, Any] | None) -> str | None:
+    try:
+        if not isinstance(payload, dict):
+            return None
+        od = (payload.get("data") or {}).get("getOrderDetails")
+        if not isinstance(od, dict):
+            return None
+        num = str(od.get("orderNumber") or "").strip()
+        return num or None
+    except Exception:
+        return None
+
+
+def _parse_response_json(payload_text: str | None) -> dict[str, Any] | None:
+    if not payload_text:
+        return None
+    try:
+        parsed = json.loads(payload_text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 class _CostcoGraphqlCapture:
     """Collect Costco order GraphQL responses from Playwright network events."""
 
@@ -103,6 +127,7 @@ class _CostcoGraphqlCapture:
         self._details: dict[str, Any] | None = None
         self._details_url: str | None = None
         self._details_header_id: str | None = None
+        self._details_order_number: str | None = None
         self._handler = self._on_response
         page.on("response", self._handler)
 
@@ -117,6 +142,7 @@ class _CostcoGraphqlCapture:
             self._details = None
             self._details_url = None
             self._details_header_id = None
+            self._details_order_number = None
 
     async def clear_orders(self) -> None:
         async with self._lock:
@@ -130,10 +156,15 @@ class _CostcoGraphqlCapture:
                 return
             if response.status != 200:
                 return
+            payload: dict[str, Any] | None = None
             try:
-                payload = await response.json()
+                raw = await response.json()
+                payload = raw if isinstance(raw, dict) else None
             except Exception:
-                return
+                try:
+                    payload = _parse_response_json(await response.text())
+                except Exception:
+                    payload = None
             if not isinstance(payload, dict):
                 return
 
@@ -158,6 +189,7 @@ class _CostcoGraphqlCapture:
                     self._details = payload
                     self._details_url = url
                     self._details_header_id = header_id
+                    self._details_order_number = _detail_order_number(payload)
         except Exception as exc:
             logger.debug("Costco GraphQL response handler error: %s", exc)
 
@@ -173,15 +205,27 @@ class _CostcoGraphqlCapture:
     async def wait_for_details(
         self,
         order_header_id: str,
+        *,
+        order_number: str | None = None,
         timeout_ms: int = 35000,
     ) -> tuple[dict[str, Any], str | None]:
-        target = str(order_header_id or "").strip()
+        target_header = str(order_header_id or "").strip()
+        target_order = str(order_number or "").strip()
         deadline = time.monotonic() + (timeout_ms / 1000.0)
         while time.monotonic() < deadline:
             async with self._lock:
                 if self._details is not None:
-                    got = (self._details_header_id or "").strip()
-                    if not target or not got or got == target:
+                    got_header = (self._details_header_id or "").strip()
+                    got_order = (self._details_order_number or "").strip()
+                    # Accept when request header id or response orderNumber matches.
+                    # Do not accept a mismatched sibling order's payload.
+                    if target_header and got_header == target_header:
+                        return self._details, self._details_url
+                    if target_order and got_order == target_order:
+                        return self._details, self._details_url
+                    if target_order and got_header == target_order:
+                        return self._details, self._details_url
+                    if not target_header and not target_order:
                         return self._details, self._details_url
             await asyncio.sleep(0.25)
         raise TimeoutError(
@@ -213,6 +257,70 @@ async def _extract_app_id(page: Page) -> str | None:
     )
 
 
+async def _costco_spa_navigate(page: Page, url: str) -> None:
+    """Drive Costco's hash router the way a real tab URL update does.
+
+    Playwright ``page.goto`` on same-document hash changes often updates the
+    address bar without Angular refetching GraphQL — which is exactly how we
+    were timing out on order details that work in the extension
+    (``chrome.tabs.update``). Prefer ``location.assign``; fall back to goto.
+    """
+    target = str(url or "").strip()
+    if not target:
+        raise ValueError("Missing Costco SPA URL.")
+    try:
+        await page.evaluate(
+            """(targetUrl) => {
+              try {
+                if (window.location.href === targetUrl) {
+                  // Same URL retry: bounce the hash so the router remounts.
+                  const u = new URL(targetUrl);
+                  const hash = u.hash || '';
+                  window.location.hash = '#';
+                  window.location.hash = hash.startsWith('#') ? hash.slice(1) : hash;
+                  return 'hash-bounce';
+                }
+                window.location.assign(targetUrl);
+                return 'assign';
+              } catch (e) {
+                return 'error:' + String(e && e.message ? e.message : e);
+              }
+            }""",
+            target,
+        )
+    except Exception:
+        await page.goto(target, wait_until="domcontentloaded", timeout=60_000)
+    await page.wait_for_timeout(600)
+
+
+async def _resolve_order_details_url(page: Page, app_id: str, order_header_id: str) -> str:
+    """Prefer the rendered Costco details link (extension parity); else construct it."""
+    header = str(order_header_id or "").strip()
+    found = None
+    if header:
+        try:
+            found = await page.evaluate(
+                """(headerId) => {
+                  const anchors = Array.from(document.querySelectorAll('a[href]'));
+                  for (let i = 0; i < anchors.length; i++) {
+                    const href = anchors[i].getAttribute('href') || '';
+                    if (!href.toLowerCase().includes('orderdetails')) continue;
+                    if (!href.includes(headerId)) continue;
+                    try {
+                      return new URL(href, document.location.href).toString();
+                    } catch (e) {}
+                  }
+                  return null;
+                }""",
+                header,
+            )
+        except Exception:
+            found = None
+    if isinstance(found, str) and found.strip():
+        return found.strip()
+    return _order_details_url(app_id, header)
+
+
 async def _ensure_orders_and_purchases_route(page: Page) -> None:
     """Navigate the Costco SPA to ordersandpurchases when we have an app id."""
     url = page.url or ""
@@ -237,13 +345,81 @@ async def _ensure_orders_and_purchases_route(page: Page) -> None:
     orders_url = (
         f"https://www.costco.com/myaccount/#/app/{quote(app_id, safe='')}/ordersandpurchases"
     )
-    await page.goto(orders_url, wait_until="domcontentloaded", timeout=60_000)
-    await page.wait_for_timeout(800)
+    await _costco_spa_navigate(page, orders_url)
 
 
 def _order_details_url(app_id: str, order_header_id: str) -> str:
     base = f"https://www.costco.com/myaccount/#/app/{quote(app_id, safe='')}/orderdetails"
     return f"{base}?orderNumbers={quote(str(order_header_id).strip(), safe='')}"
+
+
+async def _capture_order_details(
+    page: Page,
+    capture: _CostcoGraphqlCapture,
+    *,
+    app_id: str,
+    order_number: str,
+    header_id: str,
+    on_progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    """Open order details and wait for getOrderDetails, with a hard-nav retry."""
+
+    def progress(**kwargs: Any) -> None:
+        if on_progress:
+            on_progress(kwargs)
+
+    detail_url = await _resolve_order_details_url(page, app_id, header_id)
+    await capture.clear_details()
+    await _costco_spa_navigate(page, detail_url)
+    if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
+        raise LoginRequiredError("Costco session requires login.")
+
+    try:
+        detail_payload, _detail_url = await capture.wait_for_details(
+            header_id,
+            order_number=order_number,
+            timeout_ms=20_000,
+        )
+        return detail_payload
+    except TimeoutError:
+        progress(
+            phase="detail",
+            message=f"Retrying Costco order {order_number} (hard navigation)…",
+            order_id=order_number,
+        )
+
+    # Mirror the extension scrape tab: land on myaccount, then assign the
+    # detail hash so Angular boots the orderdetails route cleanly.
+    await capture.clear_details()
+    await page.goto(COSTCO_MYACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
+    fresh_app: str | None = None
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        url = page.url or ""
+        if looks_like_costco_signin(url) and "#/app/" not in url:
+            await page.wait_for_timeout(500)
+            url = page.url or ""
+            if looks_like_costco_signin(url) and "#/app/" not in url:
+                raise LoginRequiredError("Costco session requires login.")
+            continue
+        fresh_app = await _extract_app_id(page)
+        if fresh_app:
+            break
+        await page.wait_for_timeout(400)
+    if fresh_app:
+        app_id = fresh_app
+    elif not app_id:
+        raise RuntimeError("Missing Costco SPA app id after myaccount reload.")
+    detail_url = _order_details_url(app_id, header_id)
+    await _costco_spa_navigate(page, detail_url)
+    if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
+        raise LoginRequiredError("Costco session requires login.")
+    detail_payload, _detail_url = await capture.wait_for_details(
+        header_id,
+        order_number=order_number,
+        timeout_ms=35_000,
+    )
+    return detail_payload
 
 
 async def _normalize_and_merge(
@@ -375,15 +551,19 @@ async def run_costco_import(
                 captured=len(details_by_order_number),
             )
             try:
-                await capture.clear_details()
-                detail_url = _order_details_url(app_id, header_id)
-                await page.goto(detail_url, wait_until="domcontentloaded", timeout=60_000)
-                if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
-                    raise LoginRequiredError("Costco session requires login.")
-                detail_payload, _detail_url = await capture.wait_for_details(
-                    header_id, timeout_ms=35_000
+                detail_payload = await _capture_order_details(
+                    page,
+                    capture,
+                    app_id=app_id,
+                    order_number=order_number,
+                    header_id=header_id,
+                    on_progress=on_progress,
                 )
                 details_by_order_number[order_number] = detail_payload
+                # Keep app id current after hard-nav retries.
+                fresh_app = await _extract_app_id(page)
+                if fresh_app:
+                    app_id = fresh_app
             except LoginRequiredError:
                 raise
             except Exception as exc:
