@@ -6,7 +6,7 @@ from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-Retailer = Literal["amazon", "walmart"]
+Retailer = Literal["amazon", "walmart", "costco"]
 ImportMode = Literal["full", "unshipped"]
 ProfileStatus = Literal[
     "logged_out",

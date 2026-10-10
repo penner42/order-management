@@ -19,7 +19,7 @@ class BrowserProfile(Base):
         nullable=False,
         index=True,
     )
-    # Retailer key for the scraper (amazon | walmart). Independent of stores.name.
+    # Retailer key for the scraper (amazon | walmart | costco). Independent of stores.name.
     retailer = Column(String(64), nullable=False, default="walmart")
     # logged_out | ready | login_required | login_in_progress | importing | error
     status = Column(String(32), nullable=False, default="logged_out")

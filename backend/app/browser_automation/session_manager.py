@@ -32,6 +32,17 @@ WALMART_SIGNIN_HINTS = (
     "/blocked",
 )
 
+COSTCO_HOME_URL = "https://www.costco.com/"
+COSTCO_MYACCOUNT_URL = "https://www.costco.com/myaccount/"
+COSTCO_SIGNIN_HINTS = (
+    "signin.costco.com",
+    "signin-ui.costco.com",
+    "/logonform",
+    "/logon",
+    "oauthlogon",
+    "b2c_1a_sso",
+)
+
 DEFAULT_VIEWPORT = {"width": 1920, "height": 1080}
 # Cap stream resolution for WebSocket bandwidth; keep close to the UI window.
 SCREENCAST_MAX = {"width": 2560, "height": 1440}
@@ -604,25 +615,63 @@ async def walmart_session_logged_in(page: Page) -> bool:
         return False
 
 
+def looks_like_costco_signin(url: str) -> bool:
+    u = (url or "").lower()
+    return any(hint in u for hint in COSTCO_SIGNIN_HINTS)
+
+
+async def costco_session_logged_in(page: Page) -> bool:
+    """Probe myaccount — Costco redirects unauthenticated sessions to sign-in SSO."""
+    try:
+        await page.goto(COSTCO_MYACCOUNT_URL, wait_until="domcontentloaded", timeout=45_000)
+        for _ in range(12):
+            if looks_like_costco_signin(page.url or ""):
+                return False
+            url = page.url or ""
+            lower = url.lower()
+            # Logged-in SPA uses /myaccount/#/app/<clientId>/...
+            if "/myaccount" in lower and "#/app/" in url:
+                return True
+            if "/myaccount" in lower and "signin" not in lower:
+                # Still bootstrapping the hash router — give it a moment.
+                await asyncio.sleep(0.4)
+                continue
+            await asyncio.sleep(0.4)
+        if looks_like_costco_signin(page.url or ""):
+            return False
+        url = page.url or ""
+        return "/myaccount" in url.lower() and "#/app/" in url
+    except Exception:
+        return False
+
+
 def login_start_url_for_retailer(retailer: str) -> str:
     if retailer == "walmart":
         return WALMART_ORDERS_URL
+    if retailer == "costco":
+        return COSTCO_MYACCOUNT_URL
     return AMAZON_ORDERS_URL
 
 
 def login_warm_url_for_retailer(retailer: str) -> str:
     if retailer == "walmart":
         return WALMART_HOME_URL
+    if retailer == "costco":
+        return COSTCO_HOME_URL
     return AMAZON_HOME_URL
 
 
 def login_home_url_for_retailer(retailer: str) -> str:
     if retailer == "walmart":
         return WALMART_HOME_URL
+    if retailer == "costco":
+        return COSTCO_HOME_URL
     return AMAZON_HOME_URL
 
 
 async def retailer_session_logged_in(page: Page, retailer: str) -> bool:
     if retailer == "walmart":
         return await walmart_session_logged_in(page)
+    if retailer == "costco":
+        return await costco_session_logged_in(page)
     return await amazon_session_logged_in(page)

@@ -58,3 +58,14 @@ def walmart_script_paths() -> list[Path]:
     if missing:
         raise FileNotFoundError(f"Missing Walmart scrape scripts: {', '.join(missing)}")
     return files
+
+
+def costco_script_paths() -> list[Path]:
+    """Scripts to inject for Costco normalize (GraphQL capture is via Playwright responses)."""
+    files = [
+        _extension_root() / "lib" / "costco.js",
+    ]
+    missing = [str(p) for p in files if not p.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing Costco scrape scripts: {', '.join(missing)}")
+    return files

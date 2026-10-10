@@ -579,7 +579,7 @@ export default function BrowserAutomation() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedAccountId, setSelectedAccountId] = useState<number | ''>('')
-  const [selectedRetailer, setSelectedRetailer] = useState<'amazon' | 'walmart'>('walmart')
+  const [selectedRetailer, setSelectedRetailer] = useState<'amazon' | 'walmart' | 'costco'>('walmart')
   const [loginProfileId, setLoginProfileId] = useState<number | null>(null)
   const [loginSuggestedUrl, setLoginSuggestedUrl] = useState('https://www.walmart.com/')
   const [maxPagesByProfile, setMaxPagesByProfile] = useState<Record<number, number>>({})
@@ -889,10 +889,13 @@ export default function BrowserAutomation() {
             <select
               className="w-full rounded-lg border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-3 py-2 text-sm text-ink dark:text-gray-100"
               value={selectedRetailer}
-              onChange={(e) => setSelectedRetailer(e.target.value as 'amazon' | 'walmart')}
+              onChange={(e) =>
+                setSelectedRetailer(e.target.value as 'amazon' | 'walmart' | 'costco')
+              }
             >
               <option value="walmart">Walmart</option>
               <option value="amazon">Amazon</option>
+              <option value="costco">Costco</option>
             </select>
           </label>
           <label className="flex-1 min-w-[12rem]">
@@ -1013,7 +1016,13 @@ export default function BrowserAutomation() {
                         </div>
                       )}
                       <div className="text-xs text-ink-muted dark:text-gray-400 mt-0.5">
-                        {p.retailer === 'walmart' ? 'Walmart' : p.retailer === 'amazon' ? 'Amazon' : p.retailer}
+                        {p.retailer === 'walmart'
+                          ? 'Walmart'
+                          : p.retailer === 'amazon'
+                            ? 'Amazon'
+                            : p.retailer === 'costco'
+                              ? 'Costco'
+                              : p.retailer}
                         {' · '}
                         {p.last_import_at
                           ? `Last import ${new Date(p.last_import_at).toLocaleString()}`

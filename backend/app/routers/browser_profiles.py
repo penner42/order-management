@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import decode_token, get_current_user
 from app.browser_automation.amazon_import import run_amazon_import
 from app.browser_automation.common import LoginRequiredError, post_bulk_session
+from app.browser_automation.costco_import import run_costco_import
 from app.browser_automation.jobs import create_job, get_job, update_job
 from app.browser_automation.paths import profile_user_data_dir
 from app.browser_automation.session_manager import (
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/browser-profiles", tags=["browser-profiles"])
 
-SUPPORTED_RETAILERS = {"amazon", "walmart"}
+SUPPORTED_RETAILERS = {"amazon", "walmart", "costco"}
 
 
 def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
@@ -1039,6 +1040,14 @@ async def _run_import_job(
 
             if retailer == "walmart":
                 orders = await run_walmart_import(
+                    profile_id,
+                    max_pages=max_pages,
+                    order_ids=order_ids,
+                    on_progress=on_progress,
+                    on_order=on_order,
+                )
+            elif retailer == "costco":
+                orders = await run_costco_import(
                     profile_id,
                     max_pages=max_pages,
                     order_ids=order_ids,
