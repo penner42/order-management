@@ -21,13 +21,18 @@ from typing import Any, Callable, TypeVar
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.prod.buyinggroup.com"
-DEFAULT_ADD_TRACKINGS_URL = (
-    "https://prod-buyinggroup-ar3jdliyeq-wl.a.run.app/api/order/add_trackings"
-)
+DEFAULT_ADD_TRACKINGS_PATH = "/v1/order/add_trackings"
 TOKEN_GET_PATH = "/v2/token/get"
 TOKEN_REFRESH_PATH = "/v2/token/refresh"
 GET_ORDERS_PATH = "/v1/order/get_orders"
 UPDATE_ORDER_PATH = "/v1/order/update_order"
+
+# BG's edge / WAF rejects bare urllib clients; mirror the site's browser requests.
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+_SITE_ORIGIN = "https://buyinggroup.com"
 
 _T = TypeVar("_T")
 
@@ -90,14 +95,23 @@ def resolve_base_url(base_url: str | None) -> str:
     return base.rstrip("/")
 
 
-def resolve_add_trackings_url(api_url: str | None) -> str:
+def resolve_add_trackings_url(base_url: str | None, api_url: str | None) -> str:
+    """Resolve add_trackings URL.
+
+    Default is ``{base}/v1/order/add_trackings`` on api.prod.buyinggroup.com.
+    The public OpenAPI Cloud Run host 404s; do not use it.
+    """
     override = (api_url or "").strip()
-    if not override:
-        return DEFAULT_ADD_TRACKINGS_URL
     if override.startswith("http://") or override.startswith("https://"):
+        # Migrate callers still pointing at the dead Cloud Run OpenAPI server.
+        if "prod-buyinggroup-ar3jdliyeq-wl.a.run.app" in override:
+            return f"{resolve_base_url(base_url)}{DEFAULT_ADD_TRACKINGS_PATH}"
         return override
-    # Relative override is unusual; treat as full path on Cloud Run host.
-    return f"https://prod-buyinggroup-ar3jdliyeq-wl.a.run.app{override if override.startswith('/') else '/' + override}"
+    base = resolve_base_url(base_url)
+    path = override if override else DEFAULT_ADD_TRACKINGS_PATH
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
 
 
 def _format_amount(amount: Decimal | float | None) -> str | None:
@@ -142,7 +156,8 @@ def _error_detail(raw: Any, body_text: str, fallback: str = "empty response") ->
 
 
 def _is_auth_failure(status: int, raw: Any, body_text: str) -> bool:
-    if status in (401, 403):
+    """True when BG rejected the access token (not WAF / bad credentials login)."""
+    if status == 401:
         return True
     blob = ""
     if isinstance(raw, dict):
@@ -150,9 +165,34 @@ def _is_auth_failure(status: int, raw: Any, body_text: str) -> bool:
             value = raw.get(key)
             if isinstance(value, str):
                 blob += " " + value
+        errors = raw.get("errors")
+        if isinstance(errors, dict):
+            msg = errors.get("message")
+            if isinstance(msg, str):
+                blob += " " + msg
+        status_val = raw.get("status")
+        if isinstance(status_val, str) and status_val.strip().upper() == "FAIL":
+            # Auth FAIL messages from add_trackings / authed endpoints.
+            pass
     blob += " " + (body_text or "")
     msg = blob.casefold()
-    return "invalid_auth_token" in msg or ("auth" in msg and "token" in msg and ("invalid" in msg or "expired" in msg))
+    if "invalid_auth_token" in msg:
+        return True
+    if "authentication credentials were not provided or invalid" in msg:
+        return True
+    if "auth" in msg and "token" in msg and ("invalid" in msg or "expired" in msg):
+        return True
+    return False
+
+
+def _default_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json",
+        "User-Agent": _BROWSER_USER_AGENT,
+        "Origin": _SITE_ORIGIN,
+        "Referer": f"{_SITE_ORIGIN}/",
+        "X-DJANGO-TIMEZONE": "America/Los_Angeles",
+    }
 
 
 def _multipart_request(
@@ -163,7 +203,8 @@ def _multipart_request(
     timeout_seconds: float = 30.0,
 ) -> tuple[int, str, Any]:
     body, content_type = _encode_multipart(fields)
-    req_headers = {"Accept": "application/json", "Content-Type": content_type}
+    req_headers = _default_headers()
+    req_headers["Content-Type"] = content_type
     if headers:
         req_headers.update(headers)
     req = urllib.request.Request(url, data=body, method="POST", headers=req_headers)
@@ -190,6 +231,19 @@ def _multipart_request(
         raise RuntimeError(f"BuyingGroup API request failed ({url}): {reason}") from e
 
 
+def _raise_if_fail_status(raw: Any, *, url: str, raw_text: str = "") -> None:
+    """BG often returns HTTP 200 with ``{"status":"FAIL","message":...}``."""
+    if not isinstance(raw, dict):
+        return
+    status_val = raw.get("status")
+    if not isinstance(status_val, str) or status_val.strip().upper() != "FAIL":
+        return
+    detail = _error_detail(raw, raw_text, "FAIL")
+    if _is_auth_failure(200, raw, raw_text):
+        raise _SessionExpired(f"BuyingGroup auth failed at {url}: {detail}")
+    raise RuntimeError(f"BuyingGroup API failed at {url}: {detail}")
+
+
 def login(
     *,
     base_url: str | None,
@@ -207,10 +261,10 @@ def login(
     fields = [
         ("username", username.strip()),
         ("password", password),
-        ("device_type", "API"),
-        ("browser_name", "order-management"),
-        ("browser_version", "1.0"),
-        ("hostname", "order-management"),
+        ("device_type", "desktop"),
+        ("browser_name", "Chrome"),
+        ("browser_version", "120"),
+        ("hostname", _SITE_ORIGIN),
     ]
     status, raw_text, raw = _multipart_request(
         url=url,
@@ -220,6 +274,8 @@ def login(
 
     if not isinstance(raw, dict):
         raise RuntimeError(f"BuyingGroup login returned unexpected payload: {raw_text[:300]}")
+
+    _raise_if_fail_status(raw, url=url, raw_text=raw_text)
 
     if raw.get("verif_req_id"):
         raise RuntimeError(
@@ -328,22 +384,28 @@ def add_trackings(
     access_token: str,
     tracking_list: list[str],
     add_trackings_url: str | None = None,
+    base_url: str | None = None,
     timeout_seconds: float = 30.0,
 ) -> tuple[int, Any]:
     numbers = [(t or "").strip() for t in tracking_list if (t or "").strip()]
     if not numbers:
         raise ValueError("At least one tracking number is required")
-    url = (add_trackings_url or "").strip() or DEFAULT_ADD_TRACKINGS_URL
+    url = (add_trackings_url or "").strip() or resolve_add_trackings_url(base_url, None)
     fields = [("tracking_list", tn) for tn in numbers]
+    # OpenAPI documents ``auth_token``; the main API also accepts Bearer like other routes.
     status, raw_text, raw = _multipart_request(
         url=url,
         fields=fields,
-        headers={"auth_token": access_token},
+        headers={
+            "auth_token": access_token,
+            "Authorization": f"Bearer {access_token}",
+        },
         timeout_seconds=timeout_seconds,
     )
     if status >= 400:
         detail = _error_detail(raw, raw_text)
         raise RuntimeError(f"BuyingGroup add_trackings failed (HTTP {status}): {detail}")
+    _raise_if_fail_status(raw, url=url, raw_text=raw_text)
     return status, raw if raw is not None else {"raw": raw_text}
 
 
@@ -409,11 +471,9 @@ def find_order_by_tracking(
         headers={"Authorization": f"Bearer {access_token}"},
         timeout_seconds=timeout_seconds,
     )
-    if isinstance(raw, dict):
-        status_val = raw.get("status")
-        if isinstance(status_val, str) and status_val.strip().upper() not in ("SUCCESS", "OK", ""):
-            # Still try to parse orders if present.
-            pass
+    # Auth FAIL should re-login; other FAIL statuses still attempt empty parse.
+    if isinstance(raw, dict) and _is_auth_failure(200, raw, _text):
+        raise _SessionExpired(f"BuyingGroup auth failed at {url}: {_error_detail(raw, _text)}")
     rows = _orders_from_payload(raw)
     tn_key = tn.casefold()
     for row in rows:
@@ -456,12 +516,12 @@ def update_order(
         headers={"Authorization": f"Bearer {access_token}"},
         timeout_seconds=timeout_seconds,
     )
+    _raise_if_fail_status(raw, url=url, raw_text=raw_text)
     if isinstance(raw, dict):
         status_val = raw.get("status")
         if isinstance(status_val, str) and status_val.strip().upper() not in ("SUCCESS", "OK", ""):
             detail = _error_detail(raw, raw_text, status_val)
             raise RuntimeError(f"BuyingGroup update_order failed: {detail}")
-        # Nested axios-style envelope
         data = raw.get("data")
         if isinstance(data, dict):
             nested_status = data.get("status")
@@ -499,7 +559,7 @@ def submit_trackings(
         raise ValueError("At least one tracking entry is required")
 
     base = resolve_base_url(base_url)
-    add_url = resolve_add_trackings_url(api_url)
+    add_url = resolve_add_trackings_url(base, api_url)
     tracking_list = [(e.tracking or "").strip() for e in trackings if (e.tracking or "").strip()]
     if not tracking_list:
         raise ValueError("At least one tracking number is required")
@@ -516,6 +576,7 @@ def submit_trackings(
             access_token=toks.access,
             tracking_list=tracking_list,
             add_trackings_url=add_url,
+            base_url=base,
             timeout_seconds=timeout_seconds,
         )
 

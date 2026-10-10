@@ -14,8 +14,7 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
 const PARSEFILE_DEFAULT_API_URL = '/p/it@api@order-management'
 const USABG_DEFAULT_BASE_URL = 'https://api.usabuying.group/buyers'
 const BUYINGGROUP_DEFAULT_BASE_URL = 'https://api.prod.buyinggroup.com'
-const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_URL =
-  'https://prod-buyinggroup-ar3jdliyeq-wl.a.run.app/api/order/add_trackings'
+const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH = '/v1/order/add_trackings'
 const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
 
 function usesUsernamePassword(framework: string | null | undefined): boolean {
@@ -59,8 +58,7 @@ function effectiveBaseUrl(g: BuyingGroup): string {
 function effectiveApiUrl(g: BuyingGroup): string {
   if (g.api_framework === 'usabg') return '/trackings'
   if (g.api_framework === 'buyinggroup') {
-    // Shown separately from base URL (full Cloud Run URL, not a path suffix).
-    return g.api_url?.trim() || BUYINGGROUP_DEFAULT_ADD_TRACKINGS_URL
+    return g.api_url?.trim() || BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH
   }
   return g.api_url?.trim() || (g.api_framework === 'parsefile' ? PARSEFILE_DEFAULT_API_URL : '')
 }
@@ -69,7 +67,11 @@ function endpointSummary(g: BuyingGroup): string | null {
   const base = effectiveBaseUrl(g)
   if (!base && g.api_framework !== 'buyinggroup') return null
   if (g.api_framework === 'buyinggroup') {
-    return [base || BUYINGGROUP_DEFAULT_BASE_URL, effectiveApiUrl(g)].filter(Boolean).join(' · ')
+    const pathOrUrl = effectiveApiUrl(g)
+    if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
+      return pathOrUrl
+    }
+    return `${base || BUYINGGROUP_DEFAULT_BASE_URL}${pathOrUrl}`
   }
   return `${base}${effectiveApiUrl(g)}`
 }
@@ -449,12 +451,12 @@ export default function BuyingGroups() {
                       {draft.api_framework === 'buyinggroup' && (
                         <label className="block">
                           <span className="text-xs text-ink-muted">
-                            Add-trackings URL (optional; blank uses BuyingGroup.com default)
+                            Add-trackings path/URL (optional; blank uses {BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH})
                           </span>
                           <input
-                            type="url"
+                            type="text"
                             className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                            placeholder={BUYINGGROUP_DEFAULT_ADD_TRACKINGS_URL}
+                            placeholder={BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH}
                             value={draft.api_url}
                             onChange={(e) => setDraft((d) => ({ ...d, api_url: e.target.value }))}
                             disabled={saving}
