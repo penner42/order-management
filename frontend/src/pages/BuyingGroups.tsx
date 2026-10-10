@@ -9,8 +9,7 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
   { value: 'parsefile', label: 'Parsefile' },
 ]
 
-const PARSEFILE_DEFAULT_BASE_URL = 'https://www.powerbuynetwork.com'
-const PARSEFILE_API_PATH_PLACEHOLDER = '/p/it@api@order-management'
+const PARSEFILE_DEFAULT_API_URL = '/p/it@api@order-management'
 const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
 
 function formatLastRun(iso: string | null | undefined): string {
@@ -26,15 +25,15 @@ function canSubmitTrackings(g: BuyingGroup): boolean {
   return (
     g.api_framework === 'parsefile' &&
     Boolean(g.bearer_token?.trim()) &&
-    // Blank base_url uses the Parsefile framework default.
-    Boolean(g.api_url?.trim()) &&
+    Boolean(g.base_url?.trim()) &&
+    // Blank api_url uses the Parsefile framework default.
     g.api_user_id != null &&
     Boolean(g.api_email?.trim())
   )
 }
 
-function effectiveBaseUrl(g: BuyingGroup): string {
-  return g.base_url?.trim() || (g.api_framework === 'parsefile' ? PARSEFILE_DEFAULT_BASE_URL : '')
+function effectiveApiUrl(g: BuyingGroup): string {
+  return g.api_url?.trim() || (g.api_framework === 'parsefile' ? PARSEFILE_DEFAULT_API_URL : '')
 }
 
 function AliasEditor({
@@ -369,19 +368,11 @@ export default function BuyingGroups() {
                         </select>
                       </label>
                       <label className="block">
-                        <span className="text-xs text-ink-muted">
-                          {draft.api_framework === 'parsefile'
-                            ? 'Base URL (optional; blank uses Parsefile default)'
-                            : 'Base URL'}
-                        </span>
+                        <span className="text-xs text-ink-muted">Base URL</span>
                         <input
                           type="url"
                           className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                          placeholder={
-                            draft.api_framework === 'parsefile'
-                              ? PARSEFILE_DEFAULT_BASE_URL
-                              : 'https://example.com'
-                          }
+                          placeholder="https://www.powerbuynetwork.com"
                           value={draft.base_url}
                           onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
                           disabled={saving}
@@ -390,7 +381,7 @@ export default function BuyingGroups() {
                       <label className="block">
                         <span className="text-xs text-ink-muted">
                           {draft.api_framework === 'parsefile'
-                            ? 'API URL (path; commands like /cmd/addtracking are added automatically)'
+                            ? 'API URL (optional; blank uses Parsefile default; commands like /cmd/addtracking are added automatically)'
                             : 'API URL (optional, relative to base)'}
                         </span>
                         <input
@@ -398,7 +389,7 @@ export default function BuyingGroups() {
                           className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
                           placeholder={
                             draft.api_framework === 'parsefile'
-                              ? PARSEFILE_API_PATH_PLACEHOLDER
+                              ? PARSEFILE_DEFAULT_API_URL
                               : '/v1/tracking'
                           }
                           value={draft.api_url}
@@ -490,13 +481,15 @@ export default function BuyingGroups() {
                         {(g.api_framework || g.base_url || g.bearer_token) && (
                           <p
                             className="text-xs text-ink-muted truncate mt-0.5"
-                            title={effectiveBaseUrl(g) || undefined}
+                            title={
+                              g.base_url
+                                ? `${g.base_url}${effectiveApiUrl(g)}`
+                                : undefined
+                            }
                           >
                             {[
                               frameworkLabel(g.api_framework),
-                              effectiveBaseUrl(g)
-                                ? `${effectiveBaseUrl(g)}${g.api_url ?? ''}`
-                                : null,
+                              g.base_url ? `${g.base_url}${effectiveApiUrl(g)}` : null,
                               g.bearer_token ? 'token set' : null,
                             ]
                               .filter(Boolean)

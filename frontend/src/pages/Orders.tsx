@@ -1016,11 +1016,11 @@ export default function Orders() {
     if (!tracking.trim()) return false
     const bg = groups.find((g) => g.id === order.buying_group_id)
     if (!bg) return false
+    // Blank api_url uses the Parsefile framework default.
     return (
       bg.api_framework === 'parsefile' &&
       Boolean(bg.bearer_token?.trim()) &&
-      // Blank base_url uses the Parsefile framework default.
-      Boolean(bg.api_url?.trim())
+      Boolean(bg.base_url?.trim())
     )
   }
 
