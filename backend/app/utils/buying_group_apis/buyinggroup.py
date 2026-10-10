@@ -462,7 +462,8 @@ def add_trackings(
     if not numbers:
         raise ValueError("At least one tracking number is required")
     url = (add_trackings_url or "").strip() or resolve_add_trackings_url(base_url, None)
-    fields = [("tracking_list", tn) for tn in numbers]
+    # API validates tracking_list as JSON (array of strings), not repeated form fields.
+    fields = [("tracking_list", json.dumps(numbers))]
     # OpenAPI documents ``auth_token``; the main API also accepts Bearer like other routes.
     status, raw_text, raw = _multipart_request(
         url=url,
