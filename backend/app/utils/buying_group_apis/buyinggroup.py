@@ -513,16 +513,54 @@ def _orders_from_payload(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _looks_like_uuid(value: object) -> bool:
+    text = str(value or "").strip()
+    if len(text) < 32:
+        return False
+    # Accept standard UUID strings (with or without hyphens).
+    hex_only = text.replace("-", "")
+    if len(hex_only) != 32:
+        return False
+    try:
+        int(hex_only, 16)
+    except ValueError:
+        return False
+    return True
+
+
 def _parse_order_row(
     row: dict[str, Any],
     *,
     fallback_tracking: str | None = None,
 ) -> BuyinggroupOrderRow | None:
-    order_id = row.get("order_id")
-    if order_id is None:
-        order_id = row.get("key")
-    if order_id is None:
-        order_id = row.get("id")
+    """Pick the UUID used by update_order.
+
+    BG list rows expose a human display id in ``order_id`` (e.g. ``O-269283098``)
+    and the real UUID in ``key`` (what the UI sends as ``order_id`` on update).
+    """
+    candidates = (
+        row.get("key"),
+        row.get("id"),
+        row.get("order_uuid"),
+        row.get("uuid"),
+        row.get("order_id"),
+    )
+    order_id = None
+    for candidate in candidates:
+        if candidate is None or not str(candidate).strip():
+            continue
+        # Prefer UUID-shaped values; skip display ids like O-123.
+        if _looks_like_uuid(candidate) or order_id is None:
+            order_id = candidate
+        if _looks_like_uuid(candidate):
+            break
+    if order_id is not None and not _looks_like_uuid(order_id):
+        # Last resort: if nothing looked like a UUID, still try key/id before display order_id.
+        for candidate in (row.get("key"), row.get("id")):
+            if candidate is not None and str(candidate).strip():
+                order_id = candidate
+                break
+
     tracking_id = row.get("tracking_id")
     if tracking_id is None:
         tracking_id = row.get("tracking_number") or row.get("tracking")
