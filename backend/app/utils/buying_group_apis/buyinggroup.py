@@ -482,6 +482,8 @@ def add_trackings(
 
 
 def _orders_from_payload(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [o for o in raw if isinstance(o, dict)]
     if not isinstance(raw, dict):
         return []
     payload = raw.get("payload")
@@ -489,6 +491,12 @@ def _orders_from_payload(raw: Any) -> list[dict[str, Any]]:
         orders = payload.get("orders")
         if isinstance(orders, list):
             return [o for o in orders if isinstance(o, dict)]
+        # Some responses nest the list under data inside payload.
+        nested = payload.get("data")
+        if isinstance(nested, list):
+            return [o for o in nested if isinstance(o, dict)]
+    elif isinstance(payload, list):
+        return [o for o in payload if isinstance(o, dict)]
     data = raw.get("data")
     if isinstance(data, dict):
         payload = data.get("payload")
@@ -505,20 +513,35 @@ def _orders_from_payload(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _parse_order_row(row: dict[str, Any]) -> BuyinggroupOrderRow | None:
+def _parse_order_row(
+    row: dict[str, Any],
+    *,
+    fallback_tracking: str | None = None,
+) -> BuyinggroupOrderRow | None:
     order_id = row.get("order_id")
     if order_id is None:
         order_id = row.get("key")
+    if order_id is None:
+        order_id = row.get("id")
     tracking_id = row.get("tracking_id")
     if tracking_id is None:
         tracking_id = row.get("tracking_number") or row.get("tracking")
-    if order_id is None or tracking_id is None:
+    if tracking_id is None or str(tracking_id).strip() in ("", "---", "null", "None"):
+        tracking_id = fallback_tracking
+    if order_id is None:
         return None
     oid = str(order_id).strip()
-    tid = str(tracking_id).strip()
-    if not oid or not tid:
+    tid = str(tracking_id or "").strip()
+    if not oid:
         return None
     return BuyinggroupOrderRow(order_id=oid, tracking_id=tid)
+
+
+def _auth_headers(access_token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "auth_token": access_token,
+    }
 
 
 def find_order_by_tracking(
@@ -534,26 +557,40 @@ def find_order_by_tracking(
     url = f"{resolve_base_url(base_url)}{GET_ORDERS_PATH}"
     fields = [
         ("page", "1"),
-        ("page_size", "20"),
+        ("page_size", "50"),
         ("tracking_id", tn),
     ]
     _status, _text, raw = _multipart_request(
         url=url,
         fields=fields,
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers=_auth_headers(access_token),
         timeout_seconds=timeout_seconds,
     )
-    # Auth FAIL should re-login; other FAIL statuses still attempt empty parse.
-    if isinstance(raw, dict) and _is_auth_failure(200, raw, _text):
-        raise _SessionExpired(f"BuyingGroup auth failed at {url}: {_error_detail(raw, _text)}")
+    if isinstance(raw, dict):
+        if _is_auth_failure(200, raw, _text):
+            raise _SessionExpired(f"BuyingGroup auth failed at {url}: {_error_detail(raw, _text)}")
+        status_val = raw.get("status")
+        if isinstance(status_val, str) and status_val.strip().upper() == "FAIL":
+            raise RuntimeError(f"BuyingGroup get_orders failed: {_error_detail(raw, _text)}")
     rows = _orders_from_payload(raw)
     tn_key = tn.casefold()
     for row in rows:
-        parsed = _parse_order_row(row)
-        if parsed and parsed.tracking_id.casefold() == tn_key:
+        parsed = _parse_order_row(row, fallback_tracking=tn)
+        if not parsed:
+            continue
+        if not parsed.tracking_id or parsed.tracking_id.casefold() == tn_key:
+            return parsed
+        # Accept close matches (API sometimes returns spaced/dashed variants).
+        if parsed.tracking_id.casefold().replace(" ", "") == tn_key.replace(" ", ""):
             return parsed
     if len(rows) == 1:
-        return _parse_order_row(rows[0])
+        return _parse_order_row(rows[0], fallback_tracking=tn)
+    if rows:
+        # Filter was by tracking_id; prefer the first parseable row.
+        for row in rows:
+            parsed = _parse_order_row(row, fallback_tracking=tn)
+            if parsed:
+                return parsed
     return None
 
 
@@ -567,43 +604,51 @@ def update_order(
     buyer_note: str | None = None,
     timeout_seconds: float = 30.0,
 ) -> None:
+    """Patch order fields. Sends one field at a time (matches BG UI)."""
     oid = (order_id or "").strip()
     if not oid:
         raise ValueError("order_id is required")
-    fields: list[tuple[str, str]] = [("order_id", oid)]
+
+    patches: list[tuple[str, str]] = []
     if order_num is not None and str(order_num).strip():
-        fields.append(("order_num", str(order_num).strip()))
+        patches.append(("order_num", str(order_num).strip()))
     amount_text = _format_amount(amount)
     if amount_text is not None:
-        fields.append(("amount", amount_text))
+        patches.append(("amount", amount_text))
     if buyer_note is not None and str(buyer_note).strip():
-        fields.append(("buyer_note", str(buyer_note).strip()))
-    if len(fields) == 1:
-        return  # nothing to update
+        patches.append(("buyer_note", str(buyer_note).strip()))
+    if not patches:
+        return
 
     url = f"{resolve_base_url(base_url)}{UPDATE_ORDER_PATH}"
-    _status, raw_text, raw = _multipart_request(
-        url=url,
-        fields=fields,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout_seconds=timeout_seconds,
-    )
-    _raise_if_fail_status(raw, url=url, raw_text=raw_text)
-    if isinstance(raw, dict):
-        status_val = raw.get("status")
-        if isinstance(status_val, str) and status_val.strip().upper() not in ("SUCCESS", "OK", ""):
-            detail = _error_detail(raw, raw_text, status_val)
-            raise RuntimeError(f"BuyingGroup update_order failed: {detail}")
-        data = raw.get("data")
-        if isinstance(data, dict):
-            nested_status = data.get("status")
-            if isinstance(nested_status, str) and nested_status.strip().upper() not in (
+    for field_name, field_value in patches:
+        fields = [("order_id", oid), (field_name, field_value)]
+        _status, raw_text, raw = _multipart_request(
+            url=url,
+            fields=fields,
+            headers=_auth_headers(access_token),
+            timeout_seconds=timeout_seconds,
+        )
+        _raise_if_fail_status(raw, url=url, raw_text=raw_text)
+        if isinstance(raw, dict):
+            status_val = raw.get("status")
+            if isinstance(status_val, str) and status_val.strip().upper() not in (
                 "SUCCESS",
                 "OK",
                 "",
             ):
-                detail = _error_detail(data, raw_text, nested_status)
-                raise RuntimeError(f"BuyingGroup update_order failed: {detail}")
+                detail = _error_detail(raw, raw_text, status_val)
+                raise RuntimeError(f"BuyingGroup update_order failed ({field_name}): {detail}")
+            data = raw.get("data")
+            if isinstance(data, dict):
+                nested_status = data.get("status")
+                if isinstance(nested_status, str) and nested_status.strip().upper() not in (
+                    "SUCCESS",
+                    "OK",
+                    "",
+                ):
+                    detail = _error_detail(data, raw_text, nested_status)
+                    raise RuntimeError(f"BuyingGroup update_order failed ({field_name}): {detail}")
 
 
 def _message_from_add_payload(raw: Any, *, count: int) -> str:
@@ -676,6 +721,10 @@ def submit_trackings(
             or (entry.note or "").strip()
         )
         if not needs_enrich:
+            logger.warning(
+                "BuyingGroup enrich skipped for %s: no order_num/amount/note on entry",
+                tn,
+            )
             continue
         try:
 
@@ -688,7 +737,8 @@ def submit_trackings(
                 )
 
             row: BuyinggroupOrderRow | None = None
-            for attempt in range(3):
+            # Newly added trackings are not always immediately searchable.
+            for attempt in range(6):
                 row, tokens = _with_reauth(
                     base_url=base,
                     username=username,
@@ -699,11 +749,10 @@ def submit_trackings(
                 )
                 if row is not None:
                     break
-                if attempt < 2:
-                    time.sleep(0.75)
+                if attempt < 5:
+                    time.sleep(1.0)
             if row is None:
-                enrich_errors.append(f"{tn}: order not found after submit")
-                continue
+                raise RuntimeError("order not found after submit (get_orders empty)")
 
             def _update(
                 toks: _AuthTokens,
@@ -730,13 +779,22 @@ def submit_trackings(
                 call=_update,
             )
             enriched_count += 1
+            logger.info(
+                "BuyingGroup enriched tracking %s (order_id=%s order_num=%s amount=%s)",
+                tn,
+                row.order_id,
+                entry.order_num,
+                entry.amount,
+            )
         except Exception as exc:
-            enrich_errors.append(f"{tn}: {exc}")
+            err = f"{tn}: {exc}"
+            enrich_errors.append(err)
+            logger.warning("BuyingGroup enrich failed: %s", err)
 
     if enriched_count and enrich_errors:
         message = (
             f"{message}\nEnriched {enriched_count} tracking(s); "
-            f"{len(enrich_errors)} enrich error(s)."
+            f"{len(enrich_errors)} enrich error(s): {'; '.join(enrich_errors[:3])}"
         )
     elif enriched_count:
         message = f"{message}\nEnriched {enriched_count} tracking(s) with order/amount/note."
