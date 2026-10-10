@@ -295,7 +295,16 @@ export default function BrowserImportLogPage() {
                         {eventLabel(row.event_type)}
                       </td>
                       <td className="py-3 px-4 font-medium text-brand-700 dark:text-brand-400">
-                        {row.store_order_number || '—'}
+                        {row.store_order_number ? (
+                          <Link
+                            to={`/?q=${encodeURIComponent(row.store_order_number)}`}
+                            className="hover:underline"
+                          >
+                            {row.store_order_number}
+                          </Link>
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td className="py-3 px-4 text-sm text-ink dark:text-gray-200">
                         {row.tracking_numbers.length > 0 ? (
@@ -314,7 +323,12 @@ export default function BrowserImportLogPage() {
                             <ul className="space-y-0.5">
                               {row.tracking_numbers.map((t) => (
                                 <li key={t} className="font-mono text-xs">
-                                  {t}
+                                  <Link
+                                    to={`/?q=${encodeURIComponent(t)}`}
+                                    className="text-brand-600 dark:text-brand-400 hover:underline"
+                                  >
+                                    {t}
+                                  </Link>
                                 </li>
                               ))}
                             </ul>
