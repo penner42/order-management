@@ -25,8 +25,7 @@ def parsefile_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
         return False, "Buying group API framework is not configured for submission"
     if not (group.bearer_token or "").strip():
         return False, "Buying group has no API token"
-    if not (group.base_url or "").strip():
-        return False, "Buying group has no base URL"
+    # Blank base_url falls back to the Parsefile framework default.
     if not (group.api_url or "").strip():
         return False, "Buying group has no API URL"
     if group.api_user_id is None:
@@ -76,7 +75,7 @@ def submit_parsefile_trackings(
     if not entries:
         raise ValueError("At least one tracking entry is required")
     return parsefile_api.submit_trackings(
-        base_url=group.base_url,
+        base_url=parsefile_api.resolve_base_url(group.base_url),
         api_url=group.api_url,
         bearer_token=group.bearer_token,
         user_id=int(group.api_user_id),
@@ -179,7 +178,7 @@ def batch_submit_pending_trackings(
         )
 
     # Capture credentials before any commit/rollback can expire the ORM object.
-    base_url = str(group.base_url)
+    base_url = parsefile_api.resolve_base_url(group.base_url)
     api_url = str(group.api_url)
     bearer_token = str(group.bearer_token)
     api_user_id = int(group.api_user_id)

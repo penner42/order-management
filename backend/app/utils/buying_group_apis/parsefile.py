@@ -10,6 +10,7 @@ from typing import Any
 
 
 ADD_TRACKING_CMD = "/cmd/addtracking"
+DEFAULT_BASE_URL = "https://www.powerbuynetwork.com"
 
 
 @dataclass
@@ -29,12 +30,16 @@ class ParsefileSubmitResult:
     raw: dict[str, Any]
 
 
-def build_url(base_url: str, api_url: str) -> str:
-    """Join base_url + api_url + command path for addtracking."""
+def resolve_base_url(base_url: str | None) -> str:
+    """Use the buying-group base URL, or the Parsefile framework default when blank."""
     base = (base_url or "").strip().rstrip("/")
+    return base or DEFAULT_BASE_URL.rstrip("/")
+
+
+def build_url(base_url: str | None, api_url: str) -> str:
+    """Join base_url + api_url + command path for addtracking."""
+    base = resolve_base_url(base_url)
     api = (api_url or "").strip()
-    if not base:
-        raise ValueError("base_url is required")
     if not api:
         raise ValueError("api_url is required")
     if not api.startswith("/"):
@@ -63,7 +68,7 @@ def _message_from_payload(raw: dict[str, Any], *, success: bool) -> str:
 
 def submit_trackings(
     *,
-    base_url: str,
+    base_url: str | None,
     api_url: str,
     bearer_token: str,
     user_id: int,
