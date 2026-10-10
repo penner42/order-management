@@ -75,44 +75,63 @@ def delete_buying_group(group_id: int, db: Session = Depends(get_db), _: User = 
     return None
 
 
-def _add_group_tracking_log(
-    db: Session,
+def write_group_tracking_log(
     *,
-    group: BuyingGroup | None,
-    group_name: str | None,
+    group: BuyingGroup | None = None,
+    group_name: str | None = None,
     scheduled: bool,
     level: str,
     event_type: str,
     tracking_numbers: list[str] | None = None,
     message: str | None = None,
-) -> None:
-    """Write a Groups-category event into the shared browser_import_logs table."""
+) -> bool:
+    """Persist a Groups-category import-log row in its own DB session.
+
+    Uses a dedicated session so batch-submit commit/rollback cannot drop the log.
+    Returns True if the row was committed.
+    """
     name = (group_name or (group.name if group else None) or "").strip() or None
     framework = ""
     if group and (group.api_framework or "").strip():
         framework = str(group.api_framework).strip()
-    db.add(
-        BrowserImportLog(
-            browser_profile_id=None,
-            job_id=None,
-            category="groups",
-            level=level,
-            event_type=event_type,
-            mode="tracking_submit",
-            scheduled=scheduled,
-            retailer=framework or "",
-            store_order_number=None,
-            order_id=None,
-            tracking_numbers=json.dumps(tracking_numbers) if tracking_numbers else None,
-            message=message,
-            store_name=name,
-            store_account_name=None,
+    db = SessionLocal()
+    try:
+        db.add(
+            BrowserImportLog(
+                browser_profile_id=None,
+                job_id=None,
+                category="groups",
+                level=level,
+                event_type=event_type,
+                mode="tracking_submit",
+                scheduled=scheduled,
+                retailer=framework or "",
+                store_order_number=None,
+                order_id=None,
+                tracking_numbers=json.dumps(tracking_numbers) if tracking_numbers else None,
+                message=message,
+                store_name=name,
+                store_account_name=None,
+            )
         )
-    )
+        db.commit()
+        return True
+    except Exception:
+        logger.exception(
+            "Failed to write Groups import log event_type=%s group=%s",
+            event_type,
+            name or group_name,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        db.close()
 
 
 def _log_tracking_submit_result(
-    db: Session,
     *,
     group: BuyingGroup | None,
     group_name: str,
@@ -120,8 +139,7 @@ def _log_tracking_submit_result(
     result: BatchSubmitResult,
 ) -> None:
     if result.error:
-        _add_group_tracking_log(
-            db,
+        write_group_tracking_log(
             group=group,
             group_name=group_name,
             scheduled=scheduled,
@@ -133,8 +151,7 @@ def _log_tracking_submit_result(
         return
     if result.submitted_count > 0:
         msg = result.message or f"Submitted {result.submitted_count} tracking number(s)."
-        _add_group_tracking_log(
-            db,
+        write_group_tracking_log(
             group=group,
             group_name=group_name,
             scheduled=scheduled,
@@ -143,16 +160,26 @@ def _log_tracking_submit_result(
             tracking_numbers=result.tracking_numbers or None,
             message=msg,
         )
-    else:
-        _add_group_tracking_log(
-            db,
-            group=group,
-            group_name=group_name,
-            scheduled=scheduled,
-            level="info",
-            event_type="tracking_submitted",
-            message="No pending tracking numbers to submit.",
-        )
+        return
+    write_group_tracking_log(
+        group=group,
+        group_name=group_name,
+        scheduled=scheduled,
+        level="info",
+        event_type="tracking_submitted",
+        message=result.message or "No pending tracking numbers to submit.",
+    )
+
+
+def _stamp_tracking_submit_last_run(db: Session, group_id: int) -> datetime:
+    now = datetime.now(timezone.utc)
+    group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
+    if group:
+        group.tracking_submit_last_run_at = now
+        db.commit()
+        db.refresh(group)
+        return group.tracking_submit_last_run_at or now
+    return now
 
 
 def _run_tracking_submit(
@@ -161,28 +188,32 @@ def _run_tracking_submit(
     *,
     scheduled: bool = False,
 ) -> BuyingGroupSubmitTrackingResponse:
-    """Batch-submit pending trackings, stamp last_run_at, and log the result."""
+    """Batch-submit pending trackings, stamp last_run_at, and log start/result."""
     ready, reason = parsefile_group_ready(group)
     if not ready:
         raise HTTPException(status_code=400, detail=reason or "Buying group API is not configured")
 
-    group_name = (group.name or "").strip() or f"group {group.id}"
-    result = batch_submit_pending_trackings(db, buying_group_id=group.id)
-    now = datetime.now(timezone.utc)
+    group_id = group.id
+    group_name = (group.name or "").strip() or f"group {group_id}"
+    write_group_tracking_log(
+        group=group,
+        group_name=group_name,
+        scheduled=scheduled,
+        level="info",
+        event_type="tracking_submit_started",
+        message=f"Started tracking submit ({'scheduled' if scheduled else 'manual'}).",
+    )
+
+    result = batch_submit_pending_trackings(db, buying_group_id=group_id)
     # Re-load after batch_submit may have committed/rolled back.
-    group = db.query(BuyingGroup).filter(BuyingGroup.id == group.id).first()
-    if group:
-        group.tracking_submit_last_run_at = now
+    group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
+    last_run = _stamp_tracking_submit_last_run(db, group_id)
     _log_tracking_submit_result(
-        db,
         group=group,
         group_name=group_name,
         scheduled=scheduled,
         result=result,
     )
-    db.commit()
-    if group:
-        db.refresh(group)
 
     if result.error:
         raise HTTPException(status_code=502, detail=result.error)
@@ -197,7 +228,7 @@ def _run_tracking_submit(
             else "No pending tracking numbers to submit."
         ),
         tracking_numbers=result.tracking_numbers,
-        tracking_submit_last_run_at=group.tracking_submit_last_run_at if group else now,
+        tracking_submit_last_run_at=last_run,
     )
 
 
@@ -215,7 +246,11 @@ def submit_buying_group_trackings(
 
 
 def list_due_tracking_submit_group_ids(db: Session) -> list[int]:
-    """Return buying group ids whose tracking-submit schedule is due."""
+    """Return buying group ids whose tracking-submit schedule is due.
+
+    Groups that are due but not API-ready are logged and stamped so we do not
+    silently no-op every scheduler tick.
+    """
     from app.browser_automation.scheduler import schedule_due
 
     now = datetime.now(timezone.utc)
@@ -227,16 +262,28 @@ def list_due_tracking_submit_group_ids(db: Session) -> list[int]:
     )
     out: list[int] = []
     for group in rows:
-        ready, _ = parsefile_group_ready(group)
-        if not ready:
-            continue
-        if schedule_due(
+        if not schedule_due(
             enabled=True,
             cron_expr=str(group.tracking_submit_cron or DEFAULT_TRACKING_SUBMIT_CRON),
             last_run_at=group.tracking_submit_last_run_at,
             now=now,
         ):
-            out.append(group.id)
+            continue
+        ready, reason = parsefile_group_ready(group)
+        if not ready:
+            group_name = (group.name or "").strip() or f"group {group.id}"
+            write_group_tracking_log(
+                group=group,
+                group_name=group_name,
+                scheduled=True,
+                level="error",
+                event_type="tracking_submit_error",
+                message=reason or "Buying group API is not configured",
+            )
+            group.tracking_submit_last_run_at = now
+            db.commit()
+            continue
+        out.append(group.id)
     return out
 
 
@@ -248,27 +295,36 @@ def run_scheduled_tracking_submit(group_id: int) -> bool:
         if not group or not group.tracking_submit_enabled:
             return False
         ready, reason = parsefile_group_ready(group)
-        if not ready:
-            logger.info(
-                "Skipping scheduled tracking submit for buying group %s: %s",
-                group_id,
-                reason,
-            )
-            return False
         group_name = (group.name or "").strip() or f"group {group_id}"
+        if not ready:
+            write_group_tracking_log(
+                group=group,
+                group_name=group_name,
+                scheduled=True,
+                level="error",
+                event_type="tracking_submit_error",
+                message=reason or "Buying group API is not configured",
+            )
+            _stamp_tracking_submit_last_run(db, group_id)
+            return False
+
+        write_group_tracking_log(
+            group=group,
+            group_name=group_name,
+            scheduled=True,
+            level="info",
+            event_type="tracking_submit_started",
+            message="Started tracking submit (scheduled).",
+        )
         result = batch_submit_pending_trackings(db, buying_group_id=group_id)
-        now = datetime.now(timezone.utc)
         group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
-        if group:
-            group.tracking_submit_last_run_at = now
+        _stamp_tracking_submit_last_run(db, group_id)
         _log_tracking_submit_result(
-            db,
             group=group,
             group_name=group_name,
             scheduled=True,
             result=result,
         )
-        db.commit()
         if result.error:
             logger.warning(
                 "Scheduled tracking submit for buying group %s failed: %s",
@@ -288,25 +344,20 @@ def run_scheduled_tracking_submit(group_id: int) -> bool:
             db.rollback()
         except Exception:
             pass
+        write_group_tracking_log(
+            group=None,
+            group_name=f"group {group_id}",
+            scheduled=True,
+            level="error",
+            event_type="tracking_submit_error",
+            message=str(exc).strip() or exc.__class__.__name__,
+        )
         try:
-            _add_group_tracking_log(
-                db,
-                group=None,
-                group_name=f"group {group_id}",
-                scheduled=True,
-                level="error",
-                event_type="tracking_submit_error",
-                message=str(exc).strip() or exc.__class__.__name__,
-            )
-            db.commit()
+            _stamp_tracking_submit_last_run(db, group_id)
         except Exception:
             logger.exception(
-                "Failed to write tracking_submit_error log for buying group %s", group_id
+                "Failed to stamp tracking_submit_last_run_at for buying group %s", group_id
             )
-            try:
-                db.rollback()
-            except Exception:
-                pass
         return False
     finally:
         db.close()

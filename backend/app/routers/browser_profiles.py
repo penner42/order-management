@@ -356,6 +356,7 @@ def list_browser_import_logs(
         "order_error",
         "check_started",
         "check_finished",
+        "tracking_submit_started",
         "tracking_submitted",
         "tracking_submit_error",
     ):

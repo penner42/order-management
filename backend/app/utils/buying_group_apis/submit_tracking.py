@@ -90,6 +90,8 @@ class BatchSubmitResult:
     buying_group_id: int
     buying_group_name: str
     submitted_count: int = 0
+    shipped_count: int = 0
+    missing_tracking_count: int = 0
     tracking_numbers: list[str] = field(default_factory=list)
     message: str | None = None
     error: str | None = None
@@ -104,6 +106,8 @@ def batch_submit_pending_trackings(
 
     Only marks items SUBMITTED after a successful API call.
     """
+    from app.models import Shipment
+
     group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()
     if not group:
         return BatchSubmitResult(
@@ -121,7 +125,7 @@ def batch_submit_pending_trackings(
             error=reason or "Buying group API is not configured",
         )
 
-    items = (
+    shipped_items = (
         db.query(Item)
         .join(Order, Order.id == Item.order_id)
         .filter(Item.status == ItemStatus.SHIPPED)
@@ -133,21 +137,45 @@ def batch_submit_pending_trackings(
         )
         .all()
     )
+    shipped_count = len(shipped_items)
 
     pending: list[tuple[Item, Order, str]] = []
-    for item in items:
+    missing_tracking = 0
+    for item in shipped_items:
         order = item.order
         if not order:
             continue
         tracking = tracking_number_for_item(item)
         if not tracking:
+            # Fallback: re-read tracking from DB in case relationship was empty.
+            row = (
+                db.query(Shipment.tracking_number)
+                .join(ShipmentItem, ShipmentItem.shipment_id == Shipment.id)
+                .filter(ShipmentItem.item_id == item.id)
+                .filter(Shipment.tracking_number.isnot(None))
+                .filter(Shipment.tracking_number != "")
+                .first()
+            )
+            tracking = (row[0] or "").strip() if row else None
+        if not tracking:
+            missing_tracking += 1
             continue
         pending.append((item, order, tracking))
 
     if not pending:
+        if shipped_count == 0:
+            msg = "No shipped items for this buying group."
+        else:
+            msg = (
+                f"No pending tracking numbers to submit "
+                f"({shipped_count} shipped item(s), {missing_tracking} without tracking)."
+            )
         return BatchSubmitResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
+            shipped_count=shipped_count,
+            missing_tracking_count=missing_tracking,
+            message=msg,
         )
 
     # Capture credentials before any commit/rollback can expire the ORM object.
@@ -183,6 +211,8 @@ def batch_submit_pending_trackings(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
             submitted_count=len(items_to_mark),
+            shipped_count=shipped_count,
+            missing_tracking_count=missing_tracking,
             tracking_numbers=tracking_numbers,
             message=api_result.message,
         )
@@ -200,6 +230,8 @@ def batch_submit_pending_trackings(
         return BatchSubmitResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
+            shipped_count=shipped_count,
+            missing_tracking_count=missing_tracking,
             tracking_numbers=tracking_numbers,
             error=str(exc).strip() or exc.__class__.__name__,
         )

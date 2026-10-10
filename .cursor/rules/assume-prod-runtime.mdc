@@ -1,0 +1,19 @@
+---
+description: Assume the app runs in production; don't probe the local/dev host for services
+alwaysApply: true
+---
+
+# Assume Production Runtime
+
+When debugging runtime behavior (schedulers, imports, cron, logs, API calls, DB state), **assume the user is running production**, not a local/dev stack on this machine.
+
+## Do
+
+- Reason from code, migrations, deploy config, and what the user reports.
+- Ask the user for prod logs, DB rows, or UI evidence when needed.
+- Only inspect local processes, Docker, terminals, or env on this host when the user **explicitly** says they are debugging locally/dev.
+
+## Avoid
+
+- Running `docker compose ps`, scanning local terminals, or hunting for a local API/DB “to see what’s running” unless the user asks for local debugging.
+- Assuming missing local services explain a prod symptom.

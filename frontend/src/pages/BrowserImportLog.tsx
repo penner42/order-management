@@ -54,6 +54,8 @@ function eventLabel(eventType: string): string {
       return 'Check started'
     case 'check_finished':
       return 'Check finished'
+    case 'tracking_submit_started':
+      return 'Tracking submit started'
     case 'tracking_submitted':
       return 'Tracking submitted'
     case 'tracking_submit_error':
@@ -224,6 +226,7 @@ export default function BrowserImportLogPage() {
             <option value="order_error">Order error</option>
             <option value="check_started">Check started</option>
             <option value="check_finished">Check finished</option>
+            <option value="tracking_submit_started">Tracking submit started</option>
             <option value="tracking_submitted">Tracking submitted</option>
             <option value="tracking_submit_error">Tracking submit error</option>
           </select>
