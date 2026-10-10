@@ -295,6 +295,7 @@ async def run_walmart_import(
         profile_id,
         mode="import",
         start_url=start_url,
+        retailer="walmart",
     )
     page = session.page
 

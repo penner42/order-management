@@ -302,6 +302,7 @@ async def run_costco_import(
         mode="import",
         warm_url=COSTCO_HOME_URL,
         start_url=COSTCO_MYACCOUNT_URL,
+        retailer="costco",
     )
     page = session.page
 

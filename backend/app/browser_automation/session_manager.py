@@ -10,7 +10,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page
 
-from app.browser_automation.paths import profile_user_data_dir
+from app.browser_automation.paths import browser_engine_for_retailer, profile_user_data_dir
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,8 @@ class LiveSession:
     profile_id: int
     context: BrowserContext
     page: Page
-    camoufox: Any
+    camoufox: Any = None  # AsyncCamoufox CM when browser == camoufox
+    playwright: Any = None  # Playwright driver when browser == chromium
     screencast_on: bool = False
     screencast_handle: Any | None = None
     viewers: set[asyncio.Queue] = field(default_factory=set)
@@ -80,7 +81,8 @@ class LiveSession:
     mode: str = "idle"  # idle | login | import
     viewport_width: int = DEFAULT_VIEWPORT["width"]
     viewport_height: int = DEFAULT_VIEWPORT["height"]
-    browser: str = "camoufox"
+    browser: str = "camoufox"  # camoufox | chromium
+    retailer: str | None = None
     # Coalesce pointer moves so the WS receive loop never waits on humanize/animation.
     pending_mouse: tuple[float, float] | None = None
     mouse_flush_task: asyncio.Task | None = None
@@ -152,6 +154,37 @@ class SessionManager:
             raise RuntimeError("Camoufox did not return a persistent BrowserContext")
         return context, cm
 
+    async def _launch_chromium_context(
+        self,
+        user_data: str,
+        *,
+        headless: bool,
+        width: int,
+        height: int,
+    ) -> tuple[BrowserContext, Any]:
+        """Launch Chromium persistent context (Costco Azure B2C is broken on Firefox)."""
+        from playwright.async_api import async_playwright
+
+        pw = await async_playwright().start()
+        try:
+            context = await pw.chromium.launch_persistent_context(
+                user_data,
+                headless=bool(headless),
+                viewport={"width": width, "height": height},
+                locale="en-US",
+                timezone_id="America/Los_Angeles",
+                # Soften the default automation banner; Costco still sees a real Chrome TLS stack.
+                ignore_default_args=["--enable-automation"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    f"--window-size={width},{height}",
+                ],
+            )
+        except Exception:
+            await pw.stop()
+            raise
+        return context, pw
+
     async def _warm_then_goto(self, page: Page, *, warm_url: str | None, start_url: str) -> None:
         """Optional warm path used for import jobs (not interactive login)."""
         current = (page.url or "").lower()
@@ -179,18 +212,22 @@ class SessionManager:
         mode: str,
         start_url: str | None = None,
         warm_url: str | None = None,
+        retailer: str | None = None,
     ) -> LiveSession:
         async with self._global_lock:
             existing = self._sessions.get(profile_id)
             if existing:
                 existing.mode = mode
+                if retailer:
+                    existing.retailer = retailer
                 if start_url:
                     await self._warm_then_goto(existing.page, warm_url=warm_url, start_url=start_url)
                 return existing
 
             await self.acquire_slot()
             try:
-                user_data = str(profile_user_data_dir(profile_id))
+                engine = browser_engine_for_retailer(retailer or "")
+                user_data = str(profile_user_data_dir(profile_id, browser=engine))
                 headless = bool(settings.browser_headless)
                 # Login/live view: open at stream cap so set_viewport_size can grow
                 # without being clipped. Import jobs use a smaller window to save RAM/CPU.
@@ -200,14 +237,26 @@ class SessionManager:
                 else:
                     width = MIN_VIEWPORT["width"]
                     height = MIN_VIEWPORT["height"]
-                context, camoufox = await self._launch_camoufox_context(
-                    user_data,
-                    headless=headless,
-                    width=width,
-                    height=height,
-                )
+
+                camoufox = None
+                playwright = None
+                if engine == "chromium":
+                    context, playwright = await self._launch_chromium_context(
+                        user_data,
+                        headless=headless,
+                        width=width,
+                        height=height,
+                    )
+                else:
+                    context, camoufox = await self._launch_camoufox_context(
+                        user_data,
+                        headless=headless,
+                        width=width,
+                        height=height,
+                    )
+
                 page = context.pages[0] if context.pages else await context.new_page()
-                # Sync viewport from whatever Camoufox actually opened.
+                # Sync viewport from whatever the browser actually opened.
                 try:
                     vp = page.viewport_size
                     if vp:
@@ -220,16 +269,20 @@ class SessionManager:
                     context=context,
                     page=page,
                     camoufox=camoufox,
+                    playwright=playwright,
                     mode=mode,
                     viewport_width=width,
                     viewport_height=height,
-                    browser="camoufox",
+                    browser=engine,
+                    retailer=retailer,
                 )
                 self._sessions[profile_id] = session
                 self._attach_page_listeners(session)
                 logger.info(
-                    "Started browser profile=%s browser=camoufox headless=%s mode=%s",
+                    "Started browser profile=%s browser=%s retailer=%s headless=%s mode=%s",
                     profile_id,
+                    engine,
+                    retailer or "?",
                     headless,
                     mode,
                 )
@@ -265,7 +318,15 @@ class SessionManager:
                     except Exception:
                         pass
             else:
-                await session.context.close()
+                try:
+                    await session.context.close()
+                except Exception as exc:
+                    logger.debug("Chromium context close failed for profile %s: %s", profile_id, exc)
+                if session.playwright is not None:
+                    try:
+                        await session.playwright.stop()
+                    except Exception as exc:
+                        logger.debug("Playwright stop failed for profile %s: %s", profile_id, exc)
         except Exception as exc:
             logger.warning("Error closing browser context for profile %s: %s", profile_id, exc)
         self.release_slot()

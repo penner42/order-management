@@ -336,6 +336,7 @@ async def run_amazon_import(
         profile_id,
         mode="import",
         start_url=start_url,
+        retailer="amazon",
     )
     page = session.page
 

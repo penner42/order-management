@@ -13,11 +13,30 @@ def profiles_root() -> Path:
     return path
 
 
-def profile_user_data_dir(profile_id: int) -> Path:
-    # Camoufox profile layout; keep separate from older Chromium/Firefox dirs.
-    path = profiles_root() / f"camoufox-profile-{profile_id}"
+def browser_engine_for_retailer(retailer: str) -> str:
+    """Costco Azure B2C login fails on Firefox (SelfAsserted XHR interrupt); use Chromium."""
+    if (retailer or "").strip().lower() == "costco":
+        return "chromium"
+    return "camoufox"
+
+
+def profile_user_data_dir(profile_id: int, *, browser: str = "camoufox") -> Path:
+    # Keep engine-specific dirs so switching Costco → Chromium does not reuse a Firefox profile.
+    prefix = "chromium-profile" if browser == "chromium" else "camoufox-profile"
+    path = profiles_root() / f"{prefix}-{profile_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def all_profile_data_dirs(profile_id: int) -> list[Path]:
+    """All on-disk profile dirs for a profile id (current + legacy engines)."""
+    root = profiles_root()
+    return [
+        root / f"camoufox-profile-{profile_id}",
+        root / f"chromium-profile-{profile_id}",
+        root / f"profile-{profile_id}",
+        root / f"firefox-profile-{profile_id}",
+    ]
 
 
 def _extension_root() -> Path:

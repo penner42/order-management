@@ -16,7 +16,7 @@ from app.browser_automation.amazon_import import run_amazon_import
 from app.browser_automation.common import LoginRequiredError, post_bulk_session
 from app.browser_automation.costco_import import run_costco_import
 from app.browser_automation.jobs import create_job, get_job, update_job
-from app.browser_automation.paths import profile_user_data_dir
+from app.browser_automation.paths import all_profile_data_dirs
 from app.browser_automation.session_manager import (
     login_home_url_for_retailer,
     retailer_session_logged_in,
@@ -458,15 +458,10 @@ async def delete_browser_profile(
 ):
     profile = _get_profile_or_404(db, profile_id)
     await session_manager.close_session(profile_id)
-    user_data = profile_user_data_dir(profile_id)
-    # Also remove legacy profile dirs from earlier Chrome/Firefox engines.
-    legacy_dirs = [
-        user_data.parent / f"profile-{profile_id}",
-        user_data.parent / f"firefox-profile-{profile_id}",
-    ]
+    dirs = all_profile_data_dirs(profile_id)
     db.delete(profile)
     db.commit()
-    for path in (user_data, *legacy_dirs):
+    for path in dirs:
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
     return None
@@ -490,7 +485,11 @@ async def start_login(
     db.commit()
 
     try:
-        await session_manager.ensure_session(profile_id, mode="login")
+        await session_manager.ensure_session(
+            profile_id,
+            mode="login",
+            retailer=profile.retailer,
+        )
     except Exception as exc:
         profile.status = "error"
         profile.last_error = str(exc)
