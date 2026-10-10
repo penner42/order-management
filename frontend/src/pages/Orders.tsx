@@ -1016,12 +1016,15 @@ export default function Orders() {
     if (!tracking.trim()) return false
     const bg = groups.find((g) => g.id === order.buying_group_id)
     if (!bg) return false
-    // Blank api_url uses the Parsefile framework default.
-    return (
-      bg.api_framework === 'parsefile' &&
-      Boolean(bg.bearer_token?.trim()) &&
-      Boolean(bg.base_url?.trim())
-    )
+    if (bg.api_framework === 'parsefile') {
+      // Blank api_url uses the Parsefile framework default.
+      return Boolean(bg.bearer_token?.trim()) && Boolean(bg.base_url?.trim())
+    }
+    if (bg.api_framework === 'usabg') {
+      // Blank base_url uses the USABG default; login uses username/password.
+      return Boolean(bg.api_username?.trim()) && Boolean(bg.api_password?.trim())
+    }
+    return false
   }
 
   const submitTrackingToApi = async (itemId: number) => {

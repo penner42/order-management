@@ -7,9 +7,11 @@ import type { BuyingGroup, BuyingGroupApiFramework } from '../api/types'
 const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: string }[] = [
   { value: '', label: 'None' },
   { value: 'parsefile', label: 'Parsefile' },
+  { value: 'usabg', label: 'USABG' },
 ]
 
 const PARSEFILE_DEFAULT_API_URL = '/p/it@api@order-management'
+const USABG_DEFAULT_BASE_URL = 'https://api.usabuying.group/buyers'
 const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
 
 function formatLastRun(iso: string | null | undefined): string {
@@ -22,17 +24,31 @@ function formatLastRun(iso: string | null | undefined): string {
 }
 
 function canSubmitTrackings(g: BuyingGroup): boolean {
-  return (
-    g.api_framework === 'parsefile' &&
-    Boolean(g.bearer_token?.trim()) &&
-    Boolean(g.base_url?.trim()) &&
-    // Blank api_url uses the Parsefile framework default.
-    g.api_user_id != null &&
-    Boolean(g.api_email?.trim())
-  )
+  if (g.api_framework === 'parsefile') {
+    return (
+      Boolean(g.bearer_token?.trim()) &&
+      Boolean(g.base_url?.trim()) &&
+      // Blank api_url uses the Parsefile framework default.
+      g.api_user_id != null &&
+      Boolean(g.api_email?.trim())
+    )
+  }
+  if (g.api_framework === 'usabg') {
+    // Blank base_url uses the USABG default.
+    return Boolean(g.api_username?.trim()) && Boolean(g.api_password?.trim())
+  }
+  return false
+}
+
+function effectiveBaseUrl(g: BuyingGroup): string {
+  const base = g.base_url?.trim()
+  if (base) return base
+  if (g.api_framework === 'usabg') return USABG_DEFAULT_BASE_URL
+  return ''
 }
 
 function effectiveApiUrl(g: BuyingGroup): string {
+  if (g.api_framework === 'usabg') return '/trackings'
   return g.api_url?.trim() || (g.api_framework === 'parsefile' ? PARSEFILE_DEFAULT_API_URL : '')
 }
 
@@ -129,6 +145,8 @@ type EditDraft = {
   bearer_token: string
   api_user_id: string
   api_email: string
+  api_username: string
+  api_password: string
   tracking_submit_enabled: boolean
   tracking_submit_cron: string
 }
@@ -142,6 +160,8 @@ function emptyDraft(): EditDraft {
     bearer_token: '',
     api_user_id: '',
     api_email: '',
+    api_username: '',
+    api_password: '',
     tracking_submit_enabled: false,
     tracking_submit_cron: DEFAULT_TRACKING_SUBMIT_CRON,
   }
@@ -156,6 +176,8 @@ function draftFromGroup(g: BuyingGroup): EditDraft {
     bearer_token: g.bearer_token ?? '',
     api_user_id: g.api_user_id != null ? String(g.api_user_id) : '',
     api_email: g.api_email ?? '',
+    api_username: g.api_username ?? '',
+    api_password: g.api_password ?? '',
     tracking_submit_enabled: !!g.tracking_submit_enabled,
     tracking_submit_cron: g.tracking_submit_cron?.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
   }
@@ -202,10 +224,12 @@ export default function BuyingGroups() {
         name: draft.name.trim(),
         api_framework: draft.api_framework || null,
         base_url: draft.base_url.trim() || null,
-        api_url: draft.api_url.trim() || null,
-        bearer_token: draft.bearer_token.trim() || null,
-        api_user_id: apiUserId,
-        api_email: draft.api_email.trim() || null,
+        api_url: draft.api_framework === 'usabg' ? null : draft.api_url.trim() || null,
+        bearer_token: draft.api_framework === 'usabg' ? null : draft.bearer_token.trim() || null,
+        api_user_id: draft.api_framework === 'parsefile' ? apiUserId : null,
+        api_email: draft.api_framework === 'parsefile' ? draft.api_email.trim() || null : null,
+        api_username: draft.api_framework === 'usabg' ? draft.api_username.trim() || null : null,
+        api_password: draft.api_framework === 'usabg' ? draft.api_password.trim() || null : null,
         tracking_submit_enabled: draft.tracking_submit_enabled,
         tracking_submit_cron: draft.tracking_submit_cron.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
       })
@@ -368,47 +392,59 @@ export default function BuyingGroups() {
                         </select>
                       </label>
                       <label className="block">
-                        <span className="text-xs text-ink-muted">Base URL</span>
+                        <span className="text-xs text-ink-muted">
+                          {draft.api_framework === 'usabg'
+                            ? 'Base URL (optional; blank uses USABG default)'
+                            : 'Base URL'}
+                        </span>
                         <input
                           type="url"
                           className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                          placeholder="https://www.powerbuynetwork.com"
+                          placeholder={
+                            draft.api_framework === 'usabg'
+                              ? USABG_DEFAULT_BASE_URL
+                              : 'https://www.powerbuynetwork.com'
+                          }
                           value={draft.base_url}
                           onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
                           disabled={saving}
                         />
                       </label>
-                      <label className="block">
-                        <span className="text-xs text-ink-muted">
-                          {draft.api_framework === 'parsefile'
-                            ? 'API URL (optional; blank uses Parsefile default; commands like /cmd/addtracking are added automatically)'
-                            : 'API URL (optional, relative to base)'}
-                        </span>
-                        <input
-                          type="text"
-                          className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                          placeholder={
-                            draft.api_framework === 'parsefile'
-                              ? PARSEFILE_DEFAULT_API_URL
-                              : '/v1/tracking'
-                          }
-                          value={draft.api_url}
-                          onChange={(e) => setDraft((d) => ({ ...d, api_url: e.target.value }))}
-                          disabled={saving}
-                        />
-                      </label>
-                      <label className="block">
-                        <span className="text-xs text-ink-muted">Bearer token</span>
-                        <input
-                          type="password"
-                          className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                          placeholder="Token"
-                          value={draft.bearer_token}
-                          onChange={(e) => setDraft((d) => ({ ...d, bearer_token: e.target.value }))}
-                          disabled={saving}
-                          autoComplete="off"
-                        />
-                      </label>
+                      {draft.api_framework !== 'usabg' && (
+                        <label className="block">
+                          <span className="text-xs text-ink-muted">
+                            {draft.api_framework === 'parsefile'
+                              ? 'API URL (optional; blank uses Parsefile default; commands like /cmd/addtracking are added automatically)'
+                              : 'API URL (optional, relative to base)'}
+                          </span>
+                          <input
+                            type="text"
+                            className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                            placeholder={
+                              draft.api_framework === 'parsefile'
+                                ? PARSEFILE_DEFAULT_API_URL
+                                : '/v1/tracking'
+                            }
+                            value={draft.api_url}
+                            onChange={(e) => setDraft((d) => ({ ...d, api_url: e.target.value }))}
+                            disabled={saving}
+                          />
+                        </label>
+                      )}
+                      {draft.api_framework !== 'usabg' && (
+                        <label className="block">
+                          <span className="text-xs text-ink-muted">Bearer token</span>
+                          <input
+                            type="password"
+                            className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                            placeholder="Token"
+                            value={draft.bearer_token}
+                            onChange={(e) => setDraft((d) => ({ ...d, bearer_token: e.target.value }))}
+                            disabled={saving}
+                            autoComplete="off"
+                          />
+                        </label>
+                      )}
                       {draft.api_framework === 'parsefile' && (
                         <>
                           <label className="block">
@@ -433,43 +469,73 @@ export default function BuyingGroups() {
                               disabled={saving}
                             />
                           </label>
-                          <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
-                            <label className="inline-flex items-center gap-2 text-sm text-ink">
-                              <input
-                                type="checkbox"
-                                checked={draft.tracking_submit_enabled}
-                                onChange={(e) =>
-                                  setDraft((d) => ({
-                                    ...d,
-                                    tracking_submit_enabled: e.target.checked,
-                                  }))
-                                }
-                                disabled={saving}
-                                className="rounded border-brand-300"
-                              />
-                              <span>Auto-submit tracking</span>
-                            </label>
-                            <label className="block">
-                              <span className="text-xs text-ink-muted">
-                                Cron (local time; min hour day month weekday)
-                              </span>
-                              <input
-                                type="text"
-                                className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm font-mono"
-                                placeholder={DEFAULT_TRACKING_SUBMIT_CRON}
-                                value={draft.tracking_submit_cron}
-                                onChange={(e) =>
-                                  setDraft((d) => ({ ...d, tracking_submit_cron: e.target.value }))
-                                }
-                                disabled={saving}
-                                spellCheck={false}
-                              />
-                            </label>
-                            <p className="text-[11px] text-ink-muted">
-                              Last run: {formatLastRun(g.tracking_submit_last_run_at)}
-                            </p>
-                          </div>
                         </>
+                      )}
+                      {draft.api_framework === 'usabg' && (
+                        <>
+                          <label className="block">
+                            <span className="text-xs text-ink-muted">Username</span>
+                            <input
+                              type="text"
+                              className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                              placeholder="USABG username"
+                              value={draft.api_username}
+                              onChange={(e) => setDraft((d) => ({ ...d, api_username: e.target.value }))}
+                              disabled={saving}
+                              autoComplete="off"
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="text-xs text-ink-muted">Password</span>
+                            <input
+                              type="password"
+                              className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                              placeholder="USABG password"
+                              value={draft.api_password}
+                              onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}
+                              disabled={saving}
+                              autoComplete="off"
+                            />
+                          </label>
+                        </>
+                      )}
+                      {(draft.api_framework === 'parsefile' || draft.api_framework === 'usabg') && (
+                        <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
+                          <label className="inline-flex items-center gap-2 text-sm text-ink">
+                            <input
+                              type="checkbox"
+                              checked={draft.tracking_submit_enabled}
+                              onChange={(e) =>
+                                setDraft((d) => ({
+                                  ...d,
+                                  tracking_submit_enabled: e.target.checked,
+                                }))
+                              }
+                              disabled={saving}
+                              className="rounded border-brand-300"
+                            />
+                            <span>Auto-submit tracking</span>
+                          </label>
+                          <label className="block">
+                            <span className="text-xs text-ink-muted">
+                              Cron (local time; min hour day month weekday)
+                            </span>
+                            <input
+                              type="text"
+                              className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm font-mono"
+                              placeholder={DEFAULT_TRACKING_SUBMIT_CRON}
+                              value={draft.tracking_submit_cron}
+                              onChange={(e) =>
+                                setDraft((d) => ({ ...d, tracking_submit_cron: e.target.value }))
+                              }
+                              disabled={saving}
+                              spellCheck={false}
+                            />
+                          </label>
+                          <p className="text-[11px] text-ink-muted">
+                            Last run: {formatLastRun(g.tracking_submit_last_run_at)}
+                          </p>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -478,19 +544,27 @@ export default function BuyingGroups() {
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <span className="font-medium text-ink">{g.name}</span>
-                        {(g.api_framework || g.base_url || g.bearer_token) && (
+                        {(g.api_framework || g.base_url || g.bearer_token || g.api_username) && (
                           <p
                             className="text-xs text-ink-muted truncate mt-0.5"
                             title={
-                              g.base_url
-                                ? `${g.base_url}${effectiveApiUrl(g)}`
+                              effectiveBaseUrl(g)
+                                ? `${effectiveBaseUrl(g)}${effectiveApiUrl(g)}`
                                 : undefined
                             }
                           >
                             {[
                               frameworkLabel(g.api_framework),
-                              g.base_url ? `${g.base_url}${effectiveApiUrl(g)}` : null,
-                              g.bearer_token ? 'token set' : null,
+                              effectiveBaseUrl(g)
+                                ? `${effectiveBaseUrl(g)}${effectiveApiUrl(g)}`
+                                : null,
+                              g.api_framework === 'usabg'
+                                ? g.api_username
+                                  ? 'credentials set'
+                                  : null
+                                : g.bearer_token
+                                  ? 'token set'
+                                  : null,
                             ]
                               .filter(Boolean)
                               .join(' · ')}
@@ -522,7 +596,7 @@ export default function BuyingGroups() {
                         </button>
                       </div>
                     </div>
-                    {g.api_framework === 'parsefile' && (
+                    {(g.api_framework === 'parsefile' || g.api_framework === 'usabg') && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
                         <span>
                           Auto-submit:{' '}

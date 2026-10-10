@@ -26,7 +26,7 @@ export interface User {
   updated_at?: string
 }
 
-export type BuyingGroupApiFramework = 'parsefile'
+export type BuyingGroupApiFramework = 'parsefile' | 'usabg'
 
 export interface BuyingGroup {
   id: number
@@ -40,6 +40,8 @@ export interface BuyingGroup {
   bearer_token?: string | null
   api_user_id?: number | null
   api_email?: string | null
+  api_username?: string | null
+  api_password?: string | null
   tracking_submit_enabled?: boolean
   tracking_submit_cron?: string
   tracking_submit_last_run_at?: string | null

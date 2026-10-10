@@ -1,9 +1,11 @@
-"""Submit item tracking numbers to buying-group APIs (Parsefile)."""
+"""Submit item tracking numbers to buying-group APIs (Parsefile, USABG)."""
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Sequence
 
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -11,6 +13,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.models import BuyingGroup, Item, Order, ShipmentItem
 from app.models.item import ItemStatus
 from app.utils.buying_group_apis import parsefile as parsefile_api
+from app.utils.buying_group_apis import usabg as usabg_api
 from app.utils.dates import to_date_only
 
 logger = logging.getLogger(__name__)
@@ -35,11 +38,46 @@ def parsefile_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
     return True, None
 
 
+def usabg_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
+    """Return (ready, error_detail) for USABG tracking submission."""
+    if group is None:
+        return False, "Order has no buying group"
+    framework = (group.api_framework or "").strip().casefold()
+    if framework != "usabg":
+        return False, "Buying group API framework is not configured for submission"
+    if not (group.api_username or "").strip():
+        return False, "Buying group is missing API username"
+    if not (group.api_password or "").strip():
+        return False, "Buying group is missing API password"
+    # Blank base_url falls back to the USABG default.
+    return True, None
+
+
+def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
+    """Return (ready, error_detail) for whatever framework the group uses."""
+    if group is None:
+        return False, "Order has no buying group"
+    framework = (group.api_framework or "").strip().casefold()
+    if framework == "parsefile":
+        return parsefile_group_ready(group)
+    if framework == "usabg":
+        return usabg_group_ready(group)
+    if not framework:
+        return False, "Buying group API framework is not configured for submission"
+    return False, f"Unsupported buying group API framework: {group.api_framework}"
+
+
 def tracking_number_for_item(item: Item) -> str | None:
     for si in item.shipment_items or []:
         if si.shipment and (si.shipment.tracking_number or "").strip():
             return si.shipment.tracking_number.strip()
     return None
+
+
+def _item_amount(item: Item) -> Decimal | float | None:
+    if item.price_sold is None:
+        return None
+    return item.price_sold * (item.quantity or 1)
 
 
 def build_parsefile_entry(item: Item, order: Order, tracking: str) -> parsefile_api.ParsefileTrackingEntry:
@@ -48,21 +86,32 @@ def build_parsefile_entry(item: Item, order: Order, tracking: str) -> parsefile_
     if desc:
         notes = f"{item.quantity or 1}-{desc}"
 
-    amount = None
-    if item.price_sold is not None:
-        amount = item.price_sold * (item.quantity or 1)
-
     return parsefile_api.ParsefileTrackingEntry(
         tracking=tracking,
         order=(order.store_order_number or None),
-        amount=amount,
+        amount=_item_amount(item),
         notes=notes,
+    )
+
+
+def build_usabg_entry(item: Item, tracking: str) -> usabg_api.UsabgTrackingEntry:
+    return usabg_api.UsabgTrackingEntry(
+        tracking=tracking,
+        amount=_item_amount(item),
     )
 
 
 def mark_item_submitted(item: Item, when: datetime | None = None) -> None:
     item.status = ItemStatus.SUBMITTED
     item.submitted_at = to_date_only(when or datetime.now(timezone.utc))
+
+
+@dataclass
+class SubmitResult:
+    """Normalized result from any buying-group tracking submit."""
+
+    message: str
+    affected: int | None = None
 
 
 def submit_parsefile_trackings(
@@ -82,6 +131,63 @@ def submit_parsefile_trackings(
         email=group.api_email,
         trackings=list(entries),
     )
+
+
+def submit_usabg_trackings(
+    group: BuyingGroup,
+    entries: Sequence[usabg_api.UsabgTrackingEntry],
+) -> usabg_api.UsabgSubmitResult:
+    ready, reason = usabg_group_ready(group)
+    if not ready:
+        raise ValueError(reason or "Buying group API is not configured")
+    if not entries:
+        raise ValueError("At least one tracking entry is required")
+    return usabg_api.submit_trackings(
+        base_url=group.base_url,
+        username=str(group.api_username),
+        password=str(group.api_password),
+        trackings=list(entries),
+    )
+
+
+def submit_item_tracking_to_group(
+    group: BuyingGroup,
+    item: Item,
+    order: Order,
+    tracking: str,
+) -> SubmitResult:
+    """Submit a single item's tracking via the group's configured framework."""
+    framework = (group.api_framework or "").strip().casefold()
+    if framework == "parsefile":
+        result = submit_parsefile_trackings(group, [build_parsefile_entry(item, order, tracking)])
+        return SubmitResult(message=result.message, affected=result.affected)
+    if framework == "usabg":
+        result = submit_usabg_trackings(group, [build_usabg_entry(item, tracking)])
+        return SubmitResult(message=result.message, affected=result.affected)
+    raise ValueError("Buying group API framework is not configured for submission")
+
+
+def _aggregate_usabg_entries(
+    pending: Sequence[tuple[Item, Order, str]],
+) -> list[usabg_api.UsabgTrackingEntry]:
+    """One entry per tracking number; sum amounts when items share a tracking."""
+    amounts: OrderedDict[str, Decimal | float | None] = OrderedDict()
+    for item, _order, tracking in pending:
+        amount = _item_amount(item)
+        if tracking not in amounts:
+            amounts[tracking] = amount
+            continue
+        existing = amounts[tracking]
+        if amount is None:
+            continue
+        if existing is None:
+            amounts[tracking] = amount
+        else:
+            amounts[tracking] = existing + amount
+    return [
+        usabg_api.UsabgTrackingEntry(tracking=tn, amount=amt)
+        for tn, amt in amounts.items()
+    ]
 
 
 @dataclass
@@ -116,13 +222,15 @@ def batch_submit_pending_trackings(
         )
 
     group_name = (group.name or "").strip() or f"group {buying_group_id}"
-    ready, reason = parsefile_group_ready(group)
+    ready, reason = group_ready(group)
     if not ready:
         return BatchSubmitResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
             error=reason or "Buying group API is not configured",
         )
+
+    framework = (group.api_framework or "").strip().casefold()
 
     shipped_items = (
         db.query(Item)
@@ -177,25 +285,49 @@ def batch_submit_pending_trackings(
             message=msg,
         )
 
-    # Capture credentials before any commit/rollback can expire the ORM object.
-    base_url = str(group.base_url)
-    api_url = parsefile_api.resolve_api_url(group.api_url)
-    bearer_token = str(group.bearer_token)
-    api_user_id = int(group.api_user_id)
-    api_email = str(group.api_email)
     item_ids = [item.id for item, _, _ in pending]
-    entries = [build_parsefile_entry(item, order, tracking) for item, order, tracking in pending]
     tracking_numbers = [tracking for *_, tracking in pending]
 
     try:
-        api_result = parsefile_api.submit_trackings(
-            base_url=base_url,
-            api_url=api_url,
-            bearer_token=bearer_token,
-            user_id=api_user_id,
-            email=api_email,
-            trackings=entries,
-        )
+        if framework == "parsefile":
+            # Capture credentials before any commit/rollback can expire the ORM object.
+            base_url = str(group.base_url)
+            api_url = parsefile_api.resolve_api_url(group.api_url)
+            bearer_token = str(group.bearer_token)
+            api_user_id = int(group.api_user_id)
+            api_email = str(group.api_email)
+            entries = [build_parsefile_entry(item, order, tracking) for item, order, tracking in pending]
+            api_result = parsefile_api.submit_trackings(
+                base_url=base_url,
+                api_url=api_url,
+                bearer_token=bearer_token,
+                user_id=api_user_id,
+                email=api_email,
+                trackings=entries,
+            )
+            message = api_result.message
+        elif framework == "usabg":
+            base_url = group.base_url
+            username = str(group.api_username)
+            password = str(group.api_password)
+            entries = _aggregate_usabg_entries(pending)
+            tracking_numbers = [e.tracking for e in entries]
+            api_result = usabg_api.submit_trackings(
+                base_url=base_url,
+                username=username,
+                password=password,
+                trackings=entries,
+            )
+            message = api_result.message
+        else:
+            return BatchSubmitResult(
+                buying_group_id=buying_group_id,
+                buying_group_name=group_name,
+                shipped_count=shipped_count,
+                missing_tracking_count=missing_tracking,
+                error=f"Unsupported buying group API framework: {group.api_framework}",
+            )
+
         now = datetime.now(timezone.utc)
         items_to_mark = (
             db.query(Item)
@@ -213,7 +345,7 @@ def batch_submit_pending_trackings(
             shipped_count=shipped_count,
             missing_tracking_count=missing_tracking,
             tracking_numbers=tracking_numbers,
-            message=api_result.message,
+            message=message,
         )
     except Exception as exc:
         logger.warning(

@@ -6,9 +6,9 @@ from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-ApiFramework = Literal["parsefile"]
+ApiFramework = Literal["parsefile", "usabg"]
 
-ALLOWED_API_FRAMEWORKS = frozenset({"parsefile"})
+ALLOWED_API_FRAMEWORKS = frozenset({"parsefile", "usabg"})
 
 DEFAULT_TRACKING_SUBMIT_CRON = "0 */6 * * *"
 
@@ -52,6 +52,8 @@ class BuyingGroupBase(BaseModel):
     bearer_token: str | None = None
     api_user_id: int | None = None
     api_email: str | None = None
+    api_username: str | None = None
+    api_password: str | None = None
     tracking_submit_enabled: bool = False
     tracking_submit_cron: str = DEFAULT_TRACKING_SUBMIT_CRON
 
@@ -82,7 +84,15 @@ class BuyingGroupBase(BaseModel):
     def normalize_api_framework(cls, value: object) -> str | None:
         return _normalize_api_framework(value)
 
-    @field_validator("base_url", "api_url", "bearer_token", "api_email", mode="before")
+    @field_validator(
+        "base_url",
+        "api_url",
+        "bearer_token",
+        "api_email",
+        "api_username",
+        "api_password",
+        mode="before",
+    )
     @classmethod
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
@@ -106,6 +116,8 @@ class BuyingGroupUpdate(BaseModel):
     bearer_token: str | None = None
     api_user_id: int | None = None
     api_email: str | None = None
+    api_username: str | None = None
+    api_password: str | None = None
     tracking_submit_enabled: bool | None = None
     tracking_submit_cron: str | None = Field(default=None, max_length=64)
 
@@ -121,7 +133,15 @@ class BuyingGroupUpdate(BaseModel):
     def normalize_api_framework(cls, value: object) -> str | None:
         return _normalize_api_framework(value)
 
-    @field_validator("base_url", "api_url", "bearer_token", "api_email", mode="before")
+    @field_validator(
+        "base_url",
+        "api_url",
+        "bearer_token",
+        "api_email",
+        "api_username",
+        "api_password",
+        mode="before",
+    )
     @classmethod
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)

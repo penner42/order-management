@@ -22,7 +22,7 @@ from app.schemas.buying_group import (
 from app.utils.buying_group_apis.submit_tracking import (
     BatchSubmitResult,
     batch_submit_pending_trackings,
-    parsefile_group_ready,
+    group_ready,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,7 +189,7 @@ def _run_tracking_submit(
     scheduled: bool = False,
 ) -> BuyingGroupSubmitTrackingResponse:
     """Batch-submit pending trackings, stamp last_run_at, and log start/result."""
-    ready, reason = parsefile_group_ready(group)
+    ready, reason = group_ready(group)
     if not ready:
         raise HTTPException(status_code=400, detail=reason or "Buying group API is not configured")
 
@@ -269,7 +269,7 @@ def list_due_tracking_submit_group_ids(db: Session) -> list[int]:
             now=now,
         ):
             continue
-        ready, reason = parsefile_group_ready(group)
+        ready, reason = group_ready(group)
         if not ready:
             group_name = (group.name or "").strip() or f"group {group.id}"
             write_group_tracking_log(
@@ -294,7 +294,7 @@ def run_scheduled_tracking_submit(group_id: int) -> bool:
         group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
         if not group or not group.tracking_submit_enabled:
             return False
-        ready, reason = parsefile_group_ready(group)
+        ready, reason = group_ready(group)
         group_name = (group.name or "").strip() or f"group {group_id}"
         if not ready:
             write_group_tracking_log(

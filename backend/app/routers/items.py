@@ -18,10 +18,9 @@ from app.schemas.item import (
     ItemUpdate,
 )
 from app.utils.buying_group_apis.submit_tracking import (
-    build_parsefile_entry,
+    group_ready,
     mark_item_submitted,
-    parsefile_group_ready,
-    submit_parsefile_trackings,
+    submit_item_tracking_to_group,
     tracking_number_for_item,
 )
 from app.utils.dates import to_date_only
@@ -183,7 +182,7 @@ def submit_item_tracking(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Submit this item's tracking number to the order's buying-group API (Parsefile for now)."""
+    """Submit this item's tracking number to the order's buying-group API."""
     item = (
         db.query(Item)
         .filter(Item.id == item_id)
@@ -207,7 +206,7 @@ def submit_item_tracking(
     if not order or not order.buying_group_id or not order.buying_group:
         raise HTTPException(status_code=400, detail="Order has no buying group")
     group = order.buying_group
-    ready, reason = parsefile_group_ready(group)
+    ready, reason = group_ready(group)
     if not ready:
         raise HTTPException(status_code=400, detail=reason or "Buying group API is not configured")
 
@@ -216,10 +215,7 @@ def submit_item_tracking(
         return text or fallback
 
     try:
-        result = submit_parsefile_trackings(
-            group,
-            [build_parsefile_entry(item, order, tracking)],
-        )
+        result = submit_item_tracking_to_group(group, item, order, tracking)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=_http_detail(e, fallback="Invalid tracking submit request")) from e
     except RuntimeError as e:
