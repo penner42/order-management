@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type {
   BrowserImportLog,
+  BrowserImportLogCategory,
   BrowserImportLogEvent,
   BrowserImportLogLevel,
 } from '../api/types'
 
 type LevelFilter = 'all' | BrowserImportLogLevel
+type CategoryFilter = 'all' | BrowserImportLogCategory
 type EventFilter = 'all' | BrowserImportLogEvent
 
 function levelLabel(level: string): string {
@@ -20,6 +22,17 @@ function levelLabel(level: string): string {
       return 'Error'
     default:
       return level
+  }
+}
+
+function categoryLabel(category: string): string {
+  switch (category) {
+    case 'stores':
+      return 'Stores'
+    case 'groups':
+      return 'Groups'
+    default:
+      return category
   }
 }
 
@@ -41,6 +54,10 @@ function eventLabel(eventType: string): string {
       return 'Check started'
     case 'check_finished':
       return 'Check finished'
+    case 'tracking_submitted':
+      return 'Tracking submitted'
+    case 'tracking_submit_error':
+      return 'Tracking submit error'
     default:
       return eventType
   }
@@ -52,6 +69,8 @@ function modeLabel(mode: string): string {
       return 'Full check'
     case 'unshipped':
       return 'Unshipped check'
+    case 'tracking_submit':
+      return 'Tracking submit'
     default:
       return mode
   }
@@ -76,10 +95,19 @@ function levelBadgeClass(level: string): string {
   return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
 }
 
+function parseCategoryParam(raw: string | null): CategoryFilter {
+  if (raw === 'stores' || raw === 'groups') return raw
+  return 'all'
+}
+
 export default function BrowserImportLogPage() {
+  const [searchParams] = useSearchParams()
   const [rows, setRows] = useState<BrowserImportLog[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>(() =>
+    parseCategoryParam(searchParams.get('category'))
+  )
   const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
   const [eventFilter, setEventFilter] = useState<EventFilter>('all')
   const [scheduledOnly, setScheduledOnly] = useState(false)
@@ -95,6 +123,7 @@ export default function BrowserImportLogPage() {
       }
       const params = new URLSearchParams()
       params.set('limit', '300')
+      if (categoryFilter !== 'all') params.set('category', categoryFilter)
       if (levelFilter !== 'all') params.set('level', levelFilter)
       if (eventFilter !== 'all') params.set('event_type', eventFilter)
       if (scheduledOnly) params.set('scheduled_only', 'true')
@@ -127,25 +156,45 @@ export default function BrowserImportLogPage() {
       cancelled = true
       window.clearInterval(intervalId)
     }
-  }, [levelFilter, eventFilter, scheduledOnly])
+  }, [categoryFilter, levelFilter, eventFilter, scheduledOnly])
 
   return (
     <div className="w-full">
       <div className="flex flex-wrap items-start justify-between gap-4 mb-2">
-        <h1 className="text-2xl font-semibold text-ink dark:text-gray-100">Browser import log</h1>
-        <Link
-          to="/browser-automation"
-          className="text-sm text-brand-600 dark:text-brand-400 hover:underline"
-        >
-          Back to browser automation
-        </Link>
+        <h1 className="text-2xl font-semibold text-ink dark:text-gray-100">Import log</h1>
+        <div className="flex flex-wrap gap-3 text-sm">
+          <Link
+            to="/browser-automation"
+            className="text-brand-600 dark:text-brand-400 hover:underline"
+          >
+            Browser automation
+          </Link>
+          <Link
+            to="/buying-groups"
+            className="text-brand-600 dark:text-brand-400 hover:underline"
+          >
+            Buying groups
+          </Link>
+        </div>
       </div>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
-        Updates are new imports and tracking changes. Info covers check start/stop and orders
-        checked with no change. Errors are orders that failed to apply.
+        Stores covers browser import checks. Groups covers buying-group tracking submissions.
+        Levels: Updates (changes), Info (no-op / start-stop), Error (failures).
       </p>
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
+        <label className="text-sm text-ink dark:text-gray-200">
+          <span className="sr-only">Category</span>
+          <select
+            className="rounded-lg border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-3 py-1.5 text-sm"
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value as CategoryFilter)}
+          >
+            <option value="all">All categories</option>
+            <option value="stores">Stores</option>
+            <option value="groups">Groups</option>
+          </select>
+        </label>
         <label className="text-sm text-ink dark:text-gray-200">
           <span className="sr-only">Level</span>
           <select
@@ -175,6 +224,8 @@ export default function BrowserImportLogPage() {
             <option value="order_error">Order error</option>
             <option value="check_started">Check started</option>
             <option value="check_finished">Check finished</option>
+            <option value="tracking_submitted">Tracking submitted</option>
+            <option value="tracking_submit_error">Tracking submit error</option>
           </select>
         </label>
         <label className="inline-flex items-center gap-2 text-sm text-ink dark:text-gray-200">
@@ -201,6 +252,7 @@ export default function BrowserImportLogPage() {
               <thead className="bg-brand-100/50 dark:bg-gray-700/50 border-b border-brand-200/80 dark:border-gray-700">
                 <tr>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">When</th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-ink">Category</th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">Level</th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">Event</th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-ink">Order</th>
@@ -213,8 +265,8 @@ export default function BrowserImportLogPage() {
               <tbody>
                 {rows.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-12 text-center text-ink-muted">
-                      No import activity logged yet.
+                    <td colSpan={9} className="py-12 text-center text-ink-muted">
+                      No activity logged yet.
                     </td>
                   </tr>
                 ) : (
@@ -225,6 +277,9 @@ export default function BrowserImportLogPage() {
                     >
                       <td className="py-3 px-4 text-sm text-ink-muted whitespace-nowrap">
                         {formatWhen(row.created_at)}
+                      </td>
+                      <td className="py-3 px-4 text-sm text-ink dark:text-gray-200 whitespace-nowrap">
+                        {categoryLabel(row.category || 'stores')}
                       </td>
                       <td className="py-3 px-4">
                         <span
@@ -241,13 +296,26 @@ export default function BrowserImportLogPage() {
                       </td>
                       <td className="py-3 px-4 text-sm text-ink dark:text-gray-200">
                         {row.tracking_numbers.length > 0 ? (
-                          <ul className="space-y-0.5">
-                            {row.tracking_numbers.map((t) => (
-                              <li key={t} className="font-mono text-xs">
-                                {t}
-                              </li>
-                            ))}
-                          </ul>
+                          <div className="space-y-1">
+                            {row.message && (
+                              <div
+                                className={
+                                  row.level === 'error'
+                                    ? 'text-red-700 dark:text-red-300 break-words'
+                                    : 'text-ink-muted'
+                                }
+                              >
+                                {row.message}
+                              </div>
+                            )}
+                            <ul className="space-y-0.5">
+                              {row.tracking_numbers.map((t) => (
+                                <li key={t} className="font-mono text-xs">
+                                  {t}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         ) : row.message ? (
                           <span
                             className={
@@ -263,7 +331,7 @@ export default function BrowserImportLogPage() {
                         )}
                       </td>
                       <td className="py-3 px-4 text-sm text-ink dark:text-gray-200">
-                        <div>{row.store_name ?? row.retailer}</div>
+                        <div>{row.store_name ?? (row.retailer || '—')}</div>
                         {row.store_account_name && (
                           <div className="text-xs text-ink-muted">{row.store_account_name}</div>
                         )}

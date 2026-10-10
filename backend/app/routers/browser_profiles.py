@@ -196,6 +196,7 @@ def _add_import_log(
         BrowserImportLog(
             browser_profile_id=profile.id,
             job_id=job_id,
+            category="stores",
             level=level,
             event_type=event_type,
             mode=mode,
@@ -288,6 +289,7 @@ def _import_log_read(row: BrowserImportLog) -> BrowserImportLogRead:
         id=row.id,
         browser_profile_id=row.browser_profile_id,
         job_id=row.job_id,
+        category=row.category or "stores",
         level=row.level or "info",
         event_type=row.event_type,
         mode=row.mode,
@@ -333,13 +335,16 @@ def list_browser_import_logs(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
     limit: int = Query(default=200, ge=1, le=1000),
+    category: str | None = Query(default=None),
     level: str | None = Query(default=None),
     event_type: str | None = Query(default=None),
     scheduled_only: bool = Query(default=False),
     profile_id: int | None = Query(default=None),
 ):
-    """Recent browser-automation log events (updates + info)."""
+    """Recent import / tracking-submit log events (stores + groups)."""
     q = db.query(BrowserImportLog)
+    if category in ("stores", "groups"):
+        q = q.filter(BrowserImportLog.category == category)
     if level in ("updates", "info", "error"):
         q = q.filter(BrowserImportLog.level == level)
     if event_type in (
@@ -351,6 +356,8 @@ def list_browser_import_logs(
         "order_error",
         "check_started",
         "check_finished",
+        "tracking_submitted",
+        "tracking_submit_error",
     ):
         q = q.filter(BrowserImportLog.event_type == event_type)
     if scheduled_only:

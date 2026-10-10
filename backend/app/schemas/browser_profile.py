@@ -114,6 +114,7 @@ class BrowserJobRead(BaseModel):
 
 
 BrowserImportLogLevel = Literal["updates", "info", "error"]
+BrowserImportLogCategory = Literal["stores", "groups"]
 BrowserImportLogEvent = Literal[
     "order_imported",
     "tracking_updated",
@@ -123,6 +124,8 @@ BrowserImportLogEvent = Literal[
     "order_error",
     "check_started",
     "check_finished",
+    "tracking_submitted",
+    "tracking_submit_error",
 ]
 
 
@@ -130,6 +133,7 @@ class BrowserImportLogRead(BaseModel):
     id: int
     browser_profile_id: int | None = None
     job_id: str | None = None
+    category: BrowserImportLogCategory | str = "stores"
     level: BrowserImportLogLevel | str
     event_type: BrowserImportLogEvent | str
     mode: ImportMode | str

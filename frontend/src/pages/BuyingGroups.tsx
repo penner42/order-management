@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { BuyingGroup, BuyingGroupApiFramework } from '../api/types'
@@ -267,7 +268,15 @@ export default function BuyingGroups() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-ink mb-2">Buying groups</h1>
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-2">
+        <h1 className="text-2xl font-semibold text-ink">Buying groups</h1>
+        <Link
+          to="/browser-import-log?category=groups"
+          className="text-sm text-brand-600 dark:text-brand-400 hover:underline"
+        >
+          View tracking submit log
+        </Link>
+      </div>
       <p className="text-sm text-ink-muted mb-8">
         Add aliases to match shipping names and address lines on store imports. Configure API
         credentials and an optional schedule to batch-submit tracking numbers.

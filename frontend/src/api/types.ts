@@ -283,6 +283,8 @@ export interface BrowserJob {
 
 export type BrowserImportLogLevel = 'updates' | 'info' | 'error'
 
+export type BrowserImportLogCategory = 'stores' | 'groups'
+
 export type BrowserImportLogEvent =
   | 'order_imported'
   | 'tracking_updated'
@@ -292,6 +294,8 @@ export type BrowserImportLogEvent =
   | 'order_error'
   | 'check_started'
   | 'check_finished'
+  | 'tracking_submitted'
+  | 'tracking_submit_error'
 
 export interface IgnoredZipCode {
   id: number
@@ -302,9 +306,10 @@ export interface BrowserImportLog {
   id: number
   browser_profile_id: number | null
   job_id: string | null
+  category: BrowserImportLogCategory | string
   level: BrowserImportLogLevel | string
   event_type: BrowserImportLogEvent | string
-  mode: 'full' | 'unshipped' | string
+  mode: 'full' | 'unshipped' | 'tracking_submit' | string
   scheduled: boolean
   retailer: string
   store_order_number: string | null
