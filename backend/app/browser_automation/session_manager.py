@@ -133,9 +133,17 @@ class SessionManager:
             # Needed for predictable live-view click mapping; Camoufox still spoofs other signals.
             window=(width, height),
             block_webrtc=True,
+            # Costco/Azure B2C (and similar) reveal UI during finite CSS animations
+            # (e.g. press-and-hold). Instant-animation collapse hides that UI and
+            # login appears to hang after submit.
+            config={"disableInstantAnimations": True},
             firefox_user_prefs={
                 "security.sandbox.content.level": 0,
                 "security.sandbox.gpu.level": 0,
+                # Azure B2C SSO sets cookies on signin.costco.com then posts back
+                # to www.costco.com — strict tracking protection can stall that hop.
+                "network.cookie.cookieBehavior": 0,
+                "network.cookie.cookieBehavior.optInPartitioning": False,
             },
         )
         context = await cm.__aenter__()
@@ -526,17 +534,23 @@ class SessionManager:
             if not key:
                 return
             if event == "char":
-                # Prefer insert_text for printable chars — more reliable in OTP digit cells.
+                # Use type() so React/Angular (Costco Azure B2C) see real keydown/input/keyup.
+                # insert_text alone often fills the DOM without updating the SPA model, so
+                # Sign In spins forever. Fall back to insert_text for odd OTP widgets.
                 text = str(message.get("text") or key)
                 if text:
                     try:
-                        await page.keyboard.insert_text(text)
+                        await page.keyboard.type(text, delay=0)
                     except Exception as exc:
-                        logger.debug("keyboard insert_text %r failed: %s", text, exc)
+                        logger.debug("keyboard type %r failed: %s", text, exc)
+                        try:
+                            await page.keyboard.insert_text(text)
+                        except Exception as exc2:
+                            logger.debug("keyboard insert_text %r failed: %s", text, exc2)
                 return
             try:
                 if event == "down":
-                    # Printable keys are applied via the separate char/insert_text event.
+                    # Printable keys are applied via the separate char/type event.
                     if len(key) == 1:
                         return
                     await page.keyboard.down(key)
@@ -554,9 +568,18 @@ class SessionManager:
             if len(text) > 100_000:
                 text = text[:100_000]
             try:
-                await page.keyboard.insert_text(text)
+                # Short pastes (email/password/OTP): type() so SPA form state updates.
+                # Long pastes: insert_text to avoid flooding key events.
+                if len(text) <= 256:
+                    await page.keyboard.type(text, delay=0)
+                else:
+                    await page.keyboard.insert_text(text)
             except Exception as exc:
-                logger.debug("paste insert_text failed: %s", exc)
+                logger.debug("paste failed: %s", exc)
+                try:
+                    await page.keyboard.insert_text(text)
+                except Exception as exc2:
+                    logger.debug("paste insert_text failed: %s", exc2)
 
 
 session_manager = SessionManager()
