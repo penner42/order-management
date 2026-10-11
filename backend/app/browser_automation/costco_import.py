@@ -24,7 +24,6 @@ from app.browser_automation.common import (
 )
 from app.browser_automation.paths import costco_script_paths
 from app.browser_automation.session_manager import (
-    COSTCO_MYACCOUNT_URL,
     establish_costco_session,
     looks_like_costco_signin,
     session_manager,
@@ -360,39 +359,40 @@ async def _boot_order_details_route(
     header_id: str,
     detail_url: str | None = None,
 ) -> str:
-    """Land on myaccount, then open orderdetails (extension scrape-tab parity).
+    """Cold-load myaccount already pointed at orderdetails.
 
-    In-SPA hash changes from ordersandpurchases do not reliably fire
-    getOrderDetails under Playwright; booting via myaccount does.
-    Returns the app id in use after the myaccount load.
+    Loading bare myaccount first, then hash-navigating, is the same failure mode
+    as SPA assign from the orders list: Angular is already running and often
+    never refires getOrderDetails. A cross-document goto of the full detail URL
+    (hash present on first paint) matches the extension scrape-tab pattern.
     """
-    await page.goto(COSTCO_MYACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
-    fresh_app: str | None = None
-    deadline = time.monotonic() + 20.0
-    while time.monotonic() < deadline:
-        url = page.url or ""
-        if looks_like_costco_signin(url) and "#/app/" not in url:
-            await page.wait_for_timeout(500)
-            url = page.url or ""
-            if looks_like_costco_signin(url) and "#/app/" not in url:
-                raise LoginRequiredError("Costco session requires login.")
-            continue
-        fresh_app = await _extract_app_id(page)
-        if fresh_app:
-            break
-        await page.wait_for_timeout(400)
-    if fresh_app:
-        app_id = fresh_app
-    elif not app_id:
-        raise RuntimeError("Missing Costco SPA app id after myaccount reload.")
+    if not app_id:
+        raise RuntimeError("Missing Costco SPA app id; cannot open order details.")
     target = (detail_url or "").strip() or _order_details_url(app_id, header_id)
-    # Prefer a URL built with the fresh app id when the resolved link is stale.
-    if fresh_app and "orderdetails" in target and f"/app/{fresh_app}/" not in target:
+    # Ensure constructed URL uses the known app id (resolved DOM links can drift).
+    if f"/app/{app_id}/" not in target:
         target = _order_details_url(app_id, header_id)
-    await _costco_spa_navigate(page, target)
+
+    # Leave the SPA document so the next goto is a real navigation, not a
+    # same-document hash update that Playwright/Angular often no-op.
+    try:
+        await page.goto("about:blank", wait_until="domcontentloaded", timeout=15_000)
+    except Exception:
+        pass
+    await page.goto(target, wait_until="domcontentloaded", timeout=60_000)
+    await page.wait_for_timeout(800)
+
     if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
         raise LoginRequiredError("Costco session requires login.")
-    return app_id
+
+    # If Costco stripped the hash and landed on bare myaccount, assign once.
+    if "orderdetails" not in (page.url or "").lower():
+        await _costco_spa_navigate(page, target)
+        if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
+            raise LoginRequiredError("Costco session requires login.")
+
+    fresh_app = await _extract_app_id(page)
+    return fresh_app or app_id
 
 
 async def _capture_order_details(
@@ -404,14 +404,13 @@ async def _capture_order_details(
     header_id: str,
     on_progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
-    """Open order details via myaccount hard-boot and wait for getOrderDetails."""
+    """Cold-load order details and wait for getOrderDetails GraphQL."""
 
     def progress(**kwargs: Any) -> None:
         if on_progress:
             on_progress(kwargs)
 
-    # Resolve link while still on the list when possible; after hard-boot we
-    # reconstruct with the live app id if needed.
+    # Resolve link while still on the list when possible.
     detail_url = await _resolve_order_details_url(page, app_id, header_id)
     await capture.clear_details()
     app_id = await _boot_order_details_route(
@@ -428,7 +427,7 @@ async def _capture_order_details(
     except TimeoutError:
         progress(
             phase="detail",
-            message=f"Retrying Costco order {order_number} (hard navigation)…",
+            message=f"Retrying Costco order {order_number} (cold load)…",
             order_id=order_number,
         )
 
