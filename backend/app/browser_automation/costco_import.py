@@ -353,44 +353,19 @@ def _order_details_url(app_id: str, order_header_id: str) -> str:
     return f"{base}?orderNumbers={quote(str(order_header_id).strip(), safe='')}"
 
 
-async def _capture_order_details(
+async def _boot_order_details_route(
     page: Page,
-    capture: _CostcoGraphqlCapture,
     *,
     app_id: str,
-    order_number: str,
     header_id: str,
-    on_progress: ProgressCallback | None = None,
-) -> dict[str, Any]:
-    """Open order details and wait for getOrderDetails, with a hard-nav retry."""
+    detail_url: str | None = None,
+) -> str:
+    """Land on myaccount, then open orderdetails (extension scrape-tab parity).
 
-    def progress(**kwargs: Any) -> None:
-        if on_progress:
-            on_progress(kwargs)
-
-    detail_url = await _resolve_order_details_url(page, app_id, header_id)
-    await capture.clear_details()
-    await _costco_spa_navigate(page, detail_url)
-    if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
-        raise LoginRequiredError("Costco session requires login.")
-
-    try:
-        detail_payload, _detail_url = await capture.wait_for_details(
-            header_id,
-            order_number=order_number,
-            timeout_ms=20_000,
-        )
-        return detail_payload
-    except TimeoutError:
-        progress(
-            phase="detail",
-            message=f"Retrying Costco order {order_number} (hard navigation)…",
-            order_id=order_number,
-        )
-
-    # Mirror the extension scrape tab: land on myaccount, then assign the
-    # detail hash so Angular boots the orderdetails route cleanly.
-    await capture.clear_details()
+    In-SPA hash changes from ordersandpurchases do not reliably fire
+    getOrderDetails under Playwright; booting via myaccount does.
+    Returns the app id in use after the myaccount load.
+    """
     await page.goto(COSTCO_MYACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
     fresh_app: str | None = None
     deadline = time.monotonic() + 20.0
@@ -410,10 +385,55 @@ async def _capture_order_details(
         app_id = fresh_app
     elif not app_id:
         raise RuntimeError("Missing Costco SPA app id after myaccount reload.")
-    detail_url = _order_details_url(app_id, header_id)
-    await _costco_spa_navigate(page, detail_url)
+    target = (detail_url or "").strip() or _order_details_url(app_id, header_id)
+    # Prefer a URL built with the fresh app id when the resolved link is stale.
+    if fresh_app and "orderdetails" in target and f"/app/{fresh_app}/" not in target:
+        target = _order_details_url(app_id, header_id)
+    await _costco_spa_navigate(page, target)
     if looks_like_costco_signin(page.url) and "#/app/" not in (page.url or ""):
         raise LoginRequiredError("Costco session requires login.")
+    return app_id
+
+
+async def _capture_order_details(
+    page: Page,
+    capture: _CostcoGraphqlCapture,
+    *,
+    app_id: str,
+    order_number: str,
+    header_id: str,
+    on_progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    """Open order details via myaccount hard-boot and wait for getOrderDetails."""
+
+    def progress(**kwargs: Any) -> None:
+        if on_progress:
+            on_progress(kwargs)
+
+    # Resolve link while still on the list when possible; after hard-boot we
+    # reconstruct with the live app id if needed.
+    detail_url = await _resolve_order_details_url(page, app_id, header_id)
+    await capture.clear_details()
+    app_id = await _boot_order_details_route(
+        page, app_id=app_id, header_id=header_id, detail_url=detail_url
+    )
+
+    try:
+        detail_payload, _detail_url = await capture.wait_for_details(
+            header_id,
+            order_number=order_number,
+            timeout_ms=35_000,
+        )
+        return detail_payload
+    except TimeoutError:
+        progress(
+            phase="detail",
+            message=f"Retrying Costco order {order_number} (hard navigation)…",
+            order_id=order_number,
+        )
+
+    await capture.clear_details()
+    await _boot_order_details_route(page, app_id=app_id, header_id=header_id)
     detail_payload, _detail_url = await capture.wait_for_details(
         header_id,
         order_number=order_number,
