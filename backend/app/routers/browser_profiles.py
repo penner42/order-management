@@ -166,6 +166,26 @@ def _order_tracking_numbers(db: Session, store_order_number: str) -> tuple[int |
     return order.id, tracking
 
 
+def _non_canceled_item_ids(db: Session, order_id: int) -> set[int]:
+    rows = (
+        db.query(Item.id)
+        .filter(Item.order_id == order_id)
+        .filter(Item.status != ItemStatus.CANCELED)
+        .all()
+    )
+    return {rid for (rid,) in rows}
+
+
+def _order_has_canceled_items(db: Session, order_id: int) -> bool:
+    return (
+        db.query(Item.id)
+        .filter(Item.order_id == order_id)
+        .filter(Item.status == ItemStatus.CANCELED)
+        .first()
+        is not None
+    )
+
+
 def _external_order_id_from_payload(payload: StoreOrderImportPayload) -> str | None:
     ext = payload.externalOrder or {}
     raw = str(ext.get("id") or "").strip()
@@ -226,6 +246,7 @@ def _log_auto_apply_result(
     order_id: int,
     tracking_after: set[str],
     marked_personal: bool = False,
+    marked_canceled: bool = False,
     postal_code: str | None = None,
 ) -> str:
     """Log update or order_checked. Returns the event_type written."""
@@ -240,6 +261,11 @@ def _log_auto_apply_result(
             if not existed_before
             else f"Moved to personal{zip_note}."
         )
+    elif marked_canceled:
+        event_type = "order_canceled"
+        level = "updates"
+        tracking_for_log = sorted(tracking_after) if not existed_before else added_tracking
+        message = "Order canceled"
     elif not existed_before:
         event_type = "order_imported"
         level = "updates"
@@ -352,6 +378,7 @@ def list_browser_import_logs(
         "order_imported",
         "tracking_updated",
         "order_checked",
+        "order_canceled",
         "order_marked_personal",
         "order_skipped_ignored_zip",  # legacy
         "order_error",
@@ -929,6 +956,7 @@ async def _run_import_job(
             tracking_updated = 0
             checked = 0
             marked_personal = 0
+            marked_canceled = 0
             errors: list[str] = []
             apply_user: User | None = None
             on_order = None
@@ -965,7 +993,7 @@ async def _run_import_job(
 
                 def on_order(raw: dict) -> None:
                     """Apply + log + commit one captured order immediately."""
-                    nonlocal applied, imported, tracking_updated, checked, marked_personal
+                    nonlocal applied, imported, tracking_updated, checked, marked_personal, marked_canceled
                     assert apply_user is not None
                     try:
                         payload = StoreOrderImportPayload.model_validate(raw)
@@ -973,6 +1001,7 @@ async def _run_import_job(
                         existed_before = False
                         was_personal = False
                         tracking_before: set[str] = set()
+                        active_before: set[int] = set()
                         if store_order_number:
                             prior_id, tracking_before = _order_tracking_numbers(
                                 db, store_order_number
@@ -981,6 +1010,7 @@ async def _run_import_job(
                             if prior_id is not None:
                                 prior = db.query(Order).filter(Order.id == prior_id).first()
                                 was_personal = prior is not None and prior.status == "personal"
+                                active_before = _non_canceled_item_ids(db, prior_id)
                         postal = shipping_postal_code_from_payload(payload)
                         order_id = apply_store_order_payload(
                             db,
@@ -992,6 +1022,13 @@ async def _run_import_job(
                         order = db.query(Order).filter(Order.id == order_id).first()
                         is_personal = order is not None and order.status == "personal"
                         became_personal = is_personal and not was_personal
+                        active_after = _non_canceled_item_ids(db, order_id)
+                        if existed_before:
+                            became_canceled = bool(active_before - active_after)
+                        else:
+                            became_canceled = (
+                                not active_after and _order_has_canceled_items(db, order_id)
+                            )
                         if store_order_number:
                             _, tracking_after = _order_tracking_numbers(db, store_order_number)
                             event = _log_auto_apply_result(
@@ -1006,10 +1043,13 @@ async def _run_import_job(
                                 order_id=order_id,
                                 tracking_after=tracking_after,
                                 marked_personal=became_personal,
+                                marked_canceled=became_canceled,
                                 postal_code=postal if isinstance(postal, str) else None,
                             )
                             if event == "order_marked_personal":
                                 marked_personal += 1
+                            elif event == "order_canceled":
+                                marked_canceled += 1
                             elif event == "order_imported":
                                 imported += 1
                             elif event == "tracking_updated":
@@ -1024,7 +1064,8 @@ async def _run_import_job(
                             message=(
                                 f"Processed {label_num} "
                                 f"({applied} applied"
-                                f"{f', {marked_personal} personal' if marked_personal else ''})…"
+                                f"{f', {marked_personal} personal' if marked_personal else ''}"
+                                f"{f', {marked_canceled} canceled' if marked_canceled else ''})…"
                             ),
                             order_count=applied,
                         )
@@ -1150,6 +1191,8 @@ async def _run_import_job(
                 msg = f"Updated {applied} order(s)."
                 if marked_personal:
                     msg += f" {marked_personal} marked personal."
+                if marked_canceled:
+                    msg += f" {marked_canceled} canceled."
                 if errors:
                     msg += f" {len(errors)} failed."
                 update_job(
@@ -1165,6 +1208,8 @@ async def _run_import_job(
                 )
                 if marked_personal:
                     summary += f", {marked_personal} personal"
+                if marked_canceled:
+                    summary += f", {marked_canceled} canceled"
                 if errors:
                     summary += f", {len(errors)} failed"
                 summary += "."

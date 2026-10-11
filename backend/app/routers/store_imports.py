@@ -541,6 +541,15 @@ def _normalized_payload_is_canceled(normalized: dict[str, Any]) -> bool:
         if isinstance(item, dict) and _incoming_item_is_canceled(item):
             return True
 
+    cancellations = normalized.get("cancellations")
+    if isinstance(cancellations, dict):
+        order_level = cancellations.get("orderLevel") or []
+        item_level = cancellations.get("itemLevelReasons") or []
+        if (isinstance(order_level, list) and len(order_level) > 0) or (
+            isinstance(item_level, list) and len(item_level) > 0
+        ):
+            return True
+
     return False
 
 
