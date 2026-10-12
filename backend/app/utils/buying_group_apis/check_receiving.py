@@ -537,17 +537,33 @@ def _check_receiving_parsefile(
     unmatched = _build_unmatched(pending, matched_ids)
 
     if not pending and not unknown_receipts and not matches:
+        message = (
+            "No shipped/submitted (unscanned) items with tracking numbers for this buying group, "
+            "and no unknown Parsefile receipts."
+            if not unscanned_items
+            else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
+            "and no unknown Parsefile receipts."
+        )
+        payload = {
+            "buying_group_id": buying_group_id,
+            "buying_group_name": group_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "not_found_count": 0,
+            "void_skipped_count": 0,
+            "searched_trackings": all_trackings,
+            "raw_csv": raw_csv,
+            "csv_row_count": len(received_rows),
+            "unmatched": [],
+            "unknown_receipts": [],
+            "matches": [],
+        }
+        token = create_receiving_session(payload)
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
+            token=token,
             submitted_count=len(unscanned_items),
-            message=(
-                "No shipped/submitted (unscanned) items with tracking numbers for this buying group, "
-                "and no unknown Parsefile receipts."
-                if not unscanned_items
-                else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
-                "and no unknown Parsefile receipts."
-            ),
+            message=message,
         )
 
     parts: list[str] = []
@@ -812,17 +828,33 @@ def _check_receiving_buyinggroup(
 
     # Even with no pending locals, still open review when there are unknown receipts.
     if not pending and not unknown_receipts and not matches:
+        message = (
+            "No shipped/submitted (unscanned) items with tracking numbers for this buying group, "
+            "and no unknown BG receipts."
+            if not unscanned_items
+            else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
+            "and no unknown BG receipts."
+        )
+        payload = {
+            "buying_group_id": buying_group_id,
+            "buying_group_name": group_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "not_found_count": 0,
+            "void_skipped_count": 0,
+            "searched_trackings": all_trackings,
+            "raw_csv": "",
+            "csv_row_count": len(receipts),
+            "unmatched": [],
+            "unknown_receipts": [],
+            "matches": [],
+        }
+        token = create_receiving_session(payload)
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
+            token=token,
             submitted_count=len(unscanned_items),
-            message=(
-                "No shipped/submitted (unscanned) items with tracking numbers for this buying group, "
-                "and no unknown BG receipts."
-                if not unscanned_items
-                else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
-                "and no unknown BG receipts."
-            ),
+            message=message,
         )
 
     raw_dump = {

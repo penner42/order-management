@@ -58,7 +58,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(formatApiErrorDetail(err, 'Unauthorized'))
   }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    const rawText = await res.text().catch(() => '')
+    let err: unknown = null
+    if (rawText.trim()) {
+      try {
+        err = JSON.parse(rawText)
+      } catch {
+        const snippet = rawText.replace(/\s+/g, ' ').trim().slice(0, 240)
+        err = { detail: snippet || res.statusText || `HTTP ${res.status}` }
+      }
+    } else {
+      err = { detail: res.statusText || `HTTP ${res.status}` }
+    }
     throw new Error(formatApiErrorDetail(err, `Request failed (${res.status})`))
   }
   if (res.status === 204) return undefined as T

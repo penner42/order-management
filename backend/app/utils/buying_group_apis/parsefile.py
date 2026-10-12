@@ -7,6 +7,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -355,8 +356,14 @@ def search_received_items(
     min_created_date: str | None = None,
     max_created_date: str | None = None,
     timeout_seconds: float = 60.0,
+    include_empty_trackings_receipts: bool = False,
 ) -> ParsefileReceivedItemsSearchResult:
-    """POST received-items search; returns parsed rows plus the raw CSV body."""
+    """POST received-items search; returns parsed rows plus the raw CSV body.
+
+    When ``include_empty_trackings_receipts`` is True, always send ``trackings`` /
+    ``receipts`` keys (possibly empty arrays). Parsefile treats empty arrays plus
+    min dates as a full received-items export.
+    """
     if not (bearer_token or "").strip():
         raise ValueError("bearer_token is required")
     if not (email or "").strip():
@@ -378,10 +385,10 @@ def search_received_items(
         "user": int(user_id),
         "email": email.strip(),
     }
-    if cleaned_trackings:
+    if cleaned_trackings or include_empty_trackings_receipts:
         body["trackings"] = cleaned_trackings
-    if receipts:
-        body["receipts"] = [int(r) for r in receipts]
+    if receipts or include_empty_trackings_receipts:
+        body["receipts"] = [int(r) for r in (receipts or [])]
     if min_modified_date:
         body["minModifiedDate"] = min_modified_date
     if max_modified_date:
@@ -438,8 +445,12 @@ def search_received_items(
     )
 
 
-# Epoch floor used when pulling the full received-items export.
-_ALL_RECEIVED_MIN_DATE = "2000-01-01"
+# Default lower bound for full received-items export (Parsefile ``YYYY-MM-DD HH:MM:SS``).
+_ALL_RECEIVED_MIN_DATE = "2020-02-01 00:00:00"
+
+
+def _parsefile_datetime(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def list_all_received_items(
@@ -448,64 +459,38 @@ def list_all_received_items(
     bearer_token: str,
     user_id: int,
     email: str,
+    min_created_date: str | None = None,
+    max_created_date: str | None = None,
+    min_modified_date: str | None = None,
+    max_modified_date: str | None = None,
     timeout_seconds: float = 120.0,
 ) -> ParsefileReceivedItemsSearchResult:
     """POST received-items search with empty trackings/receipts to return all rows.
 
-    Parsefile returns the full export when ``trackings`` and ``receipts`` are empty
-    arrays and min created/modified dates are set.
+    Empty ``trackings``/``receipts`` plus a date window. Max dates default to end of
+    tomorrow (local) when not provided so callers can pass them later.
     """
-    if not (bearer_token or "").strip():
-        raise ValueError("bearer_token is required")
-    if not (email or "").strip():
-        raise ValueError("email is required")
-
-    body: dict[str, Any] = {
-        "user": int(user_id),
-        "email": email.strip(),
-        "trackings": [],
-        "receipts": [],
-        "minCreatedDate": _ALL_RECEIVED_MIN_DATE,
-        "minModifiedDate": _ALL_RECEIVED_MIN_DATE,
-    }
-
-    url = build_received_items_search_url(base_url)
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {bearer_token.strip()}",
-            "Content-Type": "application/json",
-        },
+    min_dt = (min_created_date or min_modified_date or _ALL_RECEIVED_MIN_DATE).strip()
+    # Inclusive upper bound slightly ahead of "now" so same-day receipts are included.
+    default_max = _parsefile_datetime(
+        (datetime.now() + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            raw_text = resp.read().decode("utf-8", errors="replace")
-            status = getattr(resp, "status", 200)
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        parsed_msg = ""
-        if err_body.strip():
-            try:
-                err_json = json.loads(err_body)
-                if isinstance(err_json, dict):
-                    parsed_msg = _message_from_payload(err_json, success=False)
-            except json.JSONDecodeError:
-                parsed_msg = err_body.strip()[:400]
-        detail = parsed_msg or (str(e.reason).strip() if e.reason else "") or "empty response"
-        raise RuntimeError(f"Parsefile API error {e.code} at {url}: {detail}") from e
-    except urllib.error.URLError as e:
-        reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
-        raise RuntimeError(f"Parsefile API request failed ({url}): {reason}") from e
+    max_created = (max_created_date or default_max).strip()
+    max_modified = (max_modified_date or max_created).strip()
+    min_created = (min_created_date or min_dt).strip()
+    min_modified = (min_modified_date or min_dt).strip()
 
-    if status >= 400:
-        raise RuntimeError(f"Parsefile received-items search failed (HTTP {status}) from {url}")
-
-    return ParsefileReceivedItemsSearchResult(
-        rows=parse_received_items_csv(raw_text),
-        raw_csv=raw_text,
-        url=url,
+    return search_received_items(
+        base_url=base_url,
+        bearer_token=bearer_token,
+        user_id=user_id,
+        email=email,
+        trackings=[],
+        receipts=[],
+        min_created_date=min_created,
+        max_created_date=max_created,
+        min_modified_date=min_modified,
+        max_modified_date=max_modified,
+        timeout_seconds=timeout_seconds,
+        include_empty_trackings_receipts=True,
     )
