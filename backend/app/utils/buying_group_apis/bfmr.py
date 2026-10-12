@@ -44,6 +44,7 @@ class BfmrTrackerRow:
     scanned_at: str | None
     status: str | None
     amount_paid: Decimal | None
+    payout_price: Decimal | None
     retail_price: Decimal | None
     item_name: str | None
     deal_title: str | None
@@ -164,6 +165,7 @@ def _parse_tracker_row(row: dict[str, Any]) -> BfmrTrackerRow:
         scanned_at=_first_str(row.get("scanned_at"), row.get("date_processed")),
         status=status,
         amount_paid=_money(row.get("amount_paid")),
+        payout_price=_money(row.get("payout_price")),
         retail_price=_money(row.get("retail_price") or row.get("deal_retail_price")),
         item_name=_first_str(row.get("item_name"), row.get("name")),
         deal_title=_first_str(row.get("deal_title"), row.get("title")),

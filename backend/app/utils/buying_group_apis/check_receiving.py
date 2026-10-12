@@ -159,10 +159,13 @@ def _pick_all_bg_receipts(
 
 
 def _bfmr_received_total(row: bfmr_api.BfmrTrackerRow) -> Decimal | None:
-    """BFMR payout is ``amount_paid`` (not retail_price)."""
-    if row.amount_paid is None:
+    """BFMR payout is ``payout_price`` only (no amount_paid / retail fallback)."""
+    if row.payout_price is None:
         return None
-    return row.amount_paid
+    qty = row.qty_received if row.qty_received is not None else row.qty
+    if qty is not None and qty > 0:
+        return (row.payout_price * Decimal(qty)).quantize(Decimal("0.01"))
+    return row.payout_price
 
 
 def _bfmr_receipt_id(row: bfmr_api.BfmrTrackerRow) -> str | None:
