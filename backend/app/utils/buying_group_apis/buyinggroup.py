@@ -30,6 +30,13 @@ TOKEN_GET_PATH = "/v2/token/get"
 TOKEN_REFRESH_PATH = "/v2/token/refresh"
 GET_ORDERS_PATH = "/v1/order/get_orders"
 UPDATE_ORDER_PATH = "/v1/order/update_order"
+GET_RECEIPTS_PATH = "/v1/receipt/get_receipts"
+GET_ANALYTICS_PATH = "/v1/receipt/get_analytics"
+
+# Browser FormData sends the literal string for empty filters.
+_UNDEFINED = "undefined"
+_MAX_LIST_PAGES = 100
+_DEFAULT_PAGE_SIZE = 50
 
 # Match dealsbot's working BuyingGroup client (WAF rejects non-browser UAs).
 _BROWSER_USER_AGENT = (
@@ -68,6 +75,36 @@ class BuyinggroupSubmitResult:
     raw: dict[str, Any] | list[Any] | None = None
     enriched_count: int = 0
     enrich_errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BuyinggroupReceipt:
+    receipt_id: str | None
+    tracking_id: str | None
+    alt_tracking_id: str | None
+    quantity: int | None
+    total: Decimal | None
+    status: str | None
+    void: bool
+    created_dt: str | None
+    order_id: str | None
+    note: str | None
+    tracking_note: str | None
+    delivery: str | None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class BuyinggroupAnalyticsRow:
+    tracking_id: str | None
+    order_id: str | None
+    description: str | None
+    quantity: int | None
+    price: Decimal | None
+    total: Decimal | None
+    note: str | None
+    tracking_note: str | None
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -780,6 +817,378 @@ def _message_from_add_payload(raw: Any, *, count: int) -> str:
         if isinstance(status, str) and status.strip().upper() == "SUCCESS":
             return f"Submitted {count} tracking number(s) to BuyingGroup.com."
     return f"Submitted {count} tracking number(s) to BuyingGroup.com."
+
+
+def _nested_tracking_id(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("tracking_id", "tracking_number", "tracking"):
+            nested = value.get(key)
+            if nested is not None and str(nested).strip() and str(nested).strip().lower() not in (
+                "null",
+                "none",
+                "---",
+                "undefined",
+            ):
+                return str(nested).strip()
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("null", "none", "---", "undefined"):
+        return None
+    return text
+
+
+def _parse_money_field(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    text = str(value).strip().replace(",", "").replace("$", "")
+    if not text or text.lower() in ("null", "none", "undefined"):
+        return None
+    try:
+        return Decimal(text)
+    except Exception:
+        return None
+
+
+def _parse_int_field(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text or text.lower() in ("null", "none", "undefined"):
+        return None
+    try:
+        return int(Decimal(text))
+    except Exception:
+        return None
+
+
+def _parse_receipt_row(row: dict[str, Any]) -> BuyinggroupReceipt:
+    tracking_id = _nested_tracking_id(row.get("tracking"))
+    if tracking_id is None:
+        tracking_id = _nested_tracking_id(row.get("tracking_id"))
+    alt_tracking_id = _nested_tracking_id(row.get("alt_tracking"))
+    receipt_id = row.get("receipt_id")
+    order_id = row.get("order_id")
+    status = row.get("status")
+    note = row.get("note")
+    tracking_note = row.get("tracking_note")
+    delivery = row.get("delivery")
+    created_dt = row.get("created_dt") or row.get("created_date") or row.get("created_at")
+    void_raw = row.get("void")
+    void = bool(void_raw) if void_raw is not None else False
+    return BuyinggroupReceipt(
+        receipt_id=str(receipt_id).strip() if receipt_id is not None and str(receipt_id).strip() else None,
+        tracking_id=tracking_id,
+        alt_tracking_id=alt_tracking_id,
+        quantity=_parse_int_field(row.get("quantity") if row.get("quantity") is not None else row.get("qty")),
+        total=_parse_money_field(row.get("total")),
+        status=str(status).strip() if status is not None and str(status).strip() else None,
+        void=void,
+        created_dt=str(created_dt).strip() if created_dt is not None and str(created_dt).strip() else None,
+        order_id=str(order_id).strip() if order_id is not None and str(order_id).strip() else None,
+        note=str(note).strip() if note is not None and str(note).strip() else None,
+        tracking_note=(
+            str(tracking_note).strip()
+            if tracking_note is not None and str(tracking_note).strip()
+            else None
+        ),
+        delivery=str(delivery).strip() if delivery is not None and str(delivery).strip() else None,
+        raw=row,
+    )
+
+
+def _receipts_from_payload(raw: Any) -> tuple[list[BuyinggroupReceipt], int]:
+    """Return (receipts, page_count). page_count is 1 when unknown."""
+    if not isinstance(raw, dict):
+        return [], 1
+    payload = raw.get("payload")
+    if not isinstance(payload, dict):
+        payload = raw
+    rows_raw = payload.get("receipts")
+    if not isinstance(rows_raw, list):
+        rows_raw = payload.get("data") if isinstance(payload.get("data"), list) else []
+    pages = _parse_int_field(payload.get("pages")) or 1
+    if pages < 1:
+        pages = 1
+    receipts = [_parse_receipt_row(r) for r in rows_raw if isinstance(r, dict)]
+    return receipts, pages
+
+
+def _receipt_list_fields(*, page: int, page_size: int = _DEFAULT_PAGE_SIZE) -> list[tuple[str, str]]:
+    return [
+        ("page", str(page)),
+        ("page_size", str(page_size)),
+        ("receiver_id", _UNDEFINED),
+        ("delivery", _UNDEFINED),
+        ("tracking_id", _UNDEFINED),
+        ("receipt_ids", _UNDEFINED),
+        ("status", "[]"),
+        ("paid", _UNDEFINED),
+        ("is_label_mismatch", _UNDEFINED),
+        ("no_user", _UNDEFINED),
+        ("no_item", _UNDEFINED),
+        ("note", _UNDEFINED),
+        ("split_from", _UNDEFINED),
+        ("bulk_order", _UNDEFINED),
+        ("warehouse_id", _UNDEFINED),
+        ("order_id", _UNDEFINED),
+        ("date_range", "[]"),
+        ("time_period", _UNDEFINED),
+        ("order_by", _UNDEFINED),
+        ("direction", _UNDEFINED),
+        ("enable_totalization", "false"),
+    ]
+
+
+def _fetch_receipts_page(
+    *,
+    base_url: str,
+    access_token: str,
+    page: int,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+    timeout_seconds: float = 30.0,
+) -> tuple[list[BuyinggroupReceipt], int, Any]:
+    url = f"{resolve_base_url(base_url)}{GET_RECEIPTS_PATH}"
+    status, text, raw = _multipart_request(
+        url=url,
+        fields=_receipt_list_fields(page=page, page_size=page_size),
+        headers=_auth_headers(access_token),
+        timeout_seconds=timeout_seconds,
+    )
+    if isinstance(raw, dict):
+        if _is_auth_failure(status, raw, text):
+            raise _SessionExpired(f"BuyingGroup auth failed at {url}: {_error_detail(raw, text)}")
+        status_val = raw.get("status")
+        if isinstance(status_val, str) and status_val.strip().upper() == "FAIL":
+            raise RuntimeError(f"BuyingGroup get_receipts failed: {_error_detail(raw, text)}")
+    receipts, pages = _receipts_from_payload(raw)
+    return receipts, pages, raw
+
+
+def list_receipts(
+    *,
+    base_url: str | None,
+    username: str,
+    password: str,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+    timeout_seconds: float = 30.0,
+) -> list[BuyinggroupReceipt]:
+    """Paginate get_receipts with no filters; return all receipt rows."""
+    base = resolve_base_url(base_url)
+    tokens = _ensure_tokens(
+        base_url=base,
+        username=username,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    all_rows: list[BuyinggroupReceipt] = []
+    total_pages = 1
+    page = 1
+    while page <= total_pages and page <= _MAX_LIST_PAGES:
+
+        def _call(toks: _AuthTokens, *, _page: int = page) -> tuple[list[BuyinggroupReceipt], int, Any]:
+            return _fetch_receipts_page(
+                base_url=base,
+                access_token=toks.access,
+                page=_page,
+                page_size=page_size,
+                timeout_seconds=timeout_seconds,
+            )
+
+        (rows, pages, _raw), tokens = _with_reauth(
+            base_url=base,
+            username=username,
+            password=password,
+            tokens=tokens,
+            timeout_seconds=timeout_seconds,
+            call=_call,
+        )
+        if page == 1:
+            total_pages = min(max(pages, 1), _MAX_LIST_PAGES)
+        all_rows.extend(rows)
+        if not rows:
+            break
+        page += 1
+    return all_rows
+
+
+def _analytics_list_fields(*, page: int, page_size: int = _DEFAULT_PAGE_SIZE) -> list[tuple[str, str]]:
+    return [
+        ("page", str(page)),
+        ("page_size", str(page_size)),
+        ("order_by", _UNDEFINED),
+        ("direction", _UNDEFINED),
+        ("date_range", _UNDEFINED),
+        ("user_id", _UNDEFINED),
+        ("serial", _UNDEFINED),
+        ("order_note", _UNDEFINED),
+        ("tracking_note", _UNDEFINED),
+        ("item_id", _UNDEFINED),
+        ("commission", _UNDEFINED),
+        ("price", _UNDEFINED),
+        ("tracking_id", _UNDEFINED),
+        ("location_id", _UNDEFINED),
+        ("time_period", "LAST_3_MONTHS"),
+        ("no_user", _UNDEFINED),
+        ("enable_totalization", "false"),
+    ]
+
+
+def _first_str(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in ("null", "none", "undefined", "---"):
+            return text
+    return None
+
+
+def _parse_analytics_row(row: dict[str, Any]) -> BuyinggroupAnalyticsRow:
+    tracking_id = _nested_tracking_id(row.get("tracking"))
+    if tracking_id is None:
+        tracking_id = _nested_tracking_id(row.get("tracking_id") or row.get("tracking_number"))
+    description = _first_str(
+        row.get("item"),
+        row.get("item_name"),
+        row.get("description"),
+        row.get("product"),
+        row.get("title"),
+        row.get("name"),
+        row.get("serial"),
+    )
+    note = _first_str(row.get("note"), row.get("order_note"), row.get("buyer_note"))
+    tracking_note = _first_str(row.get("tracking_note"))
+    order_id = _first_str(row.get("order_id"), row.get("order_num"), row.get("order_number"))
+    qty = _parse_int_field(row.get("quantity") if row.get("quantity") is not None else row.get("qty"))
+    price = _parse_money_field(row.get("price") if row.get("price") is not None else row.get("unit_price"))
+    total = _parse_money_field(
+        row.get("total")
+        if row.get("total") is not None
+        else row.get("ext_total") if row.get("ext_total") is not None else row.get("amount")
+    )
+    return BuyinggroupAnalyticsRow(
+        tracking_id=tracking_id,
+        order_id=order_id,
+        description=description,
+        quantity=qty,
+        price=price,
+        total=total,
+        note=note,
+        tracking_note=tracking_note,
+        raw=row,
+    )
+
+
+def _analytics_rows_from_payload(raw: Any) -> tuple[list[BuyinggroupAnalyticsRow], int]:
+    if not isinstance(raw, dict):
+        if isinstance(raw, list):
+            return [_parse_analytics_row(r) for r in raw if isinstance(r, dict)], 1
+        return [], 1
+    payload = raw.get("payload")
+    if not isinstance(payload, dict):
+        payload = raw if isinstance(raw, dict) else {}
+    rows_raw: list[Any] = []
+    for key in (
+        "analytics",
+        "orders",
+        "items",
+        "receipts",
+        "rows",
+        "data",
+        "results",
+    ):
+        candidate = payload.get(key) if isinstance(payload, dict) else None
+        if isinstance(candidate, list):
+            rows_raw = candidate
+            break
+    if not rows_raw and isinstance(payload, list):
+        rows_raw = payload
+    pages = 1
+    if isinstance(payload, dict):
+        pages = _parse_int_field(payload.get("pages")) or 1
+    if pages < 1:
+        pages = 1
+    return [_parse_analytics_row(r) for r in rows_raw if isinstance(r, dict)], pages
+
+
+def _fetch_analytics_page(
+    *,
+    base_url: str,
+    access_token: str,
+    page: int,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+    timeout_seconds: float = 30.0,
+) -> tuple[list[BuyinggroupAnalyticsRow], int, Any]:
+    url = f"{resolve_base_url(base_url)}{GET_ANALYTICS_PATH}"
+    status, text, raw = _multipart_request(
+        url=url,
+        fields=_analytics_list_fields(page=page, page_size=page_size),
+        headers=_auth_headers(access_token),
+        timeout_seconds=timeout_seconds,
+    )
+    if isinstance(raw, dict):
+        if _is_auth_failure(status, raw, text):
+            raise _SessionExpired(f"BuyingGroup auth failed at {url}: {_error_detail(raw, text)}")
+        status_val = raw.get("status")
+        if isinstance(status_val, str) and status_val.strip().upper() == "FAIL":
+            raise RuntimeError(f"BuyingGroup get_analytics failed: {_error_detail(raw, text)}")
+    rows, pages = _analytics_rows_from_payload(raw)
+    return rows, pages, raw
+
+
+def list_receipt_analytics(
+    *,
+    base_url: str | None,
+    username: str,
+    password: str,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+    timeout_seconds: float = 30.0,
+) -> list[BuyinggroupAnalyticsRow]:
+    """Paginate get_analytics (LAST_3_MONTHS, no other filters)."""
+    base = resolve_base_url(base_url)
+    tokens = _ensure_tokens(
+        base_url=base,
+        username=username,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    all_rows: list[BuyinggroupAnalyticsRow] = []
+    total_pages = 1
+    page = 1
+    while page <= total_pages and page <= _MAX_LIST_PAGES:
+
+        def _call(toks: _AuthTokens, *, _page: int = page) -> tuple[list[BuyinggroupAnalyticsRow], int, Any]:
+            return _fetch_analytics_page(
+                base_url=base,
+                access_token=toks.access,
+                page=_page,
+                page_size=page_size,
+                timeout_seconds=timeout_seconds,
+            )
+
+        (rows, pages, _raw), tokens = _with_reauth(
+            base_url=base,
+            username=username,
+            password=password,
+            tokens=tokens,
+            timeout_seconds=timeout_seconds,
+            call=_call,
+        )
+        if page == 1:
+            total_pages = min(max(pages, 1), _MAX_LIST_PAGES)
+        all_rows.extend(rows)
+        if not rows:
+            break
+        page += 1
+    return all_rows
 
 
 def submit_trackings(

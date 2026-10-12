@@ -33,6 +33,21 @@ interface ReceivingUnmatched {
   expected_amount: string | null
 }
 
+interface ReceivingUnknownReceipt {
+  receipt_id: string | null
+  tracking_number: string
+  bg_order_id: string | null
+  description: string | null
+  quantity: number | null
+  received_price: string | null
+  received_ext_total: string | null
+  received_status: string | null
+  note: string | null
+  created_dt: string | null
+  scanned_at: string | null
+  delivery: string | null
+}
+
 interface ReceivingSession {
   buying_group_id: number
   buying_group_name: string
@@ -43,6 +58,7 @@ interface ReceivingSession {
   raw_csv: string
   csv_row_count: number
   unmatched: ReceivingUnmatched[]
+  unknown_receipts?: ReceivingUnknownReceipt[]
   matches: ReceivingMatch[]
 }
 
@@ -211,7 +227,7 @@ export default function ReceivingReview() {
         <h1 className="text-xl font-semibold text-ink dark:text-gray-100 mb-2">Receiving review</h1>
         <p className="text-ink-muted dark:text-gray-400 mb-4">
           No session was attached to this link. Run <span className="font-medium">Check receiving</span> from a
-          Parsefile buying group.
+          Parsefile or BuyingGroup.com buying group.
         </p>
         <Link to="/buying-groups" className="text-brand-600 dark:text-brand-400 hover:underline text-sm">
           Back to Buying Groups
@@ -238,6 +254,7 @@ export default function ReceivingReview() {
 
   const allApplied = matches.length > 0 && matches.every((m) => appliedIds.has(m.item_id))
   const unmatched = session.unmatched ?? []
+  const unknownReceipts = session.unknown_receipts ?? []
   const searchedTrackings = session.searched_trackings ?? []
   const rawCsv = session.raw_csv ?? ''
 
@@ -249,10 +266,13 @@ export default function ReceivingReview() {
             Receiving review — {session.buying_group_name}
           </h1>
           <p className="text-sm text-ink-muted dark:text-gray-400 mt-1">
-            {matches.length} item{matches.length !== 1 ? 's' : ''} found scanned at Parsefile
-            {session.not_found_count > 0 ? ` · ${session.not_found_count} still unscanned there` : ''}
+            {matches.length} item{matches.length !== 1 ? 's' : ''} matched received
+            {session.not_found_count > 0 ? ` · ${session.not_found_count} local still unmatched` : ''}
             {session.void_skipped_count > 0 ? ` · ${session.void_skipped_count} voided` : ''}
-            {` · API returned ${session.csv_row_count ?? 0} CSV row(s)`}
+            {unknownReceipts.length > 0
+              ? ` · ${unknownReceipts.length} received but not in Order Manager`
+              : ''}
+            {` · API returned ${session.csv_row_count ?? 0} row(s)`}
             {discrepancyCount > 0 ? (
               <span className="text-amber-700 dark:text-amber-400">
                 {' '}
@@ -357,7 +377,7 @@ export default function ReceivingReview() {
                           {m.quantity}× {m.description || '—'}
                         </div>
                         {m.received_item && m.received_item !== m.description && (
-                          <div className="text-xs text-ink-muted mt-0.5">Parsefile: {m.received_item}</div>
+                          <div className="text-xs text-ink-muted mt-0.5">Received as: {m.received_item}</div>
                         )}
                         {applied && (
                           <div className="text-xs text-emerald-700 dark:text-emerald-400 mt-0.5">Applied</div>
@@ -427,13 +447,65 @@ export default function ReceivingReview() {
         </>
       )}
 
+      {unknownReceipts.length > 0 && (
+        <div className="mb-8">
+          <h2 className="text-sm font-medium text-ink mb-2">
+            Received at BG — not in Order Manager ({unknownReceipts.length})
+          </h2>
+          <p className="text-xs text-ink-muted mb-2">
+            Warehouse receipts whose tracking number is not on any shipment in Order Manager. Details
+            enriched from BuyingGroup analytics when available. Informational only — cannot mark scanned.
+          </p>
+          <div className="overflow-x-auto rounded-xl border border-brand-200/80 dark:border-gray-700">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left border-b border-brand-200 dark:border-gray-600 bg-brand-50/40 dark:bg-gray-800/60">
+                  <th className="py-2 px-2 font-medium text-ink-muted">Tracking</th>
+                  <th className="py-2 px-2 font-medium text-ink-muted">Receipt</th>
+                  <th className="py-2 px-2 font-medium text-ink-muted">BG order</th>
+                  <th className="py-2 px-2 font-medium text-ink-muted">Item / note</th>
+                  <th className="py-2 px-2 font-medium text-ink-muted text-right">Qty</th>
+                  <th className="py-2 px-2 font-medium text-ink-muted text-right">Total</th>
+                  <th className="py-2 px-2 font-medium text-ink-muted">Status</th>
+                  <th className="py-2 px-2 font-medium text-ink-muted">Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {unknownReceipts.map((u) => (
+                  <tr
+                    key={`${u.receipt_id || ''}-${u.tracking_number}`}
+                    className="border-b border-brand-100 dark:border-gray-700 last:border-0"
+                  >
+                    <td className="py-2 px-2 font-mono text-xs text-ink">{u.tracking_number}</td>
+                    <td className="py-2 px-2 font-mono text-xs text-ink">{u.receipt_id || '—'}</td>
+                    <td className="py-2 px-2 font-mono text-xs text-ink">{u.bg_order_id || '—'}</td>
+                    <td className="py-2 px-2 text-ink">
+                      <div>{u.description || '—'}</div>
+                      {u.note && <div className="text-xs text-ink-muted mt-0.5">{u.note}</div>}
+                    </td>
+                    <td className="py-2 px-2 text-right tabular-nums text-ink">
+                      {u.quantity != null ? u.quantity : '—'}
+                    </td>
+                    <td className="py-2 px-2 text-right tabular-nums text-ink">
+                      {fmtMoney(u.received_ext_total)}
+                    </td>
+                    <td className="py-2 px-2 text-ink-muted">{u.received_status || '—'}</td>
+                    <td className="py-2 px-2 text-xs text-ink-muted">{u.created_dt || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {unmatched.length > 0 && (
         <div className="mb-8">
           <h2 className="text-sm font-medium text-ink mb-2">
             Not matched ({unmatched.length})
           </h2>
           <p className="text-xs text-ink-muted mb-2">
-            Local unscanned items whose tracking was searched but did not match a non-void Parsefile row.
+            Local unscanned items whose tracking did not match a non-void received row.
           </p>
           <div className="overflow-x-auto rounded-xl border border-brand-200/80 dark:border-gray-700">
             <table className="w-full text-sm">
@@ -479,7 +551,7 @@ export default function ReceivingReview() {
       <div className="mb-4">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h2 className="text-sm font-medium text-ink">
-            Parsefile CSV response ({session.csv_row_count ?? 0} row{session.csv_row_count === 1 ? '' : 's'})
+            API raw response ({session.csv_row_count ?? 0} row{session.csv_row_count === 1 ? '' : 's'})
           </h2>
           <button
             type="button"

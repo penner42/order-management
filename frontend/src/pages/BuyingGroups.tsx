@@ -371,8 +371,9 @@ export default function BuyingGroups() {
       </div>
       <p className="text-sm text-ink-muted mb-8">
         Add aliases to match shipping names and address lines on store imports. Configure API
-        credentials and an optional schedule to batch-submit tracking numbers. For Parsefile groups,
-        Check receiving looks up submitted trackings in the warehouse received-items report.
+        credentials and an optional schedule to batch-submit tracking numbers. For Parsefile and
+        BuyingGroup.com groups, Check receiving looks up submitted trackings in the warehouse
+        received-items / receipts report.
       </p>
       {submitAlert && (
         <p className="mb-4 text-sm text-ink dark:text-gray-200 rounded-lg border border-brand-200 dark:border-gray-600 bg-brand-50/50 dark:bg-gray-700/40 px-3 py-2">
@@ -710,7 +711,7 @@ export default function BuyingGroups() {
                         >
                           {submittingGroupId === g.id ? 'Submitting…' : 'Submit trackings now'}
                         </button>
-                        {g.api_framework === 'parsefile' && (
+                        {(g.api_framework === 'parsefile' || g.api_framework === 'buyinggroup') && (
                           <button
                             type="button"
                             onClick={() => runCheckReceiving(g.id)}

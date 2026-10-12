@@ -257,14 +257,15 @@ def check_buying_group_receiving(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Search Parsefile received-items for submitted trackings; open a review session when matches exist."""
+    """Search warehouse receipts for submitted trackings; open a review session when matches exist."""
     group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
-    if (group.api_framework or "").strip().casefold() != "parsefile":
+    framework = (group.api_framework or "").strip().casefold()
+    if framework not in ("parsefile", "buyinggroup"):
         raise HTTPException(
             status_code=400,
-            detail="Receiving check is only available for Parsefile buying groups",
+            detail="Receiving check is only available for Parsefile or BuyingGroup.com buying groups",
         )
 
     result = check_receiving_for_group(db, buying_group_id=group_id)

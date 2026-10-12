@@ -226,6 +226,23 @@ class ReceivingReviewUnmatched(BaseModel):
     expected_amount: str | None = None
 
 
+class ReceivingReviewUnknownReceipt(BaseModel):
+    """BG receipt whose tracking is not present on any OM shipment."""
+
+    receipt_id: str | None = None
+    tracking_number: str
+    bg_order_id: str | None = None
+    description: str | None = None
+    quantity: int | None = None
+    received_price: str | None = None
+    received_ext_total: str | None = None
+    received_status: str | None = None
+    note: str | None = None
+    created_dt: str | None = None
+    scanned_at: str | None = None
+    delivery: str | None = None
+
+
 class ReceivingReviewSession(BaseModel):
     buying_group_id: int
     buying_group_name: str
@@ -236,4 +253,5 @@ class ReceivingReviewSession(BaseModel):
     raw_csv: str = ""
     csv_row_count: int = 0
     unmatched: list[ReceivingReviewUnmatched] = []
+    unknown_receipts: list[ReceivingReviewUnknownReceipt] = []
     matches: list[ReceivingReviewMatch] = []
