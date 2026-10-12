@@ -103,10 +103,20 @@ def bulk_update_items(
 ):
     """Update multiple items in a single request. delivered_at in entry is applied to the item's shipment."""
     updated: list[Item] = []
+    newly_submitted: list[Item] = []
     for entry in data.updates:
-        item = db.query(Item).filter(Item.id == entry.item_id).first()
+        item = (
+            db.query(Item)
+            .filter(Item.id == entry.item_id)
+            .options(
+                selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
+                joinedload(Item.order).joinedload(Order.buying_group),
+            )
+            .first()
+        )
         if not item:
             raise HTTPException(status_code=404, detail=f"Item {entry.item_id} not found")
+        prev_status = item.status
         payload = entry.model_dump(exclude_unset=True, exclude={"item_id"})
         for k, v in payload.items():
             if k == "delivered_at":
@@ -121,13 +131,80 @@ def bulk_update_items(
                 shipment = db.query(Shipment).filter(Shipment.id == si.shipment_id).first()
                 if shipment:
                     shipment.delivered_at = to_date_only(entry.delivered_at)
+        if (
+            "status" in payload
+            and item.status == ItemStatus.SUBMITTED
+            and prev_status != ItemStatus.SUBMITTED
+        ):
+            newly_submitted.append(item)
         updated.append(item)
     for item in updated:
         _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     for item in updated:
         db.refresh(item)
+
+    if newly_submitted:
+        _log_manual_submitted_items(newly_submitted)
+
     return ItemBulkUpdateResponse(items=updated)
+
+
+def _log_manual_submitted_items(items: list[Item]) -> None:
+    """Write Groups log rows for manual (non-API) submit-shipment / bulk-submit."""
+    from collections import defaultdict
+
+    from app.routers.buying_groups import write_group_tracking_log
+    from app.utils.buying_group_apis.submit_tracking import (
+        append_submission_ids_to_message,
+        tracking_number_for_item,
+    )
+
+    by_group: dict[int | None, list[Item]] = defaultdict(list)
+    for item in items:
+        order = item.order
+        gid = order.buying_group_id if order else None
+        by_group[gid].append(item)
+
+    for _gid, group_items in by_group.items():
+        order = group_items[0].order if group_items else None
+        group = order.buying_group if order else None
+        if group:
+            group_name = (group.name or "").strip() or f"group {group.id}"
+        else:
+            group_name = "No buying group"
+
+        ids_by_tn: dict[str, tuple[str | None, str | None]] = {}
+        tracking_numbers: list[str] = []
+        for item in group_items:
+            tn = tracking_number_for_item(item) or f"item-{item.id}"
+            tracking_numbers.append(tn)
+            sid = (item.submission_id or "").strip() or None
+            said = (item.submission_api_id or "").strip() or None
+            if sid or said:
+                ids_by_tn[tn] = (sid, said)
+
+        msg = append_submission_ids_to_message(
+            f"Manually marked {len(group_items)} item(s) submitted.",
+            ids_by_tn,
+            missing_note=(
+                "Submission ID not provided."
+                if not ids_by_tn
+                else None
+            ),
+        )
+        try:
+            write_group_tracking_log(
+                group=group,
+                group_name=group_name,
+                scheduled=False,
+                level="updates",
+                event_type="tracking_submitted",
+                tracking_numbers=tracking_numbers or None,
+                message=msg,
+            )
+        except Exception:
+            logger.exception("Failed to write manual submit log for group %s", group_name)
 
 
 @router.post("/bulk-delete", status_code=204)
@@ -277,16 +354,34 @@ def submit_item_tracking(
             submission_api_id=api_id,
         )
     db.commit()
+    for it in items_to_mark:
+        db.refresh(it)
 
     # Log Groups-category entry with submission id (same log page as batch submit).
     try:
         from app.routers.buying_groups import write_group_tracking_log
-        from app.utils.buying_group_apis.submit_tracking import format_submission_ids_for_log
+        from app.utils.buying_group_apis.submit_tracking import append_submission_ids_to_message
 
-        log_msg = result.message or "Submitted tracking number."
-        id_summary = format_submission_ids_for_log(result.submission_ids_by_tracking)
-        if id_summary:
-            log_msg = f"{log_msg}\n{id_summary}"
+        # Prefer IDs persisted on items; fall back to the submit result map.
+        ids_for_log: dict[str, tuple[str | None, str | None]] = {}
+        for it in items_to_mark:
+            sid = (it.submission_id or "").strip() or None
+            said = (it.submission_api_id or "").strip() or None
+            if sid or said:
+                ids_for_log[tracking] = (sid, said)
+                break
+        if not ids_for_log and result.submission_ids_by_tracking:
+            ids_for_log = dict(result.submission_ids_by_tracking)
+
+        log_msg = append_submission_ids_to_message(
+            result.message or "Submitted tracking number.",
+            ids_for_log,
+            missing_note=(
+                "Submission ID not retrieved after submit."
+                if not ids_for_log
+                else None
+            ),
+        )
         write_group_tracking_log(
             group=group,
             group_name=(group.name or "").strip() or f"group {group.id}",

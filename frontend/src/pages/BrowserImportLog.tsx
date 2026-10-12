@@ -318,9 +318,9 @@ export default function BrowserImportLogPage() {
                             {row.message && (
                               <div
                                 className={
-                                  row.level === 'error'
+                                  (row.level === 'error'
                                     ? 'text-red-700 dark:text-red-300 break-words'
-                                    : 'text-ink-muted'
+                                    : 'text-ink-muted break-words') + ' whitespace-pre-wrap'
                                 }
                               >
                                 {row.message}
@@ -342,9 +342,9 @@ export default function BrowserImportLogPage() {
                         ) : row.message ? (
                           <span
                             className={
-                              row.level === 'error'
+                              (row.level === 'error'
                                 ? 'text-red-700 dark:text-red-300 break-words'
-                                : 'text-ink-muted'
+                                : 'text-ink-muted break-words') + ' whitespace-pre-wrap'
                             }
                           >
                             {row.message}

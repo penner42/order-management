@@ -544,16 +544,45 @@ def format_submission_ids_for_log(
         return None
     parts: list[str] = []
     for tn, (display, api) in submission_ids_by_tracking.items():
-        label = display or api
+        label = (display or "").strip() or (api or "").strip()
         if not label:
             continue
+        tn_label = (tn or "").strip() or "?"
         if display and api and display != api:
-            parts.append(f"{tn}: {display} (api {api})")
+            parts.append(f"{tn_label} → {display} (api {api})")
         else:
-            parts.append(f"{tn}: {label}")
+            parts.append(f"{tn_label} → {label}")
     if not parts:
         return None
-    return "Submission IDs: " + "; ".join(parts)
+    if len(parts) == 1:
+        # Single submit: lead with a clear "Submission ID:" line.
+        only = parts[0]
+        # only is "TN → ID" — extract ID side for a short header when possible.
+        if " → " in only:
+            _tn, rest = only.split(" → ", 1)
+            return f"Submission ID: {rest}"
+        return f"Submission ID: {only}"
+    return "Submission IDs:\n" + "\n".join(f"  {p}" for p in parts)
+
+
+def append_submission_ids_to_message(
+    message: str | None,
+    submission_ids_by_tracking: dict[str, tuple[str | None, str | None]] | None,
+    *,
+    missing_note: str | None = None,
+) -> str:
+    """Ensure submission ids (or a missing note) appear in a log message."""
+    base = (message or "").strip()
+    summary = format_submission_ids_for_log(submission_ids_by_tracking)
+    if summary:
+        if summary in base:
+            return base
+        return f"{summary}\n{base}" if base else summary
+    if missing_note:
+        note = missing_note.strip()
+        if note and note not in base:
+            return f"{note}\n{base}" if base else note
+    return base or "Submitted tracking number(s)."
 
 
 def _aggregate_usabg_entries(
@@ -835,9 +864,24 @@ def batch_submit_pending_trackings(
                 submission_api_id=api_id,
             )
         db.commit()
-        id_summary = format_submission_ids_for_log(submission_ids_by_tracking)
-        if id_summary:
-            message = f"{message}\n{id_summary}" if message else id_summary
+        # Prefer IDs actually persisted on items (authoritative for the log).
+        persisted: dict[str, tuple[str | None, str | None]] = {}
+        for item in items_to_mark:
+            tn = item_tracking.get(item.id) or ""
+            sid = (item.submission_id or "").strip() or None
+            said = (item.submission_api_id or "").strip() or None
+            if tn and (sid or said):
+                persisted[tn] = (sid, said)
+        ids_for_log = persisted or submission_ids_by_tracking
+        message = append_submission_ids_to_message(
+            message,
+            ids_for_log,
+            missing_note=(
+                "Submission ID not retrieved after submit."
+                if items_to_mark and not ids_for_log
+                else None
+            ),
+        )
         return BatchSubmitResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
@@ -846,7 +890,7 @@ def batch_submit_pending_trackings(
             missing_tracking_count=missing_tracking,
             tracking_numbers=tracking_numbers,
             message=message,
-            submission_ids_by_tracking=submission_ids_by_tracking,
+            submission_ids_by_tracking=ids_for_log,
         )
     except Exception as exc:
         logger.warning(

@@ -144,6 +144,8 @@ def _log_tracking_submit_result(
     scheduled: bool,
     result: BatchSubmitResult,
 ) -> None:
+    from app.utils.buying_group_apis.submit_tracking import append_submission_ids_to_message
+
     if result.error:
         write_group_tracking_log(
             group=group,
@@ -156,7 +158,15 @@ def _log_tracking_submit_result(
         )
         return
     if result.submitted_count > 0:
-        msg = result.message or f"Submitted {result.submitted_count} tracking number(s)."
+        msg = append_submission_ids_to_message(
+            result.message or f"Submitted {result.submitted_count} tracking number(s).",
+            result.submission_ids_by_tracking,
+            missing_note=(
+                "Submission ID not retrieved after submit."
+                if not result.submission_ids_by_tracking
+                else None
+            ),
+        )
         write_group_tracking_log(
             group=group,
             group_name=group_name,
