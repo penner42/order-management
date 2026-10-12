@@ -300,6 +300,8 @@ _RECEIVED_HEADER_ALIASES: dict[str, str] = {
     "commission": "commission",
     "ext total": "ext_total",
     "exttotal": "ext_total",
+    # Parsefile receiving export labels this column "Total Price".
+    "total price": "ext_total",
     "status": "status",
     "delivery": "delivery",
     "tracking numbers": "tracking_numbers",

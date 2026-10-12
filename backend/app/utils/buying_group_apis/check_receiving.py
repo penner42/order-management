@@ -899,13 +899,13 @@ def _check_receiving_parsefile(
             meta["receipt_ids"].append(row.receipt_id)
         if row.status:
             meta["statuses"].append(str(row.status))
-        if row.price is not None:
-            meta["prices"].append(row.price)
+        # BG paid amount = CSV Total Price (mapped to ext_total).
         total = row.ext_total
         if total is None and row.price is not None:
-            total = row.price * qty
+            total = row.price * Decimal(qty)
         if total is not None:
             meta["ext_totals"].append(total)
+            meta["prices"].append((total / Decimal(qty)).quantize(Decimal("0.01")))
         row_scanned = _parse_created_date(row.created_date)
         if row_scanned is not None and (
             meta["scanned_at"] is None or row_scanned > meta["scanned_at"]
@@ -987,8 +987,14 @@ def _check_receiving_parsefile(
         orphan_seen.add(id(row))
         tn = row.tracking_numbers[0]
         received_total = row.ext_total
+        row_qty = row.qty if row.qty is not None else 1
         if received_total is None and row.price is not None:
-            received_total = row.price * (row.qty if row.qty is not None else 1)
+            received_total = row.price * row_qty
+        received_unit = None
+        if received_total is not None and row_qty > 0:
+            received_unit = (received_total / Decimal(row_qty)).quantize(Decimal("0.01"))
+        elif row.price is not None:
+            received_unit = row.price
         scanned_dt = _parse_created_date(row.created_date)
         unknown_receipts.append(
             {
@@ -997,7 +1003,7 @@ def _check_receiving_parsefile(
                 "bg_order_id": None,
                 "description": (row.item or "").strip() or None,
                 "quantity": row.qty,
-                "received_price": str(row.price) if row.price is not None else None,
+                "received_price": str(received_unit) if received_unit is not None else None,
                 "received_ext_total": str(received_total) if received_total is not None else None,
                 "received_status": row.status,
                 "note": None,
