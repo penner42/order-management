@@ -262,10 +262,10 @@ def check_buying_group_receiving(
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
     framework = (group.api_framework or "").strip().casefold()
-    if framework not in ("parsefile", "buyinggroup"):
+    if framework not in ("parsefile", "buyinggroup", "bfmr"):
         raise HTTPException(
             status_code=400,
-            detail="Receiving check is only available for Parsefile or BuyingGroup.com buying groups",
+            detail="Receiving check is only available for Parsefile, BuyingGroup.com, or BFMR buying groups",
         )
 
     result = check_receiving_for_group(db, buying_group_id=group_id)

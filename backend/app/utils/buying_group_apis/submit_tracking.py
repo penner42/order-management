@@ -85,6 +85,25 @@ def dealandrunner_group_ready(group: BuyingGroup | None) -> tuple[bool, str | No
     return True, None
 
 
+def bfmr_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
+    """Return (ready, error_detail) for BFMR receiving checks (API key + secret).
+
+    Tracking submission is not supported yet; this only validates credentials for
+    ``GET /api/v2/my-tracker``.
+    """
+    if group is None:
+        return False, "Order has no buying group"
+    framework = (group.api_framework or "").strip().casefold()
+    if framework != "bfmr":
+        return False, "Buying group API framework is not configured for BFMR"
+    if not (group.api_username or "").strip():
+        return False, "Buying group is missing BFMR API key"
+    if not (group.api_password or "").strip():
+        return False, "Buying group is missing BFMR API secret"
+    # Blank base_url falls back to https://api.bfmr.com.
+    return True, None
+
+
 def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
     """Return (ready, error_detail) for whatever framework the group uses."""
     if group is None:
@@ -98,6 +117,9 @@ def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
         return buyinggroup_group_ready(group)
     if framework == "dealandrunner":
         return dealandrunner_group_ready(group)
+    if framework == "bfmr":
+        # Receiving-only for now; do not treat as tracking-submit ready.
+        return False, "BFMR tracking submission is not supported yet"
     if not framework:
         return False, "Buying group API framework is not configured for submission"
     return False, f"Unsupported buying group API framework: {group.api_framework}"

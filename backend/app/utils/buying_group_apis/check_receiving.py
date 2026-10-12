@@ -12,9 +12,14 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import BuyingGroup, Item, Order, Shipment, ShipmentItem
 from app.models.item import ItemStatus
+from app.utils.buying_group_apis import bfmr as bfmr_api
 from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
 from app.utils.buying_group_apis import parsefile as parsefile_api
-from app.utils.buying_group_apis.submit_tracking import buyinggroup_group_ready, parsefile_group_ready
+from app.utils.buying_group_apis.submit_tracking import (
+    bfmr_group_ready,
+    buyinggroup_group_ready,
+    parsefile_group_ready,
+)
 from app.utils.dates import to_date_only
 
 # Items that may already be at the warehouse but not marked scanned locally.
@@ -173,6 +178,53 @@ def _pick_bg_receipt(
 
     def score(row: buyinggroup_api.BuyinggroupReceipt) -> tuple[Decimal, int]:
         total = row.total
+        if total is None:
+            return (Decimal("999999"), 1)
+        return (abs(total - expected), 0)
+
+    available.sort(key=score)
+    return available[0]
+
+
+def _bfmr_received_total(row: bfmr_api.BfmrTrackerRow) -> Decimal | None:
+    if row.amount_paid is not None and row.amount_paid > 0:
+        return row.amount_paid
+    qty = row.qty_received if row.qty_received is not None else row.qty
+    if row.retail_price is not None and qty is not None and qty > 0:
+        return (row.retail_price * Decimal(qty)).quantize(Decimal("0.01"))
+    return None
+
+
+def _bfmr_receipt_id(row: bfmr_api.BfmrTrackerRow) -> str | None:
+    return row.my_tracker_id or row.shipment_id
+
+
+def _index_bfmr_by_tracking(
+    rows: list[bfmr_api.BfmrTrackerRow],
+) -> dict[str, list[bfmr_api.BfmrTrackerRow]]:
+    index: dict[str, list[bfmr_api.BfmrTrackerRow]] = {}
+    for row in rows:
+        tn = (row.tracking_number or "").strip()
+        if not tn:
+            continue
+        index.setdefault(tn.casefold(), []).append(row)
+    return index
+
+
+def _pick_bfmr_row(
+    candidates: list[bfmr_api.BfmrTrackerRow],
+    *,
+    expected: Decimal | None,
+    used_ids: set[int],
+) -> bfmr_api.BfmrTrackerRow | None:
+    available = [c for c in candidates if id(c) not in used_ids]
+    if not available:
+        return None
+    if len(available) == 1 or expected is None:
+        return available[0]
+
+    def score(row: bfmr_api.BfmrTrackerRow) -> tuple[Decimal, int]:
+        total = _bfmr_received_total(row)
         if total is None:
             return (Decimal("999999"), 1)
         return (abs(total - expected), 0)
@@ -381,10 +433,12 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         return _check_receiving_parsefile(db, group=group, group_name=group_name)
     if framework == "buyinggroup":
         return _check_receiving_buyinggroup(db, group=group, group_name=group_name)
+    if framework == "bfmr":
+        return _check_receiving_bfmr(db, group=group, group_name=group_name)
     return CheckReceivingResult(
         buying_group_id=buying_group_id,
         buying_group_name=group_name,
-        error="Receiving check is only available for Parsefile or BuyingGroup.com groups",
+        error="Receiving check is only available for Parsefile, BuyingGroup.com, or BFMR groups",
     )
 
 
@@ -874,6 +928,236 @@ def _check_receiving_buyinggroup(
     raw_dump = {
         "receipts": [r.raw for r in receipts[:200]],
         "analytics_sample": [a.raw for a in analytics_rows[:50]],
+        "unknown_count": len(unknown_receipts),
+    }
+
+    payload = {
+        "buying_group_id": buying_group_id,
+        "buying_group_name": group_name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "not_found_count": not_found,
+        "void_skipped_count": void_skipped,
+        "searched_trackings": all_trackings,
+        "raw_csv": json.dumps(raw_dump, default=str, indent=2),
+        "csv_row_count": len(receipts),
+        "unmatched": unmatched,
+        "unknown_receipts": unknown_receipts,
+        "matches": [match_to_dict(m) for m in matches],
+    }
+    token = create_receiving_session(payload)
+
+    return CheckReceivingResult(
+        buying_group_id=buying_group_id,
+        buying_group_name=group_name,
+        token=token,
+        matched_count=len(matches),
+        not_found_count=not_found,
+        void_skipped_count=void_skipped,
+        discrepancy_count=discrepancy_count,
+        submitted_count=len(unscanned_items),
+        matches=matches,
+        message=message,
+    )
+
+
+def _check_receiving_bfmr(
+    db: Session,
+    *,
+    group: BuyingGroup,
+    group_name: str,
+) -> CheckReceivingResult:
+    buying_group_id = int(group.id)
+    ready, reason = bfmr_group_ready(group)
+    if not ready:
+        return CheckReceivingResult(
+            buying_group_id=buying_group_id,
+            buying_group_name=group_name,
+            error=reason or "Buying group BFMR API is not configured",
+        )
+
+    unscanned_items, pending, all_trackings = _collect_pending(db, buying_group_id=buying_group_id)
+    api_key = str(group.api_username or "").strip()
+    api_secret = str(group.api_password or "")
+    base_url = (group.base_url or "").strip() or None
+
+    try:
+        receipts = bfmr_api.list_received_tracker_rows(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+    except Exception as exc:
+        return CheckReceivingResult(
+            buying_group_id=buying_group_id,
+            buying_group_name=group_name,
+            submitted_count=len(unscanned_items),
+            error=str(exc).strip() or exc.__class__.__name__,
+        )
+
+    by_tracking = _index_bfmr_by_tracking(receipts)
+    used_row_ids: set[int] = set()
+    matches: list[ReceivingMatch] = []
+    not_found = 0
+    void_skipped = 0
+
+    for item, order, trackings in pending:
+        candidates: list[bfmr_api.BfmrTrackerRow] = []
+        seen_cand: set[int] = set()
+        matched_tracking = trackings[0]
+        for tn in trackings:
+            for row in by_tracking.get(tn.casefold()) or []:
+                rid = id(row)
+                if rid in seen_cand:
+                    continue
+                seen_cand.add(rid)
+                candidates.append(row)
+            if by_tracking.get(tn.casefold()):
+                matched_tracking = tn
+
+        if not candidates:
+            not_found += 1
+            continue
+
+        expected = _expected_amount(item)
+        row = _pick_bfmr_row(candidates, expected=expected, used_ids=used_row_ids)
+        if row is None:
+            void_skipped += 1
+            continue
+        used_row_ids.add(id(row))
+
+        for tn in trackings:
+            if tn.casefold() == (row.tracking_number or "").casefold():
+                matched_tracking = tn
+                break
+
+        received_qty = row.qty_received if row.qty_received is not None else row.qty
+        received_total = _bfmr_received_total(row)
+        received_price: Decimal | None = None
+        if received_total is not None and received_qty and received_qty > 0:
+            received_price = (received_total / Decimal(received_qty)).quantize(Decimal("0.01"))
+        elif row.retail_price is not None:
+            received_price = row.retail_price
+
+        scanned_dt = _parse_created_date(row.scanned_at) or to_date_only(datetime.now(timezone.utc))
+        discrepancy = _amounts_differ(expected, received_total)
+        description = (row.item_name or row.deal_title or "").strip() or None
+
+        matches.append(
+            ReceivingMatch(
+                item_id=item.id,
+                order_id=order.id,
+                store_order_number=(order.store_order_number or "").strip() or None,
+                description=(item.description or "").strip() or None,
+                quantity=item.quantity or 1,
+                tracking_number=matched_tracking,
+                price_sold=_money(item.price_sold),
+                expected_amount=expected,
+                receipt_id=_bfmr_receipt_id(row),
+                scanned_at=_iso_date(scanned_dt),
+                received_item=description,
+                received_qty=received_qty,
+                received_price=received_price,
+                received_ext_total=received_total,
+                received_status=row.status,
+                amount_discrepancy=discrepancy,
+                selected=True,
+            )
+        )
+
+    known_trackings = _known_shipment_trackings(db)
+    unknown_receipts: list[dict[str, Any]] = []
+    orphan_seen: set[int] = set()
+    for row in receipts:
+        tn = (row.tracking_number or "").strip()
+        if not tn:
+            continue
+        if tn.casefold() in known_trackings:
+            continue
+        if id(row) in used_row_ids or id(row) in orphan_seen:
+            continue
+        orphan_seen.add(id(row))
+        received_qty = row.qty_received if row.qty_received is not None else row.qty
+        received_total = _bfmr_received_total(row)
+        received_price: Decimal | None = None
+        if received_total is not None and received_qty and received_qty > 0:
+            received_price = (received_total / Decimal(received_qty)).quantize(Decimal("0.01"))
+        elif row.retail_price is not None:
+            received_price = row.retail_price
+        scanned_dt = _parse_created_date(row.scanned_at)
+        unknown_receipts.append(
+            {
+                "receipt_id": _bfmr_receipt_id(row),
+                "tracking_number": tn,
+                "bg_order_id": row.order_id,
+                "description": (row.item_name or row.deal_title or "").strip() or None,
+                "quantity": received_qty,
+                "received_price": str(received_price) if received_price is not None else None,
+                "received_ext_total": str(received_total) if received_total is not None else None,
+                "received_status": row.status,
+                "note": None,
+                "created_dt": row.scanned_at,
+                "scanned_at": _iso_date(scanned_dt),
+                "delivery": None,
+            }
+        )
+
+    discrepancy_count = sum(1 for m in matches if m.amount_discrepancy)
+    checked_summary = (
+        f"Checked {len(pending)} unscanned item(s) / {len(all_trackings)} tracking number(s) "
+        f"against BFMR ({len(receipts)} received tracker row(s))."
+    )
+
+    matched_ids = {m.item_id for m in matches}
+    unmatched = _build_unmatched(pending, matched_ids)
+
+    parts: list[str] = []
+    if matches:
+        parts.append(
+            f"Found {len(matches)} received item(s) ready to mark scanned"
+            + (f" ({discrepancy_count} amount discrepancy)" if discrepancy_count else "")
+        )
+    if unknown_receipts:
+        parts.append(f"{len(unknown_receipts)} BFMR tracker row(s) with tracking not in Order Manager")
+    if not matches and not unknown_receipts:
+        bits = [checked_summary]
+        if not_found:
+            bits.append(f"{not_found} local item(s) not found as received.")
+        message = " ".join(bits) + " Nothing to review."
+    else:
+        message = ". ".join(parts) + f". {checked_summary}"
+
+    if not pending and not unknown_receipts and not matches:
+        message = (
+            "No shipped/submitted (unscanned) items with tracking numbers for this buying group, "
+            "and no unknown BFMR tracker rows."
+            if not unscanned_items
+            else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
+            "and no unknown BFMR tracker rows."
+        )
+        payload = {
+            "buying_group_id": buying_group_id,
+            "buying_group_name": group_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "not_found_count": 0,
+            "void_skipped_count": 0,
+            "searched_trackings": all_trackings,
+            "raw_csv": "",
+            "csv_row_count": len(receipts),
+            "unmatched": [],
+            "unknown_receipts": [],
+            "matches": [],
+        }
+        token = create_receiving_session(payload)
+        return CheckReceivingResult(
+            buying_group_id=buying_group_id,
+            buying_group_name=group_name,
+            token=token,
+            submitted_count=len(unscanned_items),
+            message=message,
+        )
+
+    raw_dump = {
+        "tracker_rows": [r.raw for r in receipts[:200]],
         "unknown_count": len(unknown_receipts),
     }
 

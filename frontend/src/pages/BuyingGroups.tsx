@@ -10,6 +10,7 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
   { value: 'usabg', label: 'USABG' },
   { value: 'buyinggroup', label: 'BuyingGroup.com' },
   { value: 'dealandrunner', label: 'Deal & Runner' },
+  { value: 'bfmr', label: 'BFMR' },
 ]
 
 const PARSEFILE_DEFAULT_API_URL = '/p/it@api@order-management'
@@ -17,10 +18,29 @@ const USABG_DEFAULT_BASE_URL = 'https://api.usabuying.group/buyers'
 const BUYINGGROUP_DEFAULT_BASE_URL = 'https://api.prod.buyinggroup.com'
 const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH = '/v1/order/add_trackings'
 const DEALANDRUNNER_DEFAULT_BASE_URL = 'https://api.dealandrunner.com'
+const BFMR_DEFAULT_BASE_URL = 'https://api.bfmr.com'
 const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
 
 function usesUsernamePassword(framework: string | null | undefined): boolean {
-  return framework === 'usabg' || framework === 'buyinggroup' || framework === 'dealandrunner'
+  return (
+    framework === 'usabg' ||
+    framework === 'buyinggroup' ||
+    framework === 'dealandrunner' ||
+    framework === 'bfmr'
+  )
+}
+
+function supportsTrackingSubmit(framework: string | null | undefined): boolean {
+  return (
+    framework === 'parsefile' ||
+    framework === 'usabg' ||
+    framework === 'buyinggroup' ||
+    framework === 'dealandrunner'
+  )
+}
+
+function supportsCheckReceiving(framework: string | null | undefined): boolean {
+  return framework === 'parsefile' || framework === 'buyinggroup' || framework === 'bfmr'
 }
 
 function formatLastRun(iso: string | null | undefined): string {
@@ -33,6 +53,7 @@ function formatLastRun(iso: string | null | undefined): string {
 }
 
 function canSubmitTrackings(g: BuyingGroup): boolean {
+  if (!supportsTrackingSubmit(g.api_framework)) return false
   if (g.api_framework === 'parsefile') {
     return (
       Boolean(g.bearer_token?.trim()) &&
@@ -49,18 +70,28 @@ function canSubmitTrackings(g: BuyingGroup): boolean {
   return false
 }
 
+function canCheckReceiving(g: BuyingGroup): boolean {
+  if (!supportsCheckReceiving(g.api_framework)) return false
+  if (g.api_framework === 'bfmr') {
+    return Boolean(g.api_username?.trim()) && Boolean(g.api_password?.trim())
+  }
+  return canSubmitTrackings(g)
+}
+
 function effectiveBaseUrl(g: BuyingGroup): string {
   const base = g.base_url?.trim()
   if (base) return base
   if (g.api_framework === 'usabg') return USABG_DEFAULT_BASE_URL
   if (g.api_framework === 'buyinggroup') return BUYINGGROUP_DEFAULT_BASE_URL
   if (g.api_framework === 'dealandrunner') return DEALANDRUNNER_DEFAULT_BASE_URL
+  if (g.api_framework === 'bfmr') return BFMR_DEFAULT_BASE_URL
   return ''
 }
 
 function effectiveApiUrl(g: BuyingGroup): string {
   if (g.api_framework === 'usabg') return '/trackings'
   if (g.api_framework === 'dealandrunner') return '/tracking'
+  if (g.api_framework === 'bfmr') return '/api/v2/my-tracker'
   if (g.api_framework === 'buyinggroup') {
     return g.api_url?.trim() || BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH
   }
@@ -270,7 +301,9 @@ export default function BuyingGroups() {
         api_password: usesUsernamePassword(draft.api_framework)
           ? draft.api_password.trim() || null
           : null,
-        tracking_submit_enabled: draft.tracking_submit_enabled,
+        tracking_submit_enabled: supportsTrackingSubmit(draft.api_framework)
+          ? draft.tracking_submit_enabled
+          : false,
         tracking_submit_cron: draft.tracking_submit_cron.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
       })
       setGroups((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
@@ -371,9 +404,9 @@ export default function BuyingGroups() {
       </div>
       <p className="text-sm text-ink-muted mb-8">
         Add aliases to match shipping names and address lines on store imports. Configure API
-        credentials and an optional schedule to batch-submit tracking numbers. For Parsefile and
-        BuyingGroup.com groups, Check receiving looks up submitted trackings in the warehouse
-        received-items / receipts report.
+        credentials and an optional schedule to batch-submit tracking numbers. For Parsefile,
+        BuyingGroup.com, and BFMR groups, Check receiving looks up submitted trackings in the
+        warehouse received-items / receipts / my-tracker report.
       </p>
       {submitAlert && (
         <p className="mb-4 text-sm text-ink dark:text-gray-200 rounded-lg border border-brand-200 dark:border-gray-600 bg-brand-50/50 dark:bg-gray-700/40 px-3 py-2">
@@ -465,7 +498,9 @@ export default function BuyingGroups() {
                               ? 'Base URL (optional; blank uses BuyingGroup.com default)'
                               : draft.api_framework === 'dealandrunner'
                                 ? 'Base URL (optional; blank uses Deal & Runner default)'
-                                : 'Base URL'}
+                                : draft.api_framework === 'bfmr'
+                                  ? 'Base URL (optional; blank uses BFMR default)'
+                                  : 'Base URL'}
                         </span>
                         <input
                           type="url"
@@ -477,7 +512,9 @@ export default function BuyingGroups() {
                                 ? BUYINGGROUP_DEFAULT_BASE_URL
                                 : draft.api_framework === 'dealandrunner'
                                   ? DEALANDRUNNER_DEFAULT_BASE_URL
-                                  : 'https://www.powerbuynetwork.com'
+                                  : draft.api_framework === 'bfmr'
+                                    ? BFMR_DEFAULT_BASE_URL
+                                    : 'https://www.powerbuynetwork.com'
                           }
                           value={draft.base_url}
                           onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
@@ -564,7 +601,11 @@ export default function BuyingGroups() {
                         <>
                           <label className="block">
                             <span className="text-xs text-ink-muted">
-                              {draft.api_framework === 'dealandrunner' ? 'Email' : 'Username'}
+                              {draft.api_framework === 'bfmr'
+                                ? 'API Key'
+                                : draft.api_framework === 'dealandrunner'
+                                  ? 'Email'
+                                  : 'Username'}
                             </span>
                             <input
                               type={draft.api_framework === 'dealandrunner' ? 'email' : 'text'}
@@ -574,7 +615,9 @@ export default function BuyingGroups() {
                                   ? 'BuyingGroup.com username'
                                   : draft.api_framework === 'dealandrunner'
                                     ? 'you@example.com'
-                                    : 'USABG username'
+                                    : draft.api_framework === 'bfmr'
+                                      ? 'BFMR API-KEY'
+                                      : 'USABG username'
                               }
                               value={draft.api_username}
                               onChange={(e) => setDraft((d) => ({ ...d, api_username: e.target.value }))}
@@ -583,7 +626,9 @@ export default function BuyingGroups() {
                             />
                           </label>
                           <label className="block">
-                            <span className="text-xs text-ink-muted">Password</span>
+                            <span className="text-xs text-ink-muted">
+                              {draft.api_framework === 'bfmr' ? 'API Secret' : 'Password'}
+                            </span>
                             <input
                               type="password"
                               className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
@@ -592,7 +637,9 @@ export default function BuyingGroups() {
                                   ? 'BuyingGroup.com password'
                                   : draft.api_framework === 'dealandrunner'
                                     ? 'Deal & Runner password'
-                                    : 'USABG password'
+                                    : draft.api_framework === 'bfmr'
+                                      ? 'BFMR API-SECRET'
+                                      : 'USABG password'
                               }
                               value={draft.api_password}
                               onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}
@@ -602,8 +649,7 @@ export default function BuyingGroups() {
                           </label>
                         </>
                       )}
-                      {(draft.api_framework === 'parsefile' ||
-                        usesUsernamePassword(draft.api_framework)) && (
+                      {supportsTrackingSubmit(draft.api_framework) && (
                         <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
                           <label className="inline-flex items-center gap-2 text-sm text-ink">
                             <input
@@ -694,7 +740,7 @@ export default function BuyingGroups() {
                         </button>
                       </div>
                     </div>
-                    {(g.api_framework === 'parsefile' || usesUsernamePassword(g.api_framework)) && (
+                    {supportsTrackingSubmit(g.api_framework) && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
                         <span>
                           Auto-submit:{' '}
@@ -711,16 +757,28 @@ export default function BuyingGroups() {
                         >
                           {submittingGroupId === g.id ? 'Submitting…' : 'Submit trackings now'}
                         </button>
-                        {(g.api_framework === 'parsefile' || g.api_framework === 'buyinggroup') && (
+                        {supportsCheckReceiving(g.api_framework) && (
                           <button
                             type="button"
                             onClick={() => runCheckReceiving(g.id)}
-                            disabled={!canSubmitTrackings(g) || checkingReceivingGroupId === g.id}
+                            disabled={!canCheckReceiving(g) || checkingReceivingGroupId === g.id}
                             className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs text-ink hover:bg-brand-50 dark:hover:bg-gray-700 disabled:opacity-50"
                           >
                             {checkingReceivingGroupId === g.id ? 'Checking…' : 'Check receiving'}
                           </button>
                         )}
+                      </div>
+                    )}
+                    {g.api_framework === 'bfmr' && (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
+                        <button
+                          type="button"
+                          onClick={() => runCheckReceiving(g.id)}
+                          disabled={!canCheckReceiving(g) || checkingReceivingGroupId === g.id}
+                          className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs text-ink hover:bg-brand-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                        >
+                          {checkingReceivingGroupId === g.id ? 'Checking…' : 'Check receiving'}
+                        </button>
                       </div>
                     )}
                   </div>
