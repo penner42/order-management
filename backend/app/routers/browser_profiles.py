@@ -191,7 +191,12 @@ _STATUS_LOG_LABELS = {
     "payment_received": "paid",
     "payment_sent": "payment sent",
     "payment_requested": "payment requested",
+    "new": "new",
 }
+
+
+def _status_log_label(status: str) -> str:
+    return _STATUS_LOG_LABELS.get(status, status)
 
 
 def _effective_item_status_for_log(item: Item) -> str:
@@ -206,24 +211,38 @@ def _effective_item_status_for_log(item: Item) -> str:
     return "unknown"
 
 
-def _uncanceled_log_message(db: Session, item_ids: set[int]) -> str:
-    """Build Details text like: Uncanceled: canceled → scanned, paid"""
-    if not item_ids:
-        return "Uncanceled: canceled → unknown"
+def _item_status_snapshot(db: Session, order_id: int) -> dict[int, str]:
     items = (
         db.query(Item)
         .options(selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment))
-        .filter(Item.id.in_(item_ids))
+        .filter(Item.order_id == order_id)
         .all()
     )
-    labels = sorted(
-        {
-            _STATUS_LOG_LABELS.get(status, status)
-            for status in (_effective_item_status_for_log(item) for item in items)
-        }
-    )
-    after = ", ".join(labels) if labels else "unknown"
-    return f"Uncanceled: canceled → {after}"
+    return {item.id: _effective_item_status_for_log(item) for item in items}
+
+
+def _format_status_transitions(
+    before: dict[int, str],
+    after: dict[int, str],
+) -> str | None:
+    """Build Details text like: canceled → scanned, paid — or purchased → shipped."""
+    pairs: list[tuple[str, str]] = []
+    for item_id, after_status in after.items():
+        before_status = before.get(item_id, "new")
+        if before_status == after_status:
+            continue
+        pairs.append((_status_log_label(before_status), _status_log_label(after_status)))
+    if not pairs:
+        return None
+
+    uniq = sorted(set(pairs))
+    befores = sorted({b for b, _ in uniq})
+    afters = sorted({a for _, a in uniq})
+    if len(befores) == 1:
+        return f"{befores[0]} → {', '.join(afters)}"
+    if len(afters) == 1:
+        return f"{', '.join(befores)} → {afters[0]}"
+    return ", ".join(f"{b} → {a}" for b, a in uniq)
 
 
 def _order_has_canceled_items(db: Session, order_id: int) -> bool:
@@ -295,44 +314,47 @@ def _log_auto_apply_result(
     tracking_before: set[str],
     order_id: int,
     tracking_after: set[str],
+    statuses_before: dict[int, str] | None = None,
+    statuses_after: dict[int, str] | None = None,
     marked_personal: bool = False,
     marked_canceled: bool = False,
     marked_uncanceled: bool = False,
-    uncanceled_item_ids: set[int] | None = None,
     postal_code: str | None = None,
 ) -> str:
     """Log update or order_checked. Returns the event_type written."""
     added_tracking = sorted(tracking_after - tracking_before)
+    status_msg = _format_status_transitions(statuses_before or {}, statuses_after or {})
     if marked_personal:
         event_type = "order_marked_personal"
         level = "updates"
         tracking_for_log = sorted(tracking_after) if not existed_before else added_tracking
         zip_note = f" (ignored zip {postal_code})" if postal_code else ""
-        message = (
+        base = (
             f"Imported as personal{zip_note}."
             if not existed_before
             else f"Moved to personal{zip_note}."
         )
+        message = f"{base} {status_msg}" if status_msg else base
     elif marked_canceled:
         event_type = "order_canceled"
         level = "updates"
         tracking_for_log = sorted(tracking_after) if not existed_before else added_tracking
-        message = "Order canceled"
+        message = status_msg or "canceled"
     elif marked_uncanceled:
         event_type = "order_uncanceled"
         level = "updates"
         tracking_for_log = sorted(tracking_after) if not existed_before else added_tracking
-        message = _uncanceled_log_message(db, uncanceled_item_ids or set())
+        message = status_msg or "canceled → unknown"
     elif not existed_before:
         event_type = "order_imported"
         level = "updates"
         tracking_for_log = sorted(tracking_after)
-        message = None
+        message = status_msg
     elif added_tracking:
         event_type = "tracking_updated"
         level = "updates"
         tracking_for_log = added_tracking
-        message = None
+        message = status_msg
     else:
         event_type = "order_checked"
         level = "info"
@@ -1062,6 +1084,7 @@ async def _run_import_job(
                         tracking_before: set[str] = set()
                         active_before: set[int] = set()
                         canceled_before: set[int] = set()
+                        statuses_before: dict[int, str] = {}
                         if store_order_number:
                             prior_id, tracking_before = _order_tracking_numbers(
                                 db, store_order_number
@@ -1072,6 +1095,7 @@ async def _run_import_job(
                                 was_personal = prior is not None and prior.status == "personal"
                                 active_before = _non_canceled_item_ids(db, prior_id)
                                 canceled_before = _canceled_item_ids(db, prior_id)
+                                statuses_before = _item_status_snapshot(db, prior_id)
                         postal = shipping_postal_code_from_payload(payload)
                         order_id = apply_store_order_payload(
                             db,
@@ -1085,11 +1109,10 @@ async def _run_import_job(
                         became_personal = is_personal and not was_personal
                         active_after = _non_canceled_item_ids(db, order_id)
                         canceled_after = _canceled_item_ids(db, order_id)
-                        uncanceled_item_ids: set[int] = set()
+                        statuses_after = _item_status_snapshot(db, order_id)
                         if existed_before:
                             became_canceled = bool(active_before - active_after)
-                            uncanceled_item_ids = canceled_before - canceled_after
-                            became_uncanceled = bool(uncanceled_item_ids)
+                            became_uncanceled = bool(canceled_before - canceled_after)
                         else:
                             became_canceled = (
                                 not active_after and _order_has_canceled_items(db, order_id)
@@ -1108,10 +1131,11 @@ async def _run_import_job(
                                 tracking_before=tracking_before,
                                 order_id=order_id,
                                 tracking_after=tracking_after,
+                                statuses_before=statuses_before,
+                                statuses_after=statuses_after,
                                 marked_personal=became_personal,
                                 marked_canceled=became_canceled,
                                 marked_uncanceled=became_uncanceled,
-                                uncanceled_item_ids=uncanceled_item_ids,
                                 postal_code=postal if isinstance(postal, str) else None,
                             )
                             if event == "order_marked_personal":

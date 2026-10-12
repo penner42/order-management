@@ -14,6 +14,7 @@ import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
 import ImportReview from './pages/ImportReview'
 import ImportReviewBulk from './pages/ImportReviewBulk'
+import ReceivingReview from './pages/ReceivingReview'
 import PersonalOrders from './pages/PersonalOrders'
 import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
@@ -237,6 +238,7 @@ function AppShell() {
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
+          <Route path="/receiving-review" element={<ReceivingReview />} />
           <Route path="/personal-orders" element={<PersonalOrders />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />

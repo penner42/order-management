@@ -14,10 +14,16 @@ from app.models import BrowserImportLog, BuyingGroup, User
 from app.models.user import get_default_app_user_id
 from app.schemas.buying_group import (
     DEFAULT_TRACKING_SUBMIT_CRON,
+    BuyingGroupCheckReceivingResponse,
     BuyingGroupCreate,
     BuyingGroupRead,
     BuyingGroupSubmitTrackingResponse,
     BuyingGroupUpdate,
+    ReceivingReviewSession,
+)
+from app.utils.buying_group_apis.check_receiving import (
+    check_receiving_for_group,
+    get_receiving_session,
 )
 from app.utils.buying_group_apis.submit_tracking import (
     BatchSubmitResult,
@@ -243,6 +249,53 @@ def submit_buying_group_trackings(
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
     return _run_tracking_submit(db, group, scheduled=False)
+
+
+@router.post("/{group_id}/check-receiving", response_model=BuyingGroupCheckReceivingResponse)
+def check_buying_group_receiving(
+    group_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Search Parsefile received-items for submitted trackings; open a review session when matches exist."""
+    group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Buying group not found")
+    if (group.api_framework or "").strip().casefold() != "parsefile":
+        raise HTTPException(
+            status_code=400,
+            detail="Receiving check is only available for Parsefile buying groups",
+        )
+
+    result = check_receiving_for_group(db, buying_group_id=group_id)
+    if result.error:
+        raise HTTPException(status_code=502, detail=result.error)
+
+    review_path = f"/receiving-review?token={result.token}" if result.token else None
+    return BuyingGroupCheckReceivingResponse(
+        buying_group_id=result.buying_group_id,
+        buying_group_name=result.buying_group_name,
+        token=result.token,
+        matched_count=result.matched_count,
+        not_found_count=result.not_found_count,
+        void_skipped_count=result.void_skipped_count,
+        discrepancy_count=result.discrepancy_count,
+        submitted_count=result.submitted_count,
+        message=result.message,
+        review_path=review_path,
+    )
+
+
+@router.get("/receiving-sessions/{token}", response_model=ReceivingReviewSession)
+def get_receiving_review_session(
+    token: str,
+    _: User = Depends(get_current_user),
+):
+    """Resolve a receiving-check session token into matched items for review."""
+    payload = get_receiving_session(token)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Receiving review session not found or expired.")
+    return ReceivingReviewSession.model_validate(payload)
 
 
 def list_due_tracking_submit_group_ids(db: Session) -> list[int]:

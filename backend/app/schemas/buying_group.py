@@ -180,3 +180,45 @@ class BuyingGroupSubmitTrackingResponse(BaseModel):
     message: str | None = None
     tracking_numbers: list[str] = []
     tracking_submit_last_run_at: datetime | None = None
+
+
+class BuyingGroupCheckReceivingResponse(BaseModel):
+    buying_group_id: int
+    buying_group_name: str
+    token: str | None = None
+    matched_count: int = 0
+    not_found_count: int = 0
+    void_skipped_count: int = 0
+    discrepancy_count: int = 0
+    submitted_count: int = 0
+    message: str | None = None
+    review_path: str | None = None
+
+
+class ReceivingReviewMatch(BaseModel):
+    item_id: int
+    order_id: int
+    store_order_number: str | None = None
+    description: str | None = None
+    quantity: int = 1
+    tracking_number: str
+    price_sold: str | None = None
+    expected_amount: str | None = None
+    receipt_id: str | None = None
+    scanned_at: str | None = None
+    received_item: str | None = None
+    received_qty: int | None = None
+    received_price: str | None = None
+    received_ext_total: str | None = None
+    received_status: str | None = None
+    amount_discrepancy: bool = False
+    selected: bool = True
+
+
+class ReceivingReviewSession(BaseModel):
+    buying_group_id: int
+    buying_group_name: str
+    created_at: str | None = None
+    not_found_count: int = 0
+    void_skipped_count: int = 0
+    matches: list[ReceivingReviewMatch] = []

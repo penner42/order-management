@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { BuyingGroup, BuyingGroupApiFramework } from '../api/types'
@@ -218,6 +218,7 @@ function frameworkLabel(framework: string | null | undefined): string | null {
 }
 
 export default function BuyingGroups() {
+  const navigate = useNavigate()
   const [groups, setGroups] = useState<BuyingGroup[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<number | null>(null)
@@ -226,6 +227,7 @@ export default function BuyingGroups() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
   const [submittingGroupId, setSubmittingGroupId] = useState<number | null>(null)
+  const [checkingReceivingGroupId, setCheckingReceivingGroupId] = useState<number | null>(null)
   const [submitAlert, setSubmitAlert] = useState<string | null>(null)
 
   useEffect(() => {
@@ -307,6 +309,30 @@ export default function BuyingGroups() {
     }
   }
 
+  const runCheckReceiving = async (groupId: number) => {
+    setCheckingReceivingGroupId(groupId)
+    setSubmitAlert(null)
+    try {
+      const res = await api.post<{
+        buying_group_id: number
+        token: string | null
+        matched_count: number
+        message: string | null
+        review_path: string | null
+      }>(`/buying-groups/${groupId}/check-receiving`, {})
+      if (res.token && res.review_path) {
+        navigate(res.review_path)
+        return
+      }
+      setSubmitAlert(res.message || 'No received items found to mark scanned.')
+    } catch (e) {
+      console.error(e)
+      setSubmitAlert(e instanceof Error ? e.message : 'Failed to check receiving')
+    } finally {
+      setCheckingReceivingGroupId(null)
+    }
+  }
+
   const create = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!createName.trim()) return
@@ -345,7 +371,8 @@ export default function BuyingGroups() {
       </div>
       <p className="text-sm text-ink-muted mb-8">
         Add aliases to match shipping names and address lines on store imports. Configure API
-        credentials and an optional schedule to batch-submit tracking numbers.
+        credentials and an optional schedule to batch-submit tracking numbers. For Parsefile groups,
+        Check receiving looks up submitted trackings in the warehouse received-items report.
       </p>
       {submitAlert && (
         <p className="mb-4 text-sm text-ink dark:text-gray-200 rounded-lg border border-brand-200 dark:border-gray-600 bg-brand-50/50 dark:bg-gray-700/40 px-3 py-2">
@@ -683,6 +710,16 @@ export default function BuyingGroups() {
                         >
                           {submittingGroupId === g.id ? 'Submitting…' : 'Submit trackings now'}
                         </button>
+                        {g.api_framework === 'parsefile' && (
+                          <button
+                            type="button"
+                            onClick={() => runCheckReceiving(g.id)}
+                            disabled={!canSubmitTrackings(g) || checkingReceivingGroupId === g.id}
+                            className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs text-ink hover:bg-brand-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                          >
+                            {checkingReceivingGroupId === g.id ? 'Checking…' : 'Check receiving'}
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
