@@ -140,50 +140,22 @@ def _index_received_by_tracking(
     return index
 
 
-def _pick_received_row(
+def _pick_all_received_rows(
     candidates: list[parsefile_api.ParsefileReceivedItem],
     *,
-    expected: Decimal | None,
     used_ids: set[int],
-) -> parsefile_api.ParsefileReceivedItem | None:
-    available = [c for c in candidates if id(c) not in used_ids and not c.void]
-    if not available:
-        return None
-    if len(available) == 1 or expected is None:
-        return available[0]
-
-    def score(row: parsefile_api.ParsefileReceivedItem) -> tuple[Decimal, int]:
-        total = row.ext_total
-        if total is None and row.price is not None and row.qty is not None:
-            total = row.price * row.qty
-        if total is None:
-            return (Decimal("999999"), 1)
-        return (abs(total - expected), 0)
-
-    available.sort(key=score)
-    return available[0]
+) -> list[parsefile_api.ParsefileReceivedItem]:
+    """All unused non-void Parsefile rows (one per multi-package tracking)."""
+    return [c for c in candidates if id(c) not in used_ids and not c.void]
 
 
-def _pick_bg_receipt(
+def _pick_all_bg_receipts(
     candidates: list[buyinggroup_api.BuyinggroupReceipt],
     *,
-    expected: Decimal | None,
     used_ids: set[int],
-) -> buyinggroup_api.BuyinggroupReceipt | None:
-    available = [c for c in candidates if id(c) not in used_ids and not c.void]
-    if not available:
-        return None
-    if len(available) == 1 or expected is None:
-        return available[0]
-
-    def score(row: buyinggroup_api.BuyinggroupReceipt) -> tuple[Decimal, int]:
-        total = row.total
-        if total is None:
-            return (Decimal("999999"), 1)
-        return (abs(total - expected), 0)
-
-    available.sort(key=score)
-    return available[0]
+) -> list[buyinggroup_api.BuyinggroupReceipt]:
+    """All unused non-void BuyingGroup receipts (one per multi-package tracking)."""
+    return [c for c in candidates if id(c) not in used_ids and not c.void]
 
 
 def _bfmr_received_total(row: bfmr_api.BfmrTrackerRow) -> Decimal | None:
@@ -386,7 +358,14 @@ def _tracking_numbers_for_order(db: Session, order_id: int) -> list[str]:
 def _collect_pending(
     db: Session, *, buying_group_id: int
 ) -> tuple[list[Item], list[tuple[Item, Order, list[str]]], list[str]]:
-    """Return (unscanned_items, pending triples, unique trackings)."""
+    """Return (unscanned_items, pending triples, unique trackings).
+
+    Each pending item is matched against:
+    - trackings linked to that item, plus
+    - other trackings on the same order that are not owned by a different
+      pending item (so multi-package orders are fully checked for every
+      framework: Parsefile, BuyingGroup.com, BFMR).
+    """
     unscanned_items = (
         db.query(Item)
         .join(Order, Order.id == Item.order_id)
@@ -401,8 +380,9 @@ def _collect_pending(
         .all()
     )
 
-    pending: list[tuple[Item, Order, list[str]]] = []
-    pending_order_ids: set[int] = set()
+    # First pass: item-owned trackings only.
+    owned_by_item: dict[int, list[str]] = {}
+    item_order: dict[int, Order] = {}
     for item in unscanned_items:
         order = item.order
         if not order:
@@ -410,22 +390,54 @@ def _collect_pending(
         trackings = _tracking_numbers_for_item(db, item)
         if not trackings:
             continue
-        pending.append((item, order, trackings))
-        pending_order_ids.add(order.id)
+        owned_by_item[item.id] = trackings
+        item_order[item.id] = order
 
-    # Searched list includes every tracking on those orders (sibling packages),
-    # not only the shipment linked to each pending item (item_id is unique on
-    # shipment_items, so multi-package orders often only link one TN per item).
+    # Trackings owned by other pending siblings on the same order.
+    owned_by_order: dict[int, dict[int, set[str]]] = {}
+    for item_id, trackings in owned_by_item.items():
+        order = item_order[item_id]
+        owned_by_order.setdefault(order.id, {})[item_id] = {tn.casefold() for tn in trackings}
+
+    order_trackings_cache: dict[int, list[str]] = {}
+    pending: list[tuple[Item, Order, list[str]]] = []
+    for item in unscanned_items:
+        if item.id not in owned_by_item:
+            continue
+        order = item_order[item.id]
+        owned = owned_by_item[item.id]
+        if order.id not in order_trackings_cache:
+            order_trackings_cache[order.id] = _tracking_numbers_for_order(db, order.id)
+        sibling_owned: set[str] = set()
+        for other_id, keys in owned_by_order.get(order.id, {}).items():
+            if other_id == item.id:
+                continue
+            sibling_owned |= keys
+
+        merged: list[str] = []
+        seen: set[str] = set()
+        for tn in [*owned, *order_trackings_cache[order.id]]:
+            key = tn.casefold()
+            if key in seen:
+                continue
+            # Leave sibling-owned packages for the sibling pending item.
+            if key in sibling_owned and key not in {t.casefold() for t in owned}:
+                continue
+            seen.add(key)
+            merged.append(tn)
+        if not merged:
+            continue
+        pending.append((item, order, merged))
+
     all_trackings: list[str] = []
     seen_tn: set[str] = set()
-    for order_id in sorted(pending_order_ids):
-        for tn in _tracking_numbers_for_order(db, order_id):
+    for order_id in sorted(order_trackings_cache):
+        for tn in order_trackings_cache[order_id]:
             key = tn.casefold()
             if key in seen_tn:
                 continue
             seen_tn.add(key)
             all_trackings.append(tn)
-    # Also keep any item-level TNs that somehow were not on the order query.
     for _item, _order, trackings in pending:
         for tn in trackings:
             key = tn.casefold()
@@ -445,8 +457,7 @@ def _known_shipment_trackings(db: Session) -> set[str]:
     )
     out: set[str] = set()
     for (raw,) in rows:
-        tn = (raw or "").strip()
-        if tn:
+        for tn in _split_tracking_field(raw):
             out.add(tn.casefold())
     return out
 
@@ -580,7 +591,6 @@ def _check_receiving_parsefile(
     for item, order, trackings in pending:
         candidates: list[parsefile_api.ParsefileReceivedItem] = []
         seen_cand: set[int] = set()
-        matched_tracking = trackings[0]
         for tn in trackings:
             for row in by_tracking.get(tn.casefold()) or []:
                 rid = id(row)
@@ -588,8 +598,6 @@ def _check_receiving_parsefile(
                     continue
                 seen_cand.add(rid)
                 candidates.append(row)
-            if any(not c.void for c in (by_tracking.get(tn.casefold()) or [])):
-                matched_tracking = tn
 
         if not candidates:
             not_found += 1
@@ -600,26 +608,71 @@ def _check_receiving_parsefile(
             continue
 
         expected = _expected_amount(item)
-        row = _pick_received_row(candidates, expected=expected, used_ids=used_row_ids)
-        if row is None:
+        rows = _pick_all_received_rows(candidates, used_ids=used_row_ids)
+        if not rows:
             void_skipped += 1
             if any(c.void for c in candidates):
                 void_matched_ids.add(item.id)
             continue
-        used_row_ids.add(id(row))
+        for row in rows:
+            used_row_ids.add(id(row))
 
-        # Prefer a tracking that actually appears on the matched Parsefile row.
-        for tn in trackings:
-            if tn.casefold() in {t.casefold() for t in row.tracking_numbers}:
-                matched_tracking = tn
-                break
+        matched_trackings: list[str] = []
+        seen_mt: set[str] = set()
+        for row in rows:
+            for tn in row.tracking_numbers:
+                key = tn.casefold()
+                if key in seen_mt:
+                    continue
+                # Prefer trackings we were actually searching for.
+                if trackings and key not in {t.casefold() for t in trackings}:
+                    continue
+                seen_mt.add(key)
+                matched_trackings.append(tn)
+        if not matched_trackings:
+            matched_trackings = list(trackings[:1]) if trackings else []
 
-        received_total = row.ext_total
-        if received_total is None and row.price is not None:
-            received_total = row.price * (row.qty if row.qty is not None else (item.quantity or 1))
+        received_qty = 0
+        received_total = Decimal("0")
+        has_total = False
+        scanned_dt = None
+        description = None
+        statuses: list[str] = []
+        receipt_ids: list[str] = []
+        unit_prices: list[Decimal] = []
+        for row in rows:
+            if row.qty is not None:
+                received_qty += int(row.qty)
+            total = row.ext_total
+            if total is None and row.price is not None:
+                total = row.price * (row.qty if row.qty is not None else 1)
+            if total is not None:
+                received_total += total
+                has_total = True
+            if row.price is not None:
+                unit_prices.append(row.price)
+            row_scanned = _parse_created_date(row.created_date)
+            if row_scanned is not None and (scanned_dt is None or row_scanned > scanned_dt):
+                scanned_dt = row_scanned
+            if description is None and row.item:
+                description = row.item
+            if row.status:
+                statuses.append(str(row.status))
+            if row.receipt_id:
+                receipt_ids.append(row.receipt_id)
 
-        scanned_dt = _parse_created_date(row.created_date) or to_date_only(datetime.now(timezone.utc))
-        discrepancy = _amounts_differ(expected, received_total)
+        if received_qty <= 0:
+            received_qty = len(rows)
+        received_ext: Decimal | None = received_total if has_total else None
+        received_price: Decimal | None = None
+        if received_ext is not None and received_qty > 0:
+            received_price = (received_ext / Decimal(received_qty)).quantize(Decimal("0.01"))
+        elif unit_prices:
+            received_price = unit_prices[0]
+
+        if scanned_dt is None:
+            scanned_dt = to_date_only(datetime.now(timezone.utc))
+        discrepancy = _amounts_differ(expected, received_ext)
 
         matches.append(
             ReceivingMatch(
@@ -628,16 +681,16 @@ def _check_receiving_parsefile(
                 store_order_number=(order.store_order_number or "").strip() or None,
                 description=(item.description or "").strip() or None,
                 quantity=item.quantity or 1,
-                tracking_number=matched_tracking,
+                tracking_number=", ".join(matched_trackings),
                 price_sold=_money(item.price_sold),
                 expected_amount=expected,
-                receipt_id=row.receipt_id,
+                receipt_id=", ".join(receipt_ids) if receipt_ids else None,
                 scanned_at=_iso_date(scanned_dt),
-                received_item=row.item,
-                received_qty=row.qty,
-                received_price=row.price,
-                received_ext_total=received_total,
-                received_status=row.status,
+                received_item=description,
+                received_qty=received_qty,
+                received_price=received_price,
+                received_ext_total=received_ext,
+                received_status=", ".join(dict.fromkeys(statuses)) if statuses else None,
                 amount_discrepancy=discrepancy,
                 selected=True,
             )
@@ -811,7 +864,6 @@ def _check_receiving_buyinggroup(
     for item, order, trackings in pending:
         candidates: list[buyinggroup_api.BuyinggroupReceipt] = []
         seen_cand: set[int] = set()
-        matched_tracking = trackings[0]
         for tn in trackings:
             for row in by_tracking.get(tn.casefold()) or []:
                 rid = id(row)
@@ -819,8 +871,6 @@ def _check_receiving_buyinggroup(
                     continue
                 seen_cand.add(rid)
                 candidates.append(row)
-            if any(not c.void for c in (by_tracking.get(tn.casefold()) or [])):
-                matched_tracking = tn
 
         if not candidates:
             not_found += 1
@@ -831,31 +881,66 @@ def _check_receiving_buyinggroup(
             continue
 
         expected = _expected_amount(item)
-        row = _pick_bg_receipt(candidates, expected=expected, used_ids=used_row_ids)
-        if row is None:
+        rows = _pick_all_bg_receipts(candidates, used_ids=used_row_ids)
+        if not rows:
             void_skipped += 1
             if any(c.void for c in candidates):
                 void_matched_ids.add(item.id)
             continue
-        used_row_ids.add(id(row))
+        for row in rows:
+            used_row_ids.add(id(row))
 
-        for tn in trackings:
-            keys = {
-                (row.tracking_id or "").casefold(),
-                (row.alt_tracking_id or "").casefold(),
-            }
-            if tn.casefold() in keys:
-                matched_tracking = tn
-                break
+        matched_trackings: list[str] = []
+        seen_mt: set[str] = set()
+        tracking_keys = {t.casefold() for t in trackings}
+        for row in rows:
+            for tn in (row.tracking_id, row.alt_tracking_id):
+                text = (tn or "").strip()
+                if not text:
+                    continue
+                key = text.casefold()
+                if key in seen_mt:
+                    continue
+                if tracking_keys and key not in tracking_keys:
+                    continue
+                seen_mt.add(key)
+                matched_trackings.append(text)
+        if not matched_trackings:
+            matched_trackings = list(trackings[:1]) if trackings else []
 
-        received_total = row.total
-        received_qty = row.quantity
+        received_qty = 0
+        received_total = Decimal("0")
+        has_total = False
+        scanned_dt = None
+        description = None
+        statuses: list[str] = []
+        receipt_ids: list[str] = []
+        for row in rows:
+            if row.quantity is not None:
+                received_qty += int(row.quantity)
+            if row.total is not None:
+                received_total += row.total
+                has_total = True
+            row_scanned = _parse_created_date(row.created_dt)
+            if row_scanned is not None and (scanned_dt is None or row_scanned > scanned_dt):
+                scanned_dt = row_scanned
+            if description is None and row.order_id:
+                description = row.order_id
+            if row.status:
+                statuses.append(str(row.status))
+            if row.receipt_id:
+                receipt_ids.append(row.receipt_id)
+
+        if received_qty <= 0:
+            received_qty = len(rows)
+        received_ext: Decimal | None = received_total if has_total else None
         received_price: Decimal | None = None
-        if received_total is not None and received_qty and received_qty > 0:
-            received_price = (received_total / Decimal(received_qty)).quantize(Decimal("0.01"))
+        if received_ext is not None and received_qty > 0:
+            received_price = (received_ext / Decimal(received_qty)).quantize(Decimal("0.01"))
 
-        scanned_dt = _parse_created_date(row.created_dt) or to_date_only(datetime.now(timezone.utc))
-        discrepancy = _amounts_differ(expected, received_total)
+        if scanned_dt is None:
+            scanned_dt = to_date_only(datetime.now(timezone.utc))
+        discrepancy = _amounts_differ(expected, received_ext)
 
         matches.append(
             ReceivingMatch(
@@ -864,16 +949,16 @@ def _check_receiving_buyinggroup(
                 store_order_number=(order.store_order_number or "").strip() or None,
                 description=(item.description or "").strip() or None,
                 quantity=item.quantity or 1,
-                tracking_number=matched_tracking,
+                tracking_number=", ".join(matched_trackings),
                 price_sold=_money(item.price_sold),
                 expected_amount=expected,
-                receipt_id=row.receipt_id,
+                receipt_id=", ".join(receipt_ids) if receipt_ids else None,
                 scanned_at=_iso_date(scanned_dt),
-                received_item=row.order_id,
+                received_item=description,
                 received_qty=received_qty,
                 received_price=received_price,
-                received_ext_total=received_total,
-                received_status=row.status,
+                received_ext_total=received_ext,
+                received_status=", ".join(dict.fromkeys(statuses)) if statuses else None,
                 amount_discrepancy=discrepancy,
                 selected=True,
             )
