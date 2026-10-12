@@ -1,4 +1,4 @@
-"""Match Parsefile received-items search results to local unscanned (submitted) items."""
+"""Match Parsefile received-items search results to local unscanned items."""
 from __future__ import annotations
 
 import secrets
@@ -9,14 +9,14 @@ from typing import Any
 
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.models import BuyingGroup, Item, Order, ShipmentItem
+from app.models import BuyingGroup, Item, Order, Shipment, ShipmentItem
 from app.models.item import ItemStatus
 from app.utils.buying_group_apis import parsefile as parsefile_api
-from app.utils.buying_group_apis.submit_tracking import (
-    parsefile_group_ready,
-    tracking_number_for_item,
-)
+from app.utils.buying_group_apis.submit_tracking import parsefile_group_ready
 from app.utils.dates import to_date_only
+
+# Items that may already be at the warehouse but not marked scanned locally.
+_UNSCANNED_STATUSES = (ItemStatus.SHIPPED, ItemStatus.SUBMITTED)
 
 # Short-lived in-memory sessions for the receiving review UI (same pattern as bulk import).
 _receiving_sessions: dict[str, dict[str, Any]] = {}
@@ -187,8 +187,47 @@ def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
     }
 
 
+def _tracking_numbers_for_item(db: Session, item: Item) -> list[str]:
+    """All distinct tracking numbers linked to an item (not just the first)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for si in item.shipment_items or []:
+        tn = ""
+        if si.shipment and (si.shipment.tracking_number or "").strip():
+            tn = si.shipment.tracking_number.strip()
+        if not tn:
+            continue
+        key = tn.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tn)
+    if out:
+        return out
+
+    # Fallback when the relationship was empty/stale.
+    rows = (
+        db.query(Shipment.tracking_number)
+        .join(ShipmentItem, ShipmentItem.shipment_id == Shipment.id)
+        .filter(ShipmentItem.item_id == item.id)
+        .filter(Shipment.tracking_number.isnot(None))
+        .filter(Shipment.tracking_number != "")
+        .all()
+    )
+    for (raw,) in rows:
+        tn = (raw or "").strip()
+        if not tn:
+            continue
+        key = tn.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tn)
+    return out
+
+
 def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckReceivingResult:
-    """Search Parsefile received-items for submitted trackings; build a review session."""
+    """Search Parsefile received-items for unscanned trackings; build a review session."""
     group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()
     if not group:
         return CheckReceivingResult(
@@ -206,10 +245,10 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
             error=reason or "Buying group Parsefile API is not configured",
         )
 
-    submitted_items = (
+    unscanned_items = (
         db.query(Item)
         .join(Order, Order.id == Item.order_id)
-        .filter(Item.status == ItemStatus.SUBMITTED)
+        .filter(Item.status.in_(_UNSCANNED_STATUSES))
         .filter(Order.buying_group_id == buying_group_id)
         .filter(Order.status != "personal")
         .options(
@@ -220,29 +259,39 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         .all()
     )
 
-    pending: list[tuple[Item, Order, str]] = []
-    for item in submitted_items:
+    # One entry per item, with every linked tracking number.
+    pending: list[tuple[Item, Order, list[str]]] = []
+    for item in unscanned_items:
         order = item.order
         if not order:
             continue
-        tracking = tracking_number_for_item(item)
-        if not tracking:
+        trackings = _tracking_numbers_for_item(db, item)
+        if not trackings:
             continue
-        pending.append((item, order, tracking))
+        pending.append((item, order, trackings))
+
+    all_trackings: list[str] = []
+    seen_tn: set[str] = set()
+    for _item, _order, trackings in pending:
+        for tn in trackings:
+            key = tn.casefold()
+            if key in seen_tn:
+                continue
+            seen_tn.add(key)
+            all_trackings.append(tn)
 
     if not pending:
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
-            submitted_count=len(submitted_items),
+            submitted_count=len(unscanned_items),
             message=(
-                "No submitted (unscanned) items with tracking numbers for this buying group."
-                if not submitted_items
-                else f"{len(submitted_items)} submitted item(s) but none have tracking numbers."
+                "No shipped/submitted (unscanned) items with tracking numbers for this buying group."
+                if not unscanned_items
+                else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers."
             ),
         )
 
-    trackings = list({tn for *_, tn in pending})
     base_url = str(group.base_url)
     bearer_token = str(group.bearer_token)
     api_user_id = int(group.api_user_id)
@@ -250,8 +299,8 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
 
     received_rows: list[parsefile_api.ParsefileReceivedItem] = []
     try:
-        for i in range(0, len(trackings), TRACKING_SEARCH_CHUNK):
-            chunk = trackings[i : i + TRACKING_SEARCH_CHUNK]
+        for i in range(0, len(all_trackings), TRACKING_SEARCH_CHUNK):
+            chunk = all_trackings[i : i + TRACKING_SEARCH_CHUNK]
             received_rows.extend(
                 parsefile_api.search_received_items(
                     base_url=base_url,
@@ -265,7 +314,7 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
-            submitted_count=len(submitted_items),
+            submitted_count=len(unscanned_items),
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
@@ -275,8 +324,20 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
     not_found = 0
     void_skipped = 0
 
-    for item, order, tracking in pending:
-        candidates = by_tracking.get(tracking.casefold()) or []
+    for item, order, trackings in pending:
+        candidates: list[parsefile_api.ParsefileReceivedItem] = []
+        seen_cand: set[int] = set()
+        matched_tracking = trackings[0]
+        for tn in trackings:
+            for row in by_tracking.get(tn.casefold()) or []:
+                rid = id(row)
+                if rid in seen_cand:
+                    continue
+                seen_cand.add(rid)
+                candidates.append(row)
+            if any(not c.void for c in (by_tracking.get(tn.casefold()) or [])):
+                matched_tracking = tn
+
         if not candidates:
             not_found += 1
             continue
@@ -290,6 +351,12 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
             void_skipped += 1
             continue
         used_row_ids.add(id(row))
+
+        # Prefer a tracking that actually appears on the matched Parsefile row.
+        for tn in trackings:
+            if tn.casefold() in {t.casefold() for t in row.tracking_numbers}:
+                matched_tracking = tn
+                break
 
         received_total = row.ext_total
         if received_total is None and row.price is not None:
@@ -305,7 +372,7 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
                 store_order_number=(order.store_order_number or "").strip() or None,
                 description=(item.description or "").strip() or None,
                 quantity=item.quantity or 1,
-                tracking_number=tracking,
+                tracking_number=matched_tracking,
                 price_sold=_money(item.price_sold),
                 expected_amount=expected,
                 receipt_id=row.receipt_id,
@@ -321,11 +388,13 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         )
 
     discrepancy_count = sum(1 for m in matches if m.amount_discrepancy)
+    checked_summary = (
+        f"Checked {len(pending)} unscanned item(s) / {len(all_trackings)} tracking number(s) "
+        f"against Parsefile."
+    )
 
     if not matches:
-        parts = [
-            f"Checked {len(pending)} submitted item(s) against Parsefile.",
-        ]
+        parts = [checked_summary]
         if not_found:
             parts.append(f"{not_found} not found as received.")
         if void_skipped:
@@ -333,7 +402,7 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
-            submitted_count=len(submitted_items),
+            submitted_count=len(unscanned_items),
             not_found_count=not_found,
             void_skipped_count=void_skipped,
             message=" ".join(parts) + " Nothing to mark scanned.",
@@ -357,11 +426,11 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         not_found_count=not_found,
         void_skipped_count=void_skipped,
         discrepancy_count=discrepancy_count,
-        submitted_count=len(submitted_items),
+        submitted_count=len(unscanned_items),
         matches=matches,
         message=(
             f"Found {len(matches)} received item(s) ready to mark scanned"
             + (f" ({discrepancy_count} amount discrepancy)" if discrepancy_count else "")
-            + "."
+            + f". {checked_summary}"
         ),
     )
