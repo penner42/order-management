@@ -553,30 +553,20 @@ def _ids_for_tracking(
 def format_submission_ids_for_log(
     submission_ids_by_tracking: dict[str, tuple[str | None, str | None]] | None,
 ) -> str | None:
-    """Human-readable submission id summary for Groups log messages."""
+    """One line per tracking: ``{tracking} → {submission_id}``."""
     if not submission_ids_by_tracking:
         return None
     parts: list[str] = []
     for tn, (display, api) in submission_ids_by_tracking.items():
+        # Prefer user-facing submission_id (display); fall back to api id.
         label = (display or "").strip() or (api or "").strip()
         if not label:
             continue
         tn_label = (tn or "").strip() or "?"
-        if display and api and display != api:
-            parts.append(f"{tn_label} → {display} (api {api})")
-        else:
-            parts.append(f"{tn_label} → {label}")
+        parts.append(f"{tn_label} → {label}")
     if not parts:
         return None
-    if len(parts) == 1:
-        # Single submit: lead with a clear "Submission ID:" line.
-        only = parts[0]
-        # only is "TN → ID" — extract ID side for a short header when possible.
-        if " → " in only:
-            _tn, rest = only.split(" → ", 1)
-            return f"Submission ID: {rest}"
-        return f"Submission ID: {only}"
-    return "Submission IDs:\n" + "\n".join(f"  {p}" for p in parts)
+    return "\n".join(parts)
 
 
 def append_submission_ids_to_message(
@@ -585,10 +575,11 @@ def append_submission_ids_to_message(
     *,
     missing_note: str | None = None,
 ) -> str:
-    """Ensure submission ids (or a missing note) appear in a log message."""
+    """Put tracking→submission-id lines first, then the status message."""
     base = (message or "").strip()
     summary = format_submission_ids_for_log(submission_ids_by_tracking)
     if summary:
+        # Avoid duplicating if the message already embeds the same lines.
         if summary in base:
             return base
         return f"{summary}\n{base}" if base else summary
