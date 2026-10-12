@@ -224,6 +224,8 @@ class ReceivingReviewUnmatched(BaseModel):
     status: str | None = None
     tracking_numbers: list[str] = []
     expected_amount: str | None = None
+    submitted_at: str | None = None
+    void_matched: bool = False
 
 
 class ReceivingReviewUnknownReceipt(BaseModel):

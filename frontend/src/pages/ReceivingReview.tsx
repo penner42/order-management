@@ -31,6 +31,8 @@ interface ReceivingUnmatched {
   status: string | null
   tracking_numbers: string[]
   expected_amount: string | null
+  submitted_at: string | null
+  void_matched?: boolean
 }
 
 interface ReceivingUnknownReceipt {
@@ -505,7 +507,8 @@ export default function ReceivingReview() {
             Not matched ({unmatched.length})
           </h2>
           <p className="text-xs text-ink-muted mb-2">
-            Local unscanned items whose tracking did not match a non-void received row.
+            Local unscanned items with no non-void received match. Struck-through rows matched a void
+            received row only.
           </p>
           <div className="overflow-x-auto rounded-xl border border-brand-200/80 dark:border-gray-700">
             <table className="w-full text-sm">
@@ -515,6 +518,7 @@ export default function ReceivingReview() {
                   <th className="py-2 px-2 font-medium text-ink-muted">Item</th>
                   <th className="py-2 px-2 font-medium text-ink-muted">Status</th>
                   <th className="py-2 px-2 font-medium text-ink-muted">Trackings searched</th>
+                  <th className="py-2 px-2 font-medium text-ink-muted">Submitted</th>
                   <th className="py-2 px-2 font-medium text-ink-muted text-right">Expected</th>
                 </tr>
               </thead>
@@ -522,7 +526,9 @@ export default function ReceivingReview() {
                 {unmatched.map((u) => (
                   <tr
                     key={u.item_id}
-                    className="border-b border-brand-100 dark:border-gray-700 last:border-0"
+                    className={`border-b border-brand-100 dark:border-gray-700 last:border-0 ${
+                      u.void_matched ? 'line-through text-ink-muted opacity-70' : ''
+                    }`}
                   >
                     <td className="py-2 px-2">
                       <Link
@@ -534,10 +540,16 @@ export default function ReceivingReview() {
                     </td>
                     <td className="py-2 px-2 text-ink">
                       {u.quantity}× {u.description || '—'}
+                      {u.void_matched ? (
+                        <span className="ml-1 text-xs no-underline inline-block">(void)</span>
+                      ) : null}
                     </td>
                     <td className="py-2 px-2 text-ink-muted">{u.status || '—'}</td>
                     <td className="py-2 px-2 font-mono text-xs text-ink">
                       {(u.tracking_numbers || []).join(', ') || '—'}
+                    </td>
+                    <td className="py-2 px-2 text-xs text-ink-muted">
+                      {u.submitted_at ? toYyyyMmDd(u.submitted_at) : '—'}
                     </td>
                     <td className="py-2 px-2 text-right tabular-nums">{fmtMoney(u.expected_amount)}</td>
                   </tr>

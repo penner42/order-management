@@ -338,12 +338,16 @@ def _index_analytics_by_tracking(
 def _build_unmatched(
     pending: list[tuple[Item, Order, list[str]]],
     matched_ids: set[int],
+    *,
+    void_matched_ids: set[int] | None = None,
 ) -> list[dict[str, Any]]:
+    void_ids = void_matched_ids or set()
     unmatched: list[dict[str, Any]] = []
     for item, order, trackings in pending:
         if item.id in matched_ids:
             continue
         amt = _expected_amount(item)
+        submitted_at = item.submitted_at
         unmatched.append(
             {
                 "item_id": item.id,
@@ -354,6 +358,8 @@ def _build_unmatched(
                 "status": item.status.value if hasattr(item.status, "value") else str(item.status),
                 "tracking_numbers": trackings,
                 "expected_amount": str(amt) if amt is not None else None,
+                "submitted_at": submitted_at.isoformat() if submitted_at is not None else None,
+                "void_matched": item.id in void_ids,
             }
         )
     return unmatched
@@ -427,6 +433,7 @@ def _check_receiving_parsefile(
     matches: list[ReceivingMatch] = []
     not_found = 0
     void_skipped = 0
+    void_matched_ids: set[int] = set()
 
     for item, order, trackings in pending:
         candidates: list[parsefile_api.ParsefileReceivedItem] = []
@@ -447,12 +454,15 @@ def _check_receiving_parsefile(
             continue
         if all(c.void for c in candidates):
             void_skipped += 1
+            void_matched_ids.add(item.id)
             continue
 
         expected = _expected_amount(item)
         row = _pick_received_row(candidates, expected=expected, used_ids=used_row_ids)
         if row is None:
             void_skipped += 1
+            if any(c.void for c in candidates):
+                void_matched_ids.add(item.id)
             continue
         used_row_ids.add(id(row))
 
@@ -534,7 +544,7 @@ def _check_receiving_parsefile(
     )
 
     matched_ids = {m.item_id for m in matches}
-    unmatched = _build_unmatched(pending, matched_ids)
+    unmatched = _build_unmatched(pending, matched_ids, void_matched_ids=void_matched_ids)
 
     if not pending and not unknown_receipts and not matches:
         message = (
@@ -654,6 +664,7 @@ def _check_receiving_buyinggroup(
     matches: list[ReceivingMatch] = []
     not_found = 0
     void_skipped = 0
+    void_matched_ids: set[int] = set()
 
     for item, order, trackings in pending:
         candidates: list[buyinggroup_api.BuyinggroupReceipt] = []
@@ -674,12 +685,15 @@ def _check_receiving_buyinggroup(
             continue
         if all(c.void for c in candidates):
             void_skipped += 1
+            void_matched_ids.add(item.id)
             continue
 
         expected = _expected_amount(item)
         row = _pick_bg_receipt(candidates, expected=expected, used_ids=used_row_ids)
         if row is None:
             void_skipped += 1
+            if any(c.void for c in candidates):
+                void_matched_ids.add(item.id)
             continue
         used_row_ids.add(id(row))
 
@@ -804,7 +818,7 @@ def _check_receiving_buyinggroup(
     )
 
     matched_ids = {m.item_id for m in matches}
-    unmatched = _build_unmatched(pending, matched_ids)
+    unmatched = _build_unmatched(pending, matched_ids, void_matched_ids=void_matched_ids)
 
     parts: list[str] = []
     if matches:
