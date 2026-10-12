@@ -984,17 +984,6 @@ async def _run_import_job(
             if mode == "unshipped":
                 order_ids = _unshipped_store_order_numbers(db, store_account_id)
                 if not order_ids:
-                    _add_import_log(
-                        db,
-                        profile=profile,
-                        job_id=job_id,
-                        mode=mode,
-                        scheduled=scheduled,
-                        level="info",
-                        event_type="check_started",
-                        message=f"Started {mode_label} ({source}): 0 order(s) queued.",
-                    )
-                    db.commit()
                     now = datetime.now(timezone.utc)
                     _set_profile_status(
                         db,
@@ -1009,7 +998,7 @@ async def _run_import_job(
                         message="No unshipped orders to refresh.",
                         order_count=0,
                     )
-                    log_finished("Finished: no unshipped orders to refresh.")
+                    log_finished("No unshipped orders to refresh.")
                     finished_ok = True
                     return
 
