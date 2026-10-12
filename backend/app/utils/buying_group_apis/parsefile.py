@@ -212,14 +212,30 @@ def _parse_int(value: str | None) -> int | None:
         return None
 
 
-def _split_trackings(value: str | None) -> list[str]:
+def _unwrap_excel_text(value: str) -> str:
+    """Strip Excel CSV text-forcing wrappers like =\"TRACKING\" / =\"\"TRACKING\"\"."""
     text = (value or "").strip()
+    if not text:
+        return ""
+    # Formula-style export: ="value"
+    if text.startswith("="):
+        text = text[1:].strip()
+    # Peel balanced surrounding quotes (CSV may leave them after =).
+    while len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].strip()
+    return text.strip()
+
+
+def _split_trackings(value: str | None) -> list[str]:
+    text = _unwrap_excel_text(value or "")
     if not text:
         return []
     parts: list[str] = []
     seen: set[str] = set()
+    # After unwrapping a single Excel cell there is usually one tracking; still
+    # allow comma/semicolon lists for multi-tracking cells.
     for chunk in text.replace(";", ",").split(","):
-        tn = chunk.strip()
+        tn = _unwrap_excel_text(chunk)
         if not tn:
             continue
         key = tn.casefold()
