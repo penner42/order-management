@@ -159,12 +159,10 @@ def _pick_all_bg_receipts(
 
 
 def _bfmr_received_total(row: bfmr_api.BfmrTrackerRow) -> Decimal | None:
-    if row.amount_paid is not None and row.amount_paid > 0:
-        return row.amount_paid
-    qty = row.qty_received if row.qty_received is not None else row.qty
-    if row.retail_price is not None and qty is not None and qty > 0:
-        return (row.retail_price * Decimal(qty)).quantize(Decimal("0.01"))
-    return None
+    """BFMR payout is ``amount_paid`` (not retail_price)."""
+    if row.amount_paid is None:
+        return None
+    return row.amount_paid
 
 
 def _bfmr_receipt_id(row: bfmr_api.BfmrTrackerRow) -> str | None:
@@ -1285,8 +1283,6 @@ def _check_receiving_bfmr(
         received_price: Decimal | None = None
         if received_total is not None and received_qty and received_qty > 0:
             received_price = (received_total / Decimal(received_qty)).quantize(Decimal("0.01"))
-        elif row.retail_price is not None:
-            received_price = row.retail_price
         scanned_dt = _parse_created_date(row.scanned_at)
         unknown_receipts.append(
             {
