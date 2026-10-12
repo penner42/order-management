@@ -298,9 +298,11 @@ export default function BuyingGroups() {
         api_username: usesUsernamePassword(draft.api_framework)
           ? draft.api_username.trim() || null
           : null,
-        api_password: usesUsernamePassword(draft.api_framework)
-          ? draft.api_password.trim() || null
-          : null,
+        // Parsefile uses portal password (api_password) for encrypted orders-all id lookup.
+        api_password:
+          usesUsernamePassword(draft.api_framework) || draft.api_framework === 'parsefile'
+            ? draft.api_password.trim() || null
+            : null,
         tracking_submit_enabled: supportsTrackingSubmit(draft.api_framework)
           ? draft.tracking_submit_enabled
           : false,
@@ -399,7 +401,7 @@ export default function BuyingGroups() {
           to="/browser-import-log?category=groups"
           className="text-sm text-brand-600 dark:text-brand-400 hover:underline"
         >
-          View tracking submit log
+          View log
         </Link>
       </div>
       <p className="text-sm text-ink-muted mb-8">
@@ -593,6 +595,20 @@ export default function BuyingGroups() {
                               value={draft.api_email}
                               onChange={(e) => setDraft((d) => ({ ...d, api_email: e.target.value }))}
                               disabled={saving}
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="text-xs text-ink-muted">
+                              Portal password (for submission IDs)
+                            </span>
+                            <input
+                              type="password"
+                              className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                              placeholder="Parsefile portal password"
+                              value={draft.api_password}
+                              onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}
+                              disabled={saving}
+                              autoComplete="off"
                             />
                           </label>
                         </>

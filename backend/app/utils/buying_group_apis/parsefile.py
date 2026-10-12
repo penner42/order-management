@@ -1,21 +1,44 @@
-"""Parsefile order-management API (tracking submission + received-items search)."""
+"""Parsefile order-management API (tracking submission + received-items search).
+
+Also supports encrypted portal ``it@orders-all`` lookup (CryptoJS + SESSID) for
+submission ids after tracking submit.
+"""
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
+import logging
+import threading
+import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+from app.utils.buying_group_apis import parsefile_crypto
+
+logger = logging.getLogger(__name__)
 
 
 ADD_TRACKING_CMD = "/cmd/addtracking"
 SEARCH_CMD = "/cmd/search"
 DEFAULT_API_URL = "/p/it@api@order-management"
 RECEIVED_ITEMS_API_URL = "/p/it@api@received-items"
+ORDERS_ALL_PAGE = "it@orders-all"
+ORDERS_ALL_TABLE = "it@orders-all"
+SESSION_COOKIE_NAME = "SESSID"
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+# Process-local portal sessions keyed by (base_url, email, password hash).
+_session_cache: dict[tuple[str, str, str], str] = {}
+_session_lock = threading.Lock()
 
 
 @dataclass
@@ -28,11 +51,19 @@ class ParsefileTrackingEntry:
 
 
 @dataclass
+class ParsefileSubmissionIds:
+    display_id: str | None
+    api_id: str | None
+
+
+@dataclass
 class ParsefileSubmitResult:
     success: bool
     affected: int | None
     message: str
     raw: dict[str, Any]
+    # tracking number -> display + API ids (from it@orders-all when available)
+    submission_ids: dict[str, ParsefileSubmissionIds] = field(default_factory=dict)
 
 
 def resolve_api_url(api_url: str | None) -> str:
@@ -494,3 +525,540 @@ def list_all_received_items(
         timeout_seconds=timeout_seconds,
         include_empty_trackings_receipts=True,
     )
+
+
+# --- Encrypted portal session + it@orders-all (submission id lookup) ---
+
+
+def _portal_cache_key(base_url: str, email: str, password: str) -> tuple[str, str, str]:
+    pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return ((base_url or "").strip().rstrip("/").casefold(), email.strip().casefold(), pw_hash)
+
+
+def _resolve_portal_base(base_url: str) -> str:
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("base_url is required")
+    return base
+
+
+def _build_portal_path(page: str, cmd: dict[str, Any]) -> str:
+    segments = [f"/p/{page}"]
+    for key in sorted(cmd.keys()):
+        segments.append(str(key))
+        segments.append(str(cmd[key]))
+    segments.extend(["_dc", str(int(time.time() * 1000))])
+    return "/".join(segments)
+
+
+def _cookie_header(session_id: str) -> str:
+    return f"{SESSION_COOKIE_NAME}={session_id}"
+
+
+def _extract_sessid(headers: Any) -> str | None:
+    """Pull SESSID from Set-Cookie headers on an http.client response."""
+    try:
+        raw_headers = headers.get_all("Set-Cookie") if hasattr(headers, "get_all") else None
+    except Exception:
+        raw_headers = None
+    if not raw_headers:
+        cookie = headers.get("Set-Cookie") if headers is not None else None
+        raw_headers = [cookie] if cookie else []
+    for header in raw_headers:
+        if not header:
+            continue
+        for part in str(header).split(";"):
+            part = part.strip()
+            if part.startswith(f"{SESSION_COOKIE_NAME}="):
+                val = part.split("=", 1)[1].strip()
+                if val:
+                    return val
+    return None
+
+
+def _bootstrap_session(base_url: str, timeout_seconds: float) -> str:
+    base = _resolve_portal_base(base_url)
+    url = f"{base}/f/login"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"User-Agent": _BROWSER_UA, "Accept": "text/html,application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            resp.read()
+            sess = _extract_sessid(resp.headers)
+    except urllib.error.HTTPError as e:
+        sess = _extract_sessid(e.headers)
+        if not sess:
+            raise RuntimeError(f"Parsefile session bootstrap failed (HTTP {e.code})") from e
+    except urllib.error.URLError as e:
+        reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
+        raise RuntimeError(f"Parsefile session bootstrap failed: {reason}") from e
+    if not sess:
+        raise RuntimeError("Parsefile session bootstrap: SESSID cookie not returned")
+    return sess
+
+
+def _decode_portal_response(session_id: str, body: bytes) -> dict[str, Any]:
+    try:
+        wire = json.loads(body.decode("utf-8", errors="replace") if body else "{}")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Parsefile portal returned non-JSON: {body[:300]!r}") from e
+    if not isinstance(wire, dict):
+        raise RuntimeError("Parsefile portal returned unexpected payload")
+    if not wire.get("success"):
+        toast = wire.get("$mdToast")
+        detail = ""
+        if isinstance(toast, dict) and isinstance(toast.get("text"), str):
+            detail = toast["text"].strip()
+        raise RuntimeError(detail or "Parsefile portal request returned success=false")
+    encrypted = wire.get("_encrypted")
+    if isinstance(encrypted, str) and encrypted.strip():
+        try:
+            plain = parsefile_crypto.decrypt(session_id, encrypted)
+        except Exception as e:
+            raise RuntimeError(f"Parsefile portal decrypt failed: {e}") from e
+        try:
+            parsed = json.loads(plain) if plain else {}
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Parsefile portal decrypted non-JSON: {plain[:300]!r}") from e
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Parsefile portal decrypted unexpected payload")
+        parsed["success"] = True
+        return parsed
+    return wire
+
+
+def _portal_post(
+    *,
+    base_url: str,
+    session_id: str,
+    page: str,
+    cmd: dict[str, Any],
+    data: dict[str, Any],
+    timeout_seconds: float,
+) -> tuple[str, dict[str, Any]]:
+    """POST encrypted portal command. Returns (possibly rotated session_id, payload)."""
+    base = _resolve_portal_base(base_url)
+    plain = json.dumps(data, separators=(",", ":"))
+    encrypted = parsefile_crypto.encrypt(session_id, plain)
+    path = _build_portal_path(page, cmd)
+    url = f"{base}{path}"
+    body = json.dumps({"_encrypted": encrypted}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": _BROWSER_UA,
+            "Cookie": _cookie_header(session_id),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            raw = resp.read()
+            new_sess = _extract_sessid(resp.headers) or session_id
+            status = getattr(resp, "status", 200)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise _PortalSessionExpired(f"Parsefile portal auth failed (HTTP {e.code})") from e
+        err_body = e.read() if e.fp else b""
+        raise RuntimeError(
+            f"Parsefile portal error {e.code} at {url}: {err_body[:300]!r}"
+        ) from e
+    except urllib.error.URLError as e:
+        reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
+        raise RuntimeError(f"Parsefile portal request failed ({url}): {reason}") from e
+
+    if status in (401, 403):
+        raise _PortalSessionExpired(f"Parsefile portal auth failed (HTTP {status})")
+    try:
+        payload = _decode_portal_response(new_sess, raw)
+    except RuntimeError as e:
+        # Decrypt failures often mean a stale SESSID.
+        if "decrypt" in str(e).casefold():
+            raise _PortalSessionExpired(str(e)) from e
+        raise
+    return new_sess, payload
+
+
+class _PortalSessionExpired(RuntimeError):
+    pass
+
+
+def _login_accepted(payload: dict[str, Any]) -> bool:
+    location = payload.get("location")
+    if isinstance(location, str) and location.strip():
+        return True
+    scope = payload.get("scope")
+    if isinstance(scope, dict) and scope.get("logged_in"):
+        return True
+    if isinstance(scope, str) and scope.strip():
+        try:
+            parsed = json.loads(scope)
+            if isinstance(parsed, dict) and parsed.get("logged_in"):
+                return True
+        except json.JSONDecodeError:
+            pass
+    return False
+
+
+def portal_login(
+    *,
+    base_url: str,
+    email: str,
+    password: str,
+    timeout_seconds: float = 30.0,
+) -> str:
+    """Bootstrap SESSID and log into the Parsefile portal. Returns session id."""
+    if not (email or "").strip():
+        raise ValueError("email is required")
+    if not (password or "").strip():
+        raise ValueError("password is required")
+    session_id = _bootstrap_session(base_url, timeout_seconds)
+    body = {
+        "email": email.strip().lower(),
+        # Portal login form strips spaces from the password before submit.
+        "password": password.replace(" ", ""),
+    }
+    cmd = {
+        "cmd": "login",
+        "checkLoading": True,
+        "screen": 1,
+        "encrypt": True,
+        "page": "login",
+        "_arg": 0,
+        "section": "back@login",
+    }
+    session_id, payload = _portal_post(
+        base_url=base_url,
+        session_id=session_id,
+        page="login",
+        cmd=cmd,
+        data=body,
+        timeout_seconds=timeout_seconds,
+    )
+    toast = payload.get("$mdToast")
+    if isinstance(toast, dict):
+        text = toast.get("text")
+        if isinstance(text, str) and text.strip():
+            raise RuntimeError(f"Parsefile portal login failed: {text.strip()}")
+    if not _login_accepted(payload):
+        raise RuntimeError("Parsefile portal login failed: credentials rejected")
+    return session_id
+
+
+def _ensure_portal_session(
+    *,
+    base_url: str,
+    email: str,
+    password: str,
+    timeout_seconds: float,
+) -> str:
+    key = _portal_cache_key(base_url, email, password)
+    with _session_lock:
+        cached = _session_cache.get(key)
+        if cached:
+            return cached
+    session_id = portal_login(
+        base_url=base_url,
+        email=email,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    with _session_lock:
+        cached = _session_cache.get(key)
+        if cached:
+            return cached
+        _session_cache[key] = session_id
+        return session_id
+
+
+def _rellogin_portal_session(
+    *,
+    base_url: str,
+    email: str,
+    password: str,
+    stale_session: str,
+    timeout_seconds: float,
+) -> str:
+    key = _portal_cache_key(base_url, email, password)
+    with _session_lock:
+        cached = _session_cache.get(key)
+        if cached and cached != stale_session:
+            return cached
+        _session_cache.pop(key, None)
+    session_id = portal_login(
+        base_url=base_url,
+        email=email,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    with _session_lock:
+        cached = _session_cache.get(key)
+        if cached and cached != stale_session:
+            return cached
+        _session_cache[key] = session_id
+        return session_id
+
+
+def _with_portal_session(
+    *,
+    base_url: str,
+    email: str,
+    password: str,
+    session_id: str,
+    timeout_seconds: float,
+    call,
+):
+    try:
+        return call(session_id), session_id
+    except _PortalSessionExpired:
+        session_id = _rellogin_portal_session(
+            base_url=base_url,
+            email=email,
+            password=password,
+            stale_session=session_id,
+            timeout_seconds=timeout_seconds,
+        )
+        return call(session_id), session_id
+
+
+def _tracking_values_from_row(row: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in (
+        "tracking",
+        "tracking_number",
+        "tracking_numbers",
+        "trackingNumber",
+        "trackingNumbers",
+        "tn",
+        "f_tracking",
+    ):
+        val = row.get(key)
+        if val is None:
+            continue
+        if isinstance(val, list):
+            for item in val:
+                if item is not None and str(item).strip():
+                    values.append(str(item).strip())
+        else:
+            text = str(val).strip()
+            if not text or text.casefold() in ("---", "null", "none"):
+                continue
+            for part in text.replace(";", ",").split(","):
+                part = part.strip()
+                if part:
+                    values.append(part)
+    return values
+
+
+def _ids_from_order_row(row: dict[str, Any]) -> ParsefileSubmissionIds | None:
+    """Best-effort map of Parsefile orders-all row → display + API ids."""
+    api_candidates = (
+        row.get("id"),
+        row.get("key"),
+        row.get("uuid"),
+        row.get("order_uuid"),
+        row.get("orderId"),
+        row.get("f_id"),
+    )
+    display_candidates = (
+        row.get("order"),
+        row.get("order_id"),
+        row.get("order_number"),
+        row.get("orderNumber"),
+        row.get("number"),
+        row.get("display_id"),
+        row.get("f_order"),
+        row.get("name"),
+    )
+    api_id = None
+    for candidate in api_candidates:
+        if candidate is None or not str(candidate).strip():
+            continue
+        api_id = str(candidate).strip()
+        break
+    display_id = None
+    for candidate in display_candidates:
+        if candidate is None or not str(candidate).strip():
+            continue
+        text = str(candidate).strip()
+        if api_id and text == api_id:
+            continue
+        display_id = text
+        break
+    if not display_id and not api_id:
+        return None
+    if not display_id:
+        display_id = api_id
+    return ParsefileSubmissionIds(display_id=display_id, api_id=api_id)
+
+
+def _rows_from_loadtable(payload: dict[str, Any], *, table_name: str) -> list[dict[str, Any]]:
+    tables = payload.get("loadtable")
+    if not isinstance(tables, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in tables:
+        if not isinstance(entry, dict):
+            continue
+        if table_name and entry.get("table") not in (None, table_name, ORDERS_ALL_TABLE):
+            # Accept either exact table or first table when name differs slightly.
+            if entry.get("table") and str(entry.get("table")).strip() not in (
+                table_name,
+                ORDERS_ALL_PAGE,
+            ):
+                continue
+        data = entry.get("data")
+        rows = None
+        if isinstance(data, dict):
+            rows = data.get("data")
+        elif isinstance(data, list):
+            rows = data
+        if isinstance(rows, list):
+            out.extend(r for r in rows if isinstance(r, dict))
+    if out:
+        return out
+    # Fallback: any loadtable data if table name filter matched nothing.
+    for entry in tables:
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get("data")
+        rows = data.get("data") if isinstance(data, dict) else data
+        if isinstance(rows, list):
+            return [r for r in rows if isinstance(r, dict)]
+    return []
+
+
+def find_order_by_tracking(
+    *,
+    base_url: str,
+    email: str,
+    password: str,
+    tracking_number: str,
+    timeout_seconds: float = 30.0,
+) -> ParsefileSubmissionIds | None:
+    """Look up an order on encrypted ``it@orders-all`` by tracking number."""
+    tn = (tracking_number or "").strip()
+    if not tn:
+        return None
+    tn_key = tn.casefold()
+
+    session_id = _ensure_portal_session(
+        base_url=base_url,
+        email=email,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+
+    def _load(sess: str) -> tuple[list[dict[str, Any]], str]:
+        # Try filtered load first; fall back to a recent page if filters are ignored.
+        queries = [
+            {
+                "page": 1,
+                "limit": 50,
+                "filters": {"f_tracking": tn},
+            },
+            {
+                "page": 1,
+                "limit": 50,
+                "filters": {"tracking": tn},
+            },
+            {
+                "page": 1,
+                "limit": 100,
+                "filters": {},
+            },
+        ]
+        cmd = {
+            "cmd": "load",
+            "instance": "table",
+            "_table": ORDERS_ALL_TABLE,
+            "checkLoading": 0,
+            "init": True,
+        }
+        rows: list[dict[str, Any]] = []
+        current = sess
+        for query in queries:
+            current, payload = _portal_post(
+                base_url=base_url,
+                session_id=current,
+                page=ORDERS_ALL_PAGE,
+                cmd=cmd,
+                data=query,
+                timeout_seconds=timeout_seconds,
+            )
+            rows = _rows_from_loadtable(payload, table_name=ORDERS_ALL_TABLE)
+            if rows:
+                # Prefer an exact tracking match among returned rows.
+                for row in rows:
+                    for candidate in _tracking_values_from_row(row):
+                        if candidate.casefold() == tn_key:
+                            return [row], current
+                # If filter was by tracking, accept first row with ids.
+                if query.get("filters"):
+                    return rows, current
+        return rows, current
+
+    (rows, rotated_session), _outer_session = _with_portal_session(
+        base_url=base_url,
+        email=email,
+        password=password,
+        session_id=session_id,
+        timeout_seconds=timeout_seconds,
+        call=_load,
+    )
+    # Prefer the session rotated inside portal posts.
+    final_session = rotated_session or _outer_session or session_id
+    with _session_lock:
+        key = _portal_cache_key(base_url, email, password)
+        if final_session:
+            _session_cache[key] = final_session
+
+    for row in rows:
+        for candidate in _tracking_values_from_row(row):
+            if candidate.casefold() == tn_key:
+                return _ids_from_order_row(row)
+    if len(rows) == 1:
+        return _ids_from_order_row(rows[0])
+    return None
+
+
+def lookup_submission_ids(
+    *,
+    base_url: str,
+    email: str,
+    password: str,
+    tracking_numbers: list[str],
+    timeout_seconds: float = 30.0,
+) -> dict[str, ParsefileSubmissionIds]:
+    """Look up submission ids for each tracking after addtracking (best-effort)."""
+    out: dict[str, ParsefileSubmissionIds] = {}
+    for tracking in tracking_numbers:
+        tn = (tracking or "").strip()
+        if not tn:
+            continue
+        try:
+            ids = None
+            for attempt in range(4):
+                ids = find_order_by_tracking(
+                    base_url=base_url,
+                    email=email,
+                    password=password,
+                    tracking_number=tn,
+                    timeout_seconds=timeout_seconds,
+                )
+                if ids is not None:
+                    break
+                if attempt < 3:
+                    time.sleep(0.75)
+            if ids is not None:
+                out[tn] = ids
+        except Exception as exc:
+            logger.warning("Parsefile orders-all lookup failed for %s: %s", tn, exc)
+    return out
+

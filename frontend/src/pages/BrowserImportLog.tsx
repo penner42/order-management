@@ -141,7 +141,7 @@ export default function BrowserImportLogPage() {
         .catch((err) => {
           console.error(err)
           if (!cancelled && firstLoad) {
-            setError(err instanceof Error ? err.message : 'Failed to load import log')
+            setError(err instanceof Error ? err.message : 'Failed to load log')
           }
         })
         .finally(() => {
@@ -167,7 +167,7 @@ export default function BrowserImportLogPage() {
   return (
     <div className="w-full">
       <div className="flex flex-wrap items-start justify-between gap-4 mb-2">
-        <h1 className="text-2xl font-semibold text-ink dark:text-gray-100">Import log</h1>
+        <h1 className="text-2xl font-semibold text-ink dark:text-gray-100">Log</h1>
         <div className="flex flex-wrap gap-3 text-sm">
           <Link
             to="/browser-automation"

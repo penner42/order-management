@@ -259,9 +259,45 @@ def submit_item_tracking(
         .filter(Item.status == ItemStatus.SHIPPED)
         .all()
     )
+    display_id, api_id = (None, None)
+    if result.submission_ids_by_tracking:
+        # Single-tracking submit: use the (only) mapping for this tracking.
+        for _tn, ids in result.submission_ids_by_tracking.items():
+            display_id, api_id = ids
+            break
+        # Prefer exact tracking match when multiple are present.
+        matched = result.submission_ids_by_tracking.get(tracking)
+        if matched:
+            display_id, api_id = matched
     for it in items_to_mark:
-        mark_item_submitted(it, when=now)
+        mark_item_submitted(
+            it,
+            when=now,
+            submission_id=display_id,
+            submission_api_id=api_id,
+        )
     db.commit()
+
+    # Log Groups-category entry with submission id (same log page as batch submit).
+    try:
+        from app.routers.buying_groups import write_group_tracking_log
+        from app.utils.buying_group_apis.submit_tracking import format_submission_ids_for_log
+
+        log_msg = result.message or "Submitted tracking number."
+        id_summary = format_submission_ids_for_log(result.submission_ids_by_tracking)
+        if id_summary:
+            log_msg = f"{log_msg}\n{id_summary}"
+        write_group_tracking_log(
+            group=group,
+            group_name=(group.name or "").strip() or f"group {group.id}",
+            scheduled=False,
+            level="updates",
+            event_type="tracking_submitted",
+            tracking_numbers=[tracking],
+            message=log_msg,
+        )
+    except Exception:
+        logger.exception("Failed to write tracking submit log for item %s", item_id)
 
     updated_items = (
         db.query(Item)

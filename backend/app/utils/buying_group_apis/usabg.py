@@ -109,6 +109,8 @@ class UsabgSubmitResult:
     raw: dict[str, Any]
     notes_updated: int = 0
     notes_errors: list[str] = field(default_factory=list)
+    # tracking number -> USABG tracking_id
+    submission_ids: dict[str, str] = field(default_factory=dict)
 
 
 def resolve_base_url(base_url: str | None) -> str:
@@ -569,11 +571,12 @@ def submit_trackings(
 
     notes_updated = 0
     notes_errors: list[str] = []
+    submission_ids: dict[str, str] = {}
     for entry in trackings:
-        note = (entry.note or "").strip()
-        if not note:
-            continue
         tn = (entry.tracking or "").strip()
+        if not tn:
+            continue
+        note = (entry.note or "").strip()
         try:
 
             def _lookup(tok: str, *, _tn: str = tn) -> UsabgTrackingRow | None:
@@ -599,7 +602,12 @@ def submit_trackings(
                 if attempt < 2:
                     time.sleep(0.75)
             if row is None:
-                notes_errors.append(f"{tn}: tracking not found after submit")
+                if note:
+                    notes_errors.append(f"{tn}: tracking not found after submit")
+                continue
+
+            submission_ids[tn] = row.tracking_id
+            if not note:
                 continue
 
             def _note(
@@ -643,4 +651,5 @@ def submit_trackings(
         raw=raw,
         notes_updated=notes_updated,
         notes_errors=notes_errors,
+        submission_ids=submission_ids,
     )

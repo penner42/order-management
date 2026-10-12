@@ -49,6 +49,7 @@ class Item(Base):
     shipping = Column(Numeric(12, 2), nullable=True)
     sales_tax = Column(Numeric(12, 2), nullable=True)
     submission_id = Column(String(255), nullable=True)
+    submission_api_id = Column(String(255), nullable=True)
     receipt_id = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

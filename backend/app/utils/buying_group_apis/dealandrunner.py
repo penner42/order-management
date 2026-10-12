@@ -5,13 +5,16 @@ Flow (aligned with dealsbot dealandrunner auth):
 2. Create trackings via ``POST /tracking`` with ``{"trackingNumbers":[...]}``.
 3. On 401, re-login once and retry. On batch HTTP 400, fall back to per-TN POSTs.
 4. Duplicate TN (``4004000035``) counts as success for that number.
+5. Look up row ``id`` via ``GET /tracking`` after submit for submission_id.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
@@ -43,6 +46,12 @@ class DealandrunnerTrackingEntry:
 
 
 @dataclass
+class DealandrunnerTrackingRow:
+    tracking_id: str
+    tracking_numbers: list[str]
+
+
+@dataclass
 class DealandrunnerSubmitResult:
     success: bool
     message: str
@@ -51,6 +60,8 @@ class DealandrunnerSubmitResult:
     succeeded: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    # tracking number -> remote row id
+    submission_ids: dict[str, str] = field(default_factory=dict)
 
 
 class _SessionExpired(RuntimeError):
@@ -322,6 +333,111 @@ def _post_trackings(
         raise RuntimeError(f"Deal & Runner API request failed ({url}): {reason}") from e
 
 
+def _get_json(
+    *,
+    url: str,
+    bearer_token: str,
+    timeout_seconds: float,
+) -> tuple[int, dict[str, Any]]:
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers=_browser_headers(bearer=bearer_token),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            status, _raw_text, raw = _read_json_response(resp)
+            return status, raw
+    except urllib.error.HTTPError as e:
+        err_body, raw = _parse_http_error(e)
+        if e.code == 401:
+            raise _SessionExpired(f"Deal & Runner session expired (HTTP {e.code})") from e
+        detail = _first_error_description(raw) if raw else ""
+        if not detail:
+            detail = err_body.strip()[:400] or (str(e.reason).strip() if e.reason else "") or "empty response"
+        raise RuntimeError(f"Deal & Runner API error {e.code} at {url}: {detail}") from e
+    except urllib.error.URLError as e:
+        reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
+        raise RuntimeError(f"Deal & Runner API request failed ({url}): {reason}") from e
+
+
+def _items_from_tracking_list(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    result = raw.get("result")
+    if isinstance(result, dict):
+        items = result.get("items")
+        if isinstance(items, list):
+            return [i for i in items if isinstance(i, dict)]
+        if isinstance(result.get("id"), (str, int)):
+            return [result]
+    items = raw.get("items")
+    if isinstance(items, list):
+        return [i for i in items if isinstance(i, dict)]
+    return []
+
+
+def _parse_tracking_row(row: dict[str, Any]) -> DealandrunnerTrackingRow | None:
+    tid = row.get("id")
+    if tid is None or not str(tid).strip():
+        return None
+    tns_raw = row.get("trackingNumbers")
+    numbers: list[str] = []
+    if isinstance(tns_raw, list):
+        for val in tns_raw:
+            if val is not None and str(val).strip():
+                numbers.append(str(val).strip())
+    elif isinstance(tns_raw, str) and tns_raw.strip():
+        numbers.append(tns_raw.strip())
+    single = row.get("trackingNumber") or row.get("tracking") or row.get("number")
+    if isinstance(single, str) and single.strip():
+        numbers.append(single.strip())
+    if not numbers:
+        return None
+    return DealandrunnerTrackingRow(tracking_id=str(tid).strip(), tracking_numbers=numbers)
+
+
+def find_tracking(
+    *,
+    base_url: str | None,
+    bearer_token: str,
+    tracking_number: str,
+    timeout_seconds: float = 30.0,
+    max_pages: int = 5,
+    page_size: int = 50,
+) -> DealandrunnerTrackingRow | None:
+    """Look up a tracking row by TN via ``GET /tracking`` (newest first)."""
+    tn = (tracking_number or "").strip()
+    if not tn:
+        return None
+    tn_key = tn.casefold()
+    base = resolve_base_url(base_url)
+    for page in range(1, max_pages + 1):
+        qs = urllib.parse.urlencode(
+            {
+                "pageNumber": str(page),
+                "pageSize": str(page_size),
+                "orderBy": "dateCreated|desc",
+            }
+        )
+        url = f"{base}{TRACKING_PATH}?{qs}"
+        status, raw = _get_json(url=url, bearer_token=bearer_token, timeout_seconds=timeout_seconds)
+        if status != 200:
+            detail = _first_error_description(raw) or f"HTTP {status}"
+            raise RuntimeError(f"Deal & Runner list trackings failed: {detail}")
+        items = _items_from_tracking_list(raw)
+        if not items:
+            break
+        for row in items:
+            parsed = _parse_tracking_row(row)
+            if not parsed:
+                continue
+            for candidate in parsed.tracking_numbers:
+                if candidate.casefold() == tn_key:
+                    return parsed
+        if len(items) < page_size:
+            break
+    return None
+
+
 def _classify_single_result(
     *,
     tracking: str,
@@ -473,6 +589,38 @@ def submit_trackings(
         parts.append(f"{len(failed)} failed: {'; '.join(fail_details[:3])}")
     message = " ".join(parts) if parts else "Tracking numbers submitted successfully."
 
+    submission_ids: dict[str, str] = {}
+    for tn in succeeded + duplicates:
+        try:
+
+            def _lookup(tok: str, *, _tn: str = tn) -> DealandrunnerTrackingRow | None:
+                return find_tracking(
+                    base_url=base,
+                    bearer_token=tok,
+                    tracking_number=_tn,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            row: DealandrunnerTrackingRow | None = None
+            for attempt in range(4):
+                row, token = _with_relogin(
+                    base_url=base,
+                    email=email,
+                    password=password,
+                    token=token,
+                    timeout_seconds=timeout_seconds,
+                    call=_lookup,
+                )
+                if row is not None:
+                    break
+                if attempt < 3:
+                    time.sleep(0.75)
+            if row is not None:
+                submission_ids[tn] = row.tracking_id
+        except Exception:
+            # ID lookup must not fail the submit.
+            continue
+
     return DealandrunnerSubmitResult(
         success=True,
         message=message,
@@ -481,4 +629,5 @@ def submit_trackings(
         succeeded=succeeded,
         duplicates=duplicates,
         failed=failed,
+        submission_ids=submission_ids,
     )

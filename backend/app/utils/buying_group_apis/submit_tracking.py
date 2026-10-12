@@ -233,9 +233,20 @@ def build_buyinggroup_entry_from_items(
     )
 
 
-def mark_item_submitted(item: Item, when: datetime | None = None) -> None:
+def mark_item_submitted(
+    item: Item,
+    when: datetime | None = None,
+    *,
+    submission_id: str | None = None,
+    submission_api_id: str | None = None,
+) -> None:
     item.status = ItemStatus.SUBMITTED
     item.submitted_at = to_date_only(when or datetime.now(timezone.utc))
+    # Do not overwrite values already set (e.g. manual entry).
+    if submission_id and not (item.submission_id or "").strip():
+        item.submission_id = submission_id.strip()
+    if submission_api_id and not (item.submission_api_id or "").strip():
+        item.submission_api_id = submission_api_id.strip()
 
 
 @dataclass
@@ -245,6 +256,10 @@ class SubmitResult:
     message: str
     affected: int | None = None
     item_ids: list[int] = field(default_factory=list)
+    # tracking number -> (display_id, api_id)
+    submission_ids_by_tracking: dict[str, tuple[str | None, str | None]] = field(
+        default_factory=dict
+    )
 
 
 def submit_parsefile_trackings(
@@ -387,7 +402,13 @@ def submit_item_tracking_to_group(
     if framework == "parsefile":
         entry = build_parsefile_entry_from_items(pairs, tracking)
         result = submit_parsefile_trackings(group, [entry])
-        return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
+        ids_map = _parsefile_submission_ids(group, [tracking], result)
+        return SubmitResult(
+            message=result.message,
+            affected=result.affected,
+            item_ids=item_ids,
+            submission_ids_by_tracking=ids_map,
+        )
     if framework == "usabg":
         result = submit_usabg_trackings(
             group,
@@ -399,20 +420,140 @@ def submit_item_tracking_to_group(
                 )
             ],
         )
-        return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
+        ids_map = {
+            tn: (sid, None)
+            for tn, sid in (result.submission_ids or {}).items()
+            if sid
+        }
+        return SubmitResult(
+            message=result.message,
+            affected=result.affected,
+            item_ids=item_ids,
+            submission_ids_by_tracking=ids_map,
+        )
     if framework == "buyinggroup":
         entry = build_buyinggroup_entry_from_items(pairs, tracking)
         # Prefer summed amount already computed for siblings.
         entry.amount = amount
         result = submit_buyinggroup_trackings(group, [entry])
-        return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
+        ids_map = _buyinggroup_submission_ids(result)
+        return SubmitResult(
+            message=result.message,
+            affected=result.affected,
+            item_ids=item_ids,
+            submission_ids_by_tracking=ids_map,
+        )
     if framework == "dealandrunner":
         result = submit_dealandrunner_trackings(
             group,
             [dealandrunner_api.DealandrunnerTrackingEntry(tracking=tracking)],
         )
-        return SubmitResult(message=result.message, affected=result.affected, item_ids=item_ids)
+        ids_map = {
+            tn: (sid, None)
+            for tn, sid in (result.submission_ids or {}).items()
+            if sid
+        }
+        return SubmitResult(
+            message=result.message,
+            affected=result.affected,
+            item_ids=item_ids,
+            submission_ids_by_tracking=ids_map,
+        )
     raise ValueError("Buying group API framework is not configured for submission")
+
+
+def _buyinggroup_submission_ids(
+    result: buyinggroup_api.BuyinggroupSubmitResult,
+) -> dict[str, tuple[str | None, str | None]]:
+    out: dict[str, tuple[str | None, str | None]] = {}
+    for tn, ids in (result.submission_ids or {}).items():
+        display = (ids.display_id or "").strip() or None
+        api = (ids.api_id or "").strip() or None
+        if not display and api:
+            display = api
+        if display or api:
+            out[tn] = (display, api)
+    return out
+
+
+def _parsefile_submission_ids(
+    group: BuyingGroup,
+    trackings: Sequence[str],
+    result: parsefile_api.ParsefileSubmitResult,
+    *,
+    portal_password: str | None = None,
+) -> dict[str, tuple[str | None, str | None]]:
+    """Look up Parsefile orders-all ids when portal password is configured."""
+    if result.submission_ids:
+        out: dict[str, tuple[str | None, str | None]] = {}
+        for tn, ids in result.submission_ids.items():
+            display = (ids.display_id or "").strip() or None
+            api = (ids.api_id or "").strip() or None
+            if not display and api:
+                display = api
+            if display or api:
+                out[tn] = (display, api)
+        return out
+    email = (group.api_email or "").strip()
+    password = (portal_password if portal_password is not None else group.api_password or "").strip()
+    base_url = (group.base_url or "").strip()
+    if not email or not password or not base_url:
+        return {}
+    try:
+        looked_up = parsefile_api.lookup_submission_ids(
+            base_url=base_url,
+            email=email,
+            password=password,
+            tracking_numbers=[(t or "").strip() for t in trackings if (t or "").strip()],
+        )
+    except Exception as exc:
+        logger.warning("Parsefile submission id lookup failed: %s", exc)
+        return {}
+    out = {}
+    for tn, ids in looked_up.items():
+        display = (ids.display_id or "").strip() or None
+        api = (ids.api_id or "").strip() or None
+        if not display and api:
+            display = api
+        if display or api:
+            out[tn] = (display, api)
+    return out
+
+
+def _ids_for_tracking(
+    submission_ids_by_tracking: dict[str, tuple[str | None, str | None]],
+    tracking: str | None,
+) -> tuple[str | None, str | None]:
+    tn = (tracking or "").strip()
+    if not tn:
+        return None, None
+    if tn in submission_ids_by_tracking:
+        return submission_ids_by_tracking[tn]
+    key = tn.casefold()
+    for candidate, ids in submission_ids_by_tracking.items():
+        if candidate.casefold() == key:
+            return ids
+    return None, None
+
+
+def format_submission_ids_for_log(
+    submission_ids_by_tracking: dict[str, tuple[str | None, str | None]] | None,
+) -> str | None:
+    """Human-readable submission id summary for Groups log messages."""
+    if not submission_ids_by_tracking:
+        return None
+    parts: list[str] = []
+    for tn, (display, api) in submission_ids_by_tracking.items():
+        label = display or api
+        if not label:
+            continue
+        if display and api and display != api:
+            parts.append(f"{tn}: {display} (api {api})")
+        else:
+            parts.append(f"{tn}: {label}")
+    if not parts:
+        return None
+    return "Submission IDs: " + "; ".join(parts)
 
 
 def _aggregate_usabg_entries(
@@ -484,6 +625,10 @@ class BatchSubmitResult:
     tracking_numbers: list[str] = field(default_factory=list)
     message: str | None = None
     error: str | None = None
+    # tracking number -> (display_id, api_id)
+    submission_ids_by_tracking: dict[str, tuple[str | None, str | None]] = field(
+        default_factory=dict
+    )
 
 
 def batch_submit_pending_trackings(
@@ -571,6 +716,9 @@ def batch_submit_pending_trackings(
 
     item_ids = [item.id for item, _, _ in pending]
     tracking_numbers = [tracking for *_, tracking in pending]
+    submission_ids_by_tracking: dict[str, tuple[str | None, str | None]] = {}
+    # item_id -> tracking for applying ids after submit
+    item_tracking: dict[int, str] = {item.id: tracking for item, _order, tracking in pending}
 
     try:
         if framework == "parsefile":
@@ -580,6 +728,7 @@ def batch_submit_pending_trackings(
             bearer_token = str(group.bearer_token)
             api_user_id = int(group.api_user_id)
             api_email = str(group.api_email)
+            api_password = str(group.api_password or "")
             entries = _aggregate_parsefile_entries(pending)
             tracking_numbers = [e.tracking for e in entries]
             api_result = parsefile_api.submit_trackings(
@@ -591,6 +740,12 @@ def batch_submit_pending_trackings(
                 trackings=entries,
             )
             message = api_result.message
+            submission_ids_by_tracking = _parsefile_submission_ids(
+                group,
+                tracking_numbers,
+                api_result,
+                portal_password=api_password,
+            )
         elif framework == "usabg":
             base_url = group.base_url
             username = str(group.api_username)
@@ -604,6 +759,11 @@ def batch_submit_pending_trackings(
                 trackings=entries,
             )
             message = api_result.message
+            submission_ids_by_tracking = {
+                tn: (sid, None)
+                for tn, sid in (api_result.submission_ids or {}).items()
+                if sid
+            }
         elif framework == "buyinggroup":
             base_url = group.base_url
             api_url = group.api_url
@@ -619,6 +779,7 @@ def batch_submit_pending_trackings(
                 trackings=entries,
             )
             message = api_result.message
+            submission_ids_by_tracking = _buyinggroup_submission_ids(api_result)
         elif framework == "dealandrunner":
             base_url = group.base_url
             email = str(group.api_username)
@@ -642,6 +803,11 @@ def batch_submit_pending_trackings(
                 ]
             if api_result.failed and not item_ids:
                 raise RuntimeError(api_result.message or "Deal & Runner tracking submit failed")
+            submission_ids_by_tracking = {
+                tn: (sid, None)
+                for tn, sid in (api_result.submission_ids or {}).items()
+                if sid
+            }
         else:
             return BatchSubmitResult(
                 buying_group_id=buying_group_id,
@@ -659,8 +825,19 @@ def batch_submit_pending_trackings(
             .all()
         )
         for item in items_to_mark:
-            mark_item_submitted(item, when=now)
+            display_id, api_id = _ids_for_tracking(
+                submission_ids_by_tracking, item_tracking.get(item.id)
+            )
+            mark_item_submitted(
+                item,
+                when=now,
+                submission_id=display_id,
+                submission_api_id=api_id,
+            )
         db.commit()
+        id_summary = format_submission_ids_for_log(submission_ids_by_tracking)
+        if id_summary:
+            message = f"{message}\n{id_summary}" if message else id_summary
         return BatchSubmitResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
@@ -669,6 +846,7 @@ def batch_submit_pending_trackings(
             missing_tracking_count=missing_tracking,
             tracking_numbers=tracking_numbers,
             message=message,
+            submission_ids_by_tracking=submission_ids_by_tracking,
         )
     except Exception as exc:
         logger.warning(

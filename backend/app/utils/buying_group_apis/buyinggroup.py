@@ -63,8 +63,21 @@ class BuyinggroupTrackingEntry:
 
 @dataclass
 class BuyinggroupOrderRow:
+    """Remote order row after submit.
+
+    ``order_id`` is the UUID used by ``update_order``.
+    ``display_order_id`` is the human id (e.g. ``O-269283098``) when present.
+    """
+
     order_id: str
     tracking_id: str
+    display_order_id: str | None = None
+
+
+@dataclass
+class BuyinggroupSubmissionIds:
+    display_id: str | None
+    api_id: str | None
 
 
 @dataclass
@@ -75,6 +88,8 @@ class BuyinggroupSubmitResult:
     raw: dict[str, Any] | list[Any] | None = None
     enriched_count: int = 0
     enrich_errors: list[str] = field(default_factory=list)
+    # tracking number -> display + API ids
+    submission_ids: dict[str, BuyinggroupSubmissionIds] = field(default_factory=dict)
 
 
 @dataclass
@@ -651,11 +666,18 @@ def _parse_order_row(
     *,
     fallback_tracking: str | None = None,
 ) -> BuyinggroupOrderRow | None:
-    """Pick the UUID used by update_order.
+    """Pick the UUID used by update_order and the human display id when present.
 
     BG list rows expose a human display id in ``order_id`` (e.g. ``O-269283098``)
     and the real UUID in ``key`` (what the UI sends as ``order_id`` on update).
     """
+    display_raw = row.get("order_id")
+    display_order_id: str | None = None
+    if display_raw is not None and str(display_raw).strip():
+        display_candidate = str(display_raw).strip()
+        if not _looks_like_uuid(display_candidate):
+            display_order_id = display_candidate
+
     candidates = (
         row.get("key"),
         row.get("id"),
@@ -690,7 +712,11 @@ def _parse_order_row(
     tid = str(tracking_id or "").strip()
     if not oid:
         return None
-    return BuyinggroupOrderRow(order_id=oid, tracking_id=tid)
+    return BuyinggroupOrderRow(
+        order_id=oid,
+        tracking_id=tid,
+        display_order_id=display_order_id,
+    )
 
 
 def _auth_headers(access_token: str) -> dict[str, str]:
@@ -1239,6 +1265,7 @@ def submit_trackings(
 
     enriched_count = 0
     enrich_errors: list[str] = []
+    submission_ids: dict[str, BuyinggroupSubmissionIds] = {}
     for entry in trackings:
         tn = (entry.tracking or "").strip()
         if not tn:
@@ -1248,12 +1275,6 @@ def submit_trackings(
             or entry.amount is not None
             or (entry.note or "").strip()
         )
-        if not needs_enrich:
-            logger.warning(
-                "BuyingGroup enrich skipped for %s: no order_num/amount/note on entry",
-                tn,
-            )
-            continue
         try:
 
             def _lookup(toks: _AuthTokens, *, _tn: str = tn) -> BuyinggroupOrderRow | None:
@@ -1280,7 +1301,27 @@ def submit_trackings(
                 if attempt < 5:
                     time.sleep(1.0)
             if row is None:
-                raise RuntimeError("order not found after submit (get_orders empty)")
+                if needs_enrich:
+                    raise RuntimeError("order not found after submit (get_orders empty)")
+                logger.warning(
+                    "BuyingGroup order lookup empty for %s after submit (no ids)",
+                    tn,
+                )
+                continue
+
+            submission_ids[tn] = BuyinggroupSubmissionIds(
+                display_id=row.display_order_id or None,
+                api_id=row.order_id or None,
+            )
+
+            if not needs_enrich:
+                logger.info(
+                    "BuyingGroup captured ids for %s (display=%s api=%s); enrich skipped",
+                    tn,
+                    row.display_order_id,
+                    row.order_id,
+                )
+                continue
 
             def _update(
                 toks: _AuthTokens,
@@ -1308,16 +1349,17 @@ def submit_trackings(
             )
             enriched_count += 1
             logger.info(
-                "BuyingGroup enriched tracking %s (order_id=%s order_num=%s amount=%s)",
+                "BuyingGroup enriched tracking %s (order_id=%s display=%s order_num=%s amount=%s)",
                 tn,
                 row.order_id,
+                row.display_order_id,
                 entry.order_num,
                 entry.amount,
             )
         except Exception as exc:
             err = f"{tn}: {exc}"
             enrich_errors.append(err)
-            logger.warning("BuyingGroup enrich failed: %s", err)
+            logger.warning("BuyingGroup enrich/lookup failed: %s", err)
 
     if enriched_count and enrich_errors:
         message = (
@@ -1336,4 +1378,5 @@ def submit_trackings(
         raw=raw if isinstance(raw, (dict, list)) else None,
         enriched_count=enriched_count,
         enrich_errors=enrich_errors,
+        submission_ids=submission_ids,
     )

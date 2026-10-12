@@ -15,6 +15,7 @@ class ItemBase(BaseModel):
     shipping: Decimal | None = None
     sales_tax: Decimal | None = None
     submission_id: str | None = None
+    submission_api_id: str | None = None
     receipt_id: str | None = None
     # Datetime when each status was (last) set (shipped_at/delivered_at on Shipment; payment dates on Payment)
     purchased_at: datetime | None = None
@@ -47,6 +48,7 @@ class ItemUpdate(BaseModel):
     shipping: Decimal | None = None
     sales_tax: Decimal | None = None
     submission_id: str | None = None
+    submission_api_id: str | None = None
     receipt_id: str | None = None
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
@@ -91,6 +93,7 @@ class ItemBulkUpdateEntry(BaseModel):
     shipping: Decimal | None = None
     sales_tax: Decimal | None = None
     submission_id: str | None = None
+    submission_api_id: str | None = None
     receipt_id: str | None = None
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None

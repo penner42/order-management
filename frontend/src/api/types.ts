@@ -114,6 +114,7 @@ export interface Item {
   shipping: string | null
   sales_tax: string | null
   submission_id: string | null
+  submission_api_id: string | null
   receipt_id: string | null
   created_at: string
   updated_at?: string

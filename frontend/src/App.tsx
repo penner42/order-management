@@ -93,7 +93,7 @@ function AppShell() {
       { to: '/personal-orders', label: 'Personal Orders' },
       { to: '/extension', label: 'Extension' },
       { to: '/browser-automation', label: 'Browser automation' },
-      { to: '/browser-import-log', label: 'Import log' },
+      { to: '/browser-import-log', label: 'Log' },
       { to: '/settings', label: 'Settings' },
     ]
   }, [user])

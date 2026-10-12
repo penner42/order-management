@@ -858,7 +858,7 @@ export default function BrowserAutomation() {
           to="/browser-import-log"
           className="text-sm text-brand-600 dark:text-brand-400 hover:underline"
         >
-          View import log
+          View log
         </Link>
       </div>
       <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
