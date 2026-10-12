@@ -450,11 +450,11 @@ export default function ReceivingReview() {
       {unknownReceipts.length > 0 && (
         <div className="mb-8">
           <h2 className="text-sm font-medium text-ink mb-2">
-            Received at BG — not in Order Manager ({unknownReceipts.length})
+            Received — not in Order Manager ({unknownReceipts.length})
           </h2>
           <p className="text-xs text-ink-muted mb-2">
-            Warehouse receipts whose tracking number is not on any shipment in Order Manager. Details
-            enriched from BuyingGroup analytics when available. Informational only — cannot mark scanned.
+            Warehouse receipts whose tracking number is not on any shipment in Order Manager.
+            Informational only — cannot mark scanned.
           </p>
           <div className="overflow-x-auto rounded-xl border border-brand-200/80 dark:border-gray-700">
             <table className="w-full text-sm">

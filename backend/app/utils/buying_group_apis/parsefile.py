@@ -436,3 +436,76 @@ def search_received_items(
         raw_csv=raw_text,
         url=url,
     )
+
+
+# Epoch floor used when pulling the full received-items export.
+_ALL_RECEIVED_MIN_DATE = "2000-01-01"
+
+
+def list_all_received_items(
+    *,
+    base_url: str,
+    bearer_token: str,
+    user_id: int,
+    email: str,
+    timeout_seconds: float = 120.0,
+) -> ParsefileReceivedItemsSearchResult:
+    """POST received-items search with empty trackings/receipts to return all rows.
+
+    Parsefile returns the full export when ``trackings`` and ``receipts`` are empty
+    arrays and min created/modified dates are set.
+    """
+    if not (bearer_token or "").strip():
+        raise ValueError("bearer_token is required")
+    if not (email or "").strip():
+        raise ValueError("email is required")
+
+    body: dict[str, Any] = {
+        "user": int(user_id),
+        "email": email.strip(),
+        "trackings": [],
+        "receipts": [],
+        "minCreatedDate": _ALL_RECEIVED_MIN_DATE,
+        "minModifiedDate": _ALL_RECEIVED_MIN_DATE,
+    }
+
+    url = build_received_items_search_url(base_url)
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {bearer_token.strip()}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            raw_text = resp.read().decode("utf-8", errors="replace")
+            status = getattr(resp, "status", 200)
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        parsed_msg = ""
+        if err_body.strip():
+            try:
+                err_json = json.loads(err_body)
+                if isinstance(err_json, dict):
+                    parsed_msg = _message_from_payload(err_json, success=False)
+            except json.JSONDecodeError:
+                parsed_msg = err_body.strip()[:400]
+        detail = parsed_msg or (str(e.reason).strip() if e.reason else "") or "empty response"
+        raise RuntimeError(f"Parsefile API error {e.code} at {url}: {detail}") from e
+    except urllib.error.URLError as e:
+        reason = str(getattr(e, "reason", e)).strip() or e.__class__.__name__
+        raise RuntimeError(f"Parsefile API request failed ({url}): {reason}") from e
+
+    if status >= 400:
+        raise RuntimeError(f"Parsefile received-items search failed (HTTP {status}) from {url}")
+
+    return ParsefileReceivedItemsSearchResult(
+        rows=parse_received_items_csv(raw_text),
+        raw_csv=raw_text,
+        url=url,
+    )

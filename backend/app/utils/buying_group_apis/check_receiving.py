@@ -23,7 +23,6 @@ _UNSCANNED_STATUSES = (ItemStatus.SHIPPED, ItemStatus.SUBMITTED)
 # Short-lived in-memory sessions for the receiving review UI (same pattern as bulk import).
 _receiving_sessions: dict[str, dict[str, Any]] = {}
 
-TRACKING_SEARCH_CHUNK = 150
 AMOUNT_TOLERANCE = Decimal("0.01")
 
 
@@ -400,38 +399,18 @@ def _check_receiving_parsefile(
 
     unscanned_items, pending, all_trackings = _collect_pending(db, buying_group_id=buying_group_id)
 
-    if not pending:
-        return CheckReceivingResult(
-            buying_group_id=buying_group_id,
-            buying_group_name=group_name,
-            submitted_count=len(unscanned_items),
-            message=(
-                "No shipped/submitted (unscanned) items with tracking numbers for this buying group."
-                if not unscanned_items
-                else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers."
-            ),
-        )
-
     base_url = str(group.base_url)
     bearer_token = str(group.bearer_token)
     api_user_id = int(group.api_user_id)
     api_email = str(group.api_email)
 
-    received_rows: list[parsefile_api.ParsefileReceivedItem] = []
-    raw_csv_parts: list[str] = []
     try:
-        for i in range(0, len(all_trackings), TRACKING_SEARCH_CHUNK):
-            chunk = all_trackings[i : i + TRACKING_SEARCH_CHUNK]
-            api_result = parsefile_api.search_received_items(
-                base_url=base_url,
-                bearer_token=bearer_token,
-                user_id=api_user_id,
-                email=api_email,
-                trackings=chunk,
-            )
-            received_rows.extend(api_result.rows)
-            if api_result.raw_csv.strip():
-                raw_csv_parts.append(api_result.raw_csv.strip())
+        api_result = parsefile_api.list_all_received_items(
+            base_url=base_url,
+            bearer_token=bearer_token,
+            user_id=api_user_id,
+            email=api_email,
+        )
     except Exception as exc:
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
@@ -440,7 +419,8 @@ def _check_receiving_parsefile(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
-    raw_csv = "\n\n".join(raw_csv_parts)
+    received_rows = api_result.rows
+    raw_csv = api_result.raw_csv
 
     by_tracking = _index_received_by_tracking(received_rows)
     used_row_ids: set[int] = set()
@@ -511,28 +491,84 @@ def _check_receiving_parsefile(
             )
         )
 
+    known_trackings = _known_shipment_trackings(db)
+    unknown_receipts: list[dict[str, Any]] = []
+    orphan_seen: set[int] = set()
+    for row in received_rows:
+        if row.void:
+            continue
+        if not row.tracking_numbers:
+            continue
+        if id(row) in used_row_ids or id(row) in orphan_seen:
+            continue
+        # Skip if any tracking on the row already exists in OM.
+        if any(tn.casefold() in known_trackings for tn in row.tracking_numbers):
+            continue
+        orphan_seen.add(id(row))
+        tn = row.tracking_numbers[0]
+        received_total = row.ext_total
+        if received_total is None and row.price is not None:
+            received_total = row.price * (row.qty if row.qty is not None else 1)
+        scanned_dt = _parse_created_date(row.created_date)
+        unknown_receipts.append(
+            {
+                "receipt_id": row.receipt_id,
+                "tracking_number": tn,
+                "bg_order_id": None,
+                "description": (row.item or "").strip() or None,
+                "quantity": row.qty,
+                "received_price": str(row.price) if row.price is not None else None,
+                "received_ext_total": str(received_total) if received_total is not None else None,
+                "received_status": row.status,
+                "note": None,
+                "created_dt": row.created_date,
+                "scanned_at": _iso_date(scanned_dt),
+                "delivery": row.delivery,
+            }
+        )
+
     discrepancy_count = sum(1 for m in matches if m.amount_discrepancy)
     checked_summary = (
         f"Checked {len(pending)} unscanned item(s) / {len(all_trackings)} tracking number(s) "
-        f"against Parsefile."
+        f"against Parsefile ({len(received_rows)} received row(s))."
     )
 
     matched_ids = {m.item_id for m in matches}
     unmatched = _build_unmatched(pending, matched_ids)
 
+    if not pending and not unknown_receipts and not matches:
+        return CheckReceivingResult(
+            buying_group_id=buying_group_id,
+            buying_group_name=group_name,
+            submitted_count=len(unscanned_items),
+            message=(
+                "No shipped/submitted (unscanned) items with tracking numbers for this buying group, "
+                "and no unknown Parsefile receipts."
+                if not unscanned_items
+                else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
+                "and no unknown Parsefile receipts."
+            ),
+        )
+
+    parts: list[str] = []
     if matches:
-        message = (
+        parts.append(
             f"Found {len(matches)} received item(s) ready to mark scanned"
             + (f" ({discrepancy_count} amount discrepancy)" if discrepancy_count else "")
-            + f". {checked_summary}"
         )
-    else:
-        parts = [checked_summary]
+    if unknown_receipts:
+        parts.append(
+            f"{len(unknown_receipts)} Parsefile receipt(s) with tracking not in Order Manager"
+        )
+    if not matches and not unknown_receipts:
+        bits = [checked_summary]
         if not_found:
-            parts.append(f"{not_found} not found as received.")
+            bits.append(f"{not_found} local item(s) not found as received.")
         if void_skipped:
-            parts.append(f"{void_skipped} voided at Parsefile.")
-        message = " ".join(parts) + " Nothing to mark scanned."
+            bits.append(f"{void_skipped} voided at Parsefile.")
+        message = " ".join(bits) + " Nothing to review."
+    else:
+        message = ". ".join(parts) + f". {checked_summary}"
 
     payload = {
         "buying_group_id": buying_group_id,
@@ -544,7 +580,7 @@ def _check_receiving_parsefile(
         "raw_csv": raw_csv,
         "csv_row_count": len(received_rows),
         "unmatched": unmatched,
-        "unknown_receipts": [],
+        "unknown_receipts": unknown_receipts,
         "matches": [match_to_dict(m) for m in matches],
     }
     token = create_receiving_session(payload)
