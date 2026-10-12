@@ -24,6 +24,8 @@ interface ReceivingMatch {
   match_kind?: 'received' | 'not_received' | string
   original_quantity?: number | null
   split_keep_quantity?: number | null
+  /** Already scanned+; apply updates receipt_id only (does not change status). */
+  update_receipt_only?: boolean
 }
 
 interface ReceivingUnmatched {
@@ -199,9 +201,9 @@ export default function ReceivingReview() {
     if (!session || applying) return
     const updates: Array<{
       item_id: number
-      status: 'scanned'
+      status?: 'scanned'
       receipt_id: string | null
-      scanned_at: string
+      scanned_at?: string
       price_sold?: string | null
     }> = []
     const appliedKeys: string[] = []
@@ -209,26 +211,37 @@ export default function ReceivingReview() {
     setApplying(true)
     setApplyError(null)
     try {
+      // Live item id after chained splits for multi-tracking rows on one item.
+      const liveItemId = new Map<number, number>()
+
       for (const m of matches) {
         if (m.match_kind === 'not_received') continue
         const key = rowKey(m)
         const edit = edits[key]
         if (!edit?.selected || appliedIds.has(key)) continue
 
+        let itemId = liveItemId.get(m.item_id) ?? m.item_id
+
         if (m.split_keep_quantity != null && m.split_keep_quantity > 0) {
-          const originalQty = m.original_quantity ?? m.quantity
-          if (m.split_keep_quantity < originalQty) {
-            await api.post(`/items/${m.item_id}/split`, {
-              keep_quantity: m.split_keep_quantity,
-            })
-          }
+          const { split_off } = await api.post<{
+            kept: { id: number }
+            split_off: { id: number }
+          }>(`/items/${itemId}/split`, {
+            keep_quantity: m.split_keep_quantity,
+          })
+          // Next row for this original item applies to the split-off remainder.
+          liveItemId.set(m.item_id, split_off.id)
         }
 
         const entry: (typeof updates)[number] = {
-          item_id: m.item_id,
-          status: 'scanned',
+          item_id: itemId,
           receipt_id: edit.receipt_id.trim() || null,
-          scanned_at: dateInputToNoonUtcIso(edit.scanned_date),
+        }
+        if (!m.update_receipt_only) {
+          entry.status = 'scanned'
+          entry.scanned_at = dateInputToNoonUtcIso(edit.scanned_date)
+        } else if (edit.scanned_date) {
+          entry.scanned_at = dateInputToNoonUtcIso(edit.scanned_date)
         }
         if (edit.use_received_total && m.received_ext_total != null && m.quantity > 0) {
           const total = parseMoney(m.received_ext_total)
@@ -344,7 +357,7 @@ export default function ReceivingReview() {
         <>
           {allApplied ? (
             <p className="mb-4 text-sm text-emerald-700 dark:text-emerald-400 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-900/20 px-3 py-2">
-              All listed items were marked scanned.
+              All listed rows were applied.
             </p>
           ) : (
             <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -368,7 +381,7 @@ export default function ReceivingReview() {
                 disabled={applying || selectedCount === 0}
                 className="rounded-md bg-brand-600 text-white px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
               >
-                {applying ? 'Applying…' : `Mark ${selectedCount} scanned`}
+                {applying ? 'Applying…' : `Apply ${selectedCount} selected`}
               </button>
             </div>
           )}
@@ -440,12 +453,17 @@ export default function ReceivingReview() {
                           </div>
                         ) : (
                           <>
+                            {m.update_receipt_only && (
+                              <div className="text-xs text-ink-muted mt-0.5">
+                                Already scanned — update receipt ID only
+                              </div>
+                            )}
                             {m.split_keep_quantity != null &&
                               m.original_quantity != null &&
                               m.split_keep_quantity < m.original_quantity && (
                                 <div className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
-                                  Partial receive {m.split_keep_quantity}/{m.original_quantity} — will
-                                  split on apply
+                                  {m.quantity}/{m.original_quantity} on this tracking — will split on
+                                  apply
                                 </div>
                               )}
                             {m.received_item && m.received_item !== m.description && (

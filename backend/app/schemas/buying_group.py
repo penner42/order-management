@@ -217,6 +217,7 @@ class ReceivingReviewMatch(BaseModel):
     match_kind: str = "received"  # received | not_received
     original_quantity: int | None = None
     split_keep_quantity: int | None = None
+    update_receipt_only: bool = False
 
 
 class ReceivingReviewUnmatched(BaseModel):

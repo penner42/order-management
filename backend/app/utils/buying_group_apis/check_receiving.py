@@ -25,6 +25,17 @@ from app.utils.dates import to_date_only
 # Items that may already be at the warehouse but not marked scanned locally.
 _UNSCANNED_STATUSES = (ItemStatus.SHIPPED, ItemStatus.SUBMITTED)
 
+# Already received locally — only surface on review when receipt ID would change.
+_SCANNED_OR_LATER_STATUSES = (
+    ItemStatus.SCANNED,
+    ItemStatus.NEEDS_RETURN,
+    ItemStatus.RETURN_STARTED,
+    ItemStatus.RETURN_SENT,
+    ItemStatus.RETURN_RECEIVED,
+    ItemStatus.RETURN_REFUNDED,
+    ItemStatus.LOST_PACKAGE,
+)
+
 # Short-lived in-memory sessions for the receiving review UI (same pattern as bulk import).
 _receiving_sessions: dict[str, dict[str, Any]] = {}
 
@@ -58,6 +69,8 @@ class ReceivingMatch:
     original_quantity: int | None = None
     # When set on a received line, apply should split the item keeping this qty.
     split_keep_quantity: int | None = None
+    # Item is already scanned+; apply should update receipt_id only (not status).
+    update_receipt_only: bool = False
 
 
 @dataclass
@@ -211,6 +224,7 @@ def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
         "match_kind": m.match_kind,
         "original_quantity": m.original_quantity,
         "split_keep_quantity": m.split_keep_quantity,
+        "update_receipt_only": m.update_receipt_only,
     }
 
 
@@ -218,14 +232,19 @@ def _allocate_received_across_shared_trackings(
     *,
     item_demands: list[tuple[int, int, list[str]]],
     supply_by_tn: dict[str, int],
-) -> dict[int, int]:
+) -> tuple[dict[int, int], dict[int, list[tuple[str, int]]]]:
     """Allocate warehouse qty to items, sharing supply when orders share a TN.
 
     For each tracking, prefer fully matching as many claimant orders/items as
     possible before any under-received split. An item may be filled from
     multiple trackings until its demand is met.
+
+    Returns (total_by_item, per_item list of (tn_key, qty) in allocation order).
     """
     allocated = {item_id: 0 for item_id, _qty, _tns in item_demands}
+    detail: dict[int, list[tuple[str, int]]] = {
+        item_id: [] for item_id, _qty, _tns in item_demands
+    }
     demand = {item_id: max(int(qty or 1), 1) for item_id, qty, _tns in item_demands}
     item_tns = {
         item_id: [tn.casefold() for tn in trackings if (tn or "").strip()]
@@ -236,6 +255,13 @@ def _allocate_received_across_shared_trackings(
         for tn, qty in supply_by_tn.items()
         if tn and int(qty or 0) > 0
     }
+
+    def _add_detail(item_id: int, tn: str, give: int) -> None:
+        for i, (existing_tn, existing_qty) in enumerate(detail[item_id]):
+            if existing_tn == tn:
+                detail[item_id][i] = (tn, existing_qty + give)
+                return
+        detail[item_id].append((tn, give))
 
     for tn in sorted(remaining.keys()):
         while remaining.get(tn, 0) > 0:
@@ -267,8 +293,9 @@ def _allocate_received_across_shared_trackings(
             need = demand[item_id] - allocated[item_id]
             give = min(need, avail)
             allocated[item_id] += give
+            _add_detail(item_id, tn, give)
             remaining[tn] = avail - give
-    return allocated
+    return allocated, detail
 
 
 def _received_match_count(matches: list[ReceivingMatch]) -> int:
@@ -286,63 +313,141 @@ def _line_expected_amount(item: Item, line_qty: int) -> Decimal | None:
     return price * max(int(line_qty), 0)
 
 
-def _matches_for_allocated_item(
+def _join_unique_strs(values: list[Any]) -> str | None:
+    uniq = list(dict.fromkeys(str(v) for v in values if v is not None and str(v).strip()))
+    return ", ".join(uniq) if uniq else None
+
+
+def _meta_receipt_id(meta: dict[str, Any] | None) -> str | None:
+    if not meta:
+        return None
+    return _join_unique_strs(list(meta.get("receipt_ids") or []))
+
+
+def _receipt_ids_on_item(item: Item) -> set[str]:
+    raw = (item.receipt_id or "").strip()
+    if not raw:
+        return set()
+    return {p.strip() for p in raw.replace(";", ",").split(",") if p.strip()}
+
+
+def _receipt_needs_update(item: Item, receipt_id: str | None) -> bool:
+    """True when warehouse receipt ID(s) are not already stored on the item."""
+    new_ids = {
+        p.strip()
+        for p in (receipt_id or "").replace(";", ",").split(",")
+        if p.strip()
+    }
+    if not new_ids:
+        return False
+    return not new_ids.issubset(_receipt_ids_on_item(item))
+
+
+def _tn_display(trackings: list[str], tn_key: str) -> str:
+    for tn in trackings:
+        if tn.casefold() == tn_key:
+            return tn
+    return tn_key
+
+
+def _unit_payout_from_meta(meta: dict[str, Any], *, allocated_qty: int) -> Decimal | None:
+    prices = list(meta.get("prices") or meta.get("unit_prices") or [])
+    if prices:
+        return _money(prices[0])
+    ext_totals = list(meta.get("ext_totals") or [])
+    if ext_totals and allocated_qty > 0:
+        total_ext = sum((_money(t) or Decimal("0")) for t in ext_totals)
+        return (total_ext / Decimal(allocated_qty)).quantize(Decimal("0.01"))
+    return None
+
+
+def _matches_for_tn_allocations(
     *,
     item: Item,
     order: Order,
     trackings: list[str],
-    allocated: int,
-    receipt_id: str | None,
-    scanned_at: str | None,
-    received_item: str | None,
-    received_status: str | None,
-    unit_payout: Decimal | None,
+    tn_allocations: list[tuple[str, int]],
+    meta_by_tn: dict[str, dict[str, Any]],
+    fallback_scanned_at: Any = None,
+    update_receipt_only: bool = False,
+    extra_lines: list[tuple[str, int, dict[str, Any]]] | None = None,
 ) -> list[ReceivingMatch]:
-    """Build received (+ optional not-received split) lines for one item."""
+    """Build one review row per tracking allocation (+ optional not-received remainder)."""
     demand = item.quantity or 1
-    got = max(0, min(int(allocated), demand))
-    if got <= 0:
-        return []
-
     store_order_number = (order.store_order_number or "").strip() or None
     description = (item.description or "").strip() or None
     price_sold = _money(item.price_sold)
-    tracking_label = ", ".join(trackings) if trackings else ""
 
-    received_ext = None
-    if unit_payout is not None:
-        received_ext = (unit_payout * Decimal(got)).quantize(Decimal("0.01"))
-    expected = _line_expected_amount(item, got)
-    discrepancy = _amounts_differ(expected, received_ext)
+    lines: list[tuple[str, int, dict[str, Any]]] = []
+    for tn_key, qty in tn_allocations:
+        if qty <= 0:
+            continue
+        meta = meta_by_tn.get(tn_key) or {}
+        receipt_id = _meta_receipt_id(meta)
+        if update_receipt_only and not _receipt_needs_update(item, receipt_id):
+            continue
+        lines.append((_tn_display(trackings, tn_key), qty, meta))
+    for display_tn, qty, meta in extra_lines or []:
+        if qty <= 0:
+            continue
+        receipt_id = _meta_receipt_id(meta)
+        if update_receipt_only and not _receipt_needs_update(item, receipt_id):
+            continue
+        lines.append((display_tn, qty, meta))
 
-    out: list[ReceivingMatch] = [
-        ReceivingMatch(
-            item_id=item.id,
-            order_id=order.id,
-            store_order_number=store_order_number,
-            description=description,
-            quantity=got,
-            tracking_number=tracking_label,
-            price_sold=price_sold,
-            expected_amount=expected,
-            receipt_id=receipt_id,
-            scanned_at=scanned_at,
-            received_item=received_item,
-            received_qty=got,
-            received_price=unit_payout,
-            received_ext_total=received_ext,
-            received_status=received_status,
-            amount_discrepancy=discrepancy,
-            selected=True,
-            row_id=f"{item.id}:{MATCH_KIND_RECEIVED}",
-            match_kind=MATCH_KIND_RECEIVED,
-            original_quantity=demand,
-            split_keep_quantity=got if got < demand else None,
+    if not lines:
+        return []
+
+    got_total = sum(q for _tn, q, _meta in lines)
+    out: list[ReceivingMatch] = []
+    consumed = 0
+    for index, (display_tn, qty, meta) in enumerate(lines):
+        consumed += qty
+        more_after = consumed < demand
+        receipt_id = _meta_receipt_id(meta)
+        statuses = list(meta.get("statuses") or [])
+        unit_payout = _unit_payout_from_meta(meta, allocated_qty=qty)
+        received_ext = None
+        if unit_payout is not None:
+            received_ext = (unit_payout * Decimal(qty)).quantize(Decimal("0.01"))
+        expected = _line_expected_amount(item, qty)
+        discrepancy = _amounts_differ(expected, received_ext)
+        scanned_dt = meta.get("scanned_at") or fallback_scanned_at
+        if scanned_dt is None:
+            scanned_dt = to_date_only(datetime.now(timezone.utc))
+        received_item = meta.get("received_item")
+        tn_key = display_tn.casefold() if display_tn else f"line{index}"
+        out.append(
+            ReceivingMatch(
+                item_id=item.id,
+                order_id=order.id,
+                store_order_number=store_order_number,
+                description=description,
+                quantity=qty,
+                tracking_number=display_tn,
+                price_sold=price_sold,
+                expected_amount=expected,
+                receipt_id=receipt_id,
+                scanned_at=_iso_date(scanned_dt),
+                received_item=received_item,
+                received_qty=qty,
+                received_price=unit_payout,
+                received_ext_total=received_ext,
+                received_status=_join_unique_strs(statuses),
+                amount_discrepancy=discrepancy,
+                selected=True,
+                row_id=f"{item.id}:{MATCH_KIND_RECEIVED}:{tn_key}:{index}",
+                match_kind=MATCH_KIND_RECEIVED,
+                original_quantity=demand,
+                split_keep_quantity=qty if more_after else None,
+                update_receipt_only=update_receipt_only,
+            )
         )
-    ]
-    if got < demand:
-        rem = demand - got
+
+    if not update_receipt_only and got_total < demand:
+        rem = demand - got_total
         rem_expected = _line_expected_amount(item, rem)
+        tracking_label = ", ".join(trackings) if trackings else ""
         out.append(
             ReceivingMatch(
                 item_id=item.id,
@@ -366,9 +471,63 @@ def _matches_for_allocated_item(
                 match_kind=MATCH_KIND_NOT_RECEIVED,
                 original_quantity=demand,
                 split_keep_quantity=None,
+                update_receipt_only=False,
             )
         )
     return out
+
+
+def _receipt_update_matches_for_item(
+    *,
+    item: Item,
+    order: Order,
+    trackings: list[str],
+    meta_by_tn: dict[str, dict[str, Any]],
+    supply_by_tn: dict[str, int],
+    fallback_scanned_at: Any = None,
+    extra_meta: dict[str, Any] | None = None,
+    extra_qty: int = 0,
+    extra_display_tn: str = "",
+) -> list[ReceivingMatch]:
+    """Rows for already-scanned+ items whose warehouse receipt ID differs."""
+    demand = item.quantity or 1
+    remaining = demand
+    tn_allocations: list[tuple[str, int]] = []
+    for tn in trackings:
+        if remaining <= 0:
+            break
+        key = tn.casefold()
+        meta = meta_by_tn.get(key)
+        if not meta:
+            continue
+        receipt_id = _meta_receipt_id(meta)
+        if not _receipt_needs_update(item, receipt_id):
+            continue
+        supply = int(supply_by_tn.get(key, 0) or 0)
+        qty = min(remaining, supply if supply > 0 else 1)
+        if qty <= 0:
+            continue
+        tn_allocations.append((key, qty))
+        remaining -= qty
+
+    extra_lines: list[tuple[str, int, dict[str, Any]]] = []
+    if extra_meta and extra_qty > 0 and remaining > 0:
+        receipt_id = _meta_receipt_id(extra_meta)
+        if _receipt_needs_update(item, receipt_id):
+            give = min(remaining, extra_qty)
+            if give > 0:
+                extra_lines.append((extra_display_tn, give, extra_meta))
+
+    return _matches_for_tn_allocations(
+        item=item,
+        order=order,
+        trackings=trackings,
+        tn_allocations=tn_allocations,
+        meta_by_tn=meta_by_tn,
+        fallback_scanned_at=fallback_scanned_at,
+        update_receipt_only=True,
+        extra_lines=extra_lines,
+    )
 
 
 def _split_tracking_field(raw: str | None) -> list[str]:
@@ -446,10 +605,13 @@ def _tracking_numbers_for_order(db: Session, order_id: int) -> list[str]:
     return out
 
 
-def _collect_pending(
-    db: Session, *, buying_group_id: int
+def _collect_items_with_trackings(
+    db: Session,
+    *,
+    buying_group_id: int,
+    statuses: tuple[ItemStatus, ...],
 ) -> tuple[list[Item], list[tuple[Item, Order, list[str]]], list[str]]:
-    """Return (unscanned_items, pending triples, unique trackings).
+    """Return (items, pending triples, unique trackings) for the given statuses.
 
     Each pending item is matched against:
     - trackings linked to that item, plus
@@ -457,10 +619,10 @@ def _collect_pending(
       pending item (so multi-package orders are fully checked for every
       framework: Parsefile, BuyingGroup.com, BFMR).
     """
-    unscanned_items = (
+    items = (
         db.query(Item)
         .join(Order, Order.id == Item.order_id)
-        .filter(Item.status.in_(_UNSCANNED_STATUSES))
+        .filter(Item.status.in_(statuses))
         .filter(Order.buying_group_id == buying_group_id)
         .filter(Order.status != "personal")
         .options(
@@ -474,7 +636,7 @@ def _collect_pending(
     # First pass: item-owned trackings only.
     owned_by_item: dict[int, list[str]] = {}
     item_order: dict[int, Order] = {}
-    for item in unscanned_items:
+    for item in items:
         order = item.order
         if not order:
             continue
@@ -492,7 +654,7 @@ def _collect_pending(
 
     order_trackings_cache: dict[int, list[str]] = {}
     pending: list[tuple[Item, Order, list[str]]] = []
-    for item in unscanned_items:
+    for item in items:
         if item.id not in owned_by_item:
             continue
         order = item_order[item.id]
@@ -536,7 +698,39 @@ def _collect_pending(
                 continue
             seen_tn.add(key)
             all_trackings.append(tn)
-    return unscanned_items, pending, all_trackings
+    return items, pending, all_trackings
+
+
+def _collect_pending(
+    db: Session, *, buying_group_id: int
+) -> tuple[list[Item], list[tuple[Item, Order, list[str]]], list[str]]:
+    """Return (unscanned_items, pending triples, unique trackings)."""
+    return _collect_items_with_trackings(
+        db, buying_group_id=buying_group_id, statuses=_UNSCANNED_STATUSES
+    )
+
+
+def _collect_scanned_or_later(
+    db: Session, *, buying_group_id: int
+) -> list[tuple[Item, Order, list[str]]]:
+    """Already-scanned+ items with trackings (for receipt-ID updates only)."""
+    _items, pending, _trackings = _collect_items_with_trackings(
+        db, buying_group_id=buying_group_id, statuses=_SCANNED_OR_LATER_STATUSES
+    )
+    return pending
+
+
+def _merge_tracking_lists(*lists: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for trackings in lists:
+        for tn in trackings:
+            key = tn.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(tn)
+    return out
 
 
 def _known_shipment_trackings(db: Session) -> set[str]:
@@ -648,6 +842,10 @@ def _check_receiving_parsefile(
         )
 
     unscanned_items, pending, all_trackings = _collect_pending(db, buying_group_id=buying_group_id)
+    scanned_pending = _collect_scanned_or_later(db, buying_group_id=buying_group_id)
+    all_trackings = _merge_tracking_lists(
+        all_trackings, [tn for _i, _o, tns in scanned_pending for tn in tns]
+    )
 
     base_url = str(group.base_url)
     bearer_token = str(group.bearer_token)
@@ -741,7 +939,7 @@ def _check_receiving_parsefile(
         else:
             not_found += 1
 
-    allocated = _allocate_received_across_shared_trackings(
+    allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
         item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
         supply_by_tn=supply_by_tn,
     )
@@ -752,48 +950,24 @@ def _check_receiving_parsefile(
         if got <= 0:
             not_found += 1
             continue
-        receipt_ids: list[str] = []
-        statuses: list[str] = []
-        prices: list[Decimal] = []
-        ext_totals: list[Decimal] = []
-        scanned_dt = None
-        received_item = None
-        for tn in trackings:
-            meta = meta_by_tn.get(tn.casefold())
-            if not meta:
-                continue
-            receipt_ids.extend(meta["receipt_ids"])
-            statuses.extend(meta["statuses"])
-            prices.extend(meta["prices"])
-            ext_totals.extend(meta["ext_totals"])
-            if meta["scanned_at"] is not None and (
-                scanned_dt is None or meta["scanned_at"] > scanned_dt
-            ):
-                scanned_dt = meta["scanned_at"]
-            if received_item is None:
-                received_item = meta["received_item"]
-        unit_payout: Decimal | None = None
-        if prices:
-            unit_payout = prices[0]
-        elif ext_totals:
-            # Fall back to average unit from ext totals if price missing.
-            total_ext = sum(ext_totals, Decimal("0"))
-            supply = sum(supply_by_tn.get(tn.casefold(), 0) for tn in trackings)
-            if supply > 0:
-                unit_payout = (total_ext / Decimal(supply)).quantize(Decimal("0.01"))
-        if scanned_dt is None:
-            scanned_dt = to_date_only(datetime.now(timezone.utc))
         matches.extend(
-            _matches_for_allocated_item(
+            _matches_for_tn_allocations(
                 item=item,
                 order=order,
                 trackings=trackings,
-                allocated=got,
-                receipt_id=", ".join(dict.fromkeys(receipt_ids)) if receipt_ids else None,
-                scanned_at=_iso_date(scanned_dt),
-                received_item=received_item,
-                received_status=", ".join(dict.fromkeys(statuses)) if statuses else None,
-                unit_payout=unit_payout,
+                tn_allocations=allocated_by_tn.get(item.id, []),
+                meta_by_tn=meta_by_tn,
+            )
+        )
+
+    for item, order, trackings in scanned_pending:
+        matches.extend(
+            _receipt_update_matches_for_item(
+                item=item,
+                order=order,
+                trackings=trackings,
+                meta_by_tn=meta_by_tn,
+                supply_by_tn=supply_by_tn,
             )
         )
 
@@ -941,6 +1115,10 @@ def _check_receiving_buyinggroup(
         )
 
     unscanned_items, pending, all_trackings = _collect_pending(db, buying_group_id=buying_group_id)
+    scanned_pending = _collect_scanned_or_later(db, buying_group_id=buying_group_id)
+    all_trackings = _merge_tracking_lists(
+        all_trackings, [tn for _i, _o, tns in scanned_pending for tn in tns]
+    )
     username = str(group.api_username or "").strip()
     password = str(group.api_password or "")
     base_url = (group.base_url or "").strip() or None
@@ -1022,7 +1200,7 @@ def _check_receiving_buyinggroup(
         else:
             not_found += 1
 
-    allocated = _allocate_received_across_shared_trackings(
+    allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
         item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
         supply_by_tn=supply_by_tn,
     )
@@ -1033,38 +1211,24 @@ def _check_receiving_buyinggroup(
         if got <= 0:
             not_found += 1
             continue
-        receipt_ids: list[str] = []
-        statuses: list[str] = []
-        unit_prices: list[Decimal] = []
-        scanned_dt = None
-        received_item = None
-        for tn in trackings:
-            meta = meta_by_tn.get(tn.casefold())
-            if not meta:
-                continue
-            receipt_ids.extend(meta["receipt_ids"])
-            statuses.extend(meta["statuses"])
-            unit_prices.extend(meta["unit_prices"])
-            if meta["scanned_at"] is not None and (
-                scanned_dt is None or meta["scanned_at"] > scanned_dt
-            ):
-                scanned_dt = meta["scanned_at"]
-            if received_item is None:
-                received_item = meta["received_item"]
-        unit_payout = unit_prices[0] if unit_prices else None
-        if scanned_dt is None:
-            scanned_dt = to_date_only(datetime.now(timezone.utc))
         matches.extend(
-            _matches_for_allocated_item(
+            _matches_for_tn_allocations(
                 item=item,
                 order=order,
                 trackings=trackings,
-                allocated=got,
-                receipt_id=", ".join(dict.fromkeys(receipt_ids)) if receipt_ids else None,
-                scanned_at=_iso_date(scanned_dt),
-                received_item=received_item,
-                received_status=", ".join(dict.fromkeys(statuses)) if statuses else None,
-                unit_payout=unit_payout,
+                tn_allocations=allocated_by_tn.get(item.id, []),
+                meta_by_tn=meta_by_tn,
+            )
+        )
+
+    for item, order, trackings in scanned_pending:
+        matches.extend(
+            _receipt_update_matches_for_item(
+                item=item,
+                order=order,
+                trackings=trackings,
+                meta_by_tn=meta_by_tn,
+                supply_by_tn=supply_by_tn,
             )
         )
 
@@ -1257,6 +1421,10 @@ def _check_receiving_bfmr(
         )
 
     unscanned_items, pending, all_trackings = _collect_pending(db, buying_group_id=buying_group_id)
+    scanned_pending = _collect_scanned_or_later(db, buying_group_id=buying_group_id)
+    all_trackings = _merge_tracking_lists(
+        all_trackings, [tn for _i, _o, tns in scanned_pending for tn in tns]
+    )
     api_key = str(group.api_username or "").strip()
     api_secret = str(group.api_password or "")
     base_url = (group.base_url or "").strip() or None
@@ -1277,7 +1445,11 @@ def _check_receiving_bfmr(
 
     receipts = fetched.rows
     by_tracking = _index_bfmr_by_tracking(receipts)
-    all_pending_trackings = {tn.casefold() for _i, _o, tns in pending for tn in tns}
+    all_pending_trackings = {
+        tn.casefold()
+        for _i, _o, tns in (*pending, *scanned_pending)
+        for tn in tns
+    }
 
     supply_by_tn: dict[str, int] = {}
     supply_by_order: dict[str, int] = {}
@@ -1347,7 +1519,7 @@ def _check_receiving_bfmr(
         else:
             not_found += 1
 
-    allocated = _allocate_received_across_shared_trackings(
+    allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
         item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
         supply_by_tn=supply_by_tn,
     )
@@ -1358,6 +1530,7 @@ def _check_receiving_bfmr(
         item.id: max((item.quantity or 1) - int(allocated.get(item.id, 0)), 0)
         for item, _o, _t in eligible
     }
+    order_fill_by_item: dict[int, int] = {}
     order_items: dict[str, list[int]] = {}
     for item, order, _tns in eligible:
         okey = (order.store_order_number or "").strip().casefold()
@@ -1374,6 +1547,7 @@ def _check_receiving_bfmr(
                 continue
             give = min(need, avail)
             allocated[item_id] = int(allocated.get(item_id, 0)) + give
+            order_fill_by_item[item_id] = int(order_fill_by_item.get(item_id, 0)) + give
             demand_left[item_id] = need - give
             avail -= give
 
@@ -1383,50 +1557,38 @@ def _check_receiving_bfmr(
         if got <= 0:
             not_found += 1
             continue
-        receipt_ids: list[str] = []
-        statuses: list[str] = []
-        unit_prices: list[Decimal] = []
-        scanned_dt = None
-        received_item = None
-        for tn in trackings:
-            meta = meta_by_tn.get(tn.casefold())
-            if not meta:
-                continue
-            receipt_ids.extend(meta["receipt_ids"])
-            statuses.extend(meta["statuses"])
-            unit_prices.extend(meta["unit_prices"])
-            if meta["scanned_at"] is not None and (
-                scanned_dt is None or meta["scanned_at"] > scanned_dt
-            ):
-                scanned_dt = meta["scanned_at"]
-            if received_item is None:
-                received_item = meta["received_item"]
         okey = (order.store_order_number or "").strip().casefold()
-        if okey and okey in meta_by_order:
-            meta = meta_by_order[okey]
-            receipt_ids.extend(meta["receipt_ids"])
-            statuses.extend(meta["statuses"])
-            unit_prices.extend(meta["unit_prices"])
-            if meta["scanned_at"] is not None and (
-                scanned_dt is None or meta["scanned_at"] > scanned_dt
-            ):
-                scanned_dt = meta["scanned_at"]
-            if received_item is None:
-                received_item = meta["received_item"]
-        unit_payout = unit_prices[0] if unit_prices else None
-        if scanned_dt is None:
-            scanned_dt = to_date_only(datetime.now(timezone.utc))
+        extra_lines: list[tuple[str, int, dict[str, Any]]] = []
+        order_qty = int(order_fill_by_item.get(item.id, 0))
+        if order_qty > 0 and okey and okey in meta_by_order:
+            display = (order.store_order_number or "").strip() or "order"
+            extra_lines.append((display, order_qty, meta_by_order[okey]))
         matches.extend(
-            _matches_for_allocated_item(
+            _matches_for_tn_allocations(
                 item=item,
                 order=order,
                 trackings=trackings,
-                allocated=got,
-                receipt_id=", ".join(dict.fromkeys(receipt_ids)) if receipt_ids else None,
-                scanned_at=_iso_date(scanned_dt),
-                received_item=received_item,
-                received_status=", ".join(dict.fromkeys(statuses)) if statuses else None,
-                unit_payout=unit_payout,
+                tn_allocations=allocated_by_tn.get(item.id, []),
+                meta_by_tn=meta_by_tn,
+                extra_lines=extra_lines,
+            )
+        )
+
+    for item, order, trackings in scanned_pending:
+        okey = (order.store_order_number or "").strip().casefold()
+        extra_meta = meta_by_order.get(okey) if okey else None
+        extra_qty = int(supply_by_order.get(okey, 0)) if okey else 0
+        extra_display = (order.store_order_number or "").strip() if okey else ""
+        matches.extend(
+            _receipt_update_matches_for_item(
+                item=item,
+                order=order,
+                trackings=trackings,
+                meta_by_tn=meta_by_tn,
+                supply_by_tn=supply_by_tn,
+                extra_meta=extra_meta,
+                extra_qty=extra_qty,
+                extra_display_tn=extra_display,
             )
         )
 
