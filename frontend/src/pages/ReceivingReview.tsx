@@ -20,6 +20,10 @@ interface ReceivingMatch {
   received_status: string | null
   amount_discrepancy: boolean
   selected: boolean
+  row_id?: string | null
+  match_kind?: 'received' | 'not_received' | string
+  original_quantity?: number | null
+  split_keep_quantity?: number | null
 }
 
 interface ReceivingUnmatched {
@@ -113,11 +117,13 @@ export default function ReceivingReview() {
   const [session, setSession] = useState<ReceivingSession | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [edits, setEdits] = useState<Record<number, RowEdit>>({})
+  const [edits, setEdits] = useState<Record<string, RowEdit>>({})
   const [applying, setApplying] = useState(false)
   const [applyError, setApplyError] = useState<string | null>(null)
-  const [appliedIds, setAppliedIds] = useState<Set<number>>(new Set())
+  const [appliedIds, setAppliedIds] = useState<Set<string>>(new Set())
   const [showCsv, setShowCsv] = useState(true)
+
+  const rowKey = (m: ReceivingMatch) => m.row_id || `${m.item_id}:${m.match_kind || 'received'}`
 
   useEffect(() => {
     if (!token) {
@@ -130,10 +136,12 @@ export default function ReceivingReview() {
       .get<ReceivingSession>(`/buying-groups/receiving-sessions/${encodeURIComponent(token)}`)
       .then((data) => {
         setSession(data)
-        const next: Record<number, RowEdit> = {}
+        const next: Record<string, RowEdit> = {}
         for (const m of data.matches) {
-          next[m.item_id] = {
-            selected: m.selected !== false,
+          const key = m.row_id || `${m.item_id}:${m.match_kind || 'received'}`
+          const isNotReceived = m.match_kind === 'not_received'
+          next[key] = {
+            selected: isNotReceived ? false : m.selected !== false,
             receipt_id: m.receipt_id ?? '',
             scanned_date: toYyyyMmDd(m.scanned_at),
             use_received_total: false,
@@ -150,18 +158,27 @@ export default function ReceivingReview() {
 
   const matches = session?.matches ?? []
   const selectedCount = useMemo(
-    () => matches.filter((m) => edits[m.item_id]?.selected && !appliedIds.has(m.item_id)).length,
+    () =>
+      matches.filter(
+        (m) =>
+          m.match_kind !== 'not_received' &&
+          edits[rowKey(m)]?.selected &&
+          !appliedIds.has(rowKey(m))
+      ).length,
     [matches, edits, appliedIds]
   )
   const discrepancyCount = useMemo(
-    () => matches.filter((m) => m.amount_discrepancy && !appliedIds.has(m.item_id)).length,
+    () =>
+      matches.filter(
+        (m) => m.amount_discrepancy && m.match_kind !== 'not_received' && !appliedIds.has(rowKey(m))
+      ).length,
     [matches, appliedIds]
   )
 
-  const setRow = (itemId: number, patch: Partial<RowEdit>) => {
+  const setRow = (key: string, patch: Partial<RowEdit>) => {
     setEdits((prev) => ({
       ...prev,
-      [itemId]: { ...prev[itemId], ...patch },
+      [key]: { ...prev[key], ...patch },
     }))
   }
 
@@ -169,8 +186,10 @@ export default function ReceivingReview() {
     setEdits((prev) => {
       const next = { ...prev }
       for (const m of matches) {
-        if (appliedIds.has(m.item_id)) continue
-        next[m.item_id] = { ...next[m.item_id], selected }
+        if (m.match_kind === 'not_received') continue
+        const key = rowKey(m)
+        if (appliedIds.has(key)) continue
+        next[key] = { ...next[key], selected }
       }
       return next
     })
@@ -185,34 +204,56 @@ export default function ReceivingReview() {
       scanned_at: string
       price_sold?: string | null
     }> = []
-
-    for (const m of matches) {
-      const edit = edits[m.item_id]
-      if (!edit?.selected || appliedIds.has(m.item_id)) continue
-      const entry: (typeof updates)[number] = {
-        item_id: m.item_id,
-        status: 'scanned',
-        receipt_id: edit.receipt_id.trim() || null,
-        scanned_at: dateInputToNoonUtcIso(edit.scanned_date),
-      }
-      if (edit.use_received_total && m.received_ext_total != null && m.quantity > 0) {
-        const total = parseMoney(m.received_ext_total)
-        if (total != null) {
-          entry.price_sold = (total / m.quantity).toFixed(2)
-        }
-      }
-      updates.push(entry)
-    }
-
-    if (updates.length === 0) return
+    const appliedKeys: string[] = []
 
     setApplying(true)
     setApplyError(null)
     try {
+      for (const m of matches) {
+        if (m.match_kind === 'not_received') continue
+        const key = rowKey(m)
+        const edit = edits[key]
+        if (!edit?.selected || appliedIds.has(key)) continue
+
+        if (m.split_keep_quantity != null && m.split_keep_quantity > 0) {
+          const originalQty = m.original_quantity ?? m.quantity
+          if (m.split_keep_quantity < originalQty) {
+            await api.post(`/items/${m.item_id}/split`, {
+              keep_quantity: m.split_keep_quantity,
+            })
+          }
+        }
+
+        const entry: (typeof updates)[number] = {
+          item_id: m.item_id,
+          status: 'scanned',
+          receipt_id: edit.receipt_id.trim() || null,
+          scanned_at: dateInputToNoonUtcIso(edit.scanned_date),
+        }
+        if (edit.use_received_total && m.received_ext_total != null && m.quantity > 0) {
+          const total = parseMoney(m.received_ext_total)
+          if (total != null) {
+            entry.price_sold = (total / m.quantity).toFixed(2)
+          }
+        }
+        updates.push(entry)
+        appliedKeys.push(key)
+      }
+
+      if (updates.length === 0) return
+
       await api.post<{ items: unknown }>('/items/bulk-update', { updates })
       setAppliedIds((prev) => {
         const next = new Set(prev)
-        for (const u of updates) next.add(u.item_id)
+        for (const key of appliedKeys) next.add(key)
+        for (const m of matches) {
+          if (
+            m.match_kind === 'not_received' &&
+            appliedKeys.some((k) => k.startsWith(`${m.item_id}:`))
+          ) {
+            next.add(rowKey(m))
+          }
+        }
         return next
       })
     } catch (e) {
@@ -254,7 +295,10 @@ export default function ReceivingReview() {
     )
   }
 
-  const allApplied = matches.length > 0 && matches.every((m) => appliedIds.has(m.item_id))
+  const receivableMatches = matches.filter((m) => m.match_kind !== 'not_received')
+  const splitOffCount = matches.filter((m) => m.match_kind === 'not_received').length
+  const allApplied =
+    receivableMatches.length > 0 && receivableMatches.every((m) => appliedIds.has(rowKey(m)))
   const unmatched = session.unmatched ?? []
   const unknownReceipts = session.unknown_receipts ?? []
   const searchedTrackings = session.searched_trackings ?? []
@@ -268,7 +312,8 @@ export default function ReceivingReview() {
             Receiving review — {session.buying_group_name}
           </h1>
           <p className="text-sm text-ink-muted dark:text-gray-400 mt-1">
-            {matches.length} item{matches.length !== 1 ? 's' : ''} matched received
+            {receivableMatches.length} item{receivableMatches.length !== 1 ? 's' : ''} matched received
+            {splitOffCount > 0 ? ` · ${splitOffCount} under-received split-off` : ''}
             {session.not_found_count > 0 ? ` · ${session.not_found_count} local still unmatched` : ''}
             {session.void_skipped_count > 0 ? ` · ${session.void_skipped_count} voided` : ''}
             {unknownReceipts.length > 0
@@ -345,26 +390,34 @@ export default function ReceivingReview() {
               </thead>
               <tbody>
                 {matches.map((m) => {
-                  const edit = edits[m.item_id]
-                  const applied = appliedIds.has(m.item_id)
+                  const key = rowKey(m)
+                  const edit = edits[key]
+                  const applied = appliedIds.has(key)
+                  const isNotReceived = m.match_kind === 'not_received'
                   const rowClass = applied
                     ? 'bg-emerald-50/50 dark:bg-emerald-900/15'
-                    : m.amount_discrepancy
-                      ? 'bg-amber-50/80 dark:bg-amber-900/25'
-                      : ''
+                    : isNotReceived
+                      ? 'bg-slate-50/80 dark:bg-gray-800/40'
+                      : m.amount_discrepancy
+                        ? 'bg-amber-50/80 dark:bg-amber-900/25'
+                        : ''
                   return (
                     <tr
-                      key={m.item_id}
+                      key={key}
                       className={`border-b border-brand-100 dark:border-gray-700 last:border-0 ${rowClass}`}
                     >
                       <td className="py-2 px-2 align-top">
-                        <input
-                          type="checkbox"
-                          checked={!!edit?.selected && !applied}
-                          disabled={applied}
-                          onChange={(e) => setRow(m.item_id, { selected: e.target.checked })}
-                          aria-label={`Select item ${m.description || m.item_id}`}
-                        />
+                        {isNotReceived ? (
+                          <span className="text-ink-muted text-xs">—</span>
+                        ) : (
+                          <input
+                            type="checkbox"
+                            checked={!!edit?.selected && !applied}
+                            disabled={applied}
+                            onChange={(e) => setRow(key, { selected: e.target.checked })}
+                            aria-label={`Select item ${m.description || m.item_id}`}
+                          />
+                        )}
                       </td>
                       <td className="py-2 px-2 align-top">
                         <Link
@@ -378,8 +431,29 @@ export default function ReceivingReview() {
                         <div>
                           {m.quantity}× {m.description || '—'}
                         </div>
-                        {m.received_item && m.received_item !== m.description && (
-                          <div className="text-xs text-ink-muted mt-0.5">Received as: {m.received_item}</div>
+                        {isNotReceived ? (
+                          <div className="text-xs text-ink-muted mt-0.5">
+                            Not received — remainder stays shipped/submitted after apply
+                            {m.original_quantity != null
+                              ? ` · of ${m.original_quantity} ordered`
+                              : ''}
+                          </div>
+                        ) : (
+                          <>
+                            {m.split_keep_quantity != null &&
+                              m.original_quantity != null &&
+                              m.split_keep_quantity < m.original_quantity && (
+                                <div className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+                                  Partial receive {m.split_keep_quantity}/{m.original_quantity} — will
+                                  split on apply
+                                </div>
+                              )}
+                            {m.received_item && m.received_item !== m.description && (
+                              <div className="text-xs text-ink-muted mt-0.5">
+                                Received as: {m.received_item}
+                              </div>
+                            )}
+                          </>
                         )}
                         {applied && (
                           <div className="text-xs text-emerald-700 dark:text-emerald-400 mt-0.5">Applied</div>
@@ -398,7 +472,7 @@ export default function ReceivingReview() {
                           m.amount_discrepancy ? 'text-amber-800 dark:text-amber-300 font-medium' : 'text-ink'
                         }`}
                       >
-                        {fmtMoney(m.received_ext_total)}
+                        {isNotReceived ? '—' : fmtMoney(m.received_ext_total)}
                         {m.amount_discrepancy && (
                           <div className="text-[11px] font-normal text-amber-700 dark:text-amber-400">
                             mismatch
@@ -406,33 +480,41 @@ export default function ReceivingReview() {
                         )}
                       </td>
                       <td className="py-2 px-2 align-top">
-                        <input
-                          type="text"
-                          value={edit?.receipt_id ?? ''}
-                          disabled={applied}
-                          onChange={(e) => setRow(m.item_id, { receipt_id: e.target.value })}
-                          className="w-full min-w-[7rem] h-8 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm bg-white dark:bg-gray-700 disabled:opacity-60"
-                          aria-label="Receipt ID"
-                        />
+                        {isNotReceived ? (
+                          <span className="text-ink-muted">—</span>
+                        ) : (
+                          <input
+                            type="text"
+                            value={edit?.receipt_id ?? ''}
+                            disabled={applied}
+                            onChange={(e) => setRow(key, { receipt_id: e.target.value })}
+                            className="w-full min-w-[7rem] h-8 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm bg-white dark:bg-gray-700 disabled:opacity-60"
+                            aria-label="Receipt ID"
+                          />
+                        )}
                       </td>
                       <td className="py-2 px-2 align-top">
-                        <input
-                          type="date"
-                          value={edit?.scanned_date ?? ''}
-                          disabled={applied}
-                          onChange={(e) => setRow(m.item_id, { scanned_date: e.target.value })}
-                          className="h-8 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm bg-white dark:bg-gray-700 disabled:opacity-60"
-                          aria-label="Scan date"
-                        />
+                        {isNotReceived ? (
+                          <span className="text-ink-muted">—</span>
+                        ) : (
+                          <input
+                            type="date"
+                            value={edit?.scanned_date ?? ''}
+                            disabled={applied}
+                            onChange={(e) => setRow(key, { scanned_date: e.target.value })}
+                            className="h-8 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm bg-white dark:bg-gray-700 disabled:opacity-60"
+                            aria-label="Scan date"
+                          />
+                        )}
                       </td>
                       <td className="py-2 px-2 align-top">
-                        {m.amount_discrepancy && m.received_ext_total != null ? (
+                        {!isNotReceived && m.amount_discrepancy && m.received_ext_total != null ? (
                           <label className="inline-flex items-center gap-1.5 text-xs text-ink">
                             <input
                               type="checkbox"
                               checked={!!edit?.use_received_total}
                               disabled={applied}
-                              onChange={(e) => setRow(m.item_id, { use_received_total: e.target.checked })}
+                              onChange={(e) => setRow(key, { use_received_total: e.target.checked })}
                             />
                             <span>Use received</span>
                           </label>

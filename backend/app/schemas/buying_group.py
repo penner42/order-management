@@ -213,6 +213,10 @@ class ReceivingReviewMatch(BaseModel):
     received_status: str | None = None
     amount_discrepancy: bool = False
     selected: bool = True
+    row_id: str | None = None
+    match_kind: str = "received"  # received | not_received
+    original_quantity: int | None = None
+    split_keep_quantity: int | None = None
 
 
 class ReceivingReviewUnmatched(BaseModel):
