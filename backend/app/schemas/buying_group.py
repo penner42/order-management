@@ -215,10 +215,25 @@ class ReceivingReviewMatch(BaseModel):
     selected: bool = True
 
 
+class ReceivingReviewUnmatched(BaseModel):
+    item_id: int
+    order_id: int
+    store_order_number: str | None = None
+    description: str | None = None
+    quantity: int = 1
+    status: str | None = None
+    tracking_numbers: list[str] = []
+    expected_amount: str | None = None
+
+
 class ReceivingReviewSession(BaseModel):
     buying_group_id: int
     buying_group_name: str
     created_at: str | None = None
     not_found_count: int = 0
     void_skipped_count: int = 0
+    searched_trackings: list[str] = []
+    raw_csv: str = ""
+    csv_row_count: int = 0
+    unmatched: list[ReceivingReviewUnmatched] = []
     matches: list[ReceivingReviewMatch] = []

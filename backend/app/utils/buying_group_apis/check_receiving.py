@@ -298,18 +298,20 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
     api_email = str(group.api_email)
 
     received_rows: list[parsefile_api.ParsefileReceivedItem] = []
+    raw_csv_parts: list[str] = []
     try:
         for i in range(0, len(all_trackings), TRACKING_SEARCH_CHUNK):
             chunk = all_trackings[i : i + TRACKING_SEARCH_CHUNK]
-            received_rows.extend(
-                parsefile_api.search_received_items(
-                    base_url=base_url,
-                    bearer_token=bearer_token,
-                    user_id=api_user_id,
-                    email=api_email,
-                    trackings=chunk,
-                )
+            api_result = parsefile_api.search_received_items(
+                base_url=base_url,
+                bearer_token=bearer_token,
+                user_id=api_user_id,
+                email=api_email,
+                trackings=chunk,
             )
+            received_rows.extend(api_result.rows)
+            if api_result.raw_csv.strip():
+                raw_csv_parts.append(api_result.raw_csv.strip())
     except Exception as exc:
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
@@ -317,6 +319,8 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
             submitted_count=len(unscanned_items),
             error=str(exc).strip() or exc.__class__.__name__,
         )
+
+    raw_csv = "\n\n".join(raw_csv_parts)
 
     by_tracking = _index_received_by_tracking(received_rows)
     used_row_ids: set[int] = set()
@@ -393,20 +397,38 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         f"against Parsefile."
     )
 
-    if not matches:
+    matched_ids = {m.item_id for m in matches}
+    unmatched: list[dict[str, Any]] = []
+    for item, order, trackings in pending:
+        if item.id in matched_ids:
+            continue
+        amt = _expected_amount(item)
+        unmatched.append(
+            {
+                "item_id": item.id,
+                "order_id": order.id,
+                "store_order_number": (order.store_order_number or "").strip() or None,
+                "description": (item.description or "").strip() or None,
+                "quantity": item.quantity or 1,
+                "status": item.status.value if hasattr(item.status, "value") else str(item.status),
+                "tracking_numbers": trackings,
+                "expected_amount": str(amt) if amt is not None else None,
+            }
+        )
+
+    if matches:
+        message = (
+            f"Found {len(matches)} received item(s) ready to mark scanned"
+            + (f" ({discrepancy_count} amount discrepancy)" if discrepancy_count else "")
+            + f". {checked_summary}"
+        )
+    else:
         parts = [checked_summary]
         if not_found:
             parts.append(f"{not_found} not found as received.")
         if void_skipped:
             parts.append(f"{void_skipped} voided at Parsefile.")
-        return CheckReceivingResult(
-            buying_group_id=buying_group_id,
-            buying_group_name=group_name,
-            submitted_count=len(unscanned_items),
-            not_found_count=not_found,
-            void_skipped_count=void_skipped,
-            message=" ".join(parts) + " Nothing to mark scanned.",
-        )
+        message = " ".join(parts) + " Nothing to mark scanned."
 
     payload = {
         "buying_group_id": buying_group_id,
@@ -414,6 +436,10 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         "created_at": datetime.now(timezone.utc).isoformat(),
         "not_found_count": not_found,
         "void_skipped_count": void_skipped,
+        "searched_trackings": all_trackings,
+        "raw_csv": raw_csv,
+        "csv_row_count": len(received_rows),
+        "unmatched": unmatched,
         "matches": [match_to_dict(m) for m in matches],
     }
     token = create_receiving_session(payload)
@@ -428,9 +454,5 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         discrepancy_count=discrepancy_count,
         submitted_count=len(unscanned_items),
         matches=matches,
-        message=(
-            f"Found {len(matches)} received item(s) ready to mark scanned"
-            + (f" ({discrepancy_count} amount discrepancy)" if discrepancy_count else "")
-            + f". {checked_summary}"
-        ),
+        message=message,
     )

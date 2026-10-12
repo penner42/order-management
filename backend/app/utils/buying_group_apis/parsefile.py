@@ -319,6 +319,13 @@ def parse_received_items_csv(raw_text: str) -> list[ParsefileReceivedItem]:
     return rows
 
 
+@dataclass
+class ParsefileReceivedItemsSearchResult:
+    rows: list[ParsefileReceivedItem]
+    raw_csv: str
+    url: str
+
+
 def search_received_items(
     *,
     base_url: str,
@@ -332,8 +339,8 @@ def search_received_items(
     min_created_date: str | None = None,
     max_created_date: str | None = None,
     timeout_seconds: float = 60.0,
-) -> list[ParsefileReceivedItem]:
-    """POST received-items search; returns parsed CSV rows (JSON errors raise)."""
+) -> ParsefileReceivedItemsSearchResult:
+    """POST received-items search; returns parsed rows plus the raw CSV body."""
     if not (bearer_token or "").strip():
         raise ValueError("bearer_token is required")
     if not (email or "").strip():
@@ -408,4 +415,8 @@ def search_received_items(
     if status >= 400:
         raise RuntimeError(f"Parsefile received-items search failed (HTTP {status}) from {url}")
 
-    return parse_received_items_csv(raw_text)
+    return ParsefileReceivedItemsSearchResult(
+        rows=parse_received_items_csv(raw_text),
+        raw_csv=raw_text,
+        url=url,
+    )
