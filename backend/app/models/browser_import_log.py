@@ -26,8 +26,8 @@ class BrowserImportLog(Base):
     # updates | info | error
     level = Column(String(16), nullable=False, default="info", server_default="info", index=True)
     # stores: order_imported | tracking_updated | order_checked | order_canceled |
-    #   order_marked_personal | order_skipped_ignored_zip (legacy) | order_error |
-    #   check_started | check_finished
+    #   order_uncanceled | order_marked_personal | order_skipped_ignored_zip (legacy) |
+    #   order_error | check_started | check_finished
     # groups: tracking_submit_started | tracking_submitted | tracking_submit_error
     event_type = Column(String(32), nullable=False, index=True)
     # stores: full | unshipped ; groups: tracking_submit

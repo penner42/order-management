@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.auth import decode_token, get_current_user
 from app.browser_automation.amazon_import import run_amazon_import
@@ -29,6 +29,7 @@ from app.models import (
     BrowserProfile,
     Item,
     Order,
+    PaymentLineItem,
     Shipment,
     ShipmentItem,
     StoreAccount,
@@ -176,6 +177,55 @@ def _non_canceled_item_ids(db: Session, order_id: int) -> set[int]:
     return {rid for (rid,) in rows}
 
 
+def _canceled_item_ids(db: Session, order_id: int) -> set[int]:
+    rows = (
+        db.query(Item.id)
+        .filter(Item.order_id == order_id)
+        .filter(Item.status == ItemStatus.CANCELED)
+        .all()
+    )
+    return {rid for (rid,) in rows}
+
+
+_STATUS_LOG_LABELS = {
+    "payment_received": "paid",
+    "payment_sent": "payment sent",
+    "payment_requested": "payment requested",
+}
+
+
+def _effective_item_status_for_log(item: Item) -> str:
+    if item.payment_received_at is not None:
+        return "payment_received"
+    if item.payment_sent_at is not None:
+        return "payment_sent"
+    if item.payment_requested_at is not None:
+        return "payment_requested"
+    if item.status:
+        return item.status.value if hasattr(item.status, "value") else str(item.status)
+    return "unknown"
+
+
+def _uncanceled_log_message(db: Session, item_ids: set[int]) -> str:
+    """Build Details text like: Uncanceled: canceled → scanned, paid"""
+    if not item_ids:
+        return "Uncanceled: canceled → unknown"
+    items = (
+        db.query(Item)
+        .options(selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment))
+        .filter(Item.id.in_(item_ids))
+        .all()
+    )
+    labels = sorted(
+        {
+            _STATUS_LOG_LABELS.get(status, status)
+            for status in (_effective_item_status_for_log(item) for item in items)
+        }
+    )
+    after = ", ".join(labels) if labels else "unknown"
+    return f"Uncanceled: canceled → {after}"
+
+
 def _order_has_canceled_items(db: Session, order_id: int) -> bool:
     return (
         db.query(Item.id)
@@ -247,6 +297,8 @@ def _log_auto_apply_result(
     tracking_after: set[str],
     marked_personal: bool = False,
     marked_canceled: bool = False,
+    marked_uncanceled: bool = False,
+    uncanceled_item_ids: set[int] | None = None,
     postal_code: str | None = None,
 ) -> str:
     """Log update or order_checked. Returns the event_type written."""
@@ -266,6 +318,11 @@ def _log_auto_apply_result(
         level = "updates"
         tracking_for_log = sorted(tracking_after) if not existed_before else added_tracking
         message = "Order canceled"
+    elif marked_uncanceled:
+        event_type = "order_uncanceled"
+        level = "updates"
+        tracking_for_log = sorted(tracking_after) if not existed_before else added_tracking
+        message = _uncanceled_log_message(db, uncanceled_item_ids or set())
     elif not existed_before:
         event_type = "order_imported"
         level = "updates"
@@ -379,6 +436,7 @@ def list_browser_import_logs(
         "tracking_updated",
         "order_checked",
         "order_canceled",
+        "order_uncanceled",
         "order_marked_personal",
         "order_skipped_ignored_zip",  # legacy
         "order_error",
@@ -957,6 +1015,7 @@ async def _run_import_job(
             checked = 0
             marked_personal = 0
             marked_canceled = 0
+            marked_uncanceled = 0
             errors: list[str] = []
             apply_user: User | None = None
             on_order = None
@@ -993,7 +1052,7 @@ async def _run_import_job(
 
                 def on_order(raw: dict) -> None:
                     """Apply + log + commit one captured order immediately."""
-                    nonlocal applied, imported, tracking_updated, checked, marked_personal, marked_canceled
+                    nonlocal applied, imported, tracking_updated, checked, marked_personal, marked_canceled, marked_uncanceled
                     assert apply_user is not None
                     try:
                         payload = StoreOrderImportPayload.model_validate(raw)
@@ -1002,6 +1061,7 @@ async def _run_import_job(
                         was_personal = False
                         tracking_before: set[str] = set()
                         active_before: set[int] = set()
+                        canceled_before: set[int] = set()
                         if store_order_number:
                             prior_id, tracking_before = _order_tracking_numbers(
                                 db, store_order_number
@@ -1011,6 +1071,7 @@ async def _run_import_job(
                                 prior = db.query(Order).filter(Order.id == prior_id).first()
                                 was_personal = prior is not None and prior.status == "personal"
                                 active_before = _non_canceled_item_ids(db, prior_id)
+                                canceled_before = _canceled_item_ids(db, prior_id)
                         postal = shipping_postal_code_from_payload(payload)
                         order_id = apply_store_order_payload(
                             db,
@@ -1023,12 +1084,17 @@ async def _run_import_job(
                         is_personal = order is not None and order.status == "personal"
                         became_personal = is_personal and not was_personal
                         active_after = _non_canceled_item_ids(db, order_id)
+                        canceled_after = _canceled_item_ids(db, order_id)
+                        uncanceled_item_ids: set[int] = set()
                         if existed_before:
                             became_canceled = bool(active_before - active_after)
+                            uncanceled_item_ids = canceled_before - canceled_after
+                            became_uncanceled = bool(uncanceled_item_ids)
                         else:
                             became_canceled = (
                                 not active_after and _order_has_canceled_items(db, order_id)
                             )
+                            became_uncanceled = False
                         if store_order_number:
                             _, tracking_after = _order_tracking_numbers(db, store_order_number)
                             event = _log_auto_apply_result(
@@ -1044,12 +1110,16 @@ async def _run_import_job(
                                 tracking_after=tracking_after,
                                 marked_personal=became_personal,
                                 marked_canceled=became_canceled,
+                                marked_uncanceled=became_uncanceled,
+                                uncanceled_item_ids=uncanceled_item_ids,
                                 postal_code=postal if isinstance(postal, str) else None,
                             )
                             if event == "order_marked_personal":
                                 marked_personal += 1
                             elif event == "order_canceled":
                                 marked_canceled += 1
+                            elif event == "order_uncanceled":
+                                marked_uncanceled += 1
                             elif event == "order_imported":
                                 imported += 1
                             elif event == "tracking_updated":
@@ -1065,7 +1135,8 @@ async def _run_import_job(
                                 f"Processed {label_num} "
                                 f"({applied} applied"
                                 f"{f', {marked_personal} personal' if marked_personal else ''}"
-                                f"{f', {marked_canceled} canceled' if marked_canceled else ''})…"
+                                f"{f', {marked_canceled} canceled' if marked_canceled else ''}"
+                                f"{f', {marked_uncanceled} uncanceled' if marked_uncanceled else ''})…"
                             ),
                             order_count=applied,
                         )
@@ -1193,6 +1264,8 @@ async def _run_import_job(
                     msg += f" {marked_personal} marked personal."
                 if marked_canceled:
                     msg += f" {marked_canceled} canceled."
+                if marked_uncanceled:
+                    msg += f" {marked_uncanceled} uncanceled."
                 if errors:
                     msg += f" {len(errors)} failed."
                 update_job(
@@ -1210,6 +1283,8 @@ async def _run_import_job(
                     summary += f", {marked_personal} personal"
                 if marked_canceled:
                     summary += f", {marked_canceled} canceled"
+                if marked_uncanceled:
+                    summary += f", {marked_uncanceled} uncanceled"
                 if errors:
                     summary += f", {len(errors)} failed"
                 summary += "."

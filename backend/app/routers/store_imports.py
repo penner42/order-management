@@ -541,14 +541,9 @@ def _normalized_payload_is_canceled(normalized: dict[str, Any]) -> bool:
         if isinstance(item, dict) and _incoming_item_is_canceled(item):
             return True
 
-    cancellations = normalized.get("cancellations")
-    if isinstance(cancellations, dict):
-        order_level = cancellations.get("orderLevel") or []
-        item_level = cancellations.get("itemLevelReasons") or []
-        if (isinstance(order_level, list) and len(order_level) > 0) or (
-            isinstance(item_level, list) and len(item_level) > 0
-        ):
-            return True
+    # Do not treat cancellations.orderLevel / itemLevelReasons as cancel proof.
+    # Walmart (and similar) payloads include those as reason catalogs on active
+    # orders; real cancel state comes from status fields above.
 
     return False
 
@@ -561,14 +556,55 @@ def _mark_item_canceled(item: Item) -> None:
         item.canceled_at = datetime.now(timezone.utc)
 
 
+def _items_have_tracking(db: Session, items: list[Item]) -> dict[int, bool]:
+    shipment_ids = {
+        si.shipment_id
+        for item in items
+        for si in (item.shipment_items or [])
+    }
+    tracked_shipment_ids: set[int] = set()
+    if shipment_ids:
+        for s in db.query(Shipment).filter(Shipment.id.in_(shipment_ids)):
+            if (s.tracking_number or "").strip():
+                tracked_shipment_ids.add(s.id)
+    return {
+        item.id: any(
+            si.shipment_id in tracked_shipment_ids for si in (item.shipment_items or [])
+        )
+        for item in items
+    }
+
+
+def _status_after_uncancel(item: Item, *, has_tracking: bool) -> ItemStatus:
+    """Infer pre-cancel status from retained timestamps / tracking."""
+    if item.scanned_at is not None:
+        return ItemStatus.SCANNED
+    if item.submitted_at is not None:
+        return ItemStatus.SUBMITTED
+    if has_tracking:
+        return ItemStatus.SHIPPED
+    return ItemStatus.PURCHASED
+
+
+def _uncancel_item(item: Item, *, has_tracking: bool) -> None:
+    if item.status != ItemStatus.CANCELED:
+        return
+    item.status = _status_after_uncancel(item, has_tracking=has_tracking)
+    item.canceled_at = None
+
+
 def _apply_canceled_statuses(
     existing_items: list[Item],
     normalized: dict[str, Any],
     incoming_by_name: dict[str, dict[str, Any]] | None = None,
+    *,
+    db: Session | None = None,
 ) -> None:
     order_canceled = _normalized_payload_is_canceled(normalized)
     if incoming_by_name is None:
         incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
+
+    tracking_by_id = _items_have_tracking(db, existing_items) if db is not None else {}
 
     for item in existing_items:
         desc = (item.description or "").strip()
@@ -576,6 +612,11 @@ def _apply_canceled_statuses(
         item_incoming_canceled = bool(incoming and incoming.get("is_canceled"))
         if order_canceled or item_incoming_canceled:
             _mark_item_canceled(item)
+        elif item.status == ItemStatus.CANCELED:
+            _uncancel_item(
+                item,
+                has_tracking=tracking_by_id.get(item.id, False),
+            )
 
 
 def _aggregate_incoming_items_by_name(
@@ -753,6 +794,12 @@ def _build_order_diff(
 
     incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
     order_is_canceled = _normalized_payload_is_canceled(normalized)
+    tracking_by_id = _items_have_tracking(db, existing_items)
+    items_by_desc: dict[str, list[Item]] = {}
+    for item in existing_items:
+        desc = (item.description or "").strip()
+        if desc:
+            items_by_desc.setdefault(desc, []).append(item)
     matched_items: list[dict[str, Any]] = []
     added_items: list[dict[str, Any]] = []
 
@@ -796,6 +843,30 @@ def _build_order_diff(
                         "after": ["canceled"],
                     }
                 )
+            elif not incoming_canceled and "canceled" in existing["statuses"]:
+                after_statuses: set[str] = set()
+                for item in items_by_desc.get(name, []):
+                    if item.status == ItemStatus.CANCELED:
+                        after_statuses.add(
+                            _status_after_uncancel(
+                                item,
+                                has_tracking=tracking_by_id.get(item.id, False),
+                            ).value
+                        )
+                    elif item.status:
+                        after_statuses.add(
+                            item.status.value
+                            if hasattr(item.status, "value")
+                            else str(item.status)
+                        )
+                changes.append("status")
+                detailed_changes.append(
+                    {
+                        "field": "status",
+                        "before": sorted(existing["statuses"]),
+                        "after": sorted(after_statuses),
+                    }
+                )
 
             matched_items.append(
                 {
@@ -837,6 +908,10 @@ def _build_order_diff(
     if order_is_canceled:
         for entry in unmatched_existing:
             if set(entry["statuses"]) - {"canceled"}:
+                entry["changes"] = ["status"]
+    else:
+        for entry in unmatched_existing:
+            if "canceled" in entry["statuses"]:
                 entry["changes"] = ["status"]
 
     # --- Shipment comparison (match by Walmart original tracking or tracking number) ---
@@ -1664,7 +1739,7 @@ def _apply_items_and_shipments(
 
     if existing_order:
         _sync_existing_item_quantities_and_prices(db, normalized, existing_items)
-    _apply_canceled_statuses(existing_items, normalized)
+    _apply_canceled_statuses(existing_items, normalized, db=db)
 
 
 # ---------------------------------------------------------------------------
