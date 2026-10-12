@@ -600,7 +600,11 @@ def _bootstrap_session(base_url: str, timeout_seconds: float) -> str:
     return sess
 
 
-def _decode_portal_response(session_id: str, body: bytes) -> dict[str, Any]:
+def _decode_portal_response(
+    session_ids: list[str],
+    body: bytes,
+) -> dict[str, Any]:
+    """Decrypt portal envelope, trying each session id (old then new) as passphrase."""
     try:
         wire = json.loads(body.decode("utf-8", errors="replace") if body else "{}")
     except json.JSONDecodeError as e:
@@ -615,18 +619,28 @@ def _decode_portal_response(session_id: str, body: bytes) -> dict[str, Any]:
         raise RuntimeError(detail or "Parsefile portal request returned success=false")
     encrypted = wire.get("_encrypted")
     if isinstance(encrypted, str) and encrypted.strip():
-        try:
-            plain = parsefile_crypto.decrypt(session_id, encrypted)
-        except Exception as e:
-            raise RuntimeError(f"Parsefile portal decrypt failed: {e}") from e
-        try:
-            parsed = json.loads(plain) if plain else {}
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Parsefile portal decrypted non-JSON: {plain[:300]!r}") from e
-        if not isinstance(parsed, dict):
-            raise RuntimeError("Parsefile portal decrypted unexpected payload")
-        parsed["success"] = True
-        return parsed
+        last_err: Exception | None = None
+        seen: set[str] = set()
+        for sid in session_ids:
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            try:
+                plain = parsefile_crypto.decrypt(sid, encrypted)
+            except Exception as e:
+                last_err = e
+                continue
+            try:
+                parsed = json.loads(plain) if plain else {}
+            except json.JSONDecodeError as e:
+                last_err = e
+                continue
+            if not isinstance(parsed, dict):
+                last_err = RuntimeError("Parsefile portal decrypted unexpected payload")
+                continue
+            parsed["success"] = True
+            return parsed
+        raise RuntimeError(f"Parsefile portal decrypt failed: {last_err}")
     return wire
 
 
@@ -676,9 +690,9 @@ def _portal_post(
     if status in (401, 403):
         raise _PortalSessionExpired(f"Parsefile portal auth failed (HTTP {status})")
     try:
-        payload = _decode_portal_response(new_sess, raw)
+        # Response may be encrypted with either the request or rotated SESSID.
+        payload = _decode_portal_response([session_id, new_sess], raw)
     except RuntimeError as e:
-        # Decrypt failures often mean a stale SESSID.
         if "decrypt" in str(e).casefold():
             raise _PortalSessionExpired(str(e)) from e
         raise
@@ -827,9 +841,38 @@ def _with_portal_session(
         return call(session_id), session_id
 
 
+def _iter_string_values(value: Any, *, depth: int = 0) -> list[str]:
+    if depth > 3 or value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.casefold() in ("---", "null", "none"):
+            return []
+        parts: list[str] = []
+        for part in text.replace(";", ",").split(","):
+            part = part.strip()
+            if part:
+                parts.append(part)
+        return parts
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return [str(value)]
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(_iter_string_values(item, depth=depth + 1))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for item in value.values():
+            out.extend(_iter_string_values(item, depth=depth + 1))
+        return out
+    return []
+
+
 def _tracking_values_from_row(row: dict[str, Any]) -> list[str]:
+    """Collect likely tracking values, then fall back to every string cell."""
     values: list[str] = []
-    for key in (
+    preferred_keys = (
         "tracking",
         "tracking_number",
         "tracking_numbers",
@@ -837,60 +880,105 @@ def _tracking_values_from_row(row: dict[str, Any]) -> list[str]:
         "trackingNumbers",
         "tn",
         "f_tracking",
-    ):
-        val = row.get(key)
-        if val is None:
-            continue
-        if isinstance(val, list):
-            for item in val:
-                if item is not None and str(item).strip():
-                    values.append(str(item).strip())
-        else:
-            text = str(val).strip()
-            if not text or text.casefold() in ("---", "null", "none"):
-                continue
-            for part in text.replace(";", ",").split(","):
-                part = part.strip()
-                if part:
-                    values.append(part)
+        "f_tracking_number",
+        "f_tracking_numbers",
+        "f_tn",
+        "f_track",
+    )
+    for key in preferred_keys:
+        if key in row:
+            values.extend(_iter_string_values(row.get(key)))
+    # Also any key that looks tracking-related.
+    for key, val in row.items():
+        key_l = str(key).casefold()
+        if "track" in key_l or key_l in ("tn", "f_tn"):
+            values.extend(_iter_string_values(val))
+    if values:
+        return values
+    # Last resort: every string-ish cell (orders-all schemas vary by portal).
+    for val in row.values():
+        values.extend(_iter_string_values(val))
     return values
 
 
+def _row_matches_tracking(row: dict[str, Any], tn_key: str) -> bool:
+    tn_compact = tn_key.replace(" ", "")
+    for candidate in _tracking_values_from_row(row):
+        c = candidate.casefold()
+        if c == tn_key or c.replace(" ", "") == tn_compact:
+            return True
+        # Cell may contain "TN notes…" etc.
+        if tn_key in c or tn_compact in c.replace(" ", ""):
+            return True
+    return False
+
+
+def _first_str_from_keys(row: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        if key not in row:
+            continue
+        vals = _iter_string_values(row.get(key))
+        if vals:
+            return vals[0]
+    return None
+
+
 def _ids_from_order_row(row: dict[str, Any]) -> ParsefileSubmissionIds | None:
-    """Best-effort map of Parsefile orders-all row → display + API ids."""
-    api_candidates = (
-        row.get("id"),
-        row.get("key"),
-        row.get("uuid"),
-        row.get("order_uuid"),
-        row.get("orderId"),
-        row.get("f_id"),
+    """Best-effort map of Parsefile orders-all row → display + API ids.
+
+    Parsefile portals typically use ``f_*`` column names (e.g. ``f_id``, ``f_order``).
+    """
+    api_id = _first_str_from_keys(
+        row,
+        (
+            "f_id",
+            "id",
+            "f_order_id",
+            "f_key",
+            "key",
+            "uuid",
+            "order_uuid",
+            "orderId",
+        ),
     )
-    display_candidates = (
-        row.get("order"),
-        row.get("order_id"),
-        row.get("order_number"),
-        row.get("orderNumber"),
-        row.get("number"),
-        row.get("display_id"),
-        row.get("f_order"),
-        row.get("name"),
+    display_id = _first_str_from_keys(
+        row,
+        (
+            "f_order",
+            "f_order_number",
+            "f_ordernum",
+            "f_po",
+            "f_purchase_order",
+            "f_name",
+            "order",
+            "order_id",
+            "order_number",
+            "orderNumber",
+            "number",
+            "display_id",
+            "name",
+        ),
     )
-    api_id = None
-    for candidate in api_candidates:
-        if candidate is None or not str(candidate).strip():
-            continue
-        api_id = str(candidate).strip()
-        break
-    display_id = None
-    for candidate in display_candidates:
-        if candidate is None or not str(candidate).strip():
-            continue
-        text = str(candidate).strip()
-        if api_id and text == api_id:
-            continue
-        display_id = text
-        break
+    if display_id and api_id and display_id == api_id:
+        # Look for a distinct display-ish key.
+        for key, val in row.items():
+            key_l = str(key).casefold()
+            if key_l in ("f_id", "id", "key", "uuid"):
+                continue
+            if "order" in key_l or key_l.endswith("_name") or "po" in key_l:
+                vals = _iter_string_values(val)
+                if vals and vals[0] != api_id:
+                    display_id = vals[0]
+                    break
+    if not display_id and not api_id:
+        # Any key ending in id / containing order as last resort.
+        for key, val in row.items():
+            key_l = str(key).casefold()
+            if key_l.endswith("id") or "order" in key_l:
+                vals = _iter_string_values(val)
+                if vals:
+                    api_id = vals[0]
+                    break
     if not display_id and not api_id:
         return None
     if not display_id:
@@ -934,6 +1022,14 @@ def _rows_from_loadtable(payload: dict[str, Any], *, table_name: str) -> list[di
     return []
 
 
+_ORDERS_TABLE_CANDIDATES = (
+    ORDERS_ALL_TABLE,
+    "it@orders",
+    "orders-all",
+    "orders",
+)
+
+
 def find_order_by_tracking(
     *,
     base_url: str,
@@ -956,53 +1052,65 @@ def find_order_by_tracking(
     )
 
     def _load(sess: str) -> tuple[list[dict[str, Any]], str]:
-        # Try filtered load first; fall back to a recent page if filters are ignored.
-        queries = [
-            {
-                "page": 1,
-                "limit": 50,
-                "filters": {"f_tracking": tn},
-            },
-            {
-                "page": 1,
-                "limit": 50,
-                "filters": {"tracking": tn},
-            },
-            {
-                "page": 1,
-                "limit": 100,
-                "filters": {},
-            },
+        filter_variants = (
+            {"f_tracking": tn},
+            {"f_tracking_number": tn},
+            {"tracking": tn},
+            {"tracking_number": tn},
+            {"q": tn},
+            {"search": tn},
+        )
+        queries: list[dict[str, Any]] = [
+            {"page": 1, "limit": 50, "filters": filt} for filt in filter_variants
         ]
-        cmd = {
-            "cmd": "load",
-            "instance": "table",
-            "_table": ORDERS_ALL_TABLE,
-            "checkLoading": 0,
-            "init": True,
-        }
-        rows: list[dict[str, Any]] = []
+        queries.append({"page": 1, "limit": 150, "filters": {}})
+
         current = sess
-        for query in queries:
-            current, payload = _portal_post(
-                base_url=base_url,
-                session_id=current,
-                page=ORDERS_ALL_PAGE,
-                cmd=cmd,
-                data=query,
-                timeout_seconds=timeout_seconds,
-            )
-            rows = _rows_from_loadtable(payload, table_name=ORDERS_ALL_TABLE)
-            if rows:
-                # Prefer an exact tracking match among returned rows.
-                for row in rows:
-                    for candidate in _tracking_values_from_row(row):
-                        if candidate.casefold() == tn_key:
-                            return [row], current
-                # If filter was by tracking, accept first row with ids.
-                if query.get("filters"):
-                    return rows, current
-        return rows, current
+        last_rows: list[dict[str, Any]] = []
+        for table_name in _ORDERS_TABLE_CANDIDATES:
+            cmd = {
+                "cmd": "load",
+                "instance": "table",
+                "_table": table_name,
+                "checkLoading": 0,
+                "init": True,
+            }
+            for query in queries:
+                try:
+                    current, payload = _portal_post(
+                        base_url=base_url,
+                        session_id=current,
+                        page=ORDERS_ALL_PAGE,
+                        cmd=cmd,
+                        data=query,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except RuntimeError as exc:
+                    # Wrong _table often returns success=false; try next candidate.
+                    logger.info(
+                        "Parsefile orders-all load skipped table=%s filters=%s: %s",
+                        table_name,
+                        query.get("filters"),
+                        exc,
+                    )
+                    continue
+                rows = _rows_from_loadtable(payload, table_name=table_name)
+                if not rows:
+                    continue
+                last_rows = rows
+                matched = [row for row in rows if _row_matches_tracking(row, tn_key)]
+                if matched:
+                    return matched, current
+                # Log schema once to help diagnose field names in prod logs.
+                sample = rows[0]
+                logger.info(
+                    "Parsefile orders-all rows=%s table=%s keys=%s (no TN match yet for %s)",
+                    len(rows),
+                    table_name,
+                    sorted(str(k) for k in sample.keys())[:40],
+                    tn,
+                )
+        return last_rows, current
 
     (rows, rotated_session), _outer_session = _with_portal_session(
         base_url=base_url,
@@ -1012,7 +1120,6 @@ def find_order_by_tracking(
         timeout_seconds=timeout_seconds,
         call=_load,
     )
-    # Prefer the session rotated inside portal posts.
     final_session = rotated_session or _outer_session or session_id
     with _session_lock:
         key = _portal_cache_key(base_url, email, password)
@@ -1020,12 +1127,24 @@ def find_order_by_tracking(
             _session_cache[key] = final_session
 
     for row in rows:
-        for candidate in _tracking_values_from_row(row):
-            if candidate.casefold() == tn_key:
-                return _ids_from_order_row(row)
+        if _row_matches_tracking(row, tn_key):
+            ids = _ids_from_order_row(row)
+            if ids is None:
+                logger.warning(
+                    "Parsefile orders-all matched TN %s but no id fields in keys=%s",
+                    tn,
+                    sorted(str(k) for k in row.keys())[:40],
+                )
+            return ids
     if len(rows) == 1:
         return _ids_from_order_row(rows[0])
     return None
+
+
+@dataclass
+class ParsefileLookupResult:
+    submission_ids: dict[str, ParsefileSubmissionIds] = field(default_factory=dict)
+    error: str | None = None
 
 
 def lookup_submission_ids(
@@ -1035,16 +1154,17 @@ def lookup_submission_ids(
     password: str,
     tracking_numbers: list[str],
     timeout_seconds: float = 30.0,
-) -> dict[str, ParsefileSubmissionIds]:
+) -> ParsefileLookupResult:
     """Look up submission ids for each tracking after addtracking (best-effort)."""
     out: dict[str, ParsefileSubmissionIds] = {}
+    errors: list[str] = []
     for tracking in tracking_numbers:
         tn = (tracking or "").strip()
         if not tn:
             continue
         try:
             ids = None
-            for attempt in range(4):
+            for attempt in range(5):
                 ids = find_order_by_tracking(
                     base_url=base_url,
                     email=email,
@@ -1054,11 +1174,19 @@ def lookup_submission_ids(
                 )
                 if ids is not None:
                     break
-                if attempt < 3:
-                    time.sleep(0.75)
+                if attempt < 4:
+                    time.sleep(1.0)
             if ids is not None:
                 out[tn] = ids
+            else:
+                errors.append(f"{tn}: not found in it@orders-all")
         except Exception as exc:
             logger.warning("Parsefile orders-all lookup failed for %s: %s", tn, exc)
-    return out
+            errors.append(f"{tn}: {exc}")
+    err = None
+    if errors and not out:
+        err = "; ".join(errors[:3])
+    elif errors:
+        err = "; ".join(errors[:3])
+    return ParsefileLookupResult(submission_ids=out, error=err)
 

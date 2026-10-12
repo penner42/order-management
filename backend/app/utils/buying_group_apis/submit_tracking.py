@@ -402,9 +402,12 @@ def submit_item_tracking_to_group(
     if framework == "parsefile":
         entry = build_parsefile_entry_from_items(pairs, tracking)
         result = submit_parsefile_trackings(group, [entry])
-        ids_map = _parsefile_submission_ids(group, [tracking], result)
+        ids_map, id_err = _parsefile_submission_ids(group, [tracking], result)
+        message = result.message
+        if id_err and not ids_map:
+            message = f"{message}\n{id_err}" if message else id_err
         return SubmitResult(
-            message=result.message,
+            message=message,
             affected=result.affected,
             item_ids=item_ids,
             submission_ids_by_tracking=ids_map,
@@ -482,8 +485,11 @@ def _parsefile_submission_ids(
     result: parsefile_api.ParsefileSubmitResult,
     *,
     portal_password: str | None = None,
-) -> dict[str, tuple[str | None, str | None]]:
-    """Look up Parsefile orders-all ids when portal password is configured."""
+) -> tuple[dict[str, tuple[str | None, str | None]], str | None]:
+    """Look up Parsefile orders-all ids when portal password is configured.
+
+    Returns ``(ids_by_tracking, error_note)``.
+    """
     if result.submission_ids:
         out: dict[str, tuple[str | None, str | None]] = {}
         for tn, ids in result.submission_ids.items():
@@ -493,14 +499,16 @@ def _parsefile_submission_ids(
                 display = api
             if display or api:
                 out[tn] = (display, api)
-        return out
+        return out, None
     email = (group.api_email or "").strip()
     password = (portal_password if portal_password is not None else group.api_password or "").strip()
     base_url = (group.base_url or "").strip()
-    if not email or not password or not base_url:
-        return {}
+    if not password:
+        return {}, "Submission ID not retrieved (set Parsefile portal password on the buying group)."
+    if not email or not base_url:
+        return {}, "Submission ID not retrieved (Parsefile email/base URL missing)."
     try:
-        looked_up = parsefile_api.lookup_submission_ids(
+        looked = parsefile_api.lookup_submission_ids(
             base_url=base_url,
             email=email,
             password=password,
@@ -508,16 +516,22 @@ def _parsefile_submission_ids(
         )
     except Exception as exc:
         logger.warning("Parsefile submission id lookup failed: %s", exc)
-        return {}
+        return {}, f"Submission ID not retrieved ({exc})"
     out = {}
-    for tn, ids in looked_up.items():
+    for tn, ids in looked.submission_ids.items():
         display = (ids.display_id or "").strip() or None
         api = (ids.api_id or "").strip() or None
         if not display and api:
             display = api
         if display or api:
             out[tn] = (display, api)
-    return out
+    if out:
+        return out, looked.error
+    return {}, (
+        f"Submission ID not retrieved ({looked.error})"
+        if looked.error
+        else "Submission ID not retrieved (order not found in it@orders-all)."
+    )
 
 
 def _ids_for_tracking(
@@ -578,7 +592,7 @@ def append_submission_ids_to_message(
         if summary in base:
             return base
         return f"{summary}\n{base}" if base else summary
-    if missing_note:
+    if missing_note and "submission id not retrieved" not in base.casefold():
         note = missing_note.strip()
         if note and note not in base:
             return f"{note}\n{base}" if base else note
@@ -769,12 +783,16 @@ def batch_submit_pending_trackings(
                 trackings=entries,
             )
             message = api_result.message
-            submission_ids_by_tracking = _parsefile_submission_ids(
+            submission_ids_by_tracking, parsefile_id_err = _parsefile_submission_ids(
                 group,
                 tracking_numbers,
                 api_result,
                 portal_password=api_password,
             )
+            if parsefile_id_err and not submission_ids_by_tracking:
+                message = (
+                    f"{message}\n{parsefile_id_err}" if message else parsefile_id_err
+                )
         elif framework == "usabg":
             base_url = group.base_url
             username = str(group.api_username)
