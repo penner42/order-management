@@ -211,26 +211,65 @@ def _index_bfmr_by_tracking(
     return index
 
 
-def _pick_bfmr_row(
-    candidates: list[bfmr_api.BfmrTrackerRow],
+def _index_bfmr_by_order_id(
+    rows: list[bfmr_api.BfmrTrackerRow],
+) -> dict[str, list[bfmr_api.BfmrTrackerRow]]:
+    index: dict[str, list[bfmr_api.BfmrTrackerRow]] = {}
+    for row in rows:
+        oid = (row.order_id or "").strip()
+        if not oid:
+            continue
+        index.setdefault(oid.casefold(), []).append(row)
+    return index
+
+
+def _pick_bfmr_rows_for_item(
     *,
-    expected: Decimal | None,
+    trackings: list[str],
+    store_order_number: str | None,
+    by_tracking: dict[str, list[bfmr_api.BfmrTrackerRow]],
+    by_order_id: dict[str, list[bfmr_api.BfmrTrackerRow]],
     used_ids: set[int],
-) -> bfmr_api.BfmrTrackerRow | None:
-    available = [c for c in candidates if id(c) not in used_ids]
-    if not available:
-        return None
-    if len(available) == 1 or expected is None:
-        return available[0]
+    item_qty: int,
+    sibling_trackings: set[str] | None = None,
+) -> list[bfmr_api.BfmrTrackerRow]:
+    """Collect unused BFMR received rows for an item (all package trackings).
 
-    def score(row: bfmr_api.BfmrTrackerRow) -> tuple[Decimal, int]:
-        total = _bfmr_received_total(row)
-        if total is None:
-            return (Decimal("999999"), 1)
-        return (abs(total - expected), 0)
+    Prefer exact tracking matches; then fill remaining quantity from other
+    received rows that share the store order number (BFMR ``order_id``), skipping
+    trackings that belong to sibling pending items.
+    """
+    picked: list[bfmr_api.BfmrTrackerRow] = []
+    seen: set[int] = set()
+    own_keys = {tn.casefold() for tn in trackings}
+    reserved_for_siblings = {
+        tn.casefold() for tn in (sibling_trackings or set()) if tn.casefold() not in own_keys
+    }
 
-    available.sort(key=score)
-    return available[0]
+    def _take(row: bfmr_api.BfmrTrackerRow) -> None:
+        rid = id(row)
+        if rid in used_ids or rid in seen:
+            return
+        seen.add(rid)
+        picked.append(row)
+
+    for tn in trackings:
+        for row in by_tracking.get(tn.casefold()) or []:
+            _take(row)
+
+    order_key = (store_order_number or "").strip().casefold()
+    if order_key:
+        need = max(item_qty, 1)
+        if len(picked) < need:
+            for row in by_order_id.get(order_key) or []:
+                if len(picked) >= need:
+                    break
+                row_tn = (row.tracking_number or "").strip().casefold()
+                if row_tn and row_tn in reserved_for_siblings:
+                    continue
+                _take(row)
+
+    return picked
 
 
 def create_receiving_session(payload: dict[str, Any]) -> str:
@@ -269,21 +308,41 @@ def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
     }
 
 
-def _tracking_numbers_for_item(db: Session, item: Item) -> list[str]:
-    """All distinct tracking numbers linked to an item (not just the first)."""
-    out: list[str] = []
+def _split_tracking_field(raw: str | None) -> list[str]:
+    """Split a shipment tracking field that may contain comma/semicolon lists."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    parts: list[str] = []
     seen: set[str] = set()
-    for si in item.shipment_items or []:
-        tn = ""
-        if si.shipment and (si.shipment.tracking_number or "").strip():
-            tn = si.shipment.tracking_number.strip()
+    for chunk in text.replace(";", ",").split(","):
+        tn = chunk.strip()
         if not tn:
             continue
         key = tn.casefold()
         if key in seen:
             continue
         seen.add(key)
-        out.append(tn)
+        parts.append(tn)
+    return parts
+
+
+def _tracking_numbers_for_item(db: Session, item: Item) -> list[str]:
+    """All distinct tracking numbers linked to an item (not just the first)."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str | None) -> None:
+        for tn in _split_tracking_field(raw):
+            key = tn.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(tn)
+
+    for si in item.shipment_items or []:
+        if si.shipment:
+            _add(si.shipment.tracking_number)
     if out:
         return out
 
@@ -297,14 +356,30 @@ def _tracking_numbers_for_item(db: Session, item: Item) -> list[str]:
         .all()
     )
     for (raw,) in rows:
-        tn = (raw or "").strip()
-        if not tn:
-            continue
-        key = tn.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(tn)
+        _add(raw)
+    return out
+
+
+def _tracking_numbers_for_order(db: Session, order_id: int) -> list[str]:
+    """All distinct trackings linked to any item on the order (multi-package)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    rows = (
+        db.query(Shipment.tracking_number)
+        .join(ShipmentItem, ShipmentItem.shipment_id == Shipment.id)
+        .join(Item, Item.id == ShipmentItem.item_id)
+        .filter(Item.order_id == order_id)
+        .filter(Shipment.tracking_number.isnot(None))
+        .filter(Shipment.tracking_number != "")
+        .all()
+    )
+    for (raw,) in rows:
+        for tn in _split_tracking_field(raw):
+            key = tn.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(tn)
     return out
 
 
@@ -327,6 +402,7 @@ def _collect_pending(
     )
 
     pending: list[tuple[Item, Order, list[str]]] = []
+    pending_order_ids: set[int] = set()
     for item in unscanned_items:
         order = item.order
         if not order:
@@ -335,9 +411,21 @@ def _collect_pending(
         if not trackings:
             continue
         pending.append((item, order, trackings))
+        pending_order_ids.add(order.id)
 
+    # Searched list includes every tracking on those orders (sibling packages),
+    # not only the shipment linked to each pending item (item_id is unique on
+    # shipment_items, so multi-package orders often only link one TN per item).
     all_trackings: list[str] = []
     seen_tn: set[str] = set()
+    for order_id in sorted(pending_order_ids):
+        for tn in _tracking_numbers_for_order(db, order_id):
+            key = tn.casefold()
+            if key in seen_tn:
+                continue
+            seen_tn.add(key)
+            all_trackings.append(tn)
+    # Also keep any item-level TNs that somehow were not on the order query.
     for _item, _order, trackings in pending:
         for tn in trackings:
             key = tn.casefold()
@@ -981,7 +1069,7 @@ def _check_receiving_bfmr(
     base_url = (group.base_url or "").strip() or None
 
     try:
-        receipts = bfmr_api.list_received_tracker_rows(
+        fetched = bfmr_api.list_received_tracker_rows(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
@@ -994,71 +1082,102 @@ def _check_receiving_bfmr(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
+    receipts = fetched.rows
     by_tracking = _index_bfmr_by_tracking(receipts)
+    by_order_id = _index_bfmr_by_order_id(receipts)
     used_row_ids: set[int] = set()
     matches: list[ReceivingMatch] = []
     not_found = 0
     void_skipped = 0
+    all_pending_trackings = {tn.casefold() for _i, _o, tns in pending for tn in tns}
 
     for item, order, trackings in pending:
-        candidates: list[bfmr_api.BfmrTrackerRow] = []
-        seen_cand: set[int] = set()
-        matched_tracking = trackings[0]
-        for tn in trackings:
-            for row in by_tracking.get(tn.casefold()) or []:
-                rid = id(row)
-                if rid in seen_cand:
-                    continue
-                seen_cand.add(rid)
-                candidates.append(row)
-            if by_tracking.get(tn.casefold()):
-                matched_tracking = tn
-
+        store_order_number = (order.store_order_number or "").strip() or None
+        candidates = _pick_bfmr_rows_for_item(
+            trackings=trackings,
+            store_order_number=store_order_number,
+            by_tracking=by_tracking,
+            by_order_id=by_order_id,
+            used_ids=used_row_ids,
+            item_qty=item.quantity or 1,
+            sibling_trackings=all_pending_trackings,
+        )
         if not candidates:
             not_found += 1
             continue
 
+        for row in candidates:
+            used_row_ids.add(id(row))
+
         expected = _expected_amount(item)
-        row = _pick_bfmr_row(candidates, expected=expected, used_ids=used_row_ids)
-        if row is None:
-            void_skipped += 1
-            continue
-        used_row_ids.add(id(row))
+        matched_trackings: list[str] = []
+        seen_mt: set[str] = set()
+        for row in candidates:
+            tn = (row.tracking_number or "").strip()
+            if not tn:
+                continue
+            key = tn.casefold()
+            if key in seen_mt:
+                continue
+            seen_mt.add(key)
+            matched_trackings.append(tn)
+        if not matched_trackings:
+            matched_trackings = list(trackings[:1])
 
-        for tn in trackings:
-            if tn.casefold() == (row.tracking_number or "").casefold():
-                matched_tracking = tn
-                break
+        received_qty = 0
+        received_total = Decimal("0")
+        has_total = False
+        scanned_dt = None
+        description = None
+        statuses: list[str] = []
+        receipt_ids: list[str] = []
+        for row in candidates:
+            qty = row.qty_received if row.qty_received is not None else row.qty
+            if qty is not None:
+                received_qty += int(qty)
+            total = _bfmr_received_total(row)
+            if total is not None:
+                received_total += total
+                has_total = True
+            row_scanned = _parse_created_date(row.scanned_at)
+            if row_scanned is not None and (scanned_dt is None or row_scanned > scanned_dt):
+                scanned_dt = row_scanned
+            if description is None:
+                description = (row.item_name or row.deal_title or "").strip() or None
+            if row.status:
+                statuses.append(str(row.status))
+            rid = _bfmr_receipt_id(row)
+            if rid:
+                receipt_ids.append(rid)
 
-        received_qty = row.qty_received if row.qty_received is not None else row.qty
-        received_total = _bfmr_received_total(row)
+        if received_qty <= 0:
+            received_qty = len(candidates)
+        received_ext: Decimal | None = received_total if has_total else None
         received_price: Decimal | None = None
-        if received_total is not None and received_qty and received_qty > 0:
-            received_price = (received_total / Decimal(received_qty)).quantize(Decimal("0.01"))
-        elif row.retail_price is not None:
-            received_price = row.retail_price
+        if received_ext is not None and received_qty > 0:
+            received_price = (received_ext / Decimal(received_qty)).quantize(Decimal("0.01"))
 
-        scanned_dt = _parse_created_date(row.scanned_at) or to_date_only(datetime.now(timezone.utc))
-        discrepancy = _amounts_differ(expected, received_total)
-        description = (row.item_name or row.deal_title or "").strip() or None
+        if scanned_dt is None:
+            scanned_dt = to_date_only(datetime.now(timezone.utc))
+        discrepancy = _amounts_differ(expected, received_ext)
 
         matches.append(
             ReceivingMatch(
                 item_id=item.id,
                 order_id=order.id,
-                store_order_number=(order.store_order_number or "").strip() or None,
+                store_order_number=store_order_number,
                 description=(item.description or "").strip() or None,
                 quantity=item.quantity or 1,
-                tracking_number=matched_tracking,
+                tracking_number=", ".join(matched_trackings),
                 price_sold=_money(item.price_sold),
                 expected_amount=expected,
-                receipt_id=_bfmr_receipt_id(row),
+                receipt_id=", ".join(receipt_ids) if receipt_ids else None,
                 scanned_at=_iso_date(scanned_dt),
                 received_item=description,
                 received_qty=received_qty,
                 received_price=received_price,
-                received_ext_total=received_total,
-                received_status=row.status,
+                received_ext_total=received_ext,
+                received_status=", ".join(dict.fromkeys(statuses)) if statuses else None,
                 amount_discrepancy=discrepancy,
                 selected=True,
             )
@@ -1104,7 +1223,8 @@ def _check_receiving_bfmr(
     discrepancy_count = sum(1 for m in matches if m.amount_discrepancy)
     checked_summary = (
         f"Checked {len(pending)} unscanned item(s) / {len(all_trackings)} tracking number(s) "
-        f"against BFMR ({len(receipts)} received tracker row(s))."
+        f"against BFMR ({len(receipts)} received / {fetched.raw_total} total tracker row(s); "
+        f"{fetched.start_date}→{fetched.end_date})."
     )
 
     matched_ids = {m.item_id for m in matches}
@@ -1157,6 +1277,11 @@ def _check_receiving_bfmr(
         )
 
     raw_dump = {
+        "start_date": fetched.start_date,
+        "end_date": fetched.end_date,
+        "request_urls": fetched.request_urls,
+        "raw_total": fetched.raw_total,
+        "received_row_count": len(receipts),
         "tracker_rows": [r.raw for r in receipts[:200]],
         "unknown_count": len(unknown_receipts),
     }

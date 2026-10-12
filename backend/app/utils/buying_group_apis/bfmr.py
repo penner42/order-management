@@ -201,8 +201,10 @@ def _rows_from_payload(raw: dict[str, Any]) -> tuple[list[BfmrTrackerRow], int, 
 
 
 def _default_date_window(*, lookback_days: int = _DEFAULT_LOOKBACK_DAYS) -> tuple[str, str]:
-    end = date.today()
-    start = end - timedelta(days=max(lookback_days, 1))
+    # end_date is inclusive on the website; bump one day so TZ / exclusive-end APIs
+    # still include "today" reservations and scans.
+    end = date.today() + timedelta(days=1)
+    start = date.today() - timedelta(days=max(lookback_days, 1))
     return start.isoformat(), end.isoformat()
 
 
@@ -216,6 +218,7 @@ def _fetch_tracker_page(
     start_date: str,
     end_date: str,
     statuses: str | None,
+    quick_filter: str | None,
     timeout_seconds: float,
 ) -> tuple[list[BfmrTrackerRow], int, int, dict[str, Any]]:
     base = resolve_base_url(base_url)
@@ -225,8 +228,14 @@ def _fetch_tracker_page(
         "start_date": start_date,
         "end_date": end_date,
     }
+    # Prefer quick_filter when not narrowing by status. Comma-separated ``status``
+    # is documented but has been observed to interact badly with date filtering
+    # (API docs default both dates to 2023-11-03 when the request is rejected /
+    # partially applied).
     if statuses:
         query["status"] = statuses
+    elif quick_filter:
+        query["quick_filter"] = quick_filter
     url = f"{base}{MY_TRACKER_PATH}?{urllib.parse.urlencode(query)}"
     req = urllib.request.Request(
         url,
@@ -295,6 +304,15 @@ def _fetch_tracker_page(
     return rows, page, pages, raw
 
 
+@dataclass
+class BfmrTrackerListResult:
+    rows: list[BfmrTrackerRow]
+    start_date: str
+    end_date: str
+    request_urls: list[str] = field(default_factory=list)
+    raw_total: int = 0
+
+
 def list_my_tracker(
     *,
     base_url: str | None,
@@ -302,12 +320,17 @@ def list_my_tracker(
     api_secret: str,
     start_date: str | None = None,
     end_date: str | None = None,
-    statuses: tuple[str, ...] | list[str] | None = DEFAULT_RECEIVING_STATUSES,
+    statuses: tuple[str, ...] | list[str] | None = None,
+    quick_filter: str | None = "all",
     page_size: int = _DEFAULT_PAGE_SIZE,
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
     timeout_seconds: float = 30.0,
-) -> list[BfmrTrackerRow]:
-    """Paginate GET /api/v2/my-tracker; return all rows for the date/status window."""
+) -> BfmrTrackerListResult:
+    """Paginate GET /api/v2/my-tracker; return all rows for the date window.
+
+    By default uses ``quick_filter=all`` and no ``status`` filter so BFMR applies
+    the date range reliably; callers filter statuses client-side.
+    """
     if not (api_key or "").strip():
         raise ValueError("api_key is required")
     if not (api_secret or "").strip():
@@ -317,9 +340,11 @@ def list_my_tracker(
     start = (start_date or "").strip() or default_start
     end = (end_date or "").strip() or default_end
     status_csv = ",".join(s.strip() for s in (statuses or ()) if (s or "").strip()) or None
+    qf = None if status_csv else ((quick_filter or "").strip() or None)
     size = max(1, min(int(page_size or _DEFAULT_PAGE_SIZE), 1000))
 
     all_rows: list[BfmrTrackerRow] = []
+    request_urls: list[str] = []
     page_no = 1
     total_pages = 1
     while page_no <= total_pages and page_no <= _MAX_LIST_PAGES:
@@ -332,8 +357,22 @@ def list_my_tracker(
             start_date=start,
             end_date=end,
             statuses=status_csv,
+            quick_filter=qf,
             timeout_seconds=timeout_seconds,
         )
+        # Reconstruct URL for diagnostics (no secrets).
+        base = resolve_base_url(base_url)
+        q: dict[str, str] = {
+            "page_size": str(size),
+            "page_no": str(page_no),
+            "start_date": start,
+            "end_date": end,
+        }
+        if status_csv:
+            q["status"] = status_csv
+        elif qf:
+            q["quick_filter"] = qf
+        request_urls.append(f"{base}{MY_TRACKER_PATH}?{urllib.parse.urlencode(q)}")
         if page_no == 1:
             total_pages = min(max(pages, 1), _MAX_LIST_PAGES)
         all_rows.extend(rows)
@@ -343,7 +382,13 @@ def list_my_tracker(
         # Guard against APIs that ignore page_no.
         if page > 0 and page != page_no - 1 and page >= pages:
             break
-    return all_rows
+    return BfmrTrackerListResult(
+        rows=all_rows,
+        start_date=start,
+        end_date=end,
+        request_urls=request_urls,
+        raw_total=len(all_rows),
+    )
 
 
 def list_received_tracker_rows(
@@ -355,26 +400,35 @@ def list_received_tracker_rows(
     end_date: str | None = None,
     page_size: int = _DEFAULT_PAGE_SIZE,
     timeout_seconds: float = 30.0,
-) -> list[BfmrTrackerRow]:
-    """Fetch my-tracker rows and keep only warehouse-received ones with a tracking number."""
-    rows = list_my_tracker(
+) -> BfmrTrackerListResult:
+    """Fetch my-tracker (all statuses in date window); keep warehouse-received rows."""
+    fetched = list_my_tracker(
         base_url=base_url,
         api_key=api_key,
         api_secret=api_secret,
         start_date=start_date,
         end_date=end_date,
-        statuses=DEFAULT_RECEIVING_STATUSES,
+        statuses=None,
+        quick_filter="all",
         page_size=page_size,
         timeout_seconds=timeout_seconds,
     )
     out: list[BfmrTrackerRow] = []
-    for row in rows:
+    for row in fetched.rows:
         if not (row.tracking_number or "").strip():
             continue
         if not row.is_warehouse_received():
             continue
-        status = (row.status or "").strip().casefold()
+        status = (row.status or "").strip().casefold().replace(" ", "_")
         if status in ("cancelled", "deadline", "return", "returned"):
             continue
+        # Keep processed / paid / set_aside / pkg_received / in_review / etc. when
+        # qty_received or received already passed is_warehouse_received().
         out.append(row)
-    return out
+    return BfmrTrackerListResult(
+        rows=out,
+        start_date=fetched.start_date,
+        end_date=fetched.end_date,
+        request_urls=fetched.request_urls,
+        raw_total=fetched.raw_total,
+    )
