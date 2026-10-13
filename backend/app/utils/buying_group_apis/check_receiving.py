@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -49,6 +50,35 @@ _SCANNED_OR_LATER_STATUSES = (
 )
 
 AMOUNT_TOLERANCE = Decimal("0.01")
+# When a tracking has multiple warehouse product lines, match local items to
+# lots by unit-price proximity (covers ~$1 BG vs local drift) before names.
+LOT_PRICE_TOLERANCE = Decimal("2.00")
+_LOT_NAME_FALLBACK_MIN = 0.35
+_LOT_NAME_ONLY_MIN = 0.25
+_LOT_AMBIGUITY_NAME_MARGIN = 0.05
+_DESC_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "with",
+        "for",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "on",
+        "or",
+        "by",
+        "from",
+        "new",
+        "latest",
+        "model",
+        "white",
+        "black",
+        "gps",
+    }
+)
 
 MATCH_KIND_RECEIVED = "received"
 MATCH_KIND_NOT_RECEIVED = "not_received"
@@ -470,6 +500,197 @@ def _allocate_received_across_shared_trackings(
     return allocated, detail
 
 
+def _description_tokens(text: str | None) -> set[str]:
+    if not text:
+        return set()
+    raw = re.findall(r"[a-z0-9]+", text.casefold())
+    return {t for t in raw if len(t) >= 2 and t not in _DESC_STOPWORDS}
+
+
+def _name_similarity(a: str | None, b: str | None) -> float:
+    ta = _description_tokens(a)
+    tb = _description_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return float(inter) / float(union) if union else 0.0
+
+
+def _usabg_lot_merge_key(row: usabg_api.UsabgReceivedRow) -> tuple[str, str, str, str]:
+    tn = (row.tracking_number or "").strip().casefold()
+    sku = (row.sku or "").strip().casefold()
+    price = str(_money(row.unit_price) if row.unit_price is not None else "")
+    name = (row.received_item or "").strip().casefold()[:120]
+    return (tn, sku, price, name)
+
+
+def _usabg_lots_from_receipts(
+    receipts: list[usabg_api.UsabgReceivedRow],
+) -> list[dict[str, Any]]:
+    """Collapse identical USABG box lines into product lots per tracking."""
+    merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str, str, str]] = []
+    for row in receipts:
+        tn = (row.tracking_number or "").strip()
+        if not tn:
+            continue
+        qty = int(row.quantity) if row.quantity and row.quantity > 0 else 1
+        key = _usabg_lot_merge_key(row)
+        tn_key = tn.casefold()
+        lot = merged.get(key)
+        if lot is None:
+            lot = {
+                "lot_id": f"{tn_key}:{len(order)}",
+                "tn_key": tn_key,
+                "display_tn": tn,
+                "qty": 0,
+                "unit_price": _money(row.unit_price),
+                "received_item": (row.received_item or "").strip() or None,
+                "sku": (row.sku or "").strip() or None,
+                "receipt_ids": [],
+                "statuses": [],
+                "scanned_at": None,
+            }
+            merged[key] = lot
+            order.append(key)
+        lot["qty"] += qty
+        if row.receipt_id:
+            lot["receipt_ids"].append(row.receipt_id)
+        for bit in (row.receiving_status, row.received_status):
+            if bit:
+                lot["statuses"].append(str(bit))
+        row_scanned = _parse_created_date(row.scanned_at)
+        if row_scanned is not None and (
+            lot["scanned_at"] is None or row_scanned > lot["scanned_at"]
+        ):
+            lot["scanned_at"] = row_scanned
+        if not lot["received_item"] and row.received_item:
+            lot["received_item"] = (row.received_item or "").strip() or None
+        if lot["unit_price"] is None and row.unit_price is not None:
+            lot["unit_price"] = _money(row.unit_price)
+    return [merged[k] for k in order]
+
+
+def _lot_as_match_meta(lot: dict[str, Any]) -> dict[str, Any]:
+    """Meta dict for one lot so payout uses this lot's unit price only."""
+    unit = _money(lot.get("unit_price"))
+    return {
+        "receipt_ids": list(lot.get("receipt_ids") or []),
+        "statuses": list(lot.get("statuses") or []),
+        "unit_prices": [unit] if unit is not None else [],
+        "scanned_at": lot.get("scanned_at"),
+        "received_item": lot.get("received_item"),
+        "display_tn": lot.get("display_tn"),
+        "sku": lot.get("sku"),
+    }
+
+
+def _meta_by_tn_from_lots(lots: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Merged per-TN meta (receipt ids / supply display) for receipt-only updates."""
+    meta_by_tn: dict[str, dict[str, Any]] = {}
+    for lot in lots:
+        tn_key = lot["tn_key"]
+        meta = meta_by_tn.setdefault(
+            tn_key,
+            {
+                "receipt_ids": [],
+                "statuses": [],
+                "unit_prices": [],
+                "scanned_at": None,
+                "received_item": None,
+                "display_tn": lot.get("display_tn"),
+            },
+        )
+        meta["receipt_ids"].extend(list(lot.get("receipt_ids") or []))
+        meta["statuses"].extend(list(lot.get("statuses") or []))
+        unit = _money(lot.get("unit_price"))
+        if unit is not None:
+            meta["unit_prices"].append(unit)
+        scanned = lot.get("scanned_at")
+        if scanned is not None and (
+            meta["scanned_at"] is None or scanned > meta["scanned_at"]
+        ):
+            meta["scanned_at"] = scanned
+        if meta["received_item"] is None and lot.get("received_item"):
+            meta["received_item"] = lot.get("received_item")
+    return meta_by_tn
+
+
+def _score_item_to_lot(
+    item: Item, lot: dict[str, Any]
+) -> tuple[float, float] | None:
+    """Return (price_score, name_score) for ranking; higher is better. None = reject."""
+    local_price = _money(item.price_sold)
+    lot_price = _money(lot.get("unit_price"))
+    name_score = _name_similarity(item.description, lot.get("received_item"))
+
+    if local_price is not None and lot_price is not None:
+        delta = abs(local_price - lot_price)
+        if delta <= LOT_PRICE_TOLERANCE:
+            return (float(LOT_PRICE_TOLERANCE - delta), name_score)
+        if name_score >= _LOT_NAME_FALLBACK_MIN:
+            # Prefer closer prices among name-only fallbacks.
+            return (-1.0 - float(min(delta, Decimal("100"))), name_score)
+        return None
+
+    if name_score >= _LOT_NAME_ONLY_MIN:
+        return (-0.5, name_score)
+    return None
+
+
+def _scores_ambiguous(
+    best: tuple[float, float],
+    second: tuple[float, float] | None,
+) -> bool:
+    if second is None:
+        return False
+    if abs(best[0] - second[0]) > 1e-9:
+        return False
+    return abs(best[1] - second[1]) <= _LOT_AMBIGUITY_NAME_MARGIN
+
+
+def _assign_items_to_lots(
+    *,
+    claimants: list[tuple[Item, list[str]]],
+    lots_by_tn: dict[str, list[dict[str, Any]]],
+) -> dict[int, str]:
+    """Map item_id → lot_id. Omits ambiguous or unscored items on multi-lot trackings."""
+    assignment: dict[int, str] = {}
+    for item, trackings in claimants:
+        tn_keys = [tn.casefold() for tn in trackings if (tn or "").strip()]
+        lots: list[dict[str, Any]] = []
+        seen_lot_ids: set[str] = set()
+        for tn_key in tn_keys:
+            for lot in lots_by_tn.get(tn_key) or []:
+                lid = lot["lot_id"]
+                if lid in seen_lot_ids:
+                    continue
+                seen_lot_ids.add(lid)
+                lots.append(lot)
+        if not lots:
+            continue
+        if len(lots) == 1:
+            assignment[item.id] = lots[0]["lot_id"]
+            continue
+
+        ranked: list[tuple[tuple[float, float], str]] = []
+        for lot in lots:
+            score = _score_item_to_lot(item, lot)
+            if score is None:
+                continue
+            ranked.append((score, lot["lot_id"]))
+        if not ranked:
+            continue
+        ranked.sort(key=lambda pair: (pair[0][0], pair[0][1]), reverse=True)
+        best_score, best_lot_id = ranked[0]
+        second_score = ranked[1][0] if len(ranked) > 1 else None
+        if _scores_ambiguous(best_score, second_score):
+            continue
+        assignment[item.id] = best_lot_id
+    return assignment
+
+
 def _received_match_count(matches: list[ReceivingMatch]) -> int:
     return sum(1 for m in matches if m.match_kind == MATCH_KIND_RECEIVED)
 
@@ -558,7 +779,8 @@ def _matches_for_tn_allocations(
         receipt_id = _meta_receipt_id(meta)
         if update_receipt_only and not _receipt_needs_update(item, receipt_id):
             continue
-        lines.append((_tn_display(trackings, tn_key), qty, meta))
+        display = (meta.get("display_tn") or "").strip() or _tn_display(trackings, tn_key)
+        lines.append((display, qty, meta))
     for display_tn, qty, meta in extra_lines or []:
         if qty <= 0:
             continue
@@ -1053,41 +1275,18 @@ def _check_receiving_usabg(
         )
 
     receipts = fetched.rows
+    lots = _usabg_lots_from_receipts(receipts)
+    lots_by_tn: dict[str, list[dict[str, Any]]] = {}
+    lots_by_id: dict[str, dict[str, Any]] = {}
     supply_by_tn: dict[str, int] = {}
-    meta_by_tn: dict[str, dict[str, Any]] = {}
-    for row in receipts:
-        tn = (row.tracking_number or "").strip()
-        if not tn:
-            continue
-        qty = int(row.quantity) if row.quantity and row.quantity > 0 else 1
-        key = tn.casefold()
-        supply_by_tn[key] = supply_by_tn.get(key, 0) + qty
-        meta = meta_by_tn.setdefault(
-            key,
-            {
-                "receipt_ids": [],
-                "statuses": [],
-                "unit_prices": [],
-                "scanned_at": None,
-                "received_item": None,
-            },
-        )
-        # PO number is the warehouse receipt id.
-        if row.receipt_id:
-            meta["receipt_ids"].append(row.receipt_id)
-        status_bits = [row.receiving_status, row.received_status]
-        for bit in status_bits:
-            if bit:
-                meta["statuses"].append(str(bit))
-        if row.unit_price is not None:
-            meta["unit_prices"].append(row.unit_price)
-        row_scanned = _parse_created_date(row.scanned_at)
-        if row_scanned is not None and (
-            meta["scanned_at"] is None or row_scanned > meta["scanned_at"]
-        ):
-            meta["scanned_at"] = row_scanned
-        if meta["received_item"] is None and row.received_item:
-            meta["received_item"] = row.received_item
+    for lot in lots:
+        tn_key = lot["tn_key"]
+        lots_by_tn.setdefault(tn_key, []).append(lot)
+        lots_by_id[lot["lot_id"]] = lot
+        supply_by_tn[tn_key] = supply_by_tn.get(tn_key, 0) + int(lot["qty"])
+    # Receipt-only updates still key by tracking (PO number / receipt id).
+    meta_by_tn = _meta_by_tn_from_lots(lots)
+    meta_by_lot = {lot_id: _lot_as_match_meta(lot) for lot_id, lot in lots_by_id.items()}
 
     eligible: list[tuple[Item, Order, list[str]]] = []
     not_found = 0
@@ -1099,13 +1298,30 @@ def _check_receiving_usabg(
         else:
             not_found += 1
 
-    allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
-        item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
-        supply_by_tn=supply_by_tn,
+    lot_assignment = _assign_items_to_lots(
+        claimants=[(item, trackings) for item, _o, trackings in eligible],
+        lots_by_tn=lots_by_tn,
+    )
+
+    # Allocate qty from each product lot pool (not the whole tracking pool).
+    supply_by_lot = {lot_id: int(lot["qty"]) for lot_id, lot in lots_by_id.items()}
+    item_demands: list[tuple[int, int, list[str]]] = []
+    for item, _order, _trackings in eligible:
+        lot_id = lot_assignment.get(item.id)
+        if not lot_id:
+            continue
+        item_demands.append((item.id, item.quantity or 1, [lot_id]))
+
+    allocated, allocated_by_lot = _allocate_received_across_shared_trackings(
+        item_demands=item_demands,
+        supply_by_tn=supply_by_lot,
     )
 
     matches: list[ReceivingMatch] = []
     for item, order, trackings in eligible:
+        if item.id not in lot_assignment:
+            not_found += 1
+            continue
         got = int(allocated.get(item.id, 0))
         if got <= 0:
             not_found += 1
@@ -1115,8 +1331,8 @@ def _check_receiving_usabg(
                 item=item,
                 order=order,
                 trackings=trackings,
-                tn_allocations=allocated_by_tn.get(item.id, []),
-                meta_by_tn=meta_by_tn,
+                tn_allocations=allocated_by_lot.get(item.id, []),
+                meta_by_tn=meta_by_lot,
             )
         )
 
