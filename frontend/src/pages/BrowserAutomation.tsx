@@ -828,6 +828,16 @@ export default function BrowserAutomation() {
     }
   }
 
+  const unlockProfile = async (profileId: number) => {
+    setError(null)
+    try {
+      const updated = await api.post<BrowserProfile>(`/browser-profiles/${profileId}/unlock`, {})
+      setProfiles((prev) => prev.map((p) => (p.id === profileId ? updated : p)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const deleteProfile = async (profileId: number) => {
     if (!confirm('Delete this browser profile? Stored cookies for this account will be removed from the server.')) {
       return
@@ -1077,6 +1087,15 @@ export default function BrowserAutomation() {
                         className="rounded-lg bg-brand-600 text-white px-3 py-1.5 text-sm font-medium hover:bg-brand-700 disabled:opacity-50"
                       >
                         Import now
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => unlockProfile(p.id)}
+                        disabled={busy}
+                        title="Clear stale browser lock files if this profile fails to launch (cookies kept)"
+                        className="rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm hover:bg-brand-50 dark:hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        Unlock
                       </button>
                       <button
                         type="button"

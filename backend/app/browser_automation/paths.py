@@ -39,6 +39,41 @@ def all_profile_data_dirs(profile_id: int) -> list[Path]:
     ]
 
 
+# Chromium singleton + Firefox parent locks left behind after a crash/restart.
+_PROFILE_LOCK_NAMES = (
+    "SingletonLock",
+    "SingletonCookie",
+    "SingletonSocket",
+    "lock",
+    ".parentlock",
+    "parent.lock",
+)
+
+
+def clear_profile_browser_locks(profile_id: int) -> list[str]:
+    """Remove stale browser lock files so launch_persistent_context can reopen the profile.
+
+    Does not delete cookies or other profile data. Returns paths that were removed.
+    """
+    removed: list[str] = []
+    for directory in all_profile_data_dirs(profile_id):
+        if not directory.is_dir():
+            continue
+        for name in _PROFILE_LOCK_NAMES:
+            path = directory / name
+            try:
+                if path.is_symlink() or path.is_file():
+                    path.unlink(missing_ok=True)
+                    removed.append(str(path))
+                elif path.exists():
+                    # Rare: lock path is a socket / unexpected type — still try unlink.
+                    path.unlink(missing_ok=True)
+                    removed.append(str(path))
+            except OSError:
+                continue
+    return removed
+
+
 def _extension_root() -> Path:
     ext = extension_dir()
     if ext is None:

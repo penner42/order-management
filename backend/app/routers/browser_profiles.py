@@ -16,7 +16,7 @@ from app.browser_automation.amazon_import import run_amazon_import
 from app.browser_automation.common import LoginRequiredError, post_bulk_session
 from app.browser_automation.costco_import import run_costco_import
 from app.browser_automation.jobs import create_job, get_job, update_job
-from app.browser_automation.paths import all_profile_data_dirs
+from app.browser_automation.paths import all_profile_data_dirs, clear_profile_browser_locks
 from app.browser_automation.session_manager import (
     login_home_url_for_retailer,
     retailer_session_logged_in,
@@ -572,6 +572,50 @@ async def delete_browser_profile(
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
     return None
+
+
+@router.post("/{profile_id}/unlock", response_model=BrowserProfileRead)
+async def unlock_browser_profile(
+    profile_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Clear stale Chromium/Firefox lock files so the profile can launch again.
+
+    Use when automation fails with "profile appears to be in use by another
+    Chromium process". Cookies and login state are preserved.
+    """
+    profile = _get_profile_or_404(db, profile_id)
+    if profile.status in ("importing", "login_in_progress"):
+        raise HTTPException(
+            status_code=409,
+            detail="Stop the active login or import before unlocking this profile.",
+        )
+    await session_manager.close_session(profile_id)
+    removed = clear_profile_browser_locks(profile_id)
+    logger.info(
+        "Unlocked browser profile %s; removed %s lock file(s): %s",
+        profile_id,
+        len(removed),
+        removed,
+    )
+    # Clear lock-related errors so the card is ready to retry.
+    err = (profile.last_error or "").lower()
+    lock_hint = any(
+        needle in err
+        for needle in (
+            "profile appears to be in use",
+            "launch_persistent_context",
+            "singleton",
+            "has been closed",
+        )
+    )
+    if profile.status == "error" or lock_hint:
+        if profile.status == "error":
+            profile.status = "ready"
+        profile.last_error = None
+        db.commit()
+    return _profile_read(_get_profile_or_404(db, profile_id))
 
 
 @router.post("/{profile_id}/login/start", response_model=LoginStartResponse)
