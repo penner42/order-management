@@ -11,6 +11,7 @@ ApiFramework = Literal["parsefile", "usabg", "buyinggroup", "dealandrunner", "bf
 ALLOWED_API_FRAMEWORKS = frozenset({"parsefile", "usabg", "buyinggroup", "dealandrunner", "bfmr"})
 
 DEFAULT_TRACKING_SUBMIT_CRON = "0 */6 * * *"
+DEFAULT_RECEIVED_CHECK_CRON = "0 */6 * * *"
 
 
 def _normalize_optional_str(value: object) -> str | None:
@@ -56,6 +57,8 @@ class BuyingGroupBase(BaseModel):
     api_password: str | None = None
     tracking_submit_enabled: bool = False
     tracking_submit_cron: str = DEFAULT_TRACKING_SUBMIT_CRON
+    received_check_enabled: bool = False
+    received_check_cron: str = DEFAULT_RECEIVED_CHECK_CRON
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -97,7 +100,7 @@ class BuyingGroupBase(BaseModel):
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
 
-    @field_validator("tracking_submit_cron")
+    @field_validator("tracking_submit_cron", "received_check_cron")
     @classmethod
     def validate_cron(cls, value: str) -> str:
         return _normalize_cron(value)
@@ -120,6 +123,8 @@ class BuyingGroupUpdate(BaseModel):
     api_password: str | None = None
     tracking_submit_enabled: bool | None = None
     tracking_submit_cron: str | None = Field(default=None, max_length=64)
+    received_check_enabled: bool | None = None
+    received_check_cron: str | None = Field(default=None, max_length=64)
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -146,7 +151,7 @@ class BuyingGroupUpdate(BaseModel):
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
 
-    @field_validator("tracking_submit_cron")
+    @field_validator("tracking_submit_cron", "received_check_cron")
     @classmethod
     def validate_cron(cls, value: str | None) -> str | None:
         if value is None:
@@ -158,6 +163,7 @@ class BuyingGroupRead(BuyingGroupBase):
     id: int
     user_id: int | None = None
     tracking_submit_last_run_at: datetime | None = None
+    received_check_last_run_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -262,3 +268,14 @@ class ReceivingReviewSession(BaseModel):
     unmatched: list[ReceivingReviewUnmatched] = []
     unknown_receipts: list[ReceivingReviewUnknownReceipt] = []
     matches: list[ReceivingReviewMatch] = []
+
+
+class ReceivingReviewPruneRequest(BaseModel):
+    buying_group_id: int
+    item_ids: list[int] = Field(default_factory=list)
+
+
+class ReceivingReviewPruneResponse(BaseModel):
+    buying_group_id: int
+    remaining_matched_count: int = 0
+    deleted: bool = False

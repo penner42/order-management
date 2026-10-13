@@ -84,6 +84,7 @@ function AppShell() {
       { to: '/', label: 'Orders' },
       { to: '/reports', label: 'Reports' },
       { to: '/buying-groups', label: 'Buying Groups' },
+      { to: '/receiving-review', label: 'Receiving' },
       { to: '/rewards', label: 'Rewards' },
       { to: '/payment-methods', label: 'Payment Methods' },
       { to: '/payments', label: 'Payments' },

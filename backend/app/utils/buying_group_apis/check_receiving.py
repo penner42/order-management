@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -10,7 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.models import BuyingGroup, Item, Order, Shipment, ShipmentItem
+from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, ShipmentItem
 from app.models.item import ItemStatus
 from app.utils.buying_group_apis import bfmr as bfmr_api
 from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
@@ -35,9 +34,6 @@ _SCANNED_OR_LATER_STATUSES = (
     ItemStatus.RETURN_REFUNDED,
     ItemStatus.LOST_PACKAGE,
 )
-
-# Short-lived in-memory sessions for the receiving review UI (same pattern as bulk import).
-_receiving_sessions: dict[str, dict[str, Any]] = {}
 
 AMOUNT_TOLERANCE = Decimal("0.01")
 
@@ -78,6 +74,7 @@ class CheckReceivingResult:
     buying_group_id: int
     buying_group_name: str
     token: str | None = None
+    session_payload: dict[str, Any] | None = None
     matched_count: int = 0
     not_found_count: int = 0
     void_skipped_count: int = 0
@@ -187,18 +184,119 @@ def _index_bfmr_by_tracking(
     return index
 
 
-def create_receiving_session(payload: dict[str, Any]) -> str:
-    token = secrets.token_urlsafe(16)
-    _receiving_sessions[token] = payload
-    return token
+def _is_actionable_match_dict(m: dict[str, Any]) -> bool:
+    return m.get("match_kind") != MATCH_KIND_NOT_RECEIVED
 
 
-def get_receiving_session(token: str) -> dict[str, Any] | None:
-    return _receiving_sessions.get(token)
+def actionable_count_from_payload(payload: dict[str, Any]) -> int:
+    matches = payload.get("matches") or []
+    return sum(1 for m in matches if isinstance(m, dict) and _is_actionable_match_dict(m))
 
 
-def pop_receiving_session(token: str) -> dict[str, Any] | None:
-    return _receiving_sessions.pop(token, None)
+def save_receiving_review_pending(db: Session, payload: dict[str, Any]) -> int:
+    """Upsert or clear pending review for one buying group. Returns actionable match count."""
+    buying_group_id = int(payload["buying_group_id"])
+    count = actionable_count_from_payload(payload)
+    existing = (
+        db.query(ReceivingReviewPending)
+        .filter(ReceivingReviewPending.buying_group_id == buying_group_id)
+        .first()
+    )
+    if count <= 0:
+        if existing is not None:
+            db.delete(existing)
+        db.commit()
+        return 0
+    now = datetime.now(timezone.utc)
+    if existing is not None:
+        existing.payload = payload
+        existing.matched_count = count
+        existing.updated_at = now
+    else:
+        db.add(
+            ReceivingReviewPending(
+                buying_group_id=buying_group_id,
+                payload=payload,
+                matched_count=count,
+                updated_at=now,
+            )
+        )
+    db.commit()
+    return count
+
+
+def list_receiving_review_pending_payloads(db: Session) -> list[dict[str, Any]]:
+    from sqlalchemy import func
+
+    rows = (
+        db.query(ReceivingReviewPending)
+        .join(BuyingGroup, BuyingGroup.id == ReceivingReviewPending.buying_group_id)
+        .order_by(func.lower(BuyingGroup.name))
+        .all()
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.payload
+        if not isinstance(payload, dict):
+            continue
+        if actionable_count_from_payload(payload) > 0:
+            out.append(payload)
+    return out
+
+
+def prune_receiving_review_pending(
+    db: Session,
+    *,
+    buying_group_id: int,
+    item_ids: list[int],
+) -> tuple[int, bool]:
+    """Remove applied item rows from pending snapshot. Returns (remaining_count, deleted)."""
+    id_set = {int(i) for i in item_ids if i}
+    existing = (
+        db.query(ReceivingReviewPending)
+        .filter(ReceivingReviewPending.buying_group_id == buying_group_id)
+        .first()
+    )
+    if existing is None:
+        return 0, True
+    if not id_set:
+        count = actionable_count_from_payload(existing.payload if isinstance(existing.payload, dict) else {})
+        return count, False
+    payload = existing.payload
+    if not isinstance(payload, dict):
+        db.delete(existing)
+        db.commit()
+        return 0, True
+    matches = payload.get("matches") or []
+    new_matches = [
+        m
+        for m in matches
+        if isinstance(m, dict) and int(m.get("item_id") or 0) not in id_set
+    ]
+    payload = {**payload, "matches": new_matches}
+    count = actionable_count_from_payload(payload)
+    if count <= 0:
+        db.delete(existing)
+        db.commit()
+        return 0, True
+    existing.payload = payload
+    existing.matched_count = count
+    existing.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return count, False
+
+
+def receiving_check_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
+    if group is None:
+        return False, "Buying group not found"
+    framework = (group.api_framework or "").strip().casefold()
+    if framework == "parsefile":
+        return parsefile_group_ready(group)
+    if framework == "buyinggroup":
+        return buyinggroup_group_ready(group)
+    if framework == "bfmr":
+        return bfmr_group_ready(group)
+    return False, "Receiving check is only available for Parsefile, BuyingGroup.com, or BFMR groups"
 
 
 def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
@@ -1045,11 +1143,10 @@ def _check_receiving_parsefile(
             "unknown_receipts": [],
             "matches": [],
         }
-        token = create_receiving_session(payload)
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
-            token=token,
+            session_payload=payload,
             submitted_count=len(unscanned_items),
             message=message,
         )
@@ -1089,12 +1186,10 @@ def _check_receiving_parsefile(
         "unknown_receipts": unknown_receipts,
         "matches": [match_to_dict(m) for m in matches],
     }
-    token = create_receiving_session(payload)
-
     return CheckReceivingResult(
         buying_group_id=buying_group_id,
         buying_group_name=group_name,
-        token=token,
+        session_payload=payload,
         matched_count=received_count,
         not_found_count=not_found,
         void_skipped_count=void_skipped,
@@ -1367,11 +1462,10 @@ def _check_receiving_buyinggroup(
             "unknown_receipts": [],
             "matches": [],
         }
-        token = create_receiving_session(payload)
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
-            token=token,
+            session_payload=payload,
             submitted_count=len(unscanned_items),
             message=message,
         )
@@ -1395,12 +1489,10 @@ def _check_receiving_buyinggroup(
         "unknown_receipts": unknown_receipts,
         "matches": [match_to_dict(m) for m in matches],
     }
-    token = create_receiving_session(payload)
-
     return CheckReceivingResult(
         buying_group_id=buying_group_id,
         buying_group_name=group_name,
-        token=token,
+        session_payload=payload,
         matched_count=received_count,
         not_found_count=not_found,
         void_skipped_count=void_skipped,
@@ -1686,11 +1778,10 @@ def _check_receiving_bfmr(
             "unknown_receipts": [],
             "matches": [],
         }
-        token = create_receiving_session(payload)
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
-            token=token,
+            session_payload=payload,
             submitted_count=len(unscanned_items),
             message=message,
         )
@@ -1718,12 +1809,10 @@ def _check_receiving_bfmr(
         "unknown_receipts": unknown_receipts,
         "matches": [match_to_dict(m) for m in matches],
     }
-    token = create_receiving_session(payload)
-
     return CheckReceivingResult(
         buying_group_id=buying_group_id,
         buying_group_name=group_name,
-        token=token,
+        session_payload=payload,
         matched_count=received_count,
         not_found_count=not_found,
         void_skipped_count=void_skipped,

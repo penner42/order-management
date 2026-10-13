@@ -14,17 +14,23 @@ from app.database import SessionLocal, get_db
 from app.models import BrowserImportLog, BuyingGroup, User
 from app.models.user import get_default_app_user_id
 from app.schemas.buying_group import (
+    DEFAULT_RECEIVED_CHECK_CRON,
     DEFAULT_TRACKING_SUBMIT_CRON,
     BuyingGroupCheckReceivingResponse,
     BuyingGroupCreate,
     BuyingGroupRead,
     BuyingGroupSubmitTrackingResponse,
     BuyingGroupUpdate,
+    ReceivingReviewPruneRequest,
+    ReceivingReviewPruneResponse,
     ReceivingReviewSession,
 )
 from app.utils.buying_group_apis.check_receiving import (
     check_receiving_for_group,
-    get_receiving_session,
+    list_receiving_review_pending_payloads,
+    prune_receiving_review_pending,
+    receiving_check_group_ready,
+    save_receiving_review_pending,
 )
 from app.utils.buying_group_apis.submit_tracking import (
     BatchSubmitResult,
@@ -50,6 +56,35 @@ def create_buying_group(data: BuyingGroupCreate, db: Session = Depends(get_db), 
     db.commit()
     db.refresh(group)
     return group
+
+
+@router.get("/receiving-review", response_model=list[ReceivingReviewSession])
+def list_receiving_review(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """All buying groups with pending warehouse matches awaiting apply."""
+    payloads = list_receiving_review_pending_payloads(db)
+    return [ReceivingReviewSession.model_validate(p) for p in payloads]
+
+
+@router.post("/receiving-review/prune", response_model=ReceivingReviewPruneResponse)
+def prune_receiving_review(
+    body: ReceivingReviewPruneRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Remove applied items from a group's pending receiving snapshot."""
+    remaining, deleted = prune_receiving_review_pending(
+        db,
+        buying_group_id=body.buying_group_id,
+        item_ids=body.item_ids,
+    )
+    return ReceivingReviewPruneResponse(
+        buying_group_id=body.buying_group_id,
+        remaining_matched_count=remaining,
+        deleted=deleted,
+    )
 
 
 @router.get("/{group_id}", response_model=BuyingGroupRead)
@@ -91,6 +126,7 @@ def write_group_tracking_log(
     event_type: str,
     tracking_numbers: list[str] | None = None,
     message: str | None = None,
+    mode: str = "tracking_submit",
 ) -> bool:
     """Persist a Groups-category import-log row in its own DB session.
 
@@ -110,7 +146,7 @@ def write_group_tracking_log(
                 category="groups",
                 level=level,
                 event_type=event_type,
-                mode="tracking_submit",
+                mode=mode,
                 scheduled=scheduled,
                 retailer=framework or "",
                 store_order_number=None,
@@ -283,12 +319,17 @@ def check_buying_group_receiving(
     if result.error:
         raise HTTPException(status_code=502, detail=result.error)
 
-    review_path = f"/receiving-review?token={result.token}" if result.token else None
+    actionable = 0
+    if result.session_payload:
+        actionable = save_receiving_review_pending(db, result.session_payload)
+
+    review_path = (
+        f"/receiving-review?highlight={group_id}" if actionable > 0 else None
+    )
     return BuyingGroupCheckReceivingResponse(
         buying_group_id=result.buying_group_id,
         buying_group_name=result.buying_group_name,
-        token=result.token,
-        matched_count=result.matched_count,
+        matched_count=actionable or result.matched_count,
         not_found_count=result.not_found_count,
         void_skipped_count=result.void_skipped_count,
         discrepancy_count=result.discrepancy_count,
@@ -296,18 +337,6 @@ def check_buying_group_receiving(
         message=result.message,
         review_path=review_path,
     )
-
-
-@router.get("/receiving-sessions/{token}", response_model=ReceivingReviewSession)
-def get_receiving_review_session(
-    token: str,
-    _: User = Depends(get_current_user),
-):
-    """Resolve a receiving-check session token into matched items for review."""
-    payload = get_receiving_session(token)
-    if not payload:
-        raise HTTPException(status_code=404, detail="Receiving review session not found or expired.")
-    return ReceivingReviewSession.model_validate(payload)
 
 
 def list_due_tracking_submit_group_ids(db: Session) -> list[int]:
@@ -422,6 +451,157 @@ def run_scheduled_tracking_submit(group_id: int) -> bool:
         except Exception:
             logger.exception(
                 "Failed to stamp tracking_submit_last_run_at for buying group %s", group_id
+            )
+        return False
+    finally:
+        db.close()
+
+
+def _stamp_received_check_last_run(db: Session, group_id: int) -> datetime:
+    now = datetime.now(timezone.utc)
+    group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
+    if group:
+        group.received_check_last_run_at = now
+        db.commit()
+        db.refresh(group)
+        return group.received_check_last_run_at or now
+    return now
+
+
+def list_due_received_check_group_ids(db: Session) -> list[int]:
+    """Return buying group ids whose received-check schedule is due."""
+    from app.browser_automation.scheduler import schedule_due
+
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.query(BuyingGroup)
+        .filter(BuyingGroup.received_check_enabled.is_(True))
+        .order_by(BuyingGroup.id)
+        .all()
+    )
+    out: list[int] = []
+    for group in rows:
+        if not schedule_due(
+            enabled=True,
+            cron_expr=str(group.received_check_cron or DEFAULT_RECEIVED_CHECK_CRON),
+            last_run_at=group.received_check_last_run_at,
+            now=now,
+        ):
+            continue
+        ready, reason = receiving_check_group_ready(group)
+        if not ready:
+            group_name = (group.name or "").strip() or f"group {group.id}"
+            write_group_tracking_log(
+                group=group,
+                group_name=group_name,
+                scheduled=True,
+                level="error",
+                event_type="received_check_error",
+                message=reason or "Buying group API is not configured",
+                mode="received_check",
+            )
+            group.received_check_last_run_at = now
+            db.commit()
+            continue
+        out.append(group.id)
+    return out
+
+
+def run_scheduled_received_check(group_id: int) -> bool:
+    """Run a scheduled warehouse received check for one buying group."""
+    db = SessionLocal()
+    try:
+        group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
+        if not group or not group.received_check_enabled:
+            return False
+        ready, reason = receiving_check_group_ready(group)
+        group_name = (group.name or "").strip() or f"group {group_id}"
+        if not ready:
+            write_group_tracking_log(
+                group=group,
+                group_name=group_name,
+                scheduled=True,
+                level="error",
+                event_type="received_check_error",
+                message=reason or "Buying group API is not configured",
+                mode="received_check",
+            )
+            _stamp_received_check_last_run(db, group_id)
+            return False
+
+        write_group_tracking_log(
+            group=group,
+            group_name=group_name,
+            scheduled=True,
+            level="info",
+            event_type="received_check_started",
+            message="Started received check (scheduled).",
+            mode="received_check",
+        )
+        result = check_receiving_for_group(db, buying_group_id=group_id)
+        actionable = 0
+        if result.session_payload and not result.error:
+            actionable = save_receiving_review_pending(db, result.session_payload)
+
+        _stamp_received_check_last_run(db, group_id)
+
+        if result.error:
+            write_group_tracking_log(
+                group=group,
+                group_name=group_name,
+                scheduled=True,
+                level="error",
+                event_type="received_check_error",
+                message=result.error,
+                mode="received_check",
+            )
+            logger.warning(
+                "Scheduled received check for buying group %s failed: %s",
+                group_id,
+                result.error,
+            )
+            return True
+
+        summary = result.message or (
+            f"Found {actionable} item(s) ready to mark scanned."
+            if actionable
+            else "No received items to apply."
+        )
+        write_group_tracking_log(
+            group=group,
+            group_name=group_name,
+            scheduled=True,
+            level="updates" if actionable else "info",
+            event_type="received_check_finished",
+            message=summary,
+            mode="received_check",
+        )
+        logger.info(
+            "Scheduled received check for buying group %s: %s actionable match(es)",
+            group_id,
+            actionable,
+        )
+        return True
+    except Exception as exc:
+        logger.exception("Scheduled received check failed for buying group %s", group_id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        write_group_tracking_log(
+            group=None,
+            group_name=f"group {group_id}",
+            scheduled=True,
+            level="error",
+            event_type="received_check_error",
+            message=str(exc).strip() or exc.__class__.__name__,
+            mode="received_check",
+        )
+        try:
+            _stamp_received_check_last_run(db, group_id)
+        except Exception:
+            logger.exception(
+                "Failed to stamp received_check_last_run_at for buying group %s", group_id
             )
         return False
     finally:

@@ -13,6 +13,7 @@ from app.models.portal import Portal
 from app.models.browser_profile import BrowserProfile
 from app.models.browser_import_log import BrowserImportLog
 from app.models.ignored_zip_code import IgnoredZipCode
+from app.models.receiving_review_pending import ReceivingReviewPending
 
 __all__ = [
     "User",
@@ -33,4 +34,5 @@ __all__ = [
     "BrowserProfile",
     "BrowserImportLog",
     "IgnoredZipCode",
+    "ReceivingReviewPending",
 ]

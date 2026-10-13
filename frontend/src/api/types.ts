@@ -45,6 +45,9 @@ export interface BuyingGroup {
   tracking_submit_enabled?: boolean
   tracking_submit_cron?: string
   tracking_submit_last_run_at?: string | null
+  received_check_enabled?: boolean
+  received_check_cron?: string
+  received_check_last_run_at?: string | null
 }
 
 export interface Reward {

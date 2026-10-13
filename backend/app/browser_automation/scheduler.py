@@ -117,7 +117,9 @@ async def _tick() -> None:
     # Import here to avoid circular imports at module load.
     from app.routers.browser_profiles import start_scheduled_import
     from app.routers.buying_groups import (
+        list_due_received_check_group_ids,
         list_due_tracking_submit_group_ids,
+        run_scheduled_received_check,
         run_scheduled_tracking_submit,
     )
 
@@ -125,6 +127,7 @@ async def _tick() -> None:
     try:
         due = list_due_profile_jobs(db)
         due_groups = list_due_tracking_submit_group_ids(db)
+        due_received_groups = list_due_received_check_group_ids(db)
     finally:
         db.close()
 
@@ -156,6 +159,20 @@ async def _tick() -> None:
         except Exception:
             logger.exception(
                 "Failed scheduled tracking submit for buying group %s",
+                group_id,
+            )
+
+    for group_id in due_received_groups:
+        try:
+            started = await asyncio.to_thread(run_scheduled_received_check, group_id)
+            if started:
+                logger.info(
+                    "Ran scheduled received check for buying group %s",
+                    group_id,
+                )
+        except Exception:
+            logger.exception(
+                "Failed scheduled received check for buying group %s",
                 group_id,
             )
 

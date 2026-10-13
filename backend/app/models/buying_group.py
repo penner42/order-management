@@ -28,8 +28,20 @@ class BuyingGroup(Base):
         String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *"
     )
     tracking_submit_last_run_at = Column(DateTime(timezone=True), nullable=True)
+    # Query warehouse received items on a cron (local time); results land in receiving review inbox.
+    received_check_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    received_check_cron = Column(
+        String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *"
+    )
+    received_check_last_run_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="buying_groups")
+    receiving_review_pending = relationship(
+        "ReceivingReviewPending",
+        back_populates="buying_group",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     orders = relationship("Order", back_populates="buying_group")
     payments = relationship("Payment", back_populates="buying_group", cascade="all, delete-orphan")

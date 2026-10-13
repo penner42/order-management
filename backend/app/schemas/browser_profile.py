@@ -129,6 +129,9 @@ BrowserImportLogEvent = Literal[
     "tracking_submit_started",
     "tracking_submitted",
     "tracking_submit_error",
+    "received_check_started",
+    "received_check_finished",
+    "received_check_error",
 ]
 
 
