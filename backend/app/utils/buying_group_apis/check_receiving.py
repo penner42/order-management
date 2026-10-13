@@ -14,10 +14,12 @@ from app.models.item import ItemStatus
 from app.utils.buying_group_apis import bfmr as bfmr_api
 from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
 from app.utils.buying_group_apis import parsefile as parsefile_api
+from app.utils.buying_group_apis import usabg as usabg_api
 from app.utils.buying_group_apis.submit_tracking import (
     bfmr_group_ready,
     buyinggroup_group_ready,
     parsefile_group_ready,
+    usabg_group_ready,
 )
 from app.utils.dates import to_date_only
 
@@ -299,7 +301,9 @@ def receiving_check_group_ready(group: BuyingGroup | None) -> tuple[bool, str | 
         return buyinggroup_group_ready(group)
     if framework == "bfmr":
         return bfmr_group_ready(group)
-    return False, "Receiving check is only available for Parsefile, BuyingGroup.com, or BFMR groups"
+    if framework == "usabg":
+        return usabg_group_ready(group)
+    return False, "Receiving check is only available for Parsefile, BuyingGroup.com, BFMR, or USABG groups"
 
 
 def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
@@ -718,7 +722,7 @@ def _collect_items_with_trackings(
     - trackings linked to that item, plus
     - other trackings on the same order that are not owned by a different
       pending item (so multi-package orders are fully checked for every
-      framework: Parsefile, BuyingGroup.com, BFMR).
+      framework: Parsefile, BuyingGroup.com, BFMR, USABG).
     """
     items = (
         db.query(Item)
@@ -920,10 +924,271 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         return _check_receiving_buyinggroup(db, group=group, group_name=group_name)
     if framework == "bfmr":
         return _check_receiving_bfmr(db, group=group, group_name=group_name)
+    if framework == "usabg":
+        return _check_receiving_usabg(db, group=group, group_name=group_name)
     return CheckReceivingResult(
         buying_group_id=buying_group_id,
         buying_group_name=group_name,
-        error="Receiving check is only available for Parsefile, BuyingGroup.com, or BFMR groups",
+        error="Receiving check is only available for Parsefile, BuyingGroup.com, BFMR, or USABG groups",
+    )
+
+
+def _check_receiving_usabg(
+    db: Session,
+    *,
+    group: BuyingGroup,
+    group_name: str,
+) -> CheckReceivingResult:
+    buying_group_id = int(group.id)
+    ready, reason = usabg_group_ready(group)
+    if not ready:
+        return CheckReceivingResult(
+            buying_group_id=buying_group_id,
+            buying_group_name=group_name,
+            error=reason or "Buying group USABG API is not configured",
+        )
+
+    unscanned_items, pending, all_trackings = _collect_pending(db, buying_group_id=buying_group_id)
+    scanned_pending = _collect_scanned_or_later(db, buying_group_id=buying_group_id)
+    all_trackings = _merge_tracking_lists(
+        all_trackings, [tn for _i, _o, tns in scanned_pending for tn in tns]
+    )
+    username = str(group.api_username or "").strip()
+    password = str(group.api_password or "")
+    base_url = (group.base_url or "").strip() or None
+
+    try:
+        fetched = usabg_api.list_received_po_rows(
+            base_url=base_url,
+            username=username,
+            password=password,
+        )
+    except Exception as exc:
+        return CheckReceivingResult(
+            buying_group_id=buying_group_id,
+            buying_group_name=group_name,
+            submitted_count=len(unscanned_items),
+            error=str(exc).strip() or exc.__class__.__name__,
+        )
+
+    receipts = fetched.rows
+    supply_by_tn: dict[str, int] = {}
+    meta_by_tn: dict[str, dict[str, Any]] = {}
+    for row in receipts:
+        tn = (row.tracking_number or "").strip()
+        if not tn:
+            continue
+        qty = int(row.quantity) if row.quantity and row.quantity > 0 else 1
+        key = tn.casefold()
+        supply_by_tn[key] = supply_by_tn.get(key, 0) + qty
+        meta = meta_by_tn.setdefault(
+            key,
+            {
+                "receipt_ids": [],
+                "statuses": [],
+                "unit_prices": [],
+                "scanned_at": None,
+                "received_item": None,
+            },
+        )
+        # PO number is the warehouse receipt id.
+        if row.receipt_id:
+            meta["receipt_ids"].append(row.receipt_id)
+        status_bits = [row.receiving_status, row.received_status]
+        for bit in status_bits:
+            if bit:
+                meta["statuses"].append(str(bit))
+        if row.unit_price is not None:
+            meta["unit_prices"].append(row.unit_price)
+        row_scanned = _parse_created_date(row.scanned_at)
+        if row_scanned is not None and (
+            meta["scanned_at"] is None or row_scanned > meta["scanned_at"]
+        ):
+            meta["scanned_at"] = row_scanned
+        if meta["received_item"] is None and row.received_item:
+            meta["received_item"] = row.received_item
+
+    eligible: list[tuple[Item, Order, list[str]]] = []
+    not_found = 0
+    void_skipped = 0
+    for item, order, trackings in pending:
+        has_hit = any(tn.casefold() in supply_by_tn for tn in trackings)
+        if has_hit:
+            eligible.append((item, order, trackings))
+        else:
+            not_found += 1
+
+    allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
+        item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
+        supply_by_tn=supply_by_tn,
+    )
+
+    matches: list[ReceivingMatch] = []
+    for item, order, trackings in eligible:
+        got = int(allocated.get(item.id, 0))
+        if got <= 0:
+            not_found += 1
+            continue
+        matches.extend(
+            _matches_for_tn_allocations(
+                item=item,
+                order=order,
+                trackings=trackings,
+                tn_allocations=allocated_by_tn.get(item.id, []),
+                meta_by_tn=meta_by_tn,
+            )
+        )
+
+    for item, order, trackings in scanned_pending:
+        matches.extend(
+            _receipt_update_matches_for_item(
+                item=item,
+                order=order,
+                trackings=trackings,
+                meta_by_tn=meta_by_tn,
+                supply_by_tn=supply_by_tn,
+            )
+        )
+
+    known_trackings = _known_shipment_trackings(db)
+    unknown_receipts: list[dict[str, Any]] = []
+    orphan_seen: set[int] = set()
+    for row in receipts:
+        tn = (row.tracking_number or "").strip()
+        if not tn:
+            continue
+        if tn.casefold() in known_trackings:
+            continue
+        if id(row) in orphan_seen:
+            continue
+        orphan_seen.add(id(row))
+        scanned_dt = _parse_created_date(row.scanned_at)
+        status = _join_unique_strs(
+            [s for s in (row.receiving_status, row.received_status) if s]
+        )
+        unknown_receipts.append(
+            {
+                "receipt_id": row.receipt_id,
+                "tracking_number": tn,
+                "bg_order_id": row.purchase_id,
+                "description": row.received_item,
+                "quantity": row.quantity,
+                "received_price": str(row.unit_price) if row.unit_price is not None else None,
+                "received_ext_total": str(row.ext_total) if row.ext_total is not None else None,
+                "received_status": status,
+                "note": None,
+                "created_dt": row.scanned_at,
+                "scanned_at": _iso_date(scanned_dt),
+                "delivery": None,
+            }
+        )
+
+    discrepancy_count = sum(1 for m in matches if m.amount_discrepancy)
+    received_count = _received_match_count(matches)
+    split_off = _split_off_count(matches)
+    checked_summary = (
+        f"Checked {len(pending)} unscanned item(s) / {len(all_trackings)} tracking number(s) "
+        f"against USABG ({len(receipts)} received line(s) across {fetched.received_po_count}/"
+        f"{fetched.po_count} PO(s))."
+    )
+
+    matched_ids = {m.item_id for m in matches}
+    unmatched = _build_unmatched(pending, matched_ids)
+
+    parts: list[str] = []
+    if received_count:
+        part = f"Found {received_count} received item(s) ready to mark scanned"
+        if split_off:
+            part += f" ({split_off} under-received split-off)"
+        if discrepancy_count:
+            part += f" ({discrepancy_count} amount discrepancy)"
+        parts.append(part)
+    if unknown_receipts:
+        parts.append(f"{len(unknown_receipts)} USABG box line(s) with tracking not in Order Manager")
+    if not matches and not unknown_receipts:
+        bits = [checked_summary]
+        if not_found:
+            bits.append(f"{not_found} local item(s) not found as received.")
+        message = " ".join(bits) + " Nothing to review."
+    else:
+        message = ". ".join(parts) + f". {checked_summary}"
+
+    if not pending and not unknown_receipts and not matches:
+        message = (
+            "No shipped/submitted (unscanned) items with tracking numbers for this buying group, "
+            "and no unknown USABG received boxes."
+            if not unscanned_items
+            else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
+            "and no unknown USABG received boxes."
+        )
+        payload = {
+            "buying_group_id": buying_group_id,
+            "buying_group_name": group_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "not_found_count": 0,
+            "void_skipped_count": 0,
+            "searched_trackings": all_trackings,
+            "raw_csv": "",
+            "csv_row_count": len(receipts),
+            "unmatched": [],
+            "unknown_receipts": [],
+            "matches": [],
+        }
+        return CheckReceivingResult(
+            buying_group_id=buying_group_id,
+            buying_group_name=group_name,
+            session_payload=payload,
+            submitted_count=len(unscanned_items),
+            message=message,
+        )
+
+    raw_dump = {
+        "po_count": fetched.po_count,
+        "received_po_count": fetched.received_po_count,
+        "request_urls": fetched.request_urls[:50],
+        "received_rows": [
+            {
+                "po_number": r.po_number,
+                "purchase_id": r.purchase_id,
+                "tracking_number": r.tracking_number,
+                "quantity": r.quantity,
+                "unit_price": str(r.unit_price) if r.unit_price is not None else None,
+                "ext_total": str(r.ext_total) if r.ext_total is not None else None,
+                "sku": r.sku,
+                "received_item": r.received_item,
+                "receiving_status": r.receiving_status,
+                "status": r.received_status,
+                "scanned_at": r.scanned_at,
+            }
+            for r in receipts[:200]
+        ],
+        "unknown_count": len(unknown_receipts),
+    }
+
+    payload = {
+        "buying_group_id": buying_group_id,
+        "buying_group_name": group_name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "not_found_count": not_found,
+        "void_skipped_count": void_skipped,
+        "searched_trackings": all_trackings,
+        "raw_csv": json.dumps(raw_dump, default=str, indent=2),
+        "csv_row_count": len(receipts),
+        "unmatched": unmatched,
+        "unknown_receipts": unknown_receipts,
+        "matches": [match_to_dict(m) for m in matches],
+    }
+    return CheckReceivingResult(
+        buying_group_id=buying_group_id,
+        buying_group_name=group_name,
+        session_payload=payload,
+        matched_count=received_count,
+        not_found_count=not_found,
+        void_skipped_count=void_skipped,
+        discrepancy_count=discrepancy_count,
+        submitted_count=len(unscanned_items),
+        matches=matches,
+        message=message,
     )
 
 

@@ -41,7 +41,12 @@ function supportsTrackingSubmit(framework: string | null | undefined): boolean {
 }
 
 function supportsCheckReceiving(framework: string | null | undefined): boolean {
-  return framework === 'parsefile' || framework === 'buyinggroup' || framework === 'bfmr'
+  return (
+    framework === 'parsefile' ||
+    framework === 'buyinggroup' ||
+    framework === 'bfmr' ||
+    framework === 'usabg'
+  )
 }
 
 function formatLastRun(iso: string | null | undefined): string {

@@ -1,4 +1,4 @@
-"""USABG (api.usabuying.group) tracking submission client."""
+"""USABG (api.usabuying.group) tracking submission + PO receiving client."""
 from __future__ import annotations
 
 import hashlib
@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, TypeVar
 from urllib.parse import urlencode
 
@@ -17,6 +17,10 @@ DEFAULT_BASE_URL = "https://api.usabuying.group/buyers"
 TRACKINGS_PATH = "/trackings"
 NOTES_PATH = "/notes"
 LOGIN_PATH = "/login"
+POS_PATH = "/pos"
+
+_DEFAULT_POS_PAGE_SIZE = 50
+_MAX_POS_PAGES = 100
 
 _T = TypeVar("_T")
 
@@ -111,6 +115,53 @@ class UsabgSubmitResult:
     notes_errors: list[str] = field(default_factory=list)
     # tracking number -> USABG tracking_id
     submission_ids: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class UsabgPoSummary:
+    po_number: str
+    purchase_id: str | None
+    amount: Decimal | None
+    box_count: int | None
+    date: str | None
+    receiving_status: str | None
+    status: str | None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def is_warehouse_received(self) -> bool:
+        status = (self.receiving_status or "").strip().casefold()
+        return status in ("received", "complete", "completed")
+
+
+@dataclass
+class UsabgReceivedRow:
+    """One warehouse-received line from a PO box (keyed by tracking + PO number)."""
+
+    po_number: str
+    purchase_id: str | None
+    tracking_number: str
+    quantity: int
+    unit_price: Decimal | None
+    ext_total: Decimal | None
+    received_status: str | None
+    receiving_status: str | None
+    scanned_at: str | None
+    received_item: str | None
+    sku: str | None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def receipt_id(self) -> str:
+        """Warehouse receipt id for local storage — USABG PO number."""
+        return self.po_number
+
+
+@dataclass
+class UsabgReceivedListResult:
+    rows: list[UsabgReceivedRow]
+    po_count: int
+    received_po_count: int
+    request_urls: list[str] = field(default_factory=list)
 
 
 def resolve_base_url(base_url: str | None) -> str:
@@ -652,4 +703,361 @@ def submit_trackings(
         notes_updated=notes_updated,
         notes_errors=notes_errors,
         submission_ids=submission_ids,
+    )
+
+
+def _money(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, Decimal):
+        return value
+    text = str(value).strip().replace(",", "").replace("$", "")
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _intish(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(Decimal(str(value)))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+
+def _strish(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.casefold() in ("null", "none", "undefined"):
+        return None
+    return text
+
+
+def _envelope_ok(status: int, payload: dict[str, Any] | list[Any] | None) -> bool:
+    if status != 200:
+        return False
+    if not isinstance(payload, dict):
+        return True
+    envelope = payload.get("status")
+    if isinstance(envelope, int) and envelope not in (0, 200):
+        return False
+    return True
+
+
+def _authorized_get_json(
+    *,
+    url: str,
+    bearer_token: str,
+    timeout_seconds: float,
+) -> tuple[int, dict[str, Any] | list[Any] | None, str]:
+    return _authorized_json(
+        method="GET",
+        url=url,
+        bearer_token=bearer_token,
+        body=None,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _parse_po_summary(row: dict[str, Any]) -> UsabgPoSummary | None:
+    po_raw = row.get("po_number")
+    if po_raw is None:
+        po_raw = row.get("po")
+    po_number = _strish(po_raw)
+    if not po_number:
+        return None
+    return UsabgPoSummary(
+        po_number=po_number,
+        purchase_id=_strish(row.get("purchase_id")),
+        amount=_money(row.get("amount")),
+        box_count=_intish(row.get("box_count")),
+        date=_strish(row.get("date")),
+        receiving_status=_strish(row.get("receiving_status")),
+        status=_strish(row.get("status")),
+        raw=row,
+    )
+
+
+def _pos_list_from_payload(payload: dict[str, Any] | list[Any] | None) -> tuple[list[dict[str, Any]], int | None]:
+    """Return (row dicts, total items if known)."""
+    if payload is None:
+        return [], None
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)], None
+    if not isinstance(payload, dict):
+        return [], None
+
+    total: int | None = None
+    totals = payload.get("totals")
+    if isinstance(totals, dict):
+        total = _intish(totals.get("items"))
+
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)], total
+    if isinstance(data, dict):
+        for key in ("data", "pos", "purchase_orders", "items", "results"):
+            val = data.get(key)
+            if isinstance(val, list):
+                return [r for r in val if isinstance(r, dict)], total
+    for key in ("pos", "purchase_orders", "items", "results"):
+        val = payload.get(key)
+        if isinstance(val, list):
+            return [r for r in val if isinstance(r, dict)], total
+    return [], total
+
+
+def list_purchase_orders(
+    *,
+    base_url: str | None,
+    username: str,
+    password: str,
+    page_size: int = _DEFAULT_POS_PAGE_SIZE,
+    timeout_seconds: float = 30.0,
+) -> tuple[list[UsabgPoSummary], list[str]]:
+    """Paginate GET /pos until all purchase orders are fetched."""
+    base = resolve_base_url(base_url)
+    token = _ensure_token(
+        base_url=base,
+        username=username,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    limit = max(1, min(int(page_size or _DEFAULT_POS_PAGE_SIZE), 200))
+    start = 0
+    all_rows: list[UsabgPoSummary] = []
+    request_urls: list[str] = []
+    seen_po: set[str] = set()
+    total_items: int | None = None
+
+    for _page in range(_MAX_POS_PAGES):
+        qs = urlencode({"limit": limit, "start": start})
+        url = f"{base}{POS_PATH}?{qs}"
+        request_urls.append(url)
+
+        def _get(tok: str, *, _url: str = url) -> tuple[int, dict[str, Any] | list[Any] | None, str]:
+            return _authorized_get_json(url=_url, bearer_token=tok, timeout_seconds=timeout_seconds)
+
+        (status, payload, raw_text), token = _with_relogin(
+            base_url=base,
+            username=username,
+            password=password,
+            token=token,
+            timeout_seconds=timeout_seconds,
+            call=_get,
+        )
+        if not _envelope_ok(status, payload):
+            detail = ""
+            if isinstance(payload, dict):
+                detail = _message_from_payload(payload, success=False)
+            if not detail:
+                detail = (raw_text or "")[:300] or f"HTTP {status}"
+            raise RuntimeError(f"USABG PO list failed at {url}: {detail}")
+
+        rows_raw, page_total = _pos_list_from_payload(payload)
+        if page_total is not None:
+            total_items = page_total
+        if not rows_raw:
+            break
+
+        for row in rows_raw:
+            summary = _parse_po_summary(row)
+            if summary is None:
+                continue
+            if summary.po_number in seen_po:
+                continue
+            seen_po.add(summary.po_number)
+            all_rows.append(summary)
+
+        start += len(rows_raw)
+        if total_items is not None and start >= total_items:
+            break
+        if len(rows_raw) < limit:
+            break
+
+    return all_rows, request_urls
+
+
+def get_purchase_order(
+    *,
+    base_url: str | None,
+    username: str,
+    password: str,
+    po_number: str | int,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """GET /pos/{po_number} and return the ``data`` object (or full payload)."""
+    po = _strish(po_number)
+    if not po:
+        raise ValueError("po_number is required")
+
+    base = resolve_base_url(base_url)
+    token = _ensure_token(
+        base_url=base,
+        username=username,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    url = f"{base}{POS_PATH}/{po}"
+
+    def _get(tok: str) -> tuple[int, dict[str, Any] | list[Any] | None, str]:
+        return _authorized_get_json(url=url, bearer_token=tok, timeout_seconds=timeout_seconds)
+
+    (status, payload, raw_text), _token = _with_relogin(
+        base_url=base,
+        username=username,
+        password=password,
+        token=token,
+        timeout_seconds=timeout_seconds,
+        call=_get,
+    )
+    if not _envelope_ok(status, payload):
+        detail = ""
+        if isinstance(payload, dict):
+            detail = _message_from_payload(payload, success=False)
+        if not detail:
+            detail = (raw_text or "")[:300] or f"HTTP {status}"
+        raise RuntimeError(f"USABG PO detail failed at {url}: {detail}")
+
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            return data
+        return payload
+    raise RuntimeError(f"USABG PO detail returned unexpected payload at {url}")
+
+
+def _box_line_qty(item: dict[str, Any]) -> int:
+    qty = _intish(item.get("quantity"))
+    if qty is not None and qty > 0:
+        return qty
+    return 1
+
+
+def _received_rows_from_po_detail(
+    *,
+    summary: UsabgPoSummary,
+    detail: dict[str, Any],
+) -> list[UsabgReceivedRow]:
+    po_obj = detail.get("po") if isinstance(detail.get("po"), dict) else {}
+    po_number = _strish(po_obj.get("po_number")) or summary.po_number
+    purchase_id = _strish(po_obj.get("purchase_id")) or summary.purchase_id
+    receiving_status = _strish(po_obj.get("receiving_status")) or summary.receiving_status
+    po_status = _strish(po_obj.get("status")) or summary.status
+
+    boxes = detail.get("boxes")
+    if not isinstance(boxes, list):
+        boxes = []
+
+    rows: list[UsabgReceivedRow] = []
+    for box in boxes:
+        if not isinstance(box, dict):
+            continue
+        tn = _strish(box.get("tracking_number"))
+        if not tn:
+            continue
+        scanned_at = _strish(box.get("date"))
+        box_items = box.get("items")
+        if not isinstance(box_items, list) or not box_items:
+            # Box with tracking but no line items — count as 1 unit.
+            rows.append(
+                UsabgReceivedRow(
+                    po_number=po_number,
+                    purchase_id=purchase_id,
+                    tracking_number=tn,
+                    quantity=1,
+                    unit_price=None,
+                    ext_total=_money(box.get("value")),
+                    received_status=po_status,
+                    receiving_status=receiving_status,
+                    scanned_at=scanned_at,
+                    received_item=None,
+                    sku=None,
+                    raw={"po": summary.raw, "box": box},
+                )
+            )
+            continue
+        for line in box_items:
+            if not isinstance(line, dict):
+                continue
+            qty = _box_line_qty(line)
+            # USABG box lines: ``price`` is unit, ``amount`` is line total.
+            unit = _money(line.get("price"))
+            ext = _money(line.get("amount"))
+            if ext is None and unit is not None and qty > 0:
+                ext = (unit * Decimal(qty)).quantize(Decimal("0.01"))
+            if unit is None and ext is not None and qty > 0:
+                unit = (ext / Decimal(qty)).quantize(Decimal("0.01"))
+            name = _strish(line.get("name"))
+            sku = _strish(line.get("sku"))
+            rows.append(
+                UsabgReceivedRow(
+                    po_number=po_number,
+                    purchase_id=purchase_id,
+                    tracking_number=tn,
+                    quantity=qty,
+                    unit_price=unit,
+                    ext_total=ext,
+                    received_status=po_status,
+                    receiving_status=receiving_status,
+                    scanned_at=scanned_at,
+                    received_item=name,
+                    sku=sku,
+                    raw={"po": summary.raw, "box": box, "line": line},
+                )
+            )
+    return rows
+
+
+def list_received_po_rows(
+    *,
+    base_url: str | None,
+    username: str,
+    password: str,
+    page_size: int = _DEFAULT_POS_PAGE_SIZE,
+    timeout_seconds: float = 30.0,
+) -> UsabgReceivedListResult:
+    """List warehouse-received PO box lines (tracking + PO number as receipt id).
+
+    1. Paginate ``GET /pos``
+    2. For each PO with ``receiving_status`` received, ``GET /pos/{po_number}``
+    3. Flatten box line items into received rows keyed by tracking number
+    """
+    summaries, request_urls = list_purchase_orders(
+        base_url=base_url,
+        username=username,
+        password=password,
+        page_size=page_size,
+        timeout_seconds=timeout_seconds,
+    )
+    rows: list[UsabgReceivedRow] = []
+    received_po_count = 0
+    for summary in summaries:
+        if not summary.is_warehouse_received():
+            continue
+        received_po_count += 1
+        detail_url = f"{resolve_base_url(base_url)}{POS_PATH}/{summary.po_number}"
+        request_urls.append(detail_url)
+        detail = get_purchase_order(
+            base_url=base_url,
+            username=username,
+            password=password,
+            po_number=summary.po_number,
+            timeout_seconds=timeout_seconds,
+        )
+        rows.extend(_received_rows_from_po_detail(summary=summary, detail=detail))
+
+    return UsabgReceivedListResult(
+        rows=rows,
+        po_count=len(summaries),
+        received_po_count=received_po_count,
+        request_urls=request_urls,
     )
