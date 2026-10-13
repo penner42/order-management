@@ -162,6 +162,10 @@ class UsabgReceivedListResult:
     po_count: int
     received_po_count: int
     request_urls: list[str] = field(default_factory=list)
+    detail_cache_hits: int = 0
+    detail_cache_misses: int = 0
+    # po_number -> detail payload for rows that were fetched from the API this call
+    newly_fetched_details: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def resolve_base_url(base_url: str | None) -> str:
@@ -1024,13 +1028,20 @@ def list_received_po_rows(
     password: str,
     page_size: int = _DEFAULT_POS_PAGE_SIZE,
     timeout_seconds: float = 30.0,
+    cached_details: dict[str, dict[str, Any]] | None = None,
 ) -> UsabgReceivedListResult:
     """List warehouse-received PO box lines (tracking + PO number as receipt id).
 
     1. Paginate ``GET /pos``
-    2. For each PO with ``receiving_status`` received, ``GET /pos/{po_number}``
+    2. For each PO with ``receiving_status`` received, use ``cached_details`` when
+       present; otherwise ``GET /pos/{po_number}``
     3. Flatten box line items into received rows keyed by tracking number
+
+    ``cached_details`` maps po_number -> detail JSON (same shape as
+    ``get_purchase_order``). Newly fetched details are returned in
+    ``newly_fetched_details`` so the caller can persist them.
     """
+    cache = cached_details or {}
     summaries, request_urls = list_purchase_orders(
         base_url=base_url,
         username=username,
@@ -1040,19 +1051,29 @@ def list_received_po_rows(
     )
     rows: list[UsabgReceivedRow] = []
     received_po_count = 0
+    cache_hits = 0
+    cache_misses = 0
+    newly_fetched: dict[str, dict[str, Any]] = {}
     for summary in summaries:
         if not summary.is_warehouse_received():
             continue
         received_po_count += 1
-        detail_url = f"{resolve_base_url(base_url)}{POS_PATH}/{summary.po_number}"
-        request_urls.append(detail_url)
-        detail = get_purchase_order(
-            base_url=base_url,
-            username=username,
-            password=password,
-            po_number=summary.po_number,
-            timeout_seconds=timeout_seconds,
-        )
+        cached = cache.get(summary.po_number)
+        if isinstance(cached, dict):
+            cache_hits += 1
+            detail = cached
+        else:
+            cache_misses += 1
+            detail_url = f"{resolve_base_url(base_url)}{POS_PATH}/{summary.po_number}"
+            request_urls.append(detail_url)
+            detail = get_purchase_order(
+                base_url=base_url,
+                username=username,
+                password=password,
+                po_number=summary.po_number,
+                timeout_seconds=timeout_seconds,
+            )
+            newly_fetched[summary.po_number] = detail
         rows.extend(_received_rows_from_po_detail(summary=summary, detail=detail))
 
     return UsabgReceivedListResult(
@@ -1060,4 +1081,7 @@ def list_received_po_rows(
         po_count=len(summaries),
         received_po_count=received_po_count,
         request_urls=request_urls,
+        detail_cache_hits=cache_hits,
+        detail_cache_misses=cache_misses,
+        newly_fetched_details=newly_fetched,
     )

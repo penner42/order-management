@@ -43,5 +43,10 @@ class BuyingGroup(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    usabg_po_cache = relationship(
+        "UsabgPoCache",
+        back_populates="buying_group",
+        cascade="all, delete-orphan",
+    )
     orders = relationship("Order", back_populates="buying_group")
     payments = relationship("Payment", back_populates="buying_group", cascade="all, delete-orphan")

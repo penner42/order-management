@@ -9,7 +9,15 @@ from typing import Any
 
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, ShipmentItem
+from app.models import (
+    BuyingGroup,
+    Item,
+    Order,
+    ReceivingReviewPending,
+    Shipment,
+    ShipmentItem,
+    UsabgPoCache,
+)
 from app.models.item import ItemStatus
 from app.utils.buying_group_apis import bfmr as bfmr_api
 from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
@@ -247,6 +255,65 @@ def list_receiving_review_pending_payloads(db: Session) -> list[dict[str, Any]]:
         if actionable_count_from_payload(payload) > 0:
             out.append(payload)
     return out
+
+
+def _load_usabg_po_detail_cache(db: Session, buying_group_id: int) -> dict[str, dict[str, Any]]:
+    """Return po_number -> detail_json for cached USABG POs."""
+    rows = (
+        db.query(UsabgPoCache)
+        .filter(UsabgPoCache.buying_group_id == buying_group_id)
+        .all()
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        po = (row.po_number or "").strip()
+        detail = row.detail_json
+        if po and isinstance(detail, dict):
+            out[po] = detail
+    return out
+
+
+def _persist_usabg_po_detail_cache(
+    db: Session,
+    buying_group_id: int,
+    newly_fetched: dict[str, dict[str, Any]],
+    *,
+    receiving_status_by_po: dict[str, str | None] | None = None,
+) -> None:
+    """Insert or update cached PO details. No-op when newly_fetched is empty."""
+    if not newly_fetched:
+        return
+    status_map = receiving_status_by_po or {}
+    existing = {
+        row.po_number: row
+        for row in db.query(UsabgPoCache)
+        .filter(
+            UsabgPoCache.buying_group_id == buying_group_id,
+            UsabgPoCache.po_number.in_(list(newly_fetched.keys())),
+        )
+        .all()
+    }
+    now = datetime.now(timezone.utc)
+    for po_number, detail in newly_fetched.items():
+        if not isinstance(detail, dict):
+            continue
+        status = status_map.get(po_number)
+        row = existing.get(po_number)
+        if row is not None:
+            row.detail_json = detail
+            row.receiving_status = status
+            row.fetched_at = now
+        else:
+            db.add(
+                UsabgPoCache(
+                    buying_group_id=buying_group_id,
+                    po_number=po_number,
+                    receiving_status=status,
+                    detail_json=detail,
+                    fetched_at=now,
+                )
+            )
+    db.commit()
 
 
 def prune_receiving_review_pending(
@@ -956,12 +1023,14 @@ def _check_receiving_usabg(
     username = str(group.api_username or "").strip()
     password = str(group.api_password or "")
     base_url = (group.base_url or "").strip() or None
+    cached_details = _load_usabg_po_detail_cache(db, buying_group_id)
 
     try:
         fetched = usabg_api.list_received_po_rows(
             base_url=base_url,
             username=username,
             password=password,
+            cached_details=cached_details,
         )
     except Exception as exc:
         return CheckReceivingResult(
@@ -969,6 +1038,18 @@ def _check_receiving_usabg(
             buying_group_name=group_name,
             submitted_count=len(unscanned_items),
             error=str(exc).strip() or exc.__class__.__name__,
+        )
+
+    if fetched.newly_fetched_details:
+        status_by_po: dict[str, str | None] = {}
+        for row in fetched.rows:
+            if row.po_number in fetched.newly_fetched_details and row.po_number not in status_by_po:
+                status_by_po[row.po_number] = row.receiving_status
+        _persist_usabg_po_detail_cache(
+            db,
+            buying_group_id,
+            fetched.newly_fetched_details,
+            receiving_status_by_po=status_by_po,
         )
 
     receipts = fetched.rows
@@ -1086,10 +1167,14 @@ def _check_receiving_usabg(
     discrepancy_count = sum(1 for m in matches if m.amount_discrepancy)
     received_count = _received_match_count(matches)
     split_off = _split_off_count(matches)
+    cache_bits = (
+        f"{fetched.detail_cache_hits} PO detail(s) from cache, "
+        f"{fetched.detail_cache_misses} fetched"
+    )
     checked_summary = (
         f"Checked {len(pending)} unscanned item(s) / {len(all_trackings)} tracking number(s) "
         f"against USABG ({len(receipts)} received line(s) across {fetched.received_po_count}/"
-        f"{fetched.po_count} PO(s))."
+        f"{fetched.po_count} PO(s); {cache_bits})."
     )
 
     matched_ids = {m.item_id for m in matches}
@@ -1145,6 +1230,8 @@ def _check_receiving_usabg(
     raw_dump = {
         "po_count": fetched.po_count,
         "received_po_count": fetched.received_po_count,
+        "detail_cache_hits": fetched.detail_cache_hits,
+        "detail_cache_misses": fetched.detail_cache_misses,
         "request_urls": fetched.request_urls[:50],
         "received_rows": [
             {
