@@ -57,6 +57,7 @@ const STATUS_LABELS: Record<string, string> = {
   payment_sent: 'Payment sent',
   payment_received: 'Paid',
   canceled: 'Canceled',
+  needs_review: 'Needs review',
   needs_return: 'Needs return',
   return_started: 'Return started',
   return_sent: 'Return sent',
@@ -102,6 +103,7 @@ function getStatusRowClass(status: string): string {
     case 'payment_received':
       return 'bg-emerald-100/80 dark:bg-emerald-900/30'
     case 'canceled':
+    case 'needs_review':
     case 'needs_return':
     case 'return_started':
     case 'return_sent':
@@ -129,6 +131,7 @@ function getStatusInputClass(status: string): string {
     case 'payment_received':
       return 'bg-emerald-50/90 dark:bg-emerald-900/30'
     case 'canceled':
+    case 'needs_review':
     case 'needs_return':
     case 'return_started':
     case 'return_sent':
@@ -169,6 +172,7 @@ function copyToClipboard(text: string): void {
 const DEFAULT_STATUSES: EffectiveItemStatus[] = [
   'purchased', 'shipped', 'submitted', 'scanned',
   'payment_requested', 'payment_sent', 'payment_received',
+  'needs_review',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
   'lost_package',
 ]
@@ -176,6 +180,7 @@ const DEFAULT_STATUSES: EffectiveItemStatus[] = [
 /** Item-only statuses (for status dropdown; payment status is on Payment). */
 const ITEM_STATUSES_FOR_EDIT: ItemStatus[] = [
   'purchased', 'shipped', 'submitted', 'scanned', 'canceled',
+  'needs_review',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
   'lost_package',
 ]
@@ -189,6 +194,7 @@ const STATUS_FILTER_OPTIONS: [string, string][] = [
   ['payment_sent', 'Payment sent'],
   ['payment_received', 'Paid'],
   ['canceled', 'Canceled'],
+  ['needs_review', 'Needs review'],
   ['needs_return', 'Needs return'],
   ['return_started', 'Return started'],
   ['return_sent', 'Return sent'],

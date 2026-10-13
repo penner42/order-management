@@ -22,6 +22,7 @@ class ItemBase(BaseModel):
     submitted_at: datetime | None = None
     scanned_at: datetime | None = None
     canceled_at: datetime | None = None
+    needs_review_at: datetime | None = None
     needs_return_at: datetime | None = None
     return_started_at: datetime | None = None
     return_sent_at: datetime | None = None
@@ -54,6 +55,7 @@ class ItemUpdate(BaseModel):
     submitted_at: datetime | None = None
     scanned_at: datetime | None = None
     canceled_at: datetime | None = None
+    needs_review_at: datetime | None = None
     needs_return_at: datetime | None = None
     return_started_at: datetime | None = None
     return_sent_at: datetime | None = None
@@ -80,6 +82,10 @@ class ItemReadWithRelations(ItemRead):
 
 class ItemSplitRequest(BaseModel):
     keep_quantity: int  # Quantity to keep on original item; remainder becomes new item
+    # When True, link the split-off item to the same shipment (tracking) as the original.
+    copy_tracking: bool = False
+    # Optional status for the new line (e.g. needs_review for under-received remainders).
+    split_off_status: ItemStatus | None = None
 
 
 class ItemBulkUpdateEntry(BaseModel):
@@ -100,6 +106,7 @@ class ItemBulkUpdateEntry(BaseModel):
     delivered_at: datetime | None = None  # applied to shipment
     scanned_at: datetime | None = None
     canceled_at: datetime | None = None
+    needs_review_at: datetime | None = None
     needs_return_at: datetime | None = None
     return_started_at: datetime | None = None
     return_sent_at: datetime | None = None

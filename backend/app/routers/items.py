@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Item status date fields: date-only (shipped_at/delivered_at live on Shipment; payment dates on Payment)
 _ITEM_DATE_FIELDS = frozenset({
     "purchased_at", "submitted_at", "scanned_at",
-    "canceled_at", "needs_return_at", "return_started_at",
+    "canceled_at", "needs_review_at", "needs_return_at", "return_started_at",
     "return_sent_at", "return_received_at", "return_refunded_at",
     "lost_package_at",
 })
@@ -230,7 +230,12 @@ def bulk_delete_items(
 @router.post("/{item_id}/split", response_model=ItemSplitResponse)
 def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     """Split an item into two: keep_quantity stays on original, remainder becomes new item."""
-    item = db.query(Item).filter(Item.id == item_id).first()
+    item = (
+        db.query(Item)
+        .filter(Item.id == item_id)
+        .options(selectinload(Item.shipment_items))
+        .first()
+    )
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     qty = getattr(item, "quantity", 1)
@@ -242,23 +247,40 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
         )
     split_off_qty = qty - keep
     item.quantity = keep
+    split_off_status = data.split_off_status if data.split_off_status is not None else item.status
+    now = datetime.now(timezone.utc)
     new_item = Item(
         order_id=item.order_id,
         price_paid=item.price_paid,
         price_sold=item.price_sold,
-        status=item.status,
+        status=split_off_status,
         quantity=split_off_qty,
         description=item.description,
         shipping=item.shipping,
         sales_tax=item.sales_tax,
         submission_id=item.submission_id,
         submission_api_id=item.submission_api_id,
-        receipt_id=item.receipt_id,
+        # Remainder is not received — do not carry receipt onto the new line.
+        receipt_id=None if data.split_off_status is not None else item.receipt_id,
         purchased_at=item.purchased_at,
         submitted_at=item.submitted_at,
-        scanned_at=item.scanned_at,
+        scanned_at=None if data.split_off_status is not None else item.scanned_at,
+        needs_review_at=to_date_only(now) if split_off_status == ItemStatus.NEEDS_REVIEW else None,
     )
     db.add(new_item)
+    db.flush()
+    if data.copy_tracking:
+        shipment_id = None
+        for si in item.shipment_items or []:
+            if si.shipment_id:
+                shipment_id = si.shipment_id
+                break
+        if shipment_id is None:
+            existing = db.query(ShipmentItem).filter(ShipmentItem.item_id == item.id).first()
+            if existing:
+                shipment_id = existing.shipment_id
+        if shipment_id is not None:
+            db.add(ShipmentItem(shipment_id=shipment_id, item_id=new_item.id))
     db.commit()
     db.refresh(item)
     db.refresh(new_item)

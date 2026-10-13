@@ -4,6 +4,7 @@ export type ItemStatus =
   | 'submitted'
   | 'scanned'
   | 'canceled'
+  | 'needs_review'
   | 'needs_return'
   | 'return_started'
   | 'return_sent'
@@ -130,6 +131,7 @@ export interface Item {
   payment_sent_at: string | null
   payment_received_at: string | null
   canceled_at: string | null
+  needs_review_at: string | null
   needs_return_at: string | null
   return_started_at: string | null
   return_sent_at: string | null

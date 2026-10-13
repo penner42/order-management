@@ -22,6 +22,7 @@ const STATUS_LABELS: Record<string, string> = {
   payment_sent: 'Payment sent',
   payment_received: 'Paid',
   canceled: 'Canceled',
+  needs_review: 'Needs review',
   needs_return: 'Needs return',
   return_started: 'Return started',
   return_sent: 'Return sent',

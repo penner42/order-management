@@ -229,6 +229,10 @@ function ReceivingGroupSection({
             split_off: { id: number }
           }>(`/items/${itemId}/split`, {
             keep_quantity: m.split_keep_quantity,
+            // Under-received remainder keeps the same tracking and needs review;
+            // full receiving checks skip needs_review so they don't overwrite it.
+            copy_tracking: true,
+            split_off_status: 'needs_review',
           })
           liveItemId.set(m.item_id, split_off.id)
         }
@@ -432,7 +436,7 @@ function ReceivingGroupSection({
                             </div>
                             {isNotReceived ? (
                               <div className="text-xs text-ink-muted mt-0.5">
-                                Not received — remainder stays shipped/submitted after apply
+                                Not received — remainder keeps tracking and becomes needs review after apply
                               </div>
                             ) : (
                               <>

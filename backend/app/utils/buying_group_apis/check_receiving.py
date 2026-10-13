@@ -22,9 +22,12 @@ from app.utils.buying_group_apis.submit_tracking import (
 from app.utils.dates import to_date_only
 
 # Items that may already be at the warehouse but not marked scanned locally.
+# needs_review (under-received split-offs) is intentionally excluded so a later
+# full check does not overwrite manual/receiving-apply changes.
 _UNSCANNED_STATUSES = (ItemStatus.SHIPPED, ItemStatus.SUBMITTED)
 
 # Already received locally — only surface on review when receipt ID would change.
+# needs_review is excluded for the same reason as above.
 _SCANNED_OR_LATER_STATUSES = (
     ItemStatus.SCANNED,
     ItemStatus.NEEDS_RETURN,

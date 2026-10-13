@@ -12,6 +12,7 @@ class ItemStatus(str, enum.Enum):
     SUBMITTED = "submitted"
     SCANNED = "scanned"
     CANCELED = "canceled"
+    NEEDS_REVIEW = "needs_review"
     NEEDS_RETURN = "needs_return"
     RETURN_STARTED = "return_started"
     RETURN_SENT = "return_sent"
@@ -60,6 +61,7 @@ class Item(Base):
     submitted_at = Column(DateTime(timezone=True), nullable=True)
     scanned_at = Column(DateTime(timezone=True), nullable=True)
     canceled_at = Column(DateTime(timezone=True), nullable=True)
+    needs_review_at = Column(DateTime(timezone=True), nullable=True)
     needs_return_at = Column(DateTime(timezone=True), nullable=True)
     return_started_at = Column(DateTime(timezone=True), nullable=True)
     return_sent_at = Column(DateTime(timezone=True), nullable=True)
