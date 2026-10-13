@@ -137,8 +137,6 @@ function ReceivingGroupSection({
   setEdits,
   appliedIds,
   setAppliedIds,
-  onGroupCleared,
-  onPartialApply,
 }: {
   session: ReceivingSession
   highlighted: boolean
@@ -146,8 +144,6 @@ function ReceivingGroupSection({
   setEdits: React.Dispatch<React.SetStateAction<Record<string, RowEdit>>>
   appliedIds: Set<string>
   setAppliedIds: React.Dispatch<React.SetStateAction<Set<string>>>
-  onGroupCleared: (groupId: number) => void
-  onPartialApply: (groupId: number, itemIds: number[]) => void
 }) {
   const [applying, setApplying] = useState(false)
   const [applyError, setApplyError] = useState<string | null>(null)
@@ -158,6 +154,11 @@ function ReceivingGroupSection({
   const matches = session.matches ?? []
   const receivableMatches = matches.filter((m) => m.match_kind !== 'not_received')
   const splitOffCount = matches.filter((m) => m.match_kind === 'not_received').length
+  const remainingToApply = useMemo(
+    () => receivableMatches.filter((m) => !appliedIds.has(rowKey(m))).length,
+    [receivableMatches, appliedIds]
+  )
+  const appliedCount = receivableMatches.length - remainingToApply
 
   const selectedCount = useMemo(
     () =>
@@ -261,7 +262,8 @@ function ReceivingGroupSection({
       if (updates.length === 0) return
 
       await api.post<{ items: unknown }>('/items/bulk-update', { updates })
-      const prune = await api.post<{ deleted: boolean }>('/buying-groups/receiving-review/prune', {
+      // Prune backend pending snapshot; keep rows visible here as applied/inactive.
+      await api.post<{ deleted: boolean }>('/buying-groups/receiving-review/prune', {
         buying_group_id: session.buying_group_id,
         item_ids: [...new Set(appliedItemIds)],
       })
@@ -279,12 +281,6 @@ function ReceivingGroupSection({
         }
         return next
       })
-
-      if (prune.deleted) {
-        onGroupCleared(session.buying_group_id)
-      } else {
-        onPartialApply(session.buying_group_id, [...new Set(appliedItemIds)])
-      }
     } catch (e) {
       console.error(e)
       setApplyError(e instanceof Error ? e.message : 'Failed to apply scanned updates')
@@ -315,7 +311,8 @@ function ReceivingGroupSection({
           >
             {session.buying_group_name}
             <span className="ml-2 text-sm font-normal text-ink-muted">
-              ({receivableMatches.length} to apply)
+              ({remainingToApply} to apply
+              {appliedCount > 0 ? ` · ${appliedCount} applied` : ''})
             </span>
           </button>
           <p className="text-sm text-ink-muted dark:text-gray-400 mt-1">
@@ -398,7 +395,7 @@ function ReceivingGroupSection({
                       const applied = appliedIds.has(key)
                       const isNotReceived = m.match_kind === 'not_received'
                       const rowClass = applied
-                        ? 'bg-emerald-50/50 dark:bg-emerald-900/15'
+                        ? 'bg-emerald-50/50 dark:bg-emerald-900/15 opacity-60'
                         : isNotReceived
                           ? 'bg-slate-50/80 dark:bg-gray-800/40'
                           : m.amount_discrepancy
@@ -605,20 +602,6 @@ export default function ReceivingReview() {
     return () => window.clearTimeout(t)
   }, [highlightGroupId, loading, sessions])
 
-  const handleGroupCleared = (groupId: number) => {
-    setSessions((prev) => prev.filter((s) => s.buying_group_id !== groupId))
-  }
-
-  const handlePartialApply = (groupId: number, itemIds: number[]) => {
-    const idSet = new Set(itemIds)
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.buying_group_id !== groupId) return s
-        return { ...s, matches: s.matches.filter((m) => !idSet.has(m.item_id)) }
-      })
-    )
-  }
-
   if (loading) {
     return <p className="text-ink-muted dark:text-gray-400">Loading receiving review…</p>
   }
@@ -692,8 +675,6 @@ export default function ReceivingReview() {
                   return { ...prev, [session.buying_group_id]: nextApplied }
                 })
               }}
-              onGroupCleared={handleGroupCleared}
-              onPartialApply={handlePartialApply}
             />
           </div>
         ))
