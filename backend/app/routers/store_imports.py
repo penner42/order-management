@@ -59,41 +59,67 @@ _bulk_sessions: Dict[str, list[StoreOrderImportPayload]] = {}
 # ---------------------------------------------------------------------------
 
 
+def _server_local_now() -> datetime:
+    """Current time in the server's local timezone (from the host clock)."""
+    return datetime.now().astimezone()
+
+
+def _combine_date_with_server_local_now(day: datetime) -> datetime:
+    """Attach the current server local time-of-day to a calendar date.
+
+    Stores like Amazon only provide a date. Using a fixed UTC noon made those
+    orders show as ~5 AM in US Pacific; using "now" matches manual order create.
+    """
+    now = _server_local_now()
+    return datetime(
+        day.year,
+        day.month,
+        day.day,
+        now.hour,
+        now.minute,
+        now.second,
+        tzinfo=now.tzinfo,
+    )
+
+
 def _parse_order_date_str(value: str | None) -> datetime | None:
-    """Parse store orderDate into a timezone-aware datetime for Order.purchase_date."""
+    """Parse store orderDate into a timezone-aware datetime for Order.purchase_date.
+
+    Date-only values get the current server local time of day.
+    """
     if not isinstance(value, str) or not value.strip():
         return None
     raw = value.strip()
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
-        return datetime.strptime(raw, "%Y-%m-%d").replace(hour=12, tzinfo=timezone.utc)
+        return _combine_date_with_server_local_now(datetime.strptime(raw, "%Y-%m-%d"))
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=_server_local_now().tzinfo or timezone.utc)
         if dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
-            dt = dt.replace(hour=12)
+            return _combine_date_with_server_local_now(dt)
         return dt
     except ValueError:
         pass
     for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw, fmt).replace(hour=12, tzinfo=timezone.utc)
+            return _combine_date_with_server_local_now(datetime.strptime(raw, fmt))
         except ValueError:
             continue
     return None
 
 
 def _normalize_iso_datetime_str(value: str | None) -> str | None:
-    """Return a canonical ISO datetime string for comparison.
+    """Return a canonical calendar date (YYYY-MM-DD) for purchase_date comparison.
 
-    This avoids treating format-only differences (e.g. 'Z' vs '+00:00') or
-    missing tzinfo as real changes when computing diffs.
+    Store payloads are often date-only; the time we attach on create is synthetic
+    (server local "now"), so diffs must ignore time-of-day.
     """
     if not isinstance(value, str) or not value.strip():
         return None
-    dt = _parse_order_date_str(value)
-    if dt:
-        return dt.isoformat()
+    key = _shipment_delivery_calendar_key(value)
+    if key:
+        return key
     return value.strip()
 
 
