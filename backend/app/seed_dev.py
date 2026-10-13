@@ -180,7 +180,7 @@ def seed_dev_data(db: Session) -> dict:
     item2_1 = Item(
         order_id=order2.id,
         price_paid=Decimal("52.20"),
-        price_sold=None,
+        price_sold=Decimal("0"),
         status=ItemStatus.SHIPPED,
         quantity=1,
         description="Desk lamp",
@@ -196,7 +196,7 @@ def seed_dev_data(db: Session) -> dict:
     item3_2 = Item(
         order_id=order3.id,
         price_paid=Decimal("25.00"),
-        price_sold=None,
+        price_sold=Decimal("0"),
         status=ItemStatus.PURCHASED,
         quantity=1,
         description="Sticky notes bulk",
@@ -204,7 +204,7 @@ def seed_dev_data(db: Session) -> dict:
     item4_1 = Item(
         order_id=order4.id,
         price_paid=Decimal("19.99"),
-        price_sold=None,
+        price_sold=Decimal("0"),
         status=ItemStatus.PURCHASED,
         quantity=1,
         description="Kitchen gadget",

@@ -92,7 +92,7 @@ class ReceivingMatch:
     description: str | None
     quantity: int
     tracking_number: str
-    price_sold: Decimal | None
+    price_sold: Decimal
     expected_amount: Decimal | None
     receipt_id: str | None
     scanned_at: str | None  # ISO date-time for PATCH
@@ -411,7 +411,7 @@ def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
         "description": m.description,
         "quantity": m.quantity,
         "tracking_number": m.tracking_number,
-        "price_sold": str(m.price_sold) if m.price_sold is not None else None,
+        "price_sold": str(m.price_sold if m.price_sold is not None else 0),
         "expected_amount": str(m.expected_amount) if m.expected_amount is not None else None,
         "receipt_id": m.receipt_id,
         "scanned_at": m.scanned_at,
@@ -769,7 +769,7 @@ def _matches_for_tn_allocations(
     demand = item.quantity or 1
     store_order_number = (order.store_order_number or "").strip() or None
     description = (item.description or "").strip() or None
-    price_sold = _money(item.price_sold)
+    price_sold = _money(item.price_sold) or Decimal("0")
 
     lines: list[tuple[str, int, dict[str, Any]]] = []
     for tn_key, qty in tn_allocations:

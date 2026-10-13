@@ -2,13 +2,20 @@
 from datetime import datetime
 from decimal import Decimal
 from app.schemas.common import TimestampsMixin
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from app.models.item import ItemStatus
+
+
+def _coerce_price_sold(v: object) -> object:
+    """Treat missing/null payout as 0 (column is NOT NULL)."""
+    if v is None or v == "":
+        return Decimal("0")
+    return v
 
 
 class ItemBase(BaseModel):
     price_paid: Decimal | None = None
-    price_sold: Decimal | None = None
+    price_sold: Decimal = Decimal("0")
     status: ItemStatus = ItemStatus.PURCHASED
     quantity: int = 1
     description: str | None = None
@@ -29,6 +36,11 @@ class ItemBase(BaseModel):
     return_received_at: datetime | None = None
     return_refunded_at: datetime | None = None
     lost_package_at: datetime | None = None
+
+    @field_validator("price_sold", mode="before")
+    @classmethod
+    def price_sold_not_null(cls, v: object) -> object:
+        return _coerce_price_sold(v)
 
 
 class ItemCreate(ItemBase):
@@ -62,6 +74,11 @@ class ItemUpdate(BaseModel):
     return_received_at: datetime | None = None
     return_refunded_at: datetime | None = None
     lost_package_at: datetime | None = None
+
+    @field_validator("price_sold", mode="before")
+    @classmethod
+    def price_sold_not_null(cls, v: object) -> object:
+        return _coerce_price_sold(v)
 
 
 class ItemRead(ItemBase, TimestampsMixin):
@@ -113,6 +130,11 @@ class ItemBulkUpdateEntry(BaseModel):
     return_received_at: datetime | None = None
     return_refunded_at: datetime | None = None
     lost_package_at: datetime | None = None
+
+    @field_validator("price_sold", mode="before")
+    @classmethod
+    def price_sold_not_null(cls, v: object) -> object:
+        return _coerce_price_sold(v)
 
 
 class ItemBulkUpdateRequest(BaseModel):

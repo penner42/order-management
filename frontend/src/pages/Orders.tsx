@@ -1374,7 +1374,7 @@ export default function Orders() {
         quantity: item.quantity ?? 1,
         description: item.description ?? null,
         price_paid: item.price_paid ?? null,
-        price_sold: item.price_sold ?? null,
+        price_sold: item.price_sold ?? '0',
         status: item.status,
       })
       const items = order.items ?? []
@@ -3188,7 +3188,7 @@ export default function Orders() {
                                         }
                                         onBlur={() => {
                                           const v = (itemEdits[item.id]?.price_sold ?? item.price_sold ?? '').trim()
-                                          if (v !== (item.price_sold ?? '')) updateItem(item.id, { price_sold: v || null })
+                                          if (v !== (item.price_sold ?? '')) updateItem(item.id, { price_sold: v || '0' })
                                         }}
                                         placeholder="0.00"
                                         disabled={savingItemId === item.id}

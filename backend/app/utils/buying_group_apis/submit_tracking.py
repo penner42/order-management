@@ -133,8 +133,6 @@ def tracking_number_for_item(item: Item) -> str | None:
 
 
 def _item_amount(item: Item) -> Decimal | float | None:
-    if item.price_sold is None:
-        return None
     return item.price_sold * (item.quantity or 1)
 
 

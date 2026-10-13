@@ -9,7 +9,7 @@ interface ReceivingMatch {
   description: string | null
   quantity: number
   tracking_number: string
-  price_sold: string | null
+  price_sold: string
   expected_amount: string | null
   receipt_id: string | null
   scanned_at: string | null

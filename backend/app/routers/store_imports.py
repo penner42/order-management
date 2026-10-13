@@ -1332,7 +1332,7 @@ def _apply_items_and_shipments(
         existing_items.append(remainder)
         # Later shipment slices must be able to attach to this peel (same
         # payout/pricing as the original). Without this, find_existing_item
-        # skips the remainder and creates a new line with price_sold=None.
+        # skips the remainder and creates a new line with price_sold=0.
         pre_existing_item_ids.add(remainder.id)
         existing_item_keys.add((item_name, ""))
         return item
@@ -1342,9 +1342,8 @@ def _apply_items_and_shipments(
         for ei in existing_items:
             if (ei.description or "").strip() != item_name:
                 continue
-            if ei.price_sold is not None:
-                return ei.price_sold
-        return None
+            return ei.price_sold
+        return 0
 
     def _shipment_item_for_item(item: Item) -> ShipmentItem | None:
         """Return the shipment_items row for this item (unique), including pending ORM state.
@@ -1553,7 +1552,8 @@ def _apply_items_and_shipments(
     for item_index, item_data in enumerate(items):
         name = (item_data.get("name") or "").strip()
 
-        payout = payouts[item_index] if item_index < len(payouts) else None
+        raw_payout = payouts[item_index] if item_index < len(payouts) else None
+        payout = 0 if raw_payout is None else raw_payout
 
         pricing = item_data.get("pricing") or {}
         unit_price = pricing.get("unitPrice")
@@ -1686,8 +1686,11 @@ def _apply_items_and_shipments(
                 # quantity on this shipment (new import or partial match).
                 # Existing-order applies omit item_payouts; inherit payout from
                 # a same-description line so split-off tracking rows stay filled.
+                # raw_payout is None when the client didn't send a payout for this index.
                 effective_payout = (
-                    payout if payout is not None else _inherited_payout_for_name(name)
+                    payout
+                    if raw_payout is not None
+                    else _inherited_payout_for_name(name)
                 )
                 item = Item(
                     order_id=order.id,

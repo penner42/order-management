@@ -208,7 +208,7 @@ class ReceivingReviewMatch(BaseModel):
     description: str | None = None
     quantity: int = 1
     tracking_number: str
-    price_sold: str | None = None
+    price_sold: str = "0"
     expected_amount: str | None = None
     receipt_id: str | None = None
     scanned_at: str | None = None

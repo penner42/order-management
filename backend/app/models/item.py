@@ -39,7 +39,7 @@ class Item(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False)
     price_paid = Column(Numeric(12, 2), nullable=True)
-    price_sold = Column(Numeric(12, 2), nullable=True)
+    price_sold = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
     status = Column(
         SQLEnum(ItemStatus, values_callable=lambda x: [e.value for e in x]),
         nullable=False,

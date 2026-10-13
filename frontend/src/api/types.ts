@@ -111,7 +111,7 @@ export interface Item {
   id: number
   order_id: number
   price_paid: string | null
-  price_sold: string | null
+  price_sold: string
   status: ItemStatus
   quantity: number
   description: string | null
