@@ -106,6 +106,97 @@ function parseCategoryParam(raw: string | null): CategoryFilter {
   return 'all'
 }
 
+const MESSAGE_PREVIEW_MAX = 140
+
+function messagePreview(message: string): { preview: string; expandable: boolean } {
+  const normalized = message.replace(/\r\n/g, '\n')
+  const firstLine = (normalized.split('\n').find((ln) => ln.trim()) ?? normalized).trim()
+  const expandable = normalized.includes('\n') || firstLine.length > MESSAGE_PREVIEW_MAX
+  let preview = firstLine
+  if (preview.length > MESSAGE_PREVIEW_MAX) {
+    preview = `${preview.slice(0, MESSAGE_PREVIEW_MAX - 1)}…`
+  } else if (expandable) {
+    preview = `${preview}…`
+  }
+  return { preview, expandable }
+}
+
+function LogMessageCell({
+  message,
+  level,
+  onExpand,
+}: {
+  message: string
+  level: string
+  onExpand: (message: string) => void
+}) {
+  const { preview, expandable } = messagePreview(message)
+  const tone =
+    level === 'error'
+      ? 'text-red-700 dark:text-red-300'
+      : 'text-ink-muted dark:text-gray-300'
+  if (!expandable) {
+    return <span className={`break-words ${tone}`}>{message}</span>
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onExpand(message)}
+      className={`group inline-flex max-w-md items-start gap-1.5 text-left ${tone} hover:underline`}
+      aria-label="View full message"
+      title="View full message"
+    >
+      <span className="min-w-0 break-words">{preview}</span>
+      <svg
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60 group-hover:opacity-100"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <polyline points="15 3 21 3 21 9" />
+        <polyline points="9 21 3 21 3 15" />
+        <line x1="21" y1="3" x2="14" y2="10" />
+        <line x1="3" y1="21" x2="10" y2="14" />
+      </svg>
+    </button>
+  )
+}
+
+function LogMessageModal({ message, onClose }: { message: string; onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl border border-brand-200/80 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Full log message"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-brand-100 px-4 py-3 dark:border-gray-700">
+          <h2 className="text-sm font-medium text-ink dark:text-gray-100">Full message</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg px-2 py-1 text-sm text-ink-muted hover:bg-brand-50 dark:text-gray-300 dark:hover:bg-gray-700"
+          >
+            Close
+          </button>
+        </div>
+        <pre className="overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs leading-relaxed text-ink dark:text-gray-200">
+          {message}
+        </pre>
+      </div>
+    </div>
+  )
+}
+
 export default function BrowserImportLogPage() {
   const [searchParams] = useSearchParams()
   const [rows, setRows] = useState<BrowserImportLog[]>([])
@@ -117,6 +208,7 @@ export default function BrowserImportLogPage() {
   const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
   const [eventFilter, setEventFilter] = useState<EventFilter>('all')
   const [scheduledOnly, setScheduledOnly] = useState(false)
+  const [expandedMessage, setExpandedMessage] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -316,15 +408,11 @@ export default function BrowserImportLogPage() {
                         {row.tracking_numbers.length > 0 ? (
                           <div className="space-y-1">
                             {row.message && (
-                              <div
-                                className={
-                                  (row.level === 'error'
-                                    ? 'text-red-700 dark:text-red-300 break-words'
-                                    : 'text-ink-muted break-words') + ' whitespace-pre-wrap'
-                                }
-                              >
-                                {row.message}
-                              </div>
+                              <LogMessageCell
+                                message={row.message}
+                                level={row.level}
+                                onExpand={setExpandedMessage}
+                              />
                             )}
                             <ul className="space-y-0.5">
                               {row.tracking_numbers.map((t) => (
@@ -340,15 +428,11 @@ export default function BrowserImportLogPage() {
                             </ul>
                           </div>
                         ) : row.message ? (
-                          <span
-                            className={
-                              (row.level === 'error'
-                                ? 'text-red-700 dark:text-red-300 break-words'
-                                : 'text-ink-muted break-words') + ' whitespace-pre-wrap'
-                            }
-                          >
-                            {row.message}
-                          </span>
+                          <LogMessageCell
+                            message={row.message}
+                            level={row.level}
+                            onExpand={setExpandedMessage}
+                          />
                         ) : (
                           <span className="text-ink-muted">—</span>
                         )}
@@ -372,6 +456,10 @@ export default function BrowserImportLogPage() {
             </table>
           </div>
         </div>
+      )}
+
+      {expandedMessage != null && (
+        <LogMessageModal message={expandedMessage} onClose={() => setExpandedMessage(null)} />
       )}
     </div>
   )
