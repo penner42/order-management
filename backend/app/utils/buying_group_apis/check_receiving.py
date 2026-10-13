@@ -147,6 +147,16 @@ def _expected_amount(item: Item) -> Decimal | None:
     return price * qty
 
 
+def _is_zero_payout(item: Item) -> bool:
+    """True when local expected payout is $0 (e-delivery / gratis / unset).
+
+    These lines are not warehouse inventory and must not claim box qty or
+    inherit a sibling product's received amount on a shared tracking.
+    """
+    expected = _expected_amount(item)
+    return expected is not None and expected == 0
+
+
 def _amounts_differ(expected: Decimal | None, received: Decimal | None) -> bool:
     if expected is None and received is None:
         return False
@@ -1292,6 +1302,8 @@ def _check_receiving_usabg(
     not_found = 0
     void_skipped = 0
     for item, order, trackings in pending:
+        if _is_zero_payout(item):
+            continue
         has_hit = any(tn.casefold() in supply_by_tn for tn in trackings)
         if has_hit:
             eligible.append((item, order, trackings))
@@ -1337,6 +1349,8 @@ def _check_receiving_usabg(
         )
 
     for item, order, trackings in scanned_pending:
+        if _is_zero_payout(item):
+            continue
         matches.extend(
             _receipt_update_matches_for_item(
                 item=item,
@@ -1588,6 +1602,8 @@ def _check_receiving_parsefile(
     void_skipped = 0
     not_found = 0
     for item, order, trackings in pending:
+        if _is_zero_payout(item):
+            continue
         has_hit = False
         all_void = True
         any_cand = False
@@ -1630,6 +1646,8 @@ def _check_receiving_parsefile(
         )
 
     for item, order, trackings in scanned_pending:
+        if _is_zero_payout(item):
+            continue
         matches.extend(
             _receipt_update_matches_for_item(
                 item=item,
@@ -1852,6 +1870,8 @@ def _check_receiving_buyinggroup(
     void_skipped = 0
     not_found = 0
     for item, order, trackings in pending:
+        if _is_zero_payout(item):
+            continue
         has_hit = False
         all_void = True
         any_cand = False
@@ -1894,6 +1914,8 @@ def _check_receiving_buyinggroup(
         )
 
     for item, order, trackings in scanned_pending:
+        if _is_zero_payout(item):
+            continue
         matches.extend(
             _receipt_update_matches_for_item(
                 item=item,
@@ -2179,6 +2201,8 @@ def _check_receiving_bfmr(
     not_found = 0
     void_skipped = 0
     for item, order, trackings in pending:
+        if _is_zero_payout(item):
+            continue
         store_order = (order.store_order_number or "").strip().casefold()
         has_hit = any(tn.casefold() in supply_by_tn for tn in trackings)
         if not has_hit and store_order and store_order in supply_by_order:
@@ -2244,6 +2268,8 @@ def _check_receiving_bfmr(
         )
 
     for item, order, trackings in scanned_pending:
+        if _is_zero_payout(item):
+            continue
         okey = (order.store_order_number or "").strip().casefold()
         extra_meta = meta_by_order.get(okey) if okey else None
         extra_qty = int(supply_by_order.get(okey, 0)) if okey else 0

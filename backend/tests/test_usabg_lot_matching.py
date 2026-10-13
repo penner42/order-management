@@ -16,6 +16,7 @@ from app.utils.buying_group_apis import usabg as usabg_api  # noqa: E402
 from app.utils.buying_group_apis.check_receiving import (  # noqa: E402
     _allocate_received_across_shared_trackings,
     _assign_items_to_lots,
+    _is_zero_payout,
     _lot_as_match_meta,
     _matches_for_tn_allocations,
     _name_similarity,
@@ -228,6 +229,77 @@ class UsabgLotMatchingTests(unittest.TestCase):
 
         for m in matches:
             self.assertEqual(m.tracking_number, TN)
+
+    def test_zero_payout_does_not_inherit_single_lot(self) -> None:
+        """E-delivery / $0 lines share TN with a laptop box but are not on the PO."""
+        laptop_name = (
+            'HP OmniBook 5 16" Touchscreen Laptop - Intel Core Ultra 5 225U '
+            "- 16GB RAM - 1TB SSD - Win11 Home"
+        )
+        lots = _usabg_lots_from_receipts(
+            [_row(name=laptop_name, qty=2, unit="515.00", sku="16-af1055cl")]
+        )
+        self.assertEqual(len(lots), 1)
+        lots_by_tn = {TN.casefold(): lots}
+        lots_by_id = {lot["lot_id"]: lot for lot in lots}
+        meta_by_lot = {lid: _lot_as_match_meta(lot) for lid, lot in lots_by_id.items()}
+
+        laptop = _item(item_id=1, qty=2, description=laptop_name, price_sold="515.00")
+        e_delivery = _item(
+            item_id=2,
+            qty=2,
+            description="Microsoft 365 Personal Subscription (e-delivery)",
+            price_sold="0",
+        )
+        self.assertTrue(_is_zero_payout(e_delivery))
+        self.assertFalse(_is_zero_payout(laptop))
+
+        trackings = [TN]
+        # Production filters $0 before lot assignment / allocation.
+        claimants = [
+            (item, trackings)
+            for item in (laptop, e_delivery)
+            if not _is_zero_payout(item)
+        ]
+        self.assertEqual([c[0].id for c in claimants], [1])
+
+        assignment = _assign_items_to_lots(
+            claimants=claimants, lots_by_tn=lots_by_tn
+        )
+        self.assertEqual(assignment, {1: lots[0]["lot_id"]})
+        self.assertNotIn(2, assignment)
+
+        # Without the filter, single-lot would force e-delivery onto the laptop lot.
+        forced = _assign_items_to_lots(
+            claimants=[(laptop, trackings), (e_delivery, trackings)],
+            lots_by_tn=lots_by_tn,
+        )
+        self.assertEqual(forced.get(2), lots[0]["lot_id"])
+
+        supply_by_lot = {lid: int(lot["qty"]) for lid, lot in lots_by_id.items()}
+        item_demands = [
+            (item.id, item.quantity, [assignment[item.id]])
+            for item, _tns in claimants
+        ]
+        allocated, allocated_by_lot = _allocate_received_across_shared_trackings(
+            item_demands=item_demands,
+            supply_by_tn=supply_by_lot,
+        )
+        self.assertEqual(allocated[1], 2)
+        self.assertNotIn(2, allocated)
+
+        order = _order(order_id=20, store_order_number="111-0000000-0000000")
+        matches = _matches_for_tn_allocations(
+            item=laptop,
+            order=order,
+            trackings=trackings,
+            tn_allocations=allocated_by_lot.get(laptop.id, []),
+            meta_by_tn=meta_by_lot,
+        )
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].received_ext_total, Decimal("1030.00"))
+        self.assertEqual(matches[0].expected_amount, Decimal("1030.00"))
+        self.assertFalse(matches[0].amount_discrepancy)
 
 
 if __name__ == "__main__":
