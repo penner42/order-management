@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -38,7 +39,7 @@ router = APIRouter(prefix="/buying-groups", tags=["buying-groups"])
 
 @router.get("", response_model=list[BuyingGroupRead])
 def list_buying_groups(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return db.query(BuyingGroup).all()
+    return db.query(BuyingGroup).order_by(func.lower(BuyingGroup.name)).all()
 
 
 @router.post("", response_model=BuyingGroupRead)

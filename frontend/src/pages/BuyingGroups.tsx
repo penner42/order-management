@@ -248,6 +248,10 @@ function frameworkLabel(framework: string | null | undefined): string | null {
   return opt?.label ?? framework
 }
 
+function sortGroupsByName(groups: BuyingGroup[]): BuyingGroup[] {
+  return [...groups].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+}
+
 export default function BuyingGroups() {
   const navigate = useNavigate()
   const [groups, setGroups] = useState<BuyingGroup[]>([])
@@ -262,7 +266,11 @@ export default function BuyingGroups() {
   const [submitAlert, setSubmitAlert] = useState<string | null>(null)
 
   useEffect(() => {
-    api.get<BuyingGroup[]>('/buying-groups').then(setGroups).catch(console.error).finally(() => setLoading(false))
+    api
+      .get<BuyingGroup[]>('/buying-groups')
+      .then((data) => setGroups(sortGroupsByName(data)))
+      .catch(console.error)
+      .finally(() => setLoading(false))
   }, [])
 
   const startEdit = (g: BuyingGroup) => {
@@ -308,7 +316,7 @@ export default function BuyingGroups() {
           : false,
         tracking_submit_cron: draft.tracking_submit_cron.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
       })
-      setGroups((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
+      setGroups((prev) => sortGroupsByName(prev.map((p) => (p.id === updated.id ? updated : p))))
       setEditing(null)
     } catch (e) {
       console.error(e)
@@ -373,7 +381,7 @@ export default function BuyingGroups() {
     if (!createName.trim()) return
     try {
       const created = await api.post<BuyingGroup>('/buying-groups', { name: createName.trim() })
-      setGroups((prev) => [created, ...prev])
+      setGroups((prev) => sortGroupsByName([created, ...prev]))
       setCreateName('')
     } catch (e) {
       console.error(e)
