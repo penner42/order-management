@@ -470,14 +470,23 @@ def _stamp_received_check_last_run(db: Session, group_id: int) -> datetime:
     return now
 
 
-def _searched_trackings_from_result(result: CheckReceivingResult) -> list[str] | None:
-    payload = result.session_payload
-    if not isinstance(payload, dict):
-        return None
-    raw = payload.get("searched_trackings")
-    if not isinstance(raw, list):
-        return None
-    out = [str(t).strip() for t in raw if str(t).strip()]
+def _matched_trackings_from_result(result: CheckReceivingResult) -> list[str] | None:
+    """Distinct tracking numbers from receiving matches (for import log)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in result.matches or []:
+        raw = (match.tracking_number or "").strip()
+        if not raw:
+            continue
+        for chunk in raw.replace(";", ",").split(","):
+            tn = chunk.strip()
+            if not tn:
+                continue
+            key = tn.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(tn)
     return out or None
 
 
@@ -513,7 +522,7 @@ def _execute_received_check(
             actionable = save_receiving_review_pending(db, result.session_payload)
 
         _stamp_received_check_last_run(db, group_id)
-        trackings = _searched_trackings_from_result(result)
+        trackings = _matched_trackings_from_result(result)
 
         if result.error:
             write_group_tracking_log(
