@@ -40,6 +40,7 @@ def _tx(
     tn: str,
     system_tx: str,
     timestamp: str = "2026-10-12T18:19:23.394851Z",
+    entry_type_id: int = 1,
 ) -> dnr_api.DealandrunnerReceivedRow:
     return dnr_api.DealandrunnerReceivedRow(
         tracking_numbers=[tn],
@@ -47,6 +48,7 @@ def _tx(
         product_name=name,
         system_transaction_id=system_tx,
         timestamp=timestamp,
+        entry_type_id=entry_type_id,
     )
 
 
@@ -110,11 +112,45 @@ class DealandrunnerParseTests(unittest.TestCase):
                 "productName": "X",
                 "trackingNumbers": ["TN1"],
                 "referenceWarehouseItemId": "wh-123",
+                "entryTypeId": 1,
             }
         )
         self.assertIsNotNone(row)
         assert row is not None
         self.assertEqual(row.system_transaction_id, "wh-123")
+
+    def test_list_keeps_only_receiving_entry_type(self) -> None:
+        """Payments (non-1 entryTypeId) must not become receiving supply."""
+        receiving = dnr_api._parse_received_row(
+            {
+                "amount": 37.75,
+                "productName": HYPERX_NAME,
+                "systemTransactionId": "recv-1",
+                "trackingNumbers": [TN_HYPERX],
+                "entryTypeId": 1,
+            }
+        )
+        payment = dnr_api._parse_received_row(
+            {
+                "amount": -100.0,
+                "productName": None,
+                "systemTransactionId": "pay-1",
+                "trackingNumbers": [TN_HYPERX],
+                "entryTypeId": 2,
+            }
+        )
+        self.assertIsNotNone(receiving)
+        self.assertIsNotNone(payment)
+        assert receiving is not None and payment is not None
+        self.assertEqual(receiving.entry_type_id, dnr_api.RECEIVING_ENTRY_TYPE_ID)
+        self.assertNotEqual(payment.entry_type_id, dnr_api.RECEIVING_ENTRY_TYPE_ID)
+        # Mirror list_runner_transactions filter.
+        kept = [
+            r
+            for r in (receiving, payment)
+            if r.entry_type_id == dnr_api.RECEIVING_ENTRY_TYPE_ID
+        ]
+        self.assertEqual(kept, [receiving])
 
 
 class DealandrunnerLotMatchingTests(unittest.TestCase):

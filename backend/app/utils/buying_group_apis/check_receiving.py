@@ -562,6 +562,8 @@ def _dnr_lots_from_receipts(
     merged: dict[tuple[str, str, str], dict[str, Any]] = {}
     order: list[tuple[str, str, str]] = []
     for row in receipts:
+        if row.entry_type_id != dealandrunner_api.RECEIVING_ENTRY_TYPE_ID:
+            continue
         tns = [tn.strip() for tn in (row.tracking_numbers or []) if (tn or "").strip()]
         if not tns:
             continue

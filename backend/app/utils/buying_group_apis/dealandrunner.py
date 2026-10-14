@@ -843,6 +843,10 @@ def _pagination_meta(raw: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, i
     return items, has_next, page_count, total_records
 
 
+# Receiving / warehouse-credit ledger entries (payments and other types differ).
+RECEIVING_ENTRY_TYPE_ID = 1
+
+
 def list_runner_transactions(
     *,
     base_url: str | None,
@@ -852,9 +856,11 @@ def list_runner_transactions(
     page_size: int = _DEFAULT_TX_PAGE_SIZE,
     timeout_seconds: float = 30.0,
 ) -> DealandrunnerRunnerTransactionsResult:
-    """Paginate runner balance transactions; keep rows that have tracking numbers.
+    """Paginate runner balance transactions for receiving checks.
 
-    Each API item is typically one warehouse unit (qty 1), not a grouped quantity.
+    Keeps only ``entryTypeId == 1`` rows that have tracking numbers (payments and
+    other ledger types are excluded). Each kept item is typically one warehouse
+    unit (qty 1), not a grouped quantity.
     """
     if not (email or "").strip():
         raise ValueError("email is required")
@@ -924,8 +930,11 @@ def list_runner_transactions(
 
         for item in items:
             parsed = _parse_received_row(item)
-            if parsed is not None:
-                all_rows.append(parsed)
+            if parsed is None:
+                continue
+            if parsed.entry_type_id != RECEIVING_ENTRY_TYPE_ID:
+                continue
+            all_rows.append(parsed)
 
         if not items or not has_next:
             break
