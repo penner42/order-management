@@ -64,6 +64,12 @@ function eventLabel(eventType: string): string {
       return 'Tracking submitted'
     case 'tracking_submit_error':
       return 'Tracking submit error'
+    case 'received_check_started':
+      return 'Receiving check started'
+    case 'received_check_finished':
+      return 'Receiving check finished'
+    case 'received_check_error':
+      return 'Receiving check error'
     default:
       return eventType
   }
@@ -77,6 +83,8 @@ function modeLabel(mode: string): string {
       return 'Unshipped check'
     case 'tracking_submit':
       return 'Tracking submit'
+    case 'received_check':
+      return 'Receiving check'
     default:
       return mode
   }
@@ -327,6 +335,9 @@ export default function BrowserImportLogPage() {
             <option value="tracking_submit_started">Tracking submit started</option>
             <option value="tracking_submitted">Tracking submitted</option>
             <option value="tracking_submit_error">Tracking submit error</option>
+            <option value="received_check_started">Receiving check started</option>
+            <option value="received_check_finished">Receiving check finished</option>
+            <option value="received_check_error">Receiving check error</option>
           </select>
         </label>
         <label className="inline-flex items-center gap-2 text-sm text-ink dark:text-gray-200">

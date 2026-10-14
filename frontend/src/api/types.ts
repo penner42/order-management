@@ -307,6 +307,9 @@ export type BrowserImportLogEvent =
   | 'tracking_submit_started'
   | 'tracking_submitted'
   | 'tracking_submit_error'
+  | 'received_check_started'
+  | 'received_check_finished'
+  | 'received_check_error'
 
 export interface IgnoredZipCode {
   id: number
@@ -320,7 +323,7 @@ export interface BrowserImportLog {
   category: BrowserImportLogCategory | string
   level: BrowserImportLogLevel | string
   event_type: BrowserImportLogEvent | string
-  mode: 'full' | 'unshipped' | 'tracking_submit' | string
+  mode: 'full' | 'unshipped' | 'tracking_submit' | 'received_check' | string
   scheduled: boolean
   retailer: string
   store_order_number: string | null

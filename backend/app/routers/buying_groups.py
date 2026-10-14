@@ -25,6 +25,7 @@ from app.schemas.buying_group import (
     ReceivingReviewSession,
 )
 from app.utils.buying_group_apis.check_receiving import (
+    CheckReceivingResult,
     check_receiving_for_group,
     list_receiving_review_pending_payloads,
     prune_receiving_review_pending,
@@ -307,20 +308,17 @@ def check_buying_group_receiving(
     group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
-    framework = (group.api_framework or "").strip().casefold()
-    if framework not in ("parsefile", "buyinggroup", "bfmr", "usabg"):
+    ready, reason = receiving_check_group_ready(group)
+    if not ready:
         raise HTTPException(
             status_code=400,
-            detail="Receiving check is only available for Parsefile, BuyingGroup.com, BFMR, or USABG buying groups",
+            detail=reason
+            or "Receiving check is only available for Parsefile, BuyingGroup.com, BFMR, or USABG buying groups",
         )
 
-    result = check_receiving_for_group(db, buying_group_id=group_id)
+    result, actionable = _execute_received_check(db, group, scheduled=False)
     if result.error:
         raise HTTPException(status_code=502, detail=result.error)
-
-    actionable = 0
-    if result.session_payload:
-        actionable = save_receiving_review_pending(db, result.session_payload)
 
     review_path = (
         f"/receiving-review?highlight={group_id}" if actionable > 0 else None
@@ -472,47 +470,50 @@ def _stamp_received_check_last_run(db: Session, group_id: int) -> datetime:
     return now
 
 
-def _run_followup_received_check(
+def _searched_trackings_from_result(result: CheckReceivingResult) -> list[str] | None:
+    payload = result.session_payload
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("searched_trackings")
+    if not isinstance(raw, list):
+        return None
+    out = [str(t).strip() for t in raw if str(t).strip()]
+    return out or None
+
+
+def _execute_received_check(
     db: Session,
     group: BuyingGroup,
     *,
     scheduled: bool,
-) -> bool:
-    """Run warehouse received check after tracking submit when the group supports it.
+) -> tuple[CheckReceivingResult, int]:
+    """Run warehouse received check, persist review pending, stamp last_run, and log.
 
-    Returns True when a check was attempted. Skips (False) when the framework/credentials
-    are not ready for receiving — no separate cron schedule.
+    Returns ``(CheckReceivingResult, actionable_count)``. On unexpected exceptions,
+    logs an error event, stamps last_run, and re-raises.
     """
     group_id = group.id
     group_name = (group.name or "").strip() or f"group {group_id}"
-    ready, reason = receiving_check_group_ready(group)
-    if not ready:
-        logger.info(
-            "Skipping received check after tracking submit for buying group %s: %s",
-            group_id,
-            reason or "not configured for receiving",
-        )
-        return False
+    source = "scheduled follow-up" if scheduled else "manual"
+
+    write_group_tracking_log(
+        group=group,
+        group_name=group_name,
+        scheduled=scheduled,
+        level="info",
+        event_type="received_check_started",
+        message=f"Started received check ({source}).",
+        mode="received_check",
+    )
 
     try:
-        write_group_tracking_log(
-            group=group,
-            group_name=group_name,
-            scheduled=scheduled,
-            level="info",
-            event_type="received_check_started",
-            message=(
-                "Started received check "
-                f"({'scheduled follow-up' if scheduled else 'manual'})."
-            ),
-            mode="received_check",
-        )
         result = check_receiving_for_group(db, buying_group_id=group_id)
         actionable = 0
         if result.session_payload and not result.error:
             actionable = save_receiving_review_pending(db, result.session_payload)
 
         _stamp_received_check_last_run(db, group_id)
+        trackings = _searched_trackings_from_result(result)
 
         if result.error:
             write_group_tracking_log(
@@ -521,15 +522,17 @@ def _run_followup_received_check(
                 scheduled=scheduled,
                 level="error",
                 event_type="received_check_error",
+                tracking_numbers=trackings,
                 message=result.error,
                 mode="received_check",
             )
             logger.warning(
-                "Received check after tracking submit for buying group %s failed: %s",
+                "Received check (%s) for buying group %s failed: %s",
+                source,
                 group_id,
                 result.error,
             )
-            return True
+            return result, 0
 
         summary = result.message or (
             f"Found {actionable} item(s) ready to mark scanned."
@@ -542,18 +545,20 @@ def _run_followup_received_check(
             scheduled=scheduled,
             level="updates" if actionable else "info",
             event_type="received_check_finished",
+            tracking_numbers=trackings,
             message=summary,
             mode="received_check",
         )
         logger.info(
-            "Received check after tracking submit for buying group %s: %s actionable match(es)",
+            "Received check (%s) for buying group %s: %s actionable match(es)",
+            source,
             group_id,
             actionable,
         )
-        return True
+        return result, actionable
     except Exception as exc:
         logger.exception(
-            "Received check after tracking submit failed for buying group %s", group_id
+            "Received check (%s) failed for buying group %s", source, group_id
         )
         try:
             db.rollback()
@@ -574,4 +579,32 @@ def _run_followup_received_check(
             logger.exception(
                 "Failed to stamp received_check_last_run_at for buying group %s", group_id
             )
+        raise
+
+
+def _run_followup_received_check(
+    db: Session,
+    group: BuyingGroup,
+    *,
+    scheduled: bool,
+) -> bool:
+    """Run warehouse received check after tracking submit when the group supports it.
+
+    Returns True when a check was attempted. Skips (False) when the framework/credentials
+    are not ready for receiving — no separate cron schedule.
+    """
+    group_id = group.id
+    ready, reason = receiving_check_group_ready(group)
+    if not ready:
+        logger.info(
+            "Skipping received check after tracking submit for buying group %s: %s",
+            group_id,
+            reason or "not configured for receiving",
+        )
+        return False
+
+    try:
+        _execute_received_check(db, group, scheduled=scheduled)
+        return True
+    except Exception:
         return False
