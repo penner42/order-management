@@ -652,9 +652,13 @@ function normalizeCostcoOrdersGraphqlPayloadFallback(graphqlPayload, sourceUrl) 
         coerceString(item.itemNumber) ||
         "Item";
       const logicalItemId =
+        coerceString(item.lineItemId) ||
         coerceString(item.orderLineItemId) ||
+        coerceString(item.sourceLineItemId) ||
         (item.lineNumber != null ? String(item.lineNumber) : null) ||
         null;
+      const qty = safeNumber(item.quantity);
+      const sliceQty = qty != null && qty > 0 ? qty : 1;
 
       const shipmentSlices = []
       const shipments = (() => {
@@ -700,7 +704,7 @@ function normalizeCostcoOrdersGraphqlPayloadFallback(graphqlPayload, sourceUrl) 
           };
         }
 
-        shipmentSlices.push({ shipmentId, quantity: 1 });
+        shipmentSlices.push({ shipmentId, quantity: sliceQty });
       }
 
       itemsList.push({
@@ -710,7 +714,7 @@ function normalizeCostcoOrdersGraphqlPayloadFallback(graphqlPayload, sourceUrl) 
         productUrl: null,
         imageUrl: null,
         variants: [],
-        quantities: { ordered: 1 },
+        quantities: { ordered: sliceQty },
         pricing: {
           unitPrice: null,
           linePrice: null,

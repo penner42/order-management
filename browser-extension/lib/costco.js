@@ -222,7 +222,7 @@
     const allLineItems = extractDetailLineItems(details)
     for (let i = 0; i < allLineItems.length; i++) {
       const it = allLineItems[i] || {}
-      const logicalItemId = coerceString(it.lineItemId) || coerceString(it.orderLineItemId) || null
+      const logicalItemId = costcoLineItemLogicalId(it)
       const qty = safeNumber(it.quantity)
       const unitPrice = safeNumber(it.price)
       const lineTotal = safeNumber(it.merchandiseTotalAmount)
@@ -296,6 +296,30 @@
     return all
   }
 
+  function costcoLineItemLogicalIds(lineItem) {
+    const it = lineItem || {}
+    const ids = []
+    const seen = {}
+    const candidates = [
+      coerceString(it.lineItemId),
+      coerceString(it.orderLineItemId),
+      coerceString(it.sourceLineItemId),
+      it.lineNumber != null ? String(it.lineNumber) : null,
+    ]
+    for (let i = 0; i < candidates.length; i++) {
+      const id = candidates[i]
+      if (!id || !String(id).trim() || seen[id]) continue
+      seen[id] = true
+      ids.push(id)
+    }
+    return ids
+  }
+
+  function costcoLineItemLogicalId(lineItem) {
+    const ids = costcoLineItemLogicalIds(lineItem)
+    return ids.length > 0 ? ids[0] : null
+  }
+
   function buildDetailIndexByLineItemId(orderDetailsPayload) {
     const details = extractOrderDetailsFromCostcoGraphql(orderDetailsPayload)
     if (!details) return null
@@ -308,15 +332,18 @@
     const items = extractDetailLineItems(details)
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {}
-      const lineItemId = coerceString(it.lineItemId) || coerceString(it.orderLineItemId) || null
-      if (!lineItemId) continue
-      byId[lineItemId] = {
+      const ids = costcoLineItemLogicalIds(it)
+      if (ids.length === 0) continue
+      const entry = {
         quantity: safeNumber(it.quantity),
         unitPrice: safeNumber(it.price),
         lineTotal: safeNumber(it.merchandiseTotalAmount),
         itemNumber: coerceString(it.itemNumber) || null,
         itemDescription: coerceString(it.itemDescription) || null,
         shipmentSlices: collectShipmentsFromCostcoLineItem(it, shipmentsById, orderNumber),
+      }
+      for (let ki = 0; ki < ids.length; ki++) {
+        byId[ids[ki]] = entry
       }
     }
 
@@ -401,8 +428,7 @@
           item.pricing.linePrice = d.lineTotal
         }
 
-        const existingSlices = Array.isArray(item.shipments) ? item.shipments : []
-        if (existingSlices.length === 0 && Array.isArray(d.shipmentSlices) && d.shipmentSlices.length > 0) {
+        if (Array.isArray(d.shipmentSlices) && d.shipmentSlices.length > 0) {
           item.shipments = d.shipmentSlices
         }
       }
@@ -439,10 +465,8 @@
       for (let li = 0; li < lineItems.length; li++) {
         const item = lineItems[li] || {}
         const itemName = coerceString(item.itemDescription) || coerceString(item.itemNumber) || 'Item'
-        const logicalItemId =
-          coerceString(item.orderLineItemId) ||
-          (item.lineNumber != null ? String(item.lineNumber) : null) ||
-          null
+        const logicalItemId = costcoLineItemLogicalId(item)
+        const qty = safeNumber(item.quantity)
 
         const shipmentSlices = collectShipmentsFromCostcoLineItem(item, shipmentsById, orderNumber)
 
@@ -453,7 +477,7 @@
           productUrl: null,
           imageUrl: null,
           variants: [],
-          quantities: { ordered: 1 },
+          quantities: { ordered: qty != null && qty > 0 ? qty : 1 },
           pricing: {
             unitPrice: null,
             linePrice: null,
