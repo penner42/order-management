@@ -16,7 +16,6 @@ import ImportReviewBulk from './pages/ImportReviewBulk'
 import ReceivingReview from './pages/ReceivingReview'
 import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
-import Reports from './pages/Reports'
 import BrowserExtension from './pages/BrowserExtension'
 import Settings from './pages/Settings'
 import BrowserAutomation from './pages/BrowserAutomation'
@@ -80,7 +79,6 @@ function AppShell() {
     }
     return [
       { to: '/', label: 'Orders' },
-      { to: '/reports', label: 'Reports' },
       { to: '/buying-groups', label: 'Buying Groups' },
       { to: '/receiving-review', label: 'Receiving' },
       { to: '/rewards', label: 'Rewards' },
@@ -231,7 +229,6 @@ function AppShell() {
       <main className="flex-1 w-full mx-auto px-3 sm:px-4 md:px-12 lg:px-12 py-4 md:py-8">
         <Routes>
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
-          <Route path="/reports" element={<Reports />} />
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
