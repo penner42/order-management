@@ -130,6 +130,8 @@ class ItemBulkUpdateEntry(BaseModel):
     return_received_at: datetime | None = None
     return_refunded_at: datetime | None = None
     lost_package_at: datetime | None = None
+    # When set (e.g. D&R soft-match LPN), append to shipment notes if not already known.
+    warehouse_tracking: str | None = None
 
     @field_validator("price_sold", mode="before")
     @classmethod

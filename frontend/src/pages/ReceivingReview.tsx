@@ -207,6 +207,7 @@ function ReceivingGroupSection({
       receipt_id: string | null
       scanned_at?: string
       price_sold?: string | null
+      warehouse_tracking?: string | null
     }> = []
     const appliedKeys: string[] = []
     const appliedItemIds: number[] = []
@@ -253,6 +254,11 @@ function ReceivingGroupSection({
           if (total != null) {
             entry.price_sold = (total / m.quantity).toFixed(2)
           }
+        }
+        // Persist D&R-scanned LPN / alternate TN on shipment notes when new.
+        const scannedTn = (m.tracking_number || '').trim()
+        if (scannedTn) {
+          entry.warehouse_tracking = scannedTn
         }
         updates.push(entry)
         appliedKeys.push(key)

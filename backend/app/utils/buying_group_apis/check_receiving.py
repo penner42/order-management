@@ -85,6 +85,14 @@ _DESC_STOPWORDS = frozenset(
 MATCH_KIND_RECEIVED = "received"
 MATCH_KIND_NOT_RECEIVED = "not_received"
 
+# Shipment note lines that alias an alternate warehouse / Walmart tracker.
+_WALMART_TRACKING_NOTE_PREFIX = "Walmart tracking: "
+_WAREHOUSE_TRACKING_NOTE_PREFIX = "Warehouse tracking: "
+_NOTE_TRACKING_PREFIXES = (
+    _WALMART_TRACKING_NOTE_PREFIX,
+    _WAREHOUSE_TRACKING_NOTE_PREFIX,
+)
+
 
 @dataclass
 class ReceivingMatch:
@@ -1025,8 +1033,182 @@ def _split_tracking_field(raw: str | None) -> list[str]:
     return parts
 
 
+def _tracking_aliases_from_notes(notes: str | None) -> list[str]:
+    """Extract alternate trackers stored on shipment notes (Walmart / warehouse)."""
+    if not notes:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in notes.splitlines():
+        stripped = line.strip()
+        for prefix in _NOTE_TRACKING_PREFIXES:
+            if stripped.startswith(prefix):
+                value = stripped[len(prefix) :].strip()
+                if not value:
+                    break
+                key = value.casefold()
+                if key in seen:
+                    break
+                seen.add(key)
+                out.append(value)
+                break
+    return out
+
+
+def append_warehouse_tracking_note(item: Item, tracking_number: str | None) -> bool:
+    """Append ``Warehouse tracking:`` to the item's first shipment when TN is new.
+
+    Returns True when a note line was added. No-op when the TN is already on the
+    shipment tracking field or notes.
+    """
+    tn = (tracking_number or "").strip()
+    if not tn:
+        return False
+    note_line = f"{_WAREHOUSE_TRACKING_NOTE_PREFIX}{tn}"
+    for si in item.shipment_items or []:
+        shipment = si.shipment
+        if shipment is None:
+            continue
+        known: set[str] = set()
+        for existing in _split_tracking_field(shipment.tracking_number):
+            known.add(existing.casefold())
+        for existing in _tracking_aliases_from_notes(shipment.notes):
+            known.add(existing.casefold())
+        if tn.casefold() in known:
+            return False
+        base = (shipment.notes or "").rstrip()
+        shipment.notes = f"{base}\n{note_line}" if base else note_line
+        return True
+    return False
+
+
+def _is_carrier_like_tracking(tn: str | None) -> bool:
+    """True for common carrier-shaped trackers (narrow — do not treat store LPNs as FedEx/USPS)."""
+    t = (tn or "").strip().replace(" ", "").replace("-", "")
+    if not t:
+        return False
+    if re.fullmatch(r"1Z[0-9A-Z]{16}", t, flags=re.IGNORECASE):
+        return True
+    if re.fullmatch(r"TBA\d{10,}", t, flags=re.IGNORECASE):
+        return True
+    if re.fullmatch(r"TBC\d{10,}", t, flags=re.IGNORECASE):
+        return True
+    if re.fullmatch(r"AMZN\d+[A-Z]?", t, flags=re.IGNORECASE):
+        return True
+    if re.fullmatch(r"9[0-4]\d{18,21}", t):
+        return True
+    if re.fullmatch(r"91\d+", t) and 20 <= len(t) <= 22:
+        return True
+    if re.fullmatch(r"96\d{20}", t) or re.fullmatch(r"96\d{22}", t):
+        return True
+    if re.fullmatch(r"100\d{31}", t):
+        return True
+    if re.fullmatch(r"C\d{14}", t):
+        return True
+    if re.fullmatch(r"1LS\d{8,}", t, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _is_soft_matchable_warehouse_tn(tn: str | None) -> bool:
+    """Walmart-style opaque warehouse ids eligible for D&R name+price soft-match.
+
+    Includes classic 555… trackers and long numeric store LPNs with any store
+    prefix. Excludes recognizable carrier trackers.
+    """
+    t = (tn or "").strip().replace(" ", "").replace("-", "")
+    if not t:
+        return False
+    if _is_carrier_like_tracking(t):
+        return False
+    if len(t) == 20 and t.startswith("555") and t.isdigit():
+        return True
+    if t.isdigit() and 12 <= len(t) <= 22:
+        return True
+    return False
+
+
+def _is_walmart_order(order: Order) -> bool:
+    store = getattr(order, "store", None)
+    name = getattr(store, "name", None) if store is not None else None
+    return (name or "").strip().casefold() == "walmart"
+
+
+def _score_item_to_lot_soft(
+    item: Item, lot: dict[str, Any]
+) -> tuple[float, float] | None:
+    """Stricter score for cross-TN soft-match: require price + name agreement."""
+    local_price = _money(item.price_sold)
+    lot_price = _money(lot.get("unit_price"))
+    name_score = _name_similarity(item.description, lot.get("received_item"))
+    if local_price is None or lot_price is None:
+        return None
+    delta = abs(local_price - lot_price)
+    if delta > LOT_PRICE_TOLERANCE:
+        return None
+    if name_score < _LOT_NAME_FALLBACK_MIN:
+        return None
+    return (float(LOT_PRICE_TOLERANCE - delta), name_score)
+
+
+def _soft_assign_orphan_dnr_lots(
+    *,
+    claimants: list[tuple[Item, Order, list[str]]],
+    lots: list[dict[str, Any]],
+) -> dict[int, str]:
+    """Greedy unique item→lot map for orphan warehouse TNs (Walmart soft-match)."""
+    if not claimants or not lots:
+        return {}
+
+    candidates: list[tuple[tuple[float, float], int, str]] = []
+    for item, _order, _trackings in claimants:
+        ranked_for_item: list[tuple[tuple[float, float], str]] = []
+        for lot in lots:
+            score = _score_item_to_lot_soft(item, lot)
+            if score is None:
+                continue
+            ranked_for_item.append((score, lot["lot_id"]))
+        if not ranked_for_item:
+            continue
+        ranked_for_item.sort(key=lambda pair: (pair[0][0], pair[0][1]), reverse=True)
+        best_score, best_lot_id = ranked_for_item[0]
+        second_score = ranked_for_item[1][0] if len(ranked_for_item) > 1 else None
+        if _scores_ambiguous(best_score, second_score):
+            continue
+        candidates.append((best_score, item.id, best_lot_id))
+
+    # Global greedy: highest score first; each item and lot used once.
+    # Detect cross-item ambiguity on the same lot (two items with near-tied scores).
+    by_lot: dict[str, list[tuple[tuple[float, float], int]]] = {}
+    for score, item_id, lot_id in candidates:
+        by_lot.setdefault(lot_id, []).append((score, item_id))
+
+    assignment: dict[int, str] = {}
+    used_items: set[int] = set()
+    used_lots: set[str] = set()
+    ordered = sorted(candidates, key=lambda c: (c[0][0], c[0][1]), reverse=True)
+    for score, item_id, lot_id in ordered:
+        if item_id in used_items or lot_id in used_lots:
+            continue
+        rivals = by_lot.get(lot_id) or []
+        rival_scores = [
+            (s, iid) for s, iid in rivals if iid != item_id and iid not in used_items
+        ]
+        if rival_scores:
+            rival_scores.sort(key=lambda pair: (pair[0][0], pair[0][1]), reverse=True)
+            if _scores_ambiguous(score, rival_scores[0][0]):
+                continue
+        assignment[item_id] = lot_id
+        used_items.add(item_id)
+        used_lots.add(lot_id)
+    return assignment
+
+
 def _tracking_numbers_for_item(db: Session, item: Item) -> list[str]:
-    """All distinct tracking numbers linked to an item (not just the first)."""
+    """All distinct tracking numbers linked to an item (not just the first).
+
+    Includes Walmart / Warehouse tracking aliases stored on shipment notes.
+    """
     out: list[str] = []
     seen: set[str] = set()
 
@@ -1038,23 +1220,32 @@ def _tracking_numbers_for_item(db: Session, item: Item) -> list[str]:
             seen.add(key)
             out.append(tn)
 
+    def _add_notes(notes: str | None) -> None:
+        for tn in _tracking_aliases_from_notes(notes):
+            key = tn.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(tn)
+
     for si in item.shipment_items or []:
         if si.shipment:
             _add(si.shipment.tracking_number)
+            _add_notes(si.shipment.notes)
+
     if out:
         return out
 
     # Fallback when the relationship was empty/stale.
     rows = (
-        db.query(Shipment.tracking_number)
+        db.query(Shipment.tracking_number, Shipment.notes)
         .join(ShipmentItem, ShipmentItem.shipment_id == Shipment.id)
         .filter(ShipmentItem.item_id == item.id)
-        .filter(Shipment.tracking_number.isnot(None))
-        .filter(Shipment.tracking_number != "")
         .all()
     )
-    for (raw,) in rows:
-        _add(raw)
+    for tracking_raw, notes in rows:
+        _add(tracking_raw)
+        _add_notes(notes)
     return out
 
 
@@ -1077,7 +1268,7 @@ def _collect_items_with_trackings(
         .filter(Order.buying_group_id == buying_group_id)
         .filter(Order.status != "personal")
         .options(
-            joinedload(Item.order),
+            joinedload(Item.order).joinedload(Order.store),
             selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
         )
         .order_by(Item.id)
@@ -1137,15 +1328,12 @@ def _merge_tracking_lists(*lists: list[str]) -> list[str]:
 
 
 def _known_shipment_trackings(db: Session) -> set[str]:
-    rows = (
-        db.query(Shipment.tracking_number)
-        .filter(Shipment.tracking_number.isnot(None))
-        .filter(Shipment.tracking_number != "")
-        .all()
-    )
+    rows = db.query(Shipment.tracking_number, Shipment.notes).all()
     out: set[str] = set()
-    for (raw,) in rows:
-        for tn in _split_tracking_field(raw):
+    for tracking_raw, notes in rows:
+        for tn in _split_tracking_field(tracking_raw):
+            out.add(tn.casefold())
+        for tn in _tracking_aliases_from_notes(notes):
             out.add(tn.casefold())
     return out
 
@@ -1573,7 +1761,6 @@ def _check_receiving_dealandrunner(
     meta_by_lot = {lot_id: _lot_as_match_meta(lot) for lot_id, lot in lots_by_id.items()}
 
     eligible: list[tuple[Item, Order, list[str]]] = []
-    not_found = 0
     void_skipped = 0
     for item, order, trackings in pending:
         if _is_zero_payout(item):
@@ -1581,8 +1768,6 @@ def _check_receiving_dealandrunner(
         has_hit = any(tn.casefold() in lots_by_tn for tn in trackings)
         if has_hit:
             eligible.append((item, order, trackings))
-        else:
-            not_found += 1
 
     lot_assignment = _assign_items_to_lots(
         claimants=[(item, trackings) for item, _o, trackings in eligible],
@@ -1605,11 +1790,9 @@ def _check_receiving_dealandrunner(
     matches: list[ReceivingMatch] = []
     for item, order, trackings in eligible:
         if item.id not in lot_assignment:
-            not_found += 1
             continue
         got = int(allocated.get(item.id, 0))
         if got <= 0:
-            not_found += 1
             continue
         matches.extend(
             _matches_for_tn_allocations(
@@ -1620,6 +1803,105 @@ def _check_receiving_dealandrunner(
                 meta_by_tn=meta_by_lot,
             )
         )
+
+    # Soft-match: orphan non-carrier warehouse TNs → unmatched Walmart items by
+    # name+price (D&R store-LPN scans that never match submitted order ids).
+    known_trackings = _known_shipment_trackings(db)
+    received_item_ids = {
+        m.item_id for m in matches if m.match_kind == MATCH_KIND_RECEIVED
+    }
+    pending_tn_keys = {
+        tn.casefold()
+        for _i, _o, tns in pending
+        for tn in tns
+        if (tn or "").strip()
+    }
+    lots_used_qty: dict[str, int] = {}
+    for _item_id, pairs in allocated_by_lot.items():
+        for lot_id, qty in pairs:
+            lots_used_qty[lot_id] = lots_used_qty.get(lot_id, 0) + int(qty)
+
+    unmatched_walmart: list[tuple[Item, Order, list[str]]] = []
+    for item, order, trackings in pending:
+        if _is_zero_payout(item):
+            continue
+        if item.id in received_item_ids:
+            continue
+        if not _is_walmart_order(order):
+            continue
+        unmatched_walmart.append((item, order, trackings))
+
+    orphan_lots_for_soft: list[dict[str, Any]] = []
+    soft_lots_by_id: dict[str, dict[str, Any]] = {}
+    for lot in lots:
+        display_tn = (lot.get("display_tn") or "").strip()
+        if not _is_soft_matchable_warehouse_tn(display_tn):
+            continue
+        tn_key = lot["tn_key"]
+        if tn_key in known_trackings or tn_key in pending_tn_keys:
+            continue
+        remaining_qty = int(lot["qty"]) - int(lots_used_qty.get(lot["lot_id"], 0))
+        if remaining_qty <= 0:
+            continue
+        soft_lot = dict(lot)
+        soft_lot["qty"] = remaining_qty
+        orphan_lots_for_soft.append(soft_lot)
+        soft_lots_by_id[soft_lot["lot_id"]] = soft_lot
+
+    soft_assignment = _soft_assign_orphan_dnr_lots(
+        claimants=unmatched_walmart,
+        lots=orphan_lots_for_soft,
+    )
+    soft_supply = {
+        lot_id: int(lot["qty"]) for lot_id, lot in soft_lots_by_id.items()
+    }
+    soft_demands: list[tuple[int, int, list[str]]] = []
+    soft_claimants_by_id = {
+        item.id: (item, order, trackings)
+        for item, order, trackings in unmatched_walmart
+    }
+    for item_id, lot_id in soft_assignment.items():
+        item, _order, _trackings = soft_claimants_by_id[item_id]
+        soft_demands.append((item_id, item.quantity or 1, [lot_id]))
+
+    soft_allocated, soft_allocated_by_lot = _allocate_received_across_shared_trackings(
+        item_demands=soft_demands,
+        supply_by_tn=soft_supply,
+    )
+    soft_meta_by_lot = {
+        lot_id: _lot_as_match_meta(lot) for lot_id, lot in soft_lots_by_id.items()
+    }
+    soft_matched_tn_keys: set[str] = set()
+    for item_id, pairs in soft_allocated_by_lot.items():
+        got = int(soft_allocated.get(item_id, 0))
+        if got <= 0:
+            continue
+        item, order, trackings = soft_claimants_by_id[item_id]
+        matches.extend(
+            _matches_for_tn_allocations(
+                item=item,
+                order=order,
+                trackings=trackings,
+                tn_allocations=pairs,
+                meta_by_tn=soft_meta_by_lot,
+            )
+        )
+        received_item_ids.add(item_id)
+        for lot_id, qty in pairs:
+            if qty <= 0:
+                continue
+            lot = soft_lots_by_id.get(lot_id) or lots_by_id.get(lot_id)
+            if not lot:
+                continue
+            soft_matched_tn_keys.add(lot["tn_key"])
+            for alias in lot.get("alias_tns") or []:
+                soft_matched_tn_keys.add(alias)
+
+    not_found = sum(
+        1
+        for item, _order, _trackings in pending
+        if not _is_zero_payout(item) and item.id not in received_item_ids
+    )
 
     for item, order, trackings in scanned_pending:
         if _is_zero_payout(item):
@@ -1634,7 +1916,6 @@ def _check_receiving_dealandrunner(
             )
         )
 
-    known_trackings = _known_shipment_trackings(db)
     unknown_receipts: list[dict[str, Any]] = []
     orphan_seen: set[int] = set()
     for row in receipts:
@@ -1642,6 +1923,8 @@ def _check_receiving_dealandrunner(
         if not tns:
             continue
         if any(tn.casefold() in known_trackings for tn in tns):
+            continue
+        if any(tn.casefold() in soft_matched_tn_keys for tn in tns):
             continue
         if id(row) in orphan_seen:
             continue

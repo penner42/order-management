@@ -17,8 +17,14 @@ from app.utils.buying_group_apis.check_receiving import (  # noqa: E402
     _allocate_received_across_shared_trackings,
     _assign_items_to_lots,
     _dnr_lots_from_receipts,
+    _is_carrier_like_tracking,
+    _is_soft_matchable_warehouse_tn,
+    _is_walmart_order,
     _lot_as_match_meta,
     _matches_for_tn_allocations,
+    _soft_assign_orphan_dnr_lots,
+    _tracking_aliases_from_notes,
+    append_warehouse_tracking_note,
 )
 
 
@@ -68,8 +74,26 @@ def _item(
     )
 
 
-def _order(*, order_id: int, store_order_number: str) -> SimpleNamespace:
-    return SimpleNamespace(id=order_id, store_order_number=store_order_number)
+def _order(
+    *,
+    order_id: int,
+    store_order_number: str,
+    store_name: str | None = None,
+) -> SimpleNamespace:
+    store = (
+        SimpleNamespace(name=store_name) if store_name is not None else None
+    )
+    return SimpleNamespace(
+        id=order_id,
+        store_order_number=store_order_number,
+        store=store,
+    )
+
+
+LPN_STORE_3541 = "035414608074526836"
+LPN_STORE_5678 = "056781234567890123"
+TN_555 = "55582585857605060331"
+MOUSE_NAME = "Logitech G PRO X SUPERLIGHT 2 SE Gaming Mouse 910007651"
 
 
 class DealandrunnerParseTests(unittest.TestCase):
@@ -322,6 +346,248 @@ class DealandrunnerLotMatchingTests(unittest.TestCase):
         remainder = next(m for m in matches if m.match_kind == "not_received")
         self.assertEqual(received.quantity, 2)
         self.assertEqual(remainder.quantity, 3)
+
+
+class DealandrunnerSoftMatchTests(unittest.TestCase):
+    def test_carrier_like_and_soft_matchable_heuristics(self) -> None:
+        self.assertTrue(_is_carrier_like_tracking("1Z999AA10123456784"))
+        self.assertTrue(_is_carrier_like_tracking(TN_HYPERX))
+        self.assertFalse(_is_soft_matchable_warehouse_tn(TN_HYPERX))
+        self.assertFalse(_is_soft_matchable_warehouse_tn("1Z999AA10123456784"))
+
+        self.assertTrue(_is_soft_matchable_warehouse_tn(LPN_STORE_3541))
+        self.assertTrue(_is_soft_matchable_warehouse_tn(LPN_STORE_5678))
+        self.assertTrue(_is_soft_matchable_warehouse_tn(TN_555))
+        self.assertFalse(_is_carrier_like_tracking(LPN_STORE_3541))
+        self.assertFalse(_is_carrier_like_tracking(TN_555))
+
+    def test_soft_match_orphan_lpn_to_walmart_item(self) -> None:
+        lots = _dnr_lots_from_receipts(
+            [
+                _tx(
+                    name=MOUSE_NAME,
+                    amount="69.00",
+                    tn=LPN_STORE_3541,
+                    system_tx="lpn-1",
+                ),
+            ]
+        )
+        item = _item(
+            item_id=1, qty=1, description=MOUSE_NAME, price_sold="69.00"
+        )
+        order = _order(
+            order_id=10,
+            store_order_number="200015679743328",
+            store_name="Walmart",
+        )
+        self.assertTrue(_is_walmart_order(order))
+        assignment = _soft_assign_orphan_dnr_lots(
+            claimants=[(item, order, [order.store_order_number])],
+            lots=lots,
+        )
+        self.assertEqual(assignment.get(1), lots[0]["lot_id"])
+
+        supply = {lots[0]["lot_id"]: int(lots[0]["qty"])}
+        allocated, allocated_by_lot = _allocate_received_across_shared_trackings(
+            item_demands=[(1, 1, [assignment[1]])],
+            supply_by_tn=supply,
+        )
+        self.assertEqual(allocated[1], 1)
+        matches = _matches_for_tn_allocations(
+            item=item,
+            order=order,
+            trackings=[order.store_order_number],
+            tn_allocations=allocated_by_lot.get(1, []),
+            meta_by_tn={lots[0]["lot_id"]: _lot_as_match_meta(lots[0])},
+        )
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].tracking_number, LPN_STORE_3541)
+        self.assertEqual(matches[0].receipt_id, "lpn-1")
+
+    def test_soft_match_accepts_different_store_prefix(self) -> None:
+        lots = _dnr_lots_from_receipts(
+            [
+                _tx(
+                    name=MOUSE_NAME,
+                    amount="69.00",
+                    tn=LPN_STORE_5678,
+                    system_tx="lpn-2",
+                ),
+            ]
+        )
+        item = _item(
+            item_id=1, qty=1, description=MOUSE_NAME, price_sold="69.00"
+        )
+        order = _order(
+            order_id=10,
+            store_order_number="200099999999999",
+            store_name="Walmart",
+        )
+        assignment = _soft_assign_orphan_dnr_lots(
+            claimants=[(item, order, [order.store_order_number])],
+            lots=lots,
+        )
+        self.assertEqual(assignment.get(1), lots[0]["lot_id"])
+
+    def test_carrier_orphan_tn_not_soft_matched(self) -> None:
+        self.assertFalse(_is_soft_matchable_warehouse_tn(TN_HYPERX))
+        lots = _dnr_lots_from_receipts(
+            [
+                _tx(
+                    name=MOUSE_NAME,
+                    amount="69.00",
+                    tn=TN_HYPERX,
+                    system_tx="tba-1",
+                ),
+            ]
+        )
+        # Caller filters with _is_soft_matchable_warehouse_tn before soft-assign.
+        soft_lots = [
+            lot
+            for lot in lots
+            if _is_soft_matchable_warehouse_tn(lot.get("display_tn"))
+        ]
+        self.assertEqual(soft_lots, [])
+        item = _item(
+            item_id=1, qty=1, description=MOUSE_NAME, price_sold="69.00"
+        )
+        order = _order(
+            order_id=10,
+            store_order_number="200015679743328",
+            store_name="Walmart",
+        )
+        assignment = _soft_assign_orphan_dnr_lots(
+            claimants=[(item, order, [order.store_order_number])],
+            lots=soft_lots,
+        )
+        self.assertEqual(assignment, {})
+
+    def test_soft_match_rejects_price_mismatch(self) -> None:
+        lots = _dnr_lots_from_receipts(
+            [
+                _tx(
+                    name=MOUSE_NAME,
+                    amount="69.00",
+                    tn=LPN_STORE_3541,
+                    system_tx="lpn-1",
+                ),
+            ]
+        )
+        item = _item(
+            item_id=1, qty=1, description=MOUSE_NAME, price_sold="40.00"
+        )
+        order = _order(
+            order_id=10,
+            store_order_number="200015679743328",
+            store_name="Walmart",
+        )
+        assignment = _soft_assign_orphan_dnr_lots(
+            claimants=[(item, order, [order.store_order_number])],
+            lots=lots,
+        )
+        self.assertEqual(assignment, {})
+
+    def test_soft_match_rejects_weak_name(self) -> None:
+        lots = _dnr_lots_from_receipts(
+            [
+                _tx(
+                    name=MOUSE_NAME,
+                    amount="69.00",
+                    tn=LPN_STORE_3541,
+                    system_tx="lpn-1",
+                ),
+            ]
+        )
+        item = _item(
+            item_id=1,
+            qty=1,
+            description="Completely unrelated kitchen blender set",
+            price_sold="69.00",
+        )
+        order = _order(
+            order_id=10,
+            store_order_number="200015679743328",
+            store_name="Walmart",
+        )
+        assignment = _soft_assign_orphan_dnr_lots(
+            claimants=[(item, order, [order.store_order_number])],
+            lots=lots,
+        )
+        self.assertEqual(assignment, {})
+
+    def test_soft_match_ambiguous_two_similar_items(self) -> None:
+        lots = _dnr_lots_from_receipts(
+            [
+                _tx(
+                    name=MOUSE_NAME,
+                    amount="69.00",
+                    tn=LPN_STORE_3541,
+                    system_tx="lpn-1",
+                ),
+            ]
+        )
+        item_a = _item(
+            item_id=1, qty=1, description=MOUSE_NAME, price_sold="69.00"
+        )
+        item_b = _item(
+            item_id=2, qty=1, description=MOUSE_NAME, price_sold="69.00"
+        )
+        order_a = _order(
+            order_id=10,
+            store_order_number="200011111111111",
+            store_name="Walmart",
+        )
+        order_b = _order(
+            order_id=11,
+            store_order_number="200022222222222",
+            store_name="Walmart",
+        )
+        assignment = _soft_assign_orphan_dnr_lots(
+            claimants=[
+                (item_a, order_a, [order_a.store_order_number]),
+                (item_b, order_b, [order_b.store_order_number]),
+            ],
+            lots=lots,
+        )
+        # Near-identical scores for the same lot → skip rather than guess.
+        self.assertEqual(assignment, {})
+
+    def test_soft_match_ignores_non_walmart_order(self) -> None:
+        order = _order(
+            order_id=10,
+            store_order_number="111-222",
+            store_name="Amazon",
+        )
+        self.assertFalse(_is_walmart_order(order))
+
+    def test_notes_alias_parsing(self) -> None:
+        notes = (
+            "Imported from store 'walmart'.\n"
+            f"Walmart tracking: {TN_555}\n"
+            f"Warehouse tracking: {LPN_STORE_3541}"
+        )
+        aliases = _tracking_aliases_from_notes(notes)
+        self.assertEqual(aliases, [TN_555, LPN_STORE_3541])
+
+    def test_append_warehouse_tracking_note(self) -> None:
+        shipment = SimpleNamespace(
+            tracking_number="200015679743328",
+            notes="Imported from store 'walmart'.\n"
+            f"Walmart tracking: {TN_555}",
+        )
+        item = SimpleNamespace(
+            shipment_items=[SimpleNamespace(shipment=shipment)]
+        )
+        self.assertTrue(append_warehouse_tracking_note(item, LPN_STORE_3541))
+        self.assertIn(
+            f"Warehouse tracking: {LPN_STORE_3541}", shipment.notes or ""
+        )
+        # Idempotent when already present.
+        self.assertFalse(append_warehouse_tracking_note(item, LPN_STORE_3541))
+        # Also no-op when TN is the shipment tracking_number itself.
+        self.assertFalse(
+            append_warehouse_tracking_note(item, "200015679743328")
+        )
 
 
 if __name__ == "__main__":

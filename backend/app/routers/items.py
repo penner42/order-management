@@ -20,6 +20,7 @@ from app.schemas.item import (
     ItemSubmitTrackingResponse,
     ItemUpdate,
 )
+from app.utils.buying_group_apis.check_receiving import append_warehouse_tracking_note
 from app.utils.buying_group_apis.submit_tracking import (
     find_shipped_items_sharing_tracking,
     group_ready,
@@ -117,10 +118,11 @@ def bulk_update_items(
         if not item:
             raise HTTPException(status_code=404, detail=f"Item {entry.item_id} not found")
         prev_status = item.status
-        payload = entry.model_dump(exclude_unset=True, exclude={"item_id"})
+        payload = entry.model_dump(
+            exclude_unset=True,
+            exclude={"item_id", "delivered_at", "warehouse_tracking"},
+        )
         for k, v in payload.items():
-            if k == "delivered_at":
-                continue  # applied to shipment below
             if k in _ITEM_DATE_FIELDS:
                 setattr(item, k, to_date_only(v) if v is not None else None)
             else:
@@ -131,6 +133,8 @@ def bulk_update_items(
                 shipment = db.query(Shipment).filter(Shipment.id == si.shipment_id).first()
                 if shipment:
                     shipment.delivered_at = to_date_only(entry.delivered_at)
+        if getattr(entry, "warehouse_tracking", None):
+            append_warehouse_tracking_note(item, entry.warehouse_tracking)
         if (
             "status" in payload
             and item.status == ItemStatus.SUBMITTED
