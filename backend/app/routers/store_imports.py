@@ -29,7 +29,11 @@ from app.models import (
     StoreAccount,
     User,
 )
-from app.models.item import ItemStatus, advance_item_to_shipped
+from app.models.item import (
+    ItemStatus,
+    advance_item_to_shipped,
+    item_in_return_process,
+)
 from app.schemas.store_import import (
     DirectApplyBody,
     DirectApplyResponse,
@@ -1273,12 +1277,15 @@ def _apply_items_and_shipments(
     def find_existing_item_for_tracking(
         name: str, db_key: str | None, tracking_key: str | None
     ) -> Item | None:
+        # Return-process items keep their existing shipments; store re-imports
+        # must not attach outbound/return-label tracking to them.
         candidates = [
             ei
             for ei in existing_items
             if (ei.description or "").strip() == name
             and ei.id not in used_existing_item_ids
             and ei.id in pre_existing_item_ids
+            and not item_in_return_process(ei)
         ]
         if not candidates:
             return None
@@ -1454,6 +1461,8 @@ def _apply_items_and_shipments(
     def get_or_create_shipment_for_slice(
         shipment_id: str | None,
         item_to_link: Item | None = None,
+        *,
+        allow_create: bool = True,
     ) -> Shipment | None:
         if not shipment_id:
             return None
@@ -1515,6 +1524,8 @@ def _apply_items_and_shipments(
             return existing_shipment
 
         if item_to_link:
+            if item_in_return_process(item_to_link):
+                return None
             for si in item_to_link.shipment_items:
                 s = existing_shipments_by_id.get(si.shipment_id)
                 if s is not None and not (s.tracking_number or "").strip():
@@ -1528,6 +1539,9 @@ def _apply_items_and_shipments(
                     )
                     shipments_created[shipment_id] = s
                     return s
+
+        if not allow_create:
+            return None
 
         shipment = Shipment(
             user_id=order.user_id,
@@ -1681,6 +1695,19 @@ def _apply_items_and_shipments(
                 linked_any = True
                 existing_item_keys.discard((name, ""))
 
+            if remaining > 0 and existing_order:
+                # Do not invent new lines for trackings that would have attached
+                # to return-process items (return labels, etc.).
+                return_qty = sum(
+                    (ei.quantity or 1)
+                    for ei in existing_items
+                    if (ei.description or "").strip() == name
+                    and ei.id in pre_existing_item_ids
+                    and item_in_return_process(ei)
+                )
+                if return_qty:
+                    remaining = max(0, remaining - return_qty)
+
             if remaining > 0:
                 # No (more) existing lines to attach — create the leftover
                 # quantity on this shipment (new import or partial match).
@@ -1722,13 +1749,15 @@ def _apply_items_and_shipments(
     # there are no new items for a given tracking number. This ensures that
     # delivery date changes coming from the store payload are actually
     # persisted, so subsequent diff runs stop flagging the same change.
+    # allow_create=False so return-label trackings skipped above do not become
+    # orphan shipment rows.
     for src in shipments:
         if not isinstance(src, dict):
             continue
         shipment_id = src.get("shipmentId")
         sid = shipment_id if isinstance(shipment_id, str) else None
         if existing_order:
-            get_or_create_shipment_for_slice(sid)
+            get_or_create_shipment_for_slice(sid, allow_create=False)
 
         tracking_raw = src.get("trackingNumber")
         tracking_key, walmart_original, db_key = _db_shipment_lookup_key(

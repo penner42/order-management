@@ -21,6 +21,23 @@ class ItemStatus(str, enum.Enum):
     LOST_PACKAGE = "lost_package"
 
 
+# Any status in the return workflow — store re-imports must not attach/update
+# tracking (return labels, etc.) on these items.
+RETURN_PROCESS_STATUSES: frozenset[ItemStatus] = frozenset(
+    {
+        ItemStatus.NEEDS_RETURN,
+        ItemStatus.RETURN_STARTED,
+        ItemStatus.RETURN_SENT,
+        ItemStatus.RETURN_RECEIVED,
+        ItemStatus.RETURN_REFUNDED,
+    }
+)
+
+
+def item_in_return_process(item: "Item") -> bool:
+    return item.status in RETURN_PROCESS_STATUSES
+
+
 def advance_item_to_shipped(item: "Item") -> None:
     """Advance status to shipped only from purchased.
 
