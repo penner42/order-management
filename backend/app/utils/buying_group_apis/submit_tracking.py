@@ -1,4 +1,4 @@
-"""Submit item tracking numbers to buying-group APIs (Parsefile, USABG, BuyingGroup.com, Deal & Runner)."""
+"""Submit item tracking numbers to buying-group APIs (Parsefile, USABG, BuyingGroup.com, Deal & Runner, BFMR)."""
 from __future__ import annotations
 
 import logging
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import BuyingGroup, Item, Order, ShipmentItem
 from app.models.item import ItemStatus
+from app.utils.buying_group_apis import bfmr as bfmr_api
 from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
 from app.utils.buying_group_apis import dealandrunner as dealandrunner_api
 from app.utils.buying_group_apis import parsefile as parsefile_api
@@ -86,11 +87,7 @@ def dealandrunner_group_ready(group: BuyingGroup | None) -> tuple[bool, str | No
 
 
 def bfmr_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
-    """Return (ready, error_detail) for BFMR receiving checks (API key + secret).
-
-    Tracking submission is not supported yet; this only validates credentials for
-    ``GET /api/v2/my-tracker``.
-    """
+    """Return (ready, error_detail) for BFMR receiving + tracking submit (API key + secret)."""
     if group is None:
         return False, "Order has no buying group"
     framework = (group.api_framework or "").strip().casefold()
@@ -118,8 +115,7 @@ def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
     if framework == "dealandrunner":
         return dealandrunner_group_ready(group)
     if framework == "bfmr":
-        # Receiving-only for now; do not treat as tracking-submit ready.
-        return False, "BFMR tracking submission is not supported yet"
+        return bfmr_group_ready(group)
     if not framework:
         return False, "Buying group API framework is not configured for submission"
     return False, f"Unsupported buying group API framework: {group.api_framework}"
@@ -331,6 +327,136 @@ def submit_dealandrunner_trackings(
     )
 
 
+def submit_bfmr_trackings(
+    group: BuyingGroup,
+    entries: Sequence[bfmr_api.BfmrTrackingEntry],
+) -> bfmr_api.BfmrSubmitResult:
+    ready, reason = bfmr_group_ready(group)
+    if not ready:
+        raise ValueError(reason or "Buying group API is not configured")
+    if not entries:
+        raise ValueError("At least one tracking entry is required")
+    return bfmr_api.submit_trackings(
+        base_url=group.base_url,
+        api_key=str(group.api_username),
+        api_secret=str(group.api_password),
+        trackings=list(entries),
+    )
+
+
+def _bfmr_qty_for_items(items: Sequence[Item], *, cap: int | None) -> int:
+    total = sum(max(int(item.quantity or 1), 1) for item in items)
+    if cap is not None and cap > 0:
+        return max(min(total, cap), 1)
+    return max(total, 1)
+
+
+def build_bfmr_entry_from_purchase(
+    purchase: bfmr_api.BfmrTrackerRow,
+    *,
+    tracking: str,
+    items: Sequence[Item],
+) -> bfmr_api.BfmrTrackingEntry:
+    """Create-shipment entry for a purchased BFMR row (SID null)."""
+    rid = (purchase.reserve_id or "").strip()
+    pid = (purchase.purchase_id or "").strip()
+    order_no = (purchase.order_id or "").strip()
+    tn = (tracking or "").strip()
+    if not rid or not pid or not order_no or not tn:
+        raise ValueError("BFMR purchase is missing reserve_id, purchase_id, order_id, or tracking")
+    return bfmr_api.BfmrTrackingEntry(
+        reserve_id=rid,
+        purchase_id=pid,
+        order_no=order_no,
+        tracking_number=tn,
+        qty=_bfmr_qty_for_items(items, cap=purchase.qty),
+        shipment_id=None,
+    )
+
+
+def _fetch_bfmr_purchases_needing_tracking(
+    group: BuyingGroup,
+) -> dict[str, bfmr_api.BfmrTrackerRow]:
+    """order_id.casefold() → BFMR purchase row still needing tracking."""
+    fetched = bfmr_api.list_purchases_needing_tracking(
+        base_url=group.base_url,
+        api_key=str(group.api_username),
+        api_secret=str(group.api_password),
+    )
+    return bfmr_api.index_purchases_needing_tracking_by_order(fetched.rows)
+
+
+def _aggregate_bfmr_entries(
+    pending: Sequence[tuple[Item, Order, str]],
+    purchases_by_order: dict[str, bfmr_api.BfmrTrackerRow],
+) -> tuple[
+    list[bfmr_api.BfmrTrackingEntry],
+    list[tuple[Item, Order, str]],
+    list[str],
+]:
+    """Build BFMR create-shipment entries for pending items that match a purchase.
+
+    Returns ``(entries, matched_pending, skip_notes)``.
+    Multiple trackings on one purchase get one entry each with qty split by items;
+    remaining BFMR qty is capped per purchase across those entries.
+    """
+    # Group pending by (order_id.casefold(), tracking)
+    by_order_tn: OrderedDict[tuple[str, str], list[tuple[Item, Order]]] = OrderedDict()
+    skip_notes: list[str] = []
+    unmatched_orders: set[str] = set()
+
+    for item, order, tracking in pending:
+        store_order = (order.store_order_number or "").strip()
+        if not store_order:
+            skip_notes.append(f"item {item.id}: order has no store order number")
+            continue
+        okey = store_order.casefold()
+        if okey not in purchases_by_order:
+            unmatched_orders.add(store_order)
+            continue
+        tn = (tracking or "").strip()
+        if not tn:
+            continue
+        by_order_tn.setdefault((okey, tn), []).append((item, order))
+
+    for store_order in sorted(unmatched_orders):
+        skip_notes.append(f"No BFMR purchase needing tracking for order {store_order}")
+
+    # Remaining qty capacity per purchase (mutated as we allocate).
+    remaining_qty: dict[str, int] = {}
+    for okey, row in purchases_by_order.items():
+        cap = int(row.qty) if row.qty is not None and int(row.qty) > 0 else None
+        remaining_qty[okey] = cap if cap is not None else 10**9
+
+    entries: list[bfmr_api.BfmrTrackingEntry] = []
+    matched: list[tuple[Item, Order, str]] = []
+    for (okey, tn), pairs in by_order_tn.items():
+        purchase = purchases_by_order.get(okey)
+        if purchase is None:
+            continue
+        left = remaining_qty.get(okey, 0)
+        if left < 1:
+            skip_notes.append(
+                f"BFMR purchase qty exhausted for order {purchase.order_id} (tracking {tn})"
+            )
+            continue
+        items = [item for item, _order in pairs]
+        want = sum(max(int(item.quantity or 1), 1) for item in items)
+        qty = max(min(want, left), 1)
+        try:
+            entry = build_bfmr_entry_from_purchase(purchase, tracking=tn, items=items)
+        except ValueError as exc:
+            skip_notes.append(str(exc))
+            continue
+        entry.qty = qty
+        remaining_qty[okey] = left - qty
+        entries.append(entry)
+        for item, order in pairs:
+            matched.append((item, order, tn))
+
+    return entries, matched, skip_notes
+
+
 def find_shipped_items_sharing_tracking(
     db: Session,
     *,
@@ -458,6 +584,50 @@ def submit_item_tracking_to_group(
             message=result.message,
             affected=result.affected,
             item_ids=item_ids,
+            submission_ids_by_tracking=ids_map,
+        )
+    if framework == "bfmr":
+        store_order = (order.store_order_number or "").strip()
+        if not store_order:
+            raise ValueError("Order has no store order number to match a BFMR purchase")
+        purchases = _fetch_bfmr_purchases_needing_tracking(group)
+        purchase = purchases.get(store_order.casefold())
+        if purchase is None:
+            raise ValueError(
+                f"No BFMR purchase needing tracking for order {store_order}"
+            )
+        # Only count siblings on the same store order (BFMR purchase is per order_id).
+        order_key = store_order.casefold()
+        same_order_pairs = [
+            (it, ord_)
+            for it, ord_ in pairs
+            if ((ord_.store_order_number or "").strip().casefold() == order_key)
+        ]
+        if not same_order_pairs:
+            same_order_pairs = [(item, order)]
+        same_order_items = [it for it, _ord in same_order_pairs]
+        entry = build_bfmr_entry_from_purchase(
+            purchase,
+            tracking=tracking,
+            items=same_order_items,
+        )
+        result = submit_bfmr_trackings(group, [entry])
+        if result.failed and tracking.casefold() in {t.casefold() for t in result.failed}:
+            raise RuntimeError(result.message or "BFMR tracking submit failed")
+        ids_map = {
+            tn: (display, api)
+            for tn, (display, api) in (result.submission_ids or {}).items()
+            if display or api
+        }
+        # Prefer my_tracker_id as display when available.
+        display = (purchase.my_tracker_id or purchase.purchase_id or "").strip() or None
+        api_id = (purchase.purchase_id or "").strip() or None
+        if tracking not in ids_map and (display or api_id):
+            ids_map[tracking] = (display, api_id)
+        return SubmitResult(
+            message=result.message,
+            affected=result.affected,
+            item_ids=[it.id for it in same_order_items],
             submission_ids_by_tracking=ids_map,
         )
     raise ValueError("Buying group API framework is not configured for submission")
@@ -844,6 +1014,71 @@ def batch_submit_pending_trackings(
                 for tn, sid in (api_result.submission_ids or {}).items()
                 if sid
             }
+        elif framework == "bfmr":
+            base_url = group.base_url
+            api_key = str(group.api_username)
+            api_secret = str(group.api_password)
+            purchases_by_order = bfmr_api.index_purchases_needing_tracking_by_order(
+                bfmr_api.list_purchases_needing_tracking(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                ).rows
+            )
+            entries, matched_pending, skip_notes = _aggregate_bfmr_entries(
+                pending, purchases_by_order
+            )
+            if not entries:
+                skip_msg = "; ".join(skip_notes) if skip_notes else (
+                    f"No matching BFMR purchases needing tracking "
+                    f"({shipped_count} shipped item(s) with tracking)."
+                )
+                return BatchSubmitResult(
+                    buying_group_id=buying_group_id,
+                    buying_group_name=group_name,
+                    shipped_count=shipped_count,
+                    missing_tracking_count=missing_tracking,
+                    message=skip_msg,
+                )
+            tracking_numbers = [e.tracking_number for e in entries]
+            item_ids = [item.id for item, _order, _tn in matched_pending]
+            item_tracking = {
+                item.id: tracking for item, _order, tracking in matched_pending
+            }
+            api_result = bfmr_api.submit_trackings(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                trackings=entries,
+            )
+            message = api_result.message
+            if skip_notes:
+                message = f"{message}\n" + "\n".join(skip_notes) if message else "\n".join(skip_notes)
+            ok_tns = {tn.casefold() for tn in api_result.succeeded}
+            if ok_tns and api_result.failed:
+                item_ids = [
+                    item.id
+                    for item, _order, tracking in matched_pending
+                    if (tracking or "").strip().casefold() in ok_tns
+                ]
+            if api_result.failed and not item_ids:
+                raise RuntimeError(api_result.message or "BFMR tracking submit failed")
+            # Enrich submission ids with my_tracker_id when we still have the purchase.
+            submission_ids_by_tracking = {}
+            for tn, (display, api) in (api_result.submission_ids or {}).items():
+                submission_ids_by_tracking[tn] = (display, api)
+            for entry in entries:
+                tn = entry.tracking_number
+                if tn.casefold() not in ok_tns:
+                    continue
+                purchase = purchases_by_order.get(entry.order_no.casefold())
+                display = None
+                if purchase is not None:
+                    display = (purchase.my_tracker_id or purchase.purchase_id or "").strip() or None
+                api = (entry.purchase_id or "").strip() or None
+                if tn not in submission_ids_by_tracking or display:
+                    prev = submission_ids_by_tracking.get(tn, (None, None))
+                    submission_ids_by_tracking[tn] = (display or prev[0], api or prev[1])
         else:
             return BatchSubmitResult(
                 buying_group_id=buying_group_id,

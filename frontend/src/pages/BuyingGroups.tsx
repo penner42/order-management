@@ -35,7 +35,8 @@ function supportsTrackingSubmit(framework: string | null | undefined): boolean {
     framework === 'parsefile' ||
     framework === 'usabg' ||
     framework === 'buyinggroup' ||
-    framework === 'dealandrunner'
+    framework === 'dealandrunner' ||
+    framework === 'bfmr'
   )
 }
 

@@ -1029,9 +1029,11 @@ export default function Orders() {
     if (
       bg.api_framework === 'usabg' ||
       bg.api_framework === 'buyinggroup' ||
-      bg.api_framework === 'dealandrunner'
+      bg.api_framework === 'dealandrunner' ||
+      bg.api_framework === 'bfmr'
     ) {
-      // Blank base_url uses the framework default; login uses username/password.
+      // Blank base_url uses the framework default; login uses username/password
+      // (BFMR stores API-KEY / API-SECRET in those fields).
       return Boolean(bg.api_username?.trim()) && Boolean(bg.api_password?.trim())
     }
     return false
