@@ -1,4 +1,4 @@
-"""Deal & Runner (api.dealandrunner.com) tracking submission client.
+"""Deal & Runner (api.dealandrunner.com) tracking + receiving client.
 
 Flow (aligned with dealsbot dealandrunner auth):
 1. Login via ``POST /account/login`` (email/password → bearer token). Cache token.
@@ -6,6 +6,7 @@ Flow (aligned with dealsbot dealandrunner auth):
 3. On 401, re-login once and retry. On batch HTTP 400, fall back to per-TN POSTs.
 4. Duplicate TN (``4004000035``) counts as success for that number.
 5. Look up row ``id`` via ``GET /tracking`` after submit for submission_id.
+6. Receiving: paginate ``GET /balanace-reports/runner-transactions`` (API typo preserved).
 """
 from __future__ import annotations
 
@@ -17,12 +18,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, TypeVar
 
 
 DEFAULT_BASE_URL = "https://api.dealandrunner.com"
 LOGIN_PATH = "/account/login"
 TRACKING_PATH = "/tracking"
+# Upstream path is misspelled ("balanace"); do not "fix" it.
+RUNNER_TRANSACTIONS_PATH = "/balanace-reports/runner-transactions"
 
 _SITE_ORIGIN = "https://portal.dealandrunner.com"
 _BROWSER_USER_AGENT = (
@@ -33,10 +37,15 @@ _BROWSER_USER_AGENT = (
 DUPLICATE_TN_CODE = "4004000035"
 CREATE_SUCCESS_CODE = "2004000007"
 
+_DEFAULT_TX_PAGE_SIZE = 100
+_MAX_TX_PAGES = 500
+
 _T = TypeVar("_T")
 
 # Process-local bearer tokens keyed by (base_url, email, password hash).
 _token_cache: dict[tuple[str, str, str], str] = {}
+# Optional runner/owner UUID resolved from login (same key as token cache).
+_owner_cache: dict[tuple[str, str, str], str | None] = {}
 _token_lock = threading.Lock()
 
 
@@ -62,6 +71,30 @@ class DealandrunnerSubmitResult:
     failed: list[str] = field(default_factory=list)
     # tracking number -> remote row id
     submission_ids: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class DealandrunnerReceivedRow:
+    """One runner-transactions ledger line (typically qty 1 at the warehouse)."""
+
+    tracking_numbers: list[str]
+    amount: Decimal | None
+    product_name: str | None
+    system_transaction_id: str | None
+    timestamp: str | None
+    owner_id: str | None = None
+    reference_warehouse_item_id: str | None = None
+    entry_type_id: int | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DealandrunnerRunnerTransactionsResult:
+    rows: list[DealandrunnerReceivedRow]
+    page_count: int = 0
+    total_records: int = 0
+    request_urls: list[str] = field(default_factory=list)
+    owner_id: str | None = None
 
 
 class _SessionExpired(RuntimeError):
@@ -172,13 +205,48 @@ def _token_from_login_payload(raw: dict[str, Any]) -> str | None:
     return None
 
 
-def login(
+def _owner_id_from_payload(raw: dict[str, Any]) -> str | None:
+    """Best-effort runner/owner UUID from login or transaction payloads."""
+
+    def _from_obj(obj: dict[str, Any]) -> str | None:
+        for key in (
+            "ownerId",
+            "referenceRunnerId",
+            "runnerId",
+            "userId",
+            "id",
+        ):
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip() and val.strip() != "00000000-0000-0000-0000-000000000000":
+                return val.strip()
+        owners = obj.get("ownerIds")
+        if isinstance(owners, list):
+            for val in owners:
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        user = obj.get("user")
+        if isinstance(user, dict):
+            nested = _from_obj(user)
+            if nested:
+                return nested
+        return None
+
+    result = raw.get("result")
+    if isinstance(result, dict):
+        found = _from_obj(result)
+        if found:
+            return found
+    return _from_obj(raw)
+
+
+def _login_raw(
     *,
     base_url: str | None,
     email: str,
     password: str,
     timeout_seconds: float = 30.0,
-) -> str:
+) -> tuple[str, str | None]:
+    """Login and return (bearer_token, owner_id_or_none)."""
     if not (email or "").strip():
         raise ValueError("email is required")
     if not (password or "").strip():
@@ -219,7 +287,46 @@ def login(
     token = _token_from_login_payload(raw)
     if not token:
         raise RuntimeError("Deal & Runner login succeeded but no access token returned")
+    return token, _owner_id_from_payload(raw)
+
+
+def login(
+    *,
+    base_url: str | None,
+    email: str,
+    password: str,
+    timeout_seconds: float = 30.0,
+) -> str:
+    token, _owner = _login_raw(
+        base_url=base_url,
+        email=email,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
     return token
+
+
+def _store_session(
+    key: tuple[str, str, str],
+    *,
+    token: str,
+    owner_id: str | None,
+    stale_token: str | None = None,
+) -> str:
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached and (stale_token is None or cached != stale_token):
+            return cached
+        _token_cache[key] = token
+        # Only overwrite owner when login provided one (preserve prior if None).
+        if owner_id or key not in _owner_cache:
+            _owner_cache[key] = owner_id
+        return token
+
+
+def _cached_owner_id(key: tuple[str, str, str]) -> str | None:
+    with _token_lock:
+        return _owner_cache.get(key)
 
 
 def _ensure_token(
@@ -234,18 +341,13 @@ def _ensure_token(
         cached = _token_cache.get(key)
         if cached:
             return cached
-    token = login(
+    token, owner_id = _login_raw(
         base_url=base_url,
         email=email,
         password=password,
         timeout_seconds=timeout_seconds,
     )
-    with _token_lock:
-        cached = _token_cache.get(key)
-        if cached:
-            return cached
-        _token_cache[key] = token
-        return token
+    return _store_session(key, token=token, owner_id=owner_id)
 
 
 def _rellogin_token(
@@ -262,18 +364,14 @@ def _rellogin_token(
         if cached and cached != stale_token:
             return cached
         _token_cache.pop(key, None)
-    token = login(
+        _owner_cache.pop(key, None)
+    token, owner_id = _login_raw(
         base_url=base_url,
         email=email,
         password=password,
         timeout_seconds=timeout_seconds,
     )
-    with _token_lock:
-        cached = _token_cache.get(key)
-        if cached and cached != stale_token:
-            return cached
-        _token_cache[key] = token
-        return token
+    return _store_session(key, token=token, owner_id=owner_id, stale_token=stale_token)
 
 
 def _with_relogin(
@@ -630,4 +728,215 @@ def submit_trackings(
         duplicates=duplicates,
         failed=failed,
         submission_ids=submission_ids,
+    )
+
+
+def _parse_decimal(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value).strip())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _tracking_numbers_from_tx(row: dict[str, Any]) -> list[str]:
+    numbers: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        if raw is None:
+            return
+        text = str(raw).strip()
+        if not text:
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        numbers.append(text)
+
+    tns_raw = row.get("trackingNumbers")
+    if isinstance(tns_raw, list):
+        for val in tns_raw:
+            _add(val)
+    elif isinstance(tns_raw, str):
+        _add(tns_raw)
+    for key in ("trackingNumber", "tracking", "number"):
+        _add(row.get(key))
+    return numbers
+
+
+def _parse_received_row(row: dict[str, Any]) -> DealandrunnerReceivedRow | None:
+    tracking_numbers = _tracking_numbers_from_tx(row)
+    if not tracking_numbers:
+        return None
+
+    system_tx = row.get("systemTransactionId")
+    system_transaction_id = (
+        str(system_tx).strip()
+        if system_tx is not None and str(system_tx).strip()
+        else None
+    )
+    # Ignore the always-zero ``id`` field; warehouse item id is a fallback receipt key.
+    if not system_transaction_id:
+        wh = row.get("referenceWarehouseItemId")
+        if wh is not None and str(wh).strip():
+            system_transaction_id = str(wh).strip()
+
+    product = row.get("productName")
+    product_name = str(product).strip() if product is not None and str(product).strip() else None
+
+    ts = row.get("timestamp")
+    timestamp = str(ts).strip() if ts is not None and str(ts).strip() else None
+
+    owner = row.get("ownerId") or row.get("referenceRunnerId")
+    owner_id = str(owner).strip() if owner is not None and str(owner).strip() else None
+
+    wh_item = row.get("referenceWarehouseItemId")
+    warehouse_item_id = (
+        str(wh_item).strip() if wh_item is not None and str(wh_item).strip() else None
+    )
+
+    entry_raw = row.get("entryTypeId")
+    entry_type_id: int | None
+    try:
+        entry_type_id = int(entry_raw) if entry_raw is not None else None
+    except (TypeError, ValueError):
+        entry_type_id = None
+
+    return DealandrunnerReceivedRow(
+        tracking_numbers=tracking_numbers,
+        amount=_parse_decimal(row.get("amount")),
+        product_name=product_name,
+        system_transaction_id=system_transaction_id,
+        timestamp=timestamp,
+        owner_id=owner_id,
+        reference_warehouse_item_id=warehouse_item_id,
+        entry_type_id=entry_type_id,
+        raw=row,
+    )
+
+
+def _pagination_meta(raw: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, int, int]:
+    """Return (items, has_next_page, page_count, total_records)."""
+    result = raw.get("result")
+    items: list[dict[str, Any]] = []
+    has_next = False
+    page_count = 0
+    total_records = 0
+    if isinstance(result, dict):
+        raw_items = result.get("items")
+        if isinstance(raw_items, list):
+            items = [i for i in raw_items if isinstance(i, dict)]
+        has_next = bool(result.get("hasNextPage"))
+        try:
+            page_count = int(result.get("pageCount") or 0)
+        except (TypeError, ValueError):
+            page_count = 0
+        try:
+            total_records = int(result.get("totalRecords") or 0)
+        except (TypeError, ValueError):
+            total_records = 0
+    return items, has_next, page_count, total_records
+
+
+def list_runner_transactions(
+    *,
+    base_url: str | None,
+    email: str,
+    password: str,
+    owner_id: str | None = None,
+    page_size: int = _DEFAULT_TX_PAGE_SIZE,
+    timeout_seconds: float = 30.0,
+) -> DealandrunnerRunnerTransactionsResult:
+    """Paginate runner balance transactions; keep rows that have tracking numbers.
+
+    Each API item is typically one warehouse unit (qty 1), not a grouped quantity.
+    """
+    if not (email or "").strip():
+        raise ValueError("email is required")
+    if not (password or "").strip():
+        raise ValueError("password is required")
+
+    base = resolve_base_url(base_url)
+    key = _cache_key(base, email, password)
+    token = _ensure_token(
+        base_url=base,
+        email=email,
+        password=password,
+        timeout_seconds=timeout_seconds,
+    )
+    resolved_owner = (owner_id or "").strip() or _cached_owner_id(key)
+    size = max(1, min(int(page_size or _DEFAULT_TX_PAGE_SIZE), 200))
+
+    all_rows: list[DealandrunnerReceivedRow] = []
+    request_urls: list[str] = []
+    page_count = 0
+    total_records = 0
+    page_number = 1
+
+    while page_number <= _MAX_TX_PAGES:
+        query: dict[str, str] = {
+            "pageNumber": str(page_number),
+            "pageSize": str(size),
+            "orderBy": "timestamp|desc",
+        }
+        if resolved_owner:
+            query["ownerIds"] = resolved_owner
+        url = f"{base}{RUNNER_TRANSACTIONS_PATH}?{urllib.parse.urlencode(query)}"
+        request_urls.append(url)
+
+        def _fetch(tok: str, *, _url: str = url) -> tuple[int, dict[str, Any]]:
+            return _get_json(url=_url, bearer_token=tok, timeout_seconds=timeout_seconds)
+
+        (status, raw), token = _with_relogin(
+            base_url=base,
+            email=email,
+            password=password,
+            token=token,
+            timeout_seconds=timeout_seconds,
+            call=_fetch,
+        )
+        if status != 200:
+            detail = _first_error_description(raw) or f"HTTP {status}"
+            raise RuntimeError(f"Deal & Runner runner-transactions failed: {detail}")
+        errors = _envelope_error_items(raw)
+        if errors:
+            detail = _first_error_description(raw) or "runner-transactions failed"
+            raise RuntimeError(f"Deal & Runner runner-transactions failed: {detail}")
+
+        items, has_next, page_count, total_records = _pagination_meta(raw)
+
+        # Discover ownerId from the first page when login did not provide one.
+        if not resolved_owner:
+            for item in items:
+                cand = _owner_id_from_payload({"result": item}) or (
+                    str(item.get("ownerId") or item.get("referenceRunnerId") or "").strip() or None
+                )
+                if cand:
+                    resolved_owner = cand
+                    with _token_lock:
+                        _owner_cache[key] = cand
+                    break
+
+        for item in items:
+            parsed = _parse_received_row(item)
+            if parsed is not None:
+                all_rows.append(parsed)
+
+        if not items or not has_next:
+            break
+        if page_count > 0 and page_number >= page_count:
+            break
+        page_number += 1
+
+    return DealandrunnerRunnerTransactionsResult(
+        rows=all_rows,
+        page_count=page_count,
+        total_records=total_records,
+        request_urls=request_urls,
+        owner_id=resolved_owner,
     )

@@ -44,7 +44,8 @@ function supportsCheckReceiving(framework: string | null | undefined): boolean {
     framework === 'parsefile' ||
     framework === 'buyinggroup' ||
     framework === 'bfmr' ||
-    framework === 'usabg'
+    framework === 'usabg' ||
+    framework === 'dealandrunner'
   )
 }
 
