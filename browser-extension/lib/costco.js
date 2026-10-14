@@ -41,7 +41,25 @@
     return []
   }
 
-  function collectShipmentsFromCostcoLineItem(lineItem, shipmentsById) {
+  function isCostcoLogisticsCarrier(carrierName) {
+    const name = coerceString(carrierName)
+    return !!(name && name.trim().toLowerCase() === 'costco logistics')
+  }
+
+  function resolveCostcoTrackingNumber(shipment, orderNumber) {
+    const jsonTracking = coerceString(shipment && shipment.trackingNumber)
+    if (!isCostcoLogisticsCarrier(shipment && shipment.carrierName)) {
+      return jsonTracking || null
+    }
+    const orderId =
+      coerceString(orderNumber) ||
+      coerceString(shipment && shipment.orderNumber) ||
+      null
+    if (orderId && orderId.trim()) return orderId.trim()
+    return jsonTracking || null
+  }
+
+  function collectShipmentsFromCostcoLineItem(lineItem, shipmentsById, orderNumber) {
     const shipmentSlices = []
     const shipments = coerceShipmentArray(lineItem && lineItem.shipment)
     const itemStatus =
@@ -55,7 +73,7 @@
         coerceString(s.trackingNumber)
       if (!shipmentId) continue
 
-      const trackingNumber = coerceString(s.trackingNumber)
+      const trackingNumber = resolveCostcoTrackingNumber(s, orderNumber)
       const trackingUrl = coerceString(s.trackingSiteUrl)
       const deliveredDate = normalizeIsoOrNull(s.deliveredDate)
       const estimatedArrivalDate = normalizeIsoOrNull(s.estimatedArrivalDate)
@@ -208,7 +226,7 @@
       const qty = safeNumber(it.quantity)
       const unitPrice = safeNumber(it.price)
       const lineTotal = safeNumber(it.merchandiseTotalAmount)
-      const shipmentSlices = collectShipmentsFromCostcoLineItem(it, shipmentsById)
+      const shipmentSlices = collectShipmentsFromCostcoLineItem(it, shipmentsById, orderNumber)
 
       items.push({
         logicalItemId,
@@ -298,7 +316,7 @@
         lineTotal: safeNumber(it.merchandiseTotalAmount),
         itemNumber: coerceString(it.itemNumber) || null,
         itemDescription: coerceString(it.itemDescription) || null,
-        shipmentSlices: collectShipmentsFromCostcoLineItem(it, shipmentsById),
+        shipmentSlices: collectShipmentsFromCostcoLineItem(it, shipmentsById, orderNumber),
       }
     }
 
@@ -426,7 +444,7 @@
           (item.lineNumber != null ? String(item.lineNumber) : null) ||
           null
 
-        const shipmentSlices = collectShipmentsFromCostcoLineItem(item, shipmentsById)
+        const shipmentSlices = collectShipmentsFromCostcoLineItem(item, shipmentsById, orderNumber)
 
         itemsList.push({
           logicalItemId,

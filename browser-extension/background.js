@@ -671,7 +671,12 @@ function normalizeCostcoOrdersGraphqlPayloadFallback(graphqlPayload, sourceUrl) 
           coerceString(s.trackingNumber);
         if (!shipmentId) continue;
 
-        const trackingNumber = coerceString(s.trackingNumber);
+        const carrierName = coerceString(s.carrierName);
+        const isCostcoLogistics =
+          !!(carrierName && carrierName.trim().toLowerCase() === "costco logistics");
+        const trackingNumber = isCostcoLogistics
+          ? String(orderNumber).trim()
+          : coerceString(s.trackingNumber);
         const trackingUrl = coerceString(s.trackingSiteUrl);
 
         const deliveredDate = normalizeIsoOrNull(s.deliveredDate);
