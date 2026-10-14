@@ -516,7 +516,8 @@ class DealandrunnerSoftMatchTests(unittest.TestCase):
         )
         self.assertEqual(assignment, {})
 
-    def test_soft_match_ambiguous_two_similar_items(self) -> None:
+    def test_soft_match_two_items_share_scarce_lot(self) -> None:
+        """Two similar items may both claim one lot; allocation fills what supply allows."""
         lots = _dnr_lots_from_receipts(
             [
                 _tx(
@@ -550,8 +551,104 @@ class DealandrunnerSoftMatchTests(unittest.TestCase):
             ],
             lots=lots,
         )
-        # Near-identical scores for the same lot → skip rather than guess.
-        self.assertEqual(assignment, {})
+        self.assertEqual(assignment.get(1), lots[0]["lot_id"])
+        self.assertEqual(assignment.get(2), lots[0]["lot_id"])
+
+        supply = {lots[0]["lot_id"]: 1}
+        allocated, _allocated_by_lot = _allocate_received_across_shared_trackings(
+            item_demands=[
+                (1, 1, [assignment[1]]),
+                (2, 1, [assignment[2]]),
+            ],
+            supply_by_tn=supply,
+        )
+        self.assertEqual(sum(allocated.values()), 1)
+        self.assertEqual({allocated.get(1, 0), allocated.get(2, 0)}, {0, 1})
+
+    def test_soft_match_qty1_and_qty3_share_merged_lpn_pool(self) -> None:
+        """Prod-shaped case: qty 1 + qty 3 Walmart lines vs four $69.11 LPN scans."""
+        lpn_tns = [
+            "035414608074528836",
+            "035414608074578838",
+            "035414608074528836",
+            "035414608074565316",
+        ]
+        raw_lots = _dnr_lots_from_receipts(
+            [
+                _tx(
+                    name=(
+                        "Logitech G PRO X Superlight 2 SE Wireless Gaming Mouse "
+                        "with 5 Programm"
+                    ),
+                    amount="69.11",
+                    tn=tn,
+                    system_tx=f"lpn-{i}",
+                )
+                for i, tn in enumerate(lpn_tns)
+            ]
+        )
+        for lot in raw_lots:
+            lot["source_tns"] = [lot["tn_key"]]
+        merged = _merge_fungible_orphan_lots(raw_lots)
+        self.assertEqual(len(merged), 1)
+        # Duplicate LPN collapses in lot merge key by TN at receipt stage; three
+        # distinct TNs → qty 3 from unique TNs, or 4 if dup kept as separate rows.
+        self.assertGreaterEqual(merged[0]["qty"], 3)
+
+        om_name = "Logitech G PRO X SUPERLIGHT 2 SE Gaming Mouse 8000"
+        item_one = _item(item_id=1, qty=1, description=om_name, price_sold="69.00")
+        item_three = _item(item_id=2, qty=3, description=om_name, price_sold="69.00")
+        order_one = _order(
+            order_id=10,
+            store_order_number="200015679743328",
+            store_name="Walmart",
+        )
+        order_three = _order(
+            order_id=11,
+            store_order_number="200015519785311",
+            store_name="Walmart",
+        )
+        assignment = _soft_assign_orphan_dnr_lots(
+            claimants=[
+                (item_one, order_one, [order_one.store_order_number]),
+                (item_three, order_three, [order_three.store_order_number]),
+            ],
+            lots=merged,
+        )
+        self.assertEqual(assignment.get(1), merged[0]["lot_id"])
+        self.assertEqual(assignment.get(2), merged[0]["lot_id"])
+
+        # Force pool qty 4 to mirror four D&R scan lines (including duplicate LPN).
+        merged[0]["qty"] = 4
+        supply = {merged[0]["lot_id"]: 4}
+        allocated, allocated_by_lot = _allocate_received_across_shared_trackings(
+            item_demands=[
+                (1, 1, [assignment[1]]),
+                (2, 3, [assignment[2]]),
+            ],
+            supply_by_tn=supply,
+        )
+        self.assertEqual(allocated[1], 1)
+        self.assertEqual(allocated[2], 3)
+
+        meta = {merged[0]["lot_id"]: _lot_as_match_meta(merged[0])}
+        matches = []
+        for item, order in (
+            (item_one, order_one),
+            (item_three, order_three),
+        ):
+            matches.extend(
+                _matches_for_tn_allocations(
+                    item=item,
+                    order=order,
+                    trackings=[order.store_order_number],
+                    tn_allocations=allocated_by_lot.get(item.id, []),
+                    meta_by_tn=meta,
+                )
+            )
+        by_item = {m.item_id: m for m in matches if m.match_kind == "received"}
+        self.assertEqual(by_item[1].quantity, 1)
+        self.assertEqual(by_item[2].quantity, 3)
 
     def test_fungible_lpns_merge_and_soft_match(self) -> None:
         """Multiple store LPNs for the same product must not block soft-match."""

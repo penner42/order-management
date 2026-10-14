@@ -1202,18 +1202,19 @@ def _soft_assign_orphan_dnr_lots(
     claimants: list[tuple[Item, Order, list[str]]],
     lots: list[dict[str, Any]],
 ) -> dict[int, str]:
-    """Greedy unique item→lot map for orphan warehouse TNs (Walmart soft-match).
+    """Map items → soft lots for orphan warehouse TNs (Walmart soft-match).
 
     Callers should pass lots already merged by product/price when LPNs differ.
     Within-item ties across fungible (same product key) lots pick one lot; ties
-    across different products still skip. Cross-item ties on one lot skip.
+    across different products still skip. Multiple items may share one soft lot;
+    scarce supply is split later by ``_allocate_received_across_shared_trackings``.
     """
     if not claimants or not lots:
         return {}
 
     lots_by_id = {lot["lot_id"]: lot for lot in lots}
 
-    candidates: list[tuple[tuple[float, float], int, str]] = []
+    assignment: dict[int, str] = {}
     for item, _order, _trackings in claimants:
         ranked_for_item: list[tuple[tuple[float, float], str]] = []
         for lot in lots:
@@ -1237,32 +1238,7 @@ def _soft_assign_orphan_dnr_lots(
             break
         if second_score is not None and _scores_ambiguous(best_score, second_score):
             continue
-        candidates.append((best_score, item.id, best_lot_id))
-
-    # Global greedy: highest score first; each item and lot used once.
-    # Detect cross-item ambiguity on the same lot (two items with near-tied scores).
-    by_lot: dict[str, list[tuple[tuple[float, float], int]]] = {}
-    for score, item_id, lot_id in candidates:
-        by_lot.setdefault(lot_id, []).append((score, item_id))
-
-    assignment: dict[int, str] = {}
-    used_items: set[int] = set()
-    used_lots: set[str] = set()
-    ordered = sorted(candidates, key=lambda c: (c[0][0], c[0][1]), reverse=True)
-    for score, item_id, lot_id in ordered:
-        if item_id in used_items or lot_id in used_lots:
-            continue
-        rivals = by_lot.get(lot_id) or []
-        rival_scores = [
-            (s, iid) for s, iid in rivals if iid != item_id and iid not in used_items
-        ]
-        if rival_scores:
-            rival_scores.sort(key=lambda pair: (pair[0][0], pair[0][1]), reverse=True)
-            if _scores_ambiguous(score, rival_scores[0][0]):
-                continue
-        assignment[item_id] = lot_id
-        used_items.add(item_id)
-        used_lots.add(lot_id)
+        assignment[item.id] = best_lot_id
     return assignment
 
 
