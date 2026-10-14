@@ -22,6 +22,7 @@ from app.utils.buying_group_apis.check_receiving import (  # noqa: E402
     _is_walmart_order,
     _lot_as_match_meta,
     _matches_for_tn_allocations,
+    _merge_fungible_orphan_lots,
     _soft_assign_orphan_dnr_lots,
     _tracking_aliases_from_notes,
     append_warehouse_tracking_note,
@@ -551,6 +552,65 @@ class DealandrunnerSoftMatchTests(unittest.TestCase):
         )
         # Near-identical scores for the same lot → skip rather than guess.
         self.assertEqual(assignment, {})
+
+    def test_fungible_lpns_merge_and_soft_match(self) -> None:
+        """Multiple store LPNs for the same product must not block soft-match."""
+        raw_lots = _dnr_lots_from_receipts(
+            [
+                _tx(
+                    name=MOUSE_NAME,
+                    amount="69.00",
+                    tn=LPN_STORE_3541,
+                    system_tx="lpn-1",
+                ),
+                _tx(
+                    name=MOUSE_NAME,
+                    amount="69.00",
+                    tn=LPN_STORE_5678,
+                    system_tx="lpn-2",
+                ),
+            ]
+        )
+        for lot in raw_lots:
+            lot["source_tns"] = [lot["tn_key"]]
+        merged = _merge_fungible_orphan_lots(raw_lots)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["qty"], 2)
+        self.assertEqual(
+            set(merged[0]["source_tns"]),
+            {LPN_STORE_3541.casefold(), LPN_STORE_5678.casefold()},
+        )
+
+        item = _item(
+            item_id=1, qty=1, description=MOUSE_NAME, price_sold="69.00"
+        )
+        order = _order(
+            order_id=10,
+            store_order_number="200015679743328",
+            store_name="Walmart.com",
+        )
+        self.assertTrue(_is_walmart_order(order))
+        assignment = _soft_assign_orphan_dnr_lots(
+            claimants=[(item, order, [order.store_order_number])],
+            lots=merged,
+        )
+        self.assertEqual(assignment.get(1), merged[0]["lot_id"])
+
+        supply = {merged[0]["lot_id"]: int(merged[0]["qty"])}
+        allocated, allocated_by_lot = _allocate_received_across_shared_trackings(
+            item_demands=[(1, 1, [assignment[1]])],
+            supply_by_tn=supply,
+        )
+        self.assertEqual(allocated[1], 1)
+        matches = _matches_for_tn_allocations(
+            item=item,
+            order=order,
+            trackings=[order.store_order_number],
+            tn_allocations=allocated_by_lot.get(1, []),
+            meta_by_tn={merged[0]["lot_id"]: _lot_as_match_meta(merged[0])},
+        )
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].quantity, 1)
 
     def test_soft_match_ignores_non_walmart_order(self) -> None:
         order = _order(

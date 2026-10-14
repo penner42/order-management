@@ -1131,7 +1131,7 @@ def _is_soft_matchable_warehouse_tn(tn: str | None) -> bool:
 def _is_walmart_order(order: Order) -> bool:
     store = getattr(order, "store", None)
     name = getattr(store, "name", None) if store is not None else None
-    return (name or "").strip().casefold() == "walmart"
+    return "walmart" in (name or "").strip().casefold()
 
 
 def _score_item_to_lot_soft(
@@ -1151,14 +1151,67 @@ def _score_item_to_lot_soft(
     return (float(LOT_PRICE_TOLERANCE - delta), name_score)
 
 
+def _soft_lot_product_key(lot: dict[str, Any]) -> tuple[str, str]:
+    """Fungible soft-lot key: same unit price + product name."""
+    price = str(_money(lot.get("unit_price")) if lot.get("unit_price") is not None else "")
+    name = (lot.get("received_item") or "").strip().casefold()[:120]
+    return (price, name)
+
+
+def _merge_fungible_orphan_lots(lots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse same-product / same-price orphan LPNs into one supply pool.
+
+    D&R store barcodes are unique per package, so identical products arrive as
+    many qty-1 lots. Without merging, soft-assign treats them as ambiguous ties
+    and skips every claimant.
+    """
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for lot in lots:
+        key = _soft_lot_product_key(lot)
+        existing = merged.get(key)
+        display = (lot.get("display_tn") or "").strip() or lot.get("tn_key")
+        source_tns = list(lot.get("source_tns") or [])
+        if not source_tns and lot.get("tn_key"):
+            source_tns = [lot["tn_key"]]
+        if existing is None:
+            soft = dict(lot)
+            soft["lot_id"] = f"soft:{key[0]}:{abs(hash(key[1])) % 10**10}:{len(order)}"
+            soft["qty"] = int(lot.get("qty") or 0)
+            soft["receipt_ids"] = list(lot.get("receipt_ids") or [])
+            soft["source_tns"] = list(dict.fromkeys(source_tns))
+            soft["alias_tns"] = list(lot.get("alias_tns") or [])
+            if display:
+                soft["display_tn"] = display
+            merged[key] = soft
+            order.append(key)
+            continue
+        existing["qty"] = int(existing.get("qty") or 0) + int(lot.get("qty") or 0)
+        existing["receipt_ids"].extend(list(lot.get("receipt_ids") or []))
+        for tn in source_tns:
+            if tn and tn not in existing["source_tns"]:
+                existing["source_tns"].append(tn)
+        for alias in lot.get("alias_tns") or []:
+            if alias and alias not in existing["alias_tns"]:
+                existing["alias_tns"].append(alias)
+    return [merged[k] for k in order]
+
+
 def _soft_assign_orphan_dnr_lots(
     *,
     claimants: list[tuple[Item, Order, list[str]]],
     lots: list[dict[str, Any]],
 ) -> dict[int, str]:
-    """Greedy unique item→lot map for orphan warehouse TNs (Walmart soft-match)."""
+    """Greedy unique item→lot map for orphan warehouse TNs (Walmart soft-match).
+
+    Callers should pass lots already merged by product/price when LPNs differ.
+    Within-item ties across fungible (same product key) lots pick one lot; ties
+    across different products still skip. Cross-item ties on one lot skip.
+    """
     if not claimants or not lots:
         return {}
+
+    lots_by_id = {lot["lot_id"]: lot for lot in lots}
 
     candidates: list[tuple[tuple[float, float], int, str]] = []
     for item, _order, _trackings in claimants:
@@ -1172,8 +1225,17 @@ def _soft_assign_orphan_dnr_lots(
             continue
         ranked_for_item.sort(key=lambda pair: (pair[0][0], pair[0][1]), reverse=True)
         best_score, best_lot_id = ranked_for_item[0]
-        second_score = ranked_for_item[1][0] if len(ranked_for_item) > 1 else None
-        if _scores_ambiguous(best_score, second_score):
+        best_lot = lots_by_id.get(best_lot_id) or {}
+        best_key = _soft_lot_product_key(best_lot)
+        # Ignore near-ties that are the same fungible product pool.
+        second_score = None
+        for score, lot_id in ranked_for_item[1:]:
+            other = lots_by_id.get(lot_id) or {}
+            if _soft_lot_product_key(other) == best_key:
+                continue
+            second_score = score
+            break
+        if second_score is not None and _scores_ambiguous(best_score, second_score):
             continue
         candidates.append((best_score, item.id, best_lot_id))
 
@@ -1832,7 +1894,6 @@ def _check_receiving_dealandrunner(
         unmatched_walmart.append((item, order, trackings))
 
     orphan_lots_for_soft: list[dict[str, Any]] = []
-    soft_lots_by_id: dict[str, dict[str, Any]] = {}
     for lot in lots:
         display_tn = (lot.get("display_tn") or "").strip()
         if not _is_soft_matchable_warehouse_tn(display_tn):
@@ -1845,8 +1906,12 @@ def _check_receiving_dealandrunner(
             continue
         soft_lot = dict(lot)
         soft_lot["qty"] = remaining_qty
+        soft_lot["source_tns"] = [tn_key]
         orphan_lots_for_soft.append(soft_lot)
-        soft_lots_by_id[soft_lot["lot_id"]] = soft_lot
+
+    # Same product under different store LPNs → one pooled lot (avoids false ambiguity).
+    orphan_lots_for_soft = _merge_fungible_orphan_lots(orphan_lots_for_soft)
+    soft_lots_by_id = {lot["lot_id"]: lot for lot in orphan_lots_for_soft}
 
     soft_assignment = _soft_assign_orphan_dnr_lots(
         claimants=unmatched_walmart,
@@ -1893,9 +1958,16 @@ def _check_receiving_dealandrunner(
             lot = soft_lots_by_id.get(lot_id) or lots_by_id.get(lot_id)
             if not lot:
                 continue
-            soft_matched_tn_keys.add(lot["tn_key"])
+            # Each source TN is typically one warehouse unit; only mark consumed ones.
+            sources = [
+                str(src).casefold()
+                for src in (lot.get("source_tns") or [lot.get("tn_key")])
+                if src
+            ]
+            for src in sources[: int(qty)]:
+                soft_matched_tn_keys.add(src)
             for alias in lot.get("alias_tns") or []:
-                soft_matched_tn_keys.add(alias)
+                soft_matched_tn_keys.add(str(alias).casefold())
 
     not_found = sum(
         1
