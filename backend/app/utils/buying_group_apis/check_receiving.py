@@ -1058,29 +1058,6 @@ def _tracking_numbers_for_item(db: Session, item: Item) -> list[str]:
     return out
 
 
-def _tracking_numbers_for_order(db: Session, order_id: int) -> list[str]:
-    """All distinct trackings linked to any item on the order (multi-package)."""
-    out: list[str] = []
-    seen: set[str] = set()
-    rows = (
-        db.query(Shipment.tracking_number)
-        .join(ShipmentItem, ShipmentItem.shipment_id == Shipment.id)
-        .join(Item, Item.id == ShipmentItem.item_id)
-        .filter(Item.order_id == order_id)
-        .filter(Shipment.tracking_number.isnot(None))
-        .filter(Shipment.tracking_number != "")
-        .all()
-    )
-    for (raw,) in rows:
-        for tn in _split_tracking_field(raw):
-            key = tn.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(tn)
-    return out
-
-
 def _collect_items_with_trackings(
     db: Session,
     *,
@@ -1089,11 +1066,9 @@ def _collect_items_with_trackings(
 ) -> tuple[list[Item], list[tuple[Item, Order, list[str]]], list[str]]:
     """Return (items, pending triples, unique trackings) for the given statuses.
 
-    Each pending item is matched against:
-    - trackings linked to that item, plus
-    - other trackings on the same order that are not owned by a different
-      pending item (so multi-package orders are fully checked for every
-      framework: Parsefile, BuyingGroup.com, BFMR, USABG).
+    Each pending item is matched only against trackings linked to that item.
+    Sibling / other order packages are never inherited — a warehouse receipt on
+    TN1 must not match an item whose shipments are only TN2 (all frameworks).
     """
     items = (
         db.query(Item)
@@ -1109,9 +1084,9 @@ def _collect_items_with_trackings(
         .all()
     )
 
-    # First pass: item-owned trackings only.
-    owned_by_item: dict[int, list[str]] = {}
-    item_order: dict[int, Order] = {}
+    pending: list[tuple[Item, Order, list[str]]] = []
+    all_trackings: list[str] = []
+    seen_tn: set[str] = set()
     for item in items:
         order = item.order
         if not order:
@@ -1119,55 +1094,7 @@ def _collect_items_with_trackings(
         trackings = _tracking_numbers_for_item(db, item)
         if not trackings:
             continue
-        owned_by_item[item.id] = trackings
-        item_order[item.id] = order
-
-    # Trackings owned by other pending siblings on the same order.
-    owned_by_order: dict[int, dict[int, set[str]]] = {}
-    for item_id, trackings in owned_by_item.items():
-        order = item_order[item_id]
-        owned_by_order.setdefault(order.id, {})[item_id] = {tn.casefold() for tn in trackings}
-
-    order_trackings_cache: dict[int, list[str]] = {}
-    pending: list[tuple[Item, Order, list[str]]] = []
-    for item in items:
-        if item.id not in owned_by_item:
-            continue
-        order = item_order[item.id]
-        owned = owned_by_item[item.id]
-        if order.id not in order_trackings_cache:
-            order_trackings_cache[order.id] = _tracking_numbers_for_order(db, order.id)
-        sibling_owned: set[str] = set()
-        for other_id, keys in owned_by_order.get(order.id, {}).items():
-            if other_id == item.id:
-                continue
-            sibling_owned |= keys
-
-        merged: list[str] = []
-        seen: set[str] = set()
-        for tn in [*owned, *order_trackings_cache[order.id]]:
-            key = tn.casefold()
-            if key in seen:
-                continue
-            # Leave sibling-owned packages for the sibling pending item.
-            if key in sibling_owned and key not in {t.casefold() for t in owned}:
-                continue
-            seen.add(key)
-            merged.append(tn)
-        if not merged:
-            continue
-        pending.append((item, order, merged))
-
-    all_trackings: list[str] = []
-    seen_tn: set[str] = set()
-    for order_id in sorted(order_trackings_cache):
-        for tn in order_trackings_cache[order_id]:
-            key = tn.casefold()
-            if key in seen_tn:
-                continue
-            seen_tn.add(key)
-            all_trackings.append(tn)
-    for _item, _order, trackings in pending:
+        pending.append((item, order, trackings))
         for tn in trackings:
             key = tn.casefold()
             if key in seen_tn:

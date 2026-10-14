@@ -301,6 +301,61 @@ class UsabgLotMatchingTests(unittest.TestCase):
         self.assertEqual(matches[0].expected_amount, Decimal("1030.00"))
         self.assertFalse(matches[0].amount_discrepancy)
 
+    def test_item_owned_tracking_does_not_claim_sibling_package(self) -> None:
+        """Submitted item on TN2 must not match a warehouse lot on sibling TN1.
+
+        Mirrors multi-SKU orders where a scanned sibling already owns TN1 and a
+        submitted sibling only owns TN2 — item-owned trackings only, no order merge.
+        """
+        tn1 = "TBA335391801005"
+        tn2 = "TBA335478885927"
+        rye_name = (
+            "Google - Fitbit Air - Special Edition Stephen Curry - Screenless "
+            "Fitness and Health Tracking - Works with Android and iOS - Rye"
+        )
+        obsidian_name = "Google Fitbit Air - Screenless Activity Tracker, Obsidian"
+
+        lots = _usabg_lots_from_receipts(
+            [
+                _row(
+                    name=rye_name,
+                    qty=6,
+                    unit="129.99",
+                    sku="GA11551-US",
+                    tn=tn1,
+                    po="2150582",
+                )
+            ]
+        )
+        self.assertEqual(len(lots), 1)
+        lots_by_tn = {tn1.casefold(): lots}
+
+        rye = _item(item_id=1, qty=6, description=rye_name, price_sold="129.99")
+        obsidian = _item(
+            item_id=2, qty=3, description=obsidian_name, price_sold="99.99"
+        )
+
+        # Production: each item only claims its own shipment tracking(s).
+        assignment = _assign_items_to_lots(
+            claimants=[
+                (rye, [tn1]),
+                (obsidian, [tn2]),
+            ],
+            lots_by_tn=lots_by_tn,
+        )
+        self.assertEqual(assignment.get(1), lots[0]["lot_id"])
+        self.assertNotIn(2, assignment)
+
+        # Pre-fix bug: order-level merge gave Obsidian TN1 as well → false match.
+        buggy = _assign_items_to_lots(
+            claimants=[
+                (rye, [tn1]),
+                (obsidian, [tn2, tn1]),
+            ],
+            lots_by_tn=lots_by_tn,
+        )
+        self.assertEqual(buggy.get(2), lots[0]["lot_id"])
+
 
 if __name__ == "__main__":
     unittest.main()
