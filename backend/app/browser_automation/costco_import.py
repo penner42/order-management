@@ -81,30 +81,98 @@ def _looks_like_order_details_graphql(payload: Any) -> bool:
         return False
 
 
-def _extract_order_header_pairs(payload: dict[str, Any]) -> list[dict[str, str]]:
+def _get_online_orders_block(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     try:
-        go = payload.get("data", {}).get("getOnlineOrders")
+        if not isinstance(payload, dict):
+            return None
+        go = (payload.get("data") or {}).get("getOnlineOrders")
         if not isinstance(go, list) or not go:
-            return []
-        orders = (go[0] or {}).get("bcOrders")
-        if not isinstance(orders, list):
-            return []
-        out: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for row in orders:
-            if not isinstance(row, dict):
-                continue
-            order_number = str(row.get("orderNumber") or "").strip()
-            order_header_id = str(row.get("orderHeaderId") or "").strip()
-            if not order_number or not order_header_id:
-                continue
-            if order_number in seen:
-                continue
-            seen.add(order_number)
-            out.append({"orderNumber": order_number, "orderHeaderId": order_header_id})
-        return out
+            return None
+        block = go[0]
+        return block if isinstance(block, dict) else None
     except Exception:
+        return None
+
+
+def _extract_bc_orders(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    block = _get_online_orders_block(payload)
+    if not block:
         return []
+    orders = block.get("bcOrders")
+    if not isinstance(orders, list):
+        return []
+    return [row for row in orders if isinstance(row, dict)]
+
+
+def _extract_order_header_pairs(payload: dict[str, Any]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in _extract_bc_orders(payload):
+        order_number = str(row.get("orderNumber") or "").strip()
+        order_header_id = str(row.get("orderHeaderId") or "").strip()
+        if not order_number or not order_header_id:
+            continue
+        if order_number in seen:
+            continue
+        seen.add(order_number)
+        out.append({"orderNumber": order_number, "orderHeaderId": order_header_id})
+    return out
+
+
+def _orders_page_meta(payload: dict[str, Any] | None) -> tuple[int, int, int]:
+    """Return (page_number, page_size, total_records) from a getOnlineOrders payload."""
+    block = _get_online_orders_block(payload)
+    if not block:
+        return 1, ORDERS_PER_PAGE_ESTIMATE, 0
+    try:
+        page_number = int(block.get("pageNumber") or 1)
+    except Exception:
+        page_number = 1
+    try:
+        page_size = int(block.get("pageSize") or ORDERS_PER_PAGE_ESTIMATE)
+    except Exception:
+        page_size = ORDERS_PER_PAGE_ESTIMATE
+    try:
+        total = int(block.get("totalNumberOfRecords") or 0)
+    except Exception:
+        total = 0
+    if page_size < 1:
+        page_size = ORDERS_PER_PAGE_ESTIMATE
+    if page_number < 1:
+        page_number = 1
+    return page_number, page_size, max(0, total)
+
+
+def _has_more_orders_pages(payload: dict[str, Any] | None, *, page_number: int) -> bool:
+    """True when another getOnlineOrders page may exist after *page_number*."""
+    rows = _extract_bc_orders(payload)
+    if not rows:
+        return False
+    _, page_size, total = _orders_page_meta(payload)
+    if total > 0:
+        return page_number * page_size < total
+    # No total: assume another page only if this page looks full.
+    return len(rows) >= page_size
+
+
+def _payload_with_bc_orders(
+    template: dict[str, Any] | None,
+    bc_orders: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a getOnlineOrders-shaped payload containing only *bc_orders*."""
+    if isinstance(template, dict):
+        try:
+            base = json.loads(json.dumps(template))
+        except Exception:
+            base = {"data": {"getOnlineOrders": [{}]}}
+    else:
+        base = {"data": {"getOnlineOrders": [{}]}}
+    go = (base.get("data") or {}).get("getOnlineOrders")
+    if not isinstance(go, list) or not go or not isinstance(go[0], dict):
+        base = {"data": {"getOnlineOrders": [{}]}}
+        go = base["data"]["getOnlineOrders"]
+    go[0]["bcOrders"] = list(bc_orders)
+    return base
 
 
 def _detail_order_number(payload: dict[str, Any] | None) -> str | None:
@@ -185,6 +253,9 @@ class _CostcoGraphqlCapture:
         self._lock = asyncio.Lock()
         self._orders: dict[str, Any] | None = None
         self._orders_url: str | None = None
+        self._orders_query: str | None = None
+        self._orders_operation_name: str | None = None
+        self._orders_variables: dict[str, Any] | None = None
         self._details: dict[str, Any] | None = None
         self._details_url: str | None = None
         self._details_header_id: str | None = None
@@ -236,6 +307,7 @@ class _CostcoGraphqlCapture:
             header_id: str | None = None
             op_name: str | None = None
             req_query: str | None = None
+            req_vars: dict[str, Any] | None = None
             try:
                 post = response.request.post_data
                 if post:
@@ -247,6 +319,7 @@ class _CostcoGraphqlCapture:
                             req_query = body["query"].strip()
                         vars_ = body.get("variables") if isinstance(body.get("variables"), dict) else None
                         if isinstance(vars_, dict):
+                            req_vars = vars_
                             nums = vars_.get("orderNumbers")
                             if isinstance(nums, list) and nums:
                                 header_id = str(nums[0]).strip() or None
@@ -271,6 +344,11 @@ class _CostcoGraphqlCapture:
                     self._graphql_url = url.split("?")[0] or COSTCO_GRAPHQL_URL
                     if hdrs:
                         self._graphql_headers = hdrs
+                    if req_query and "getOnlineOrders" in req_query:
+                        self._orders_query = req_query
+                        self._orders_operation_name = op_name
+                        if isinstance(req_vars, dict):
+                            self._orders_variables = dict(req_vars)
                 if looks_details:
                     self._details = payload
                     self._details_url = url
@@ -379,6 +457,66 @@ class _CostcoGraphqlCapture:
             self._details_url = url
             self._details_header_id = order_num
             self._details_order_number = _detail_order_number(payload)
+        return payload
+
+    async def fetch_orders_page(self, page_number: int) -> dict[str, Any]:
+        """Replay the SPA-captured getOnlineOrders query for *page_number*."""
+        page_num = max(1, int(page_number or 1))
+        async with self._lock:
+            query = self._orders_query
+            op_name = self._orders_operation_name
+            base_vars = dict(self._orders_variables or {})
+            url = self._graphql_url or COSTCO_GRAPHQL_URL
+            headers = dict(self._graphql_headers or {})
+        if not query:
+            raise RuntimeError("No Costco getOnlineOrders query captured yet.")
+        if not headers.get("costco-x-authorization") and not headers.get("authorization"):
+            raise RuntimeError("Missing Costco GraphQL auth headers.")
+        variables = dict(base_vars)
+        variables["pageNumber"] = page_num
+        send_headers = dict(headers)
+        if "content-type" not in {k.lower() for k in send_headers}:
+            send_headers["content-type"] = "application/json-patch+json"
+
+        result = await self._page.evaluate(
+            """async ({ url, headers, query, operationName, variables }) => {
+              const body = { query, variables: variables || {} };
+              if (operationName) body.operationName = operationName;
+              const resp = await fetch(url, {
+                method: 'POST',
+                credentials: 'include',
+                headers: headers || {},
+                body: JSON.stringify(body),
+              });
+              const text = await resp.text();
+              let json = null;
+              try { json = JSON.parse(text); } catch (e) { json = null; }
+              return { status: resp.status, json, textBody: text.slice(0, 500) };
+            }""",
+            {
+                "url": url,
+                "headers": send_headers,
+                "query": query,
+                "operationName": op_name,
+                "variables": variables,
+            },
+        )
+        if not isinstance(result, dict) or int(result.get("status") or 0) != 200:
+            raise RuntimeError(
+                f"Costco getOnlineOrders HTTP {result.get('status') if isinstance(result, dict) else '?'}"
+                f" for page {page_num}"
+            )
+        payload = result.get("json")
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Costco getOnlineOrders returned non-JSON for page {page_num}.")
+        if not _looks_like_orders_graphql(payload) and not _extract_bc_orders(payload):
+            # Empty page is a valid end-of-list signal; still return the payload.
+            go = (payload.get("data") or {}).get("getOnlineOrders")
+            if not isinstance(go, list):
+                raise RuntimeError(f"Costco getOnlineOrders empty for page {page_num}")
+        async with self._lock:
+            self._orders = payload
+            self._orders_url = url
         return payload
 
 
@@ -610,8 +748,9 @@ async def run_costco_import(
 ) -> list[dict[str, Any]]:
     """Capture Costco orders for a profile (orders GraphQL → detail GraphQL).
 
-    When *order_ids* is provided (unshipped refresh), filter the list capture to
-    those order numbers. Orders not present on the current list page are skipped.
+    When *order_ids* is provided (unshipped refresh), filter list capture to those
+    order numbers and paginate getOnlineOrders until all are found or *max_pages*
+    is exhausted. Never falls back to applying the full list when nothing matches.
     """
 
     def progress(**kwargs: Any) -> None:
@@ -648,24 +787,82 @@ async def run_costco_import(
                 raise LoginRequiredError("Costco session requires login.")
             orders_payload, orders_url = await capture.wait_for_orders(timeout_ms=45_000)
 
-        pairs = _extract_order_header_pairs(orders_payload)
+        page_limit = max(1, int(max_pages or 3))
+        pairs: list[dict[str, str]] = []
+        matched_bc_orders: list[dict[str, Any]] = []
+
         if order_ids is not None:
             wanted = {str(x).strip() for x in order_ids if str(x or "").strip()}
-            pairs = [p for p in pairs if p["orderNumber"] in wanted]
-            missing = wanted - {p["orderNumber"] for p in pairs}
+            found: set[str] = set()
+            page_num = 1
+            current_payload: dict[str, Any] | None = orders_payload
+
+            while current_payload is not None:
+                page_pairs = _extract_order_header_pairs(current_payload)
+                page_rows = _extract_bc_orders(current_payload)
+                rows_by_number = {
+                    str(row.get("orderNumber") or "").strip(): row
+                    for row in page_rows
+                    if str(row.get("orderNumber") or "").strip()
+                }
+                for pair in page_pairs:
+                    num = pair["orderNumber"]
+                    if num not in wanted or num in found:
+                        continue
+                    found.add(num)
+                    pairs.append(pair)
+                    row = rows_by_number.get(num)
+                    if row is not None:
+                        matched_bc_orders.append(row)
+
+                missing = wanted - found
+                progress(
+                    phase="list",
+                    message=(
+                        f"List page {page_num}: found {len(found)}/{len(wanted)} "
+                        f"unshipped order(s)…"
+                    ),
+                    page=page_num,
+                    list_count=len(pairs),
+                )
+                if not missing:
+                    break
+                if page_num >= page_limit:
+                    break
+                if not _has_more_orders_pages(current_payload, page_number=page_num):
+                    break
+                page_num += 1
+                try:
+                    current_payload = await capture.fetch_orders_page(page_num)
+                except Exception as exc:
+                    logger.warning(
+                        "Costco unshipped refresh: failed to fetch list page %s: %s",
+                        page_num,
+                        exc,
+                    )
+                    break
+
+            missing = wanted - found
             if missing:
                 logger.warning(
-                    "Costco unshipped refresh: %s order(s) not on current list page: %s",
+                    "Costco unshipped refresh: %s order(s) not found after %s list page(s): %s",
                     len(missing),
+                    page_num,
                     ", ".join(sorted(missing)[:8]),
                 )
             progress(
                 phase="list",
-                message=f"Refreshing {len(pairs)} unshipped order(s)…",
+                message=(
+                    f"Refreshing {len(pairs)} unshipped order(s) "
+                    f"(scanned {page_num} list page(s))…"
+                ),
+                page=page_num,
                 list_count=len(pairs),
             )
+            orders_payload = _payload_with_bc_orders(orders_payload, matched_bc_orders)
         else:
-            cap = max(1, int(max_pages or 3)) * ORDERS_PER_PAGE_ESTIMATE
+            pairs = _extract_order_header_pairs(orders_payload)
+            cap = page_limit * ORDERS_PER_PAGE_ESTIMATE
             if len(pairs) > cap:
                 pairs = pairs[:cap]
             progress(
@@ -673,6 +870,10 @@ async def run_costco_import(
                 message=f"Found {len(pairs)} order(s)",
                 list_count=len(pairs),
             )
+
+        if not pairs:
+            progress(phase="done", message="Captured 0 order(s)", captured=0)
+            return []
 
         details_by_order_number: dict[str, Any] = {}
         for idx, pair in enumerate(pairs):
@@ -706,14 +907,11 @@ async def run_costco_import(
             page, orders_payload, orders_url or page.url, details_by_order_number
         )
         wanted_numbers = {p["orderNumber"] for p in pairs}
-        if wanted_numbers:
-            orders = [
-                o
-                for o in all_orders
-                if str((o.get("externalOrder") or {}).get("id") or "").strip() in wanted_numbers
-            ]
-        else:
-            orders = all_orders
+        orders = [
+            o
+            for o in all_orders
+            if str((o.get("externalOrder") or {}).get("id") or "").strip() in wanted_numbers
+        ]
 
         if on_order:
             for body in orders:
