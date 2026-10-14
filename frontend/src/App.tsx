@@ -6,7 +6,6 @@ import BuyingGroups from './pages/BuyingGroups'
 import Rewards from './pages/Rewards'
 import PaymentMethods from './pages/PaymentMethods'
 import Payments from './pages/Payments'
-import Shipments from './pages/Shipments'
 import Stores from './pages/Stores'
 import Login from './pages/Login'
 import Admin from './pages/Admin'
@@ -15,7 +14,6 @@ import ImportPreview from './pages/ImportPreview'
 import ImportReview from './pages/ImportReview'
 import ImportReviewBulk from './pages/ImportReviewBulk'
 import ReceivingReview from './pages/ReceivingReview'
-import PersonalOrders from './pages/PersonalOrders'
 import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
 import Reports from './pages/Reports'
@@ -88,10 +86,8 @@ function AppShell() {
       { to: '/rewards', label: 'Rewards' },
       { to: '/payment-methods', label: 'Payment Methods' },
       { to: '/payments', label: 'Payments' },
-      { to: '/shipments', label: 'Shipments' },
       { to: '/stores', label: 'Stores' },
       { to: '/portals', label: 'Portals' },
-      { to: '/personal-orders', label: 'Personal Orders' },
       { to: '/extension', label: 'Extension' },
       { to: '/browser-automation', label: 'Browser automation' },
       { to: '/browser-import-log', label: 'Log' },
@@ -240,12 +236,10 @@ function AppShell() {
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
           <Route path="/receiving-review" element={<ReceivingReview />} />
-          <Route path="/personal-orders" element={<PersonalOrders />} />
           <Route path="/buying-groups" element={<BuyingGroups />} />
           <Route path="/rewards" element={<Rewards />} />
           <Route path="/payment-methods" element={<PaymentMethods />} />
           <Route path="/payments" element={<Payments />} />
-          <Route path="/shipments" element={<Shipments />} />
           <Route path="/stores" element={<Stores />} />
           <Route path="/portals" element={<Portals />} />
           <Route path="/extension" element={<BrowserExtension />} />
