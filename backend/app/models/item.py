@@ -33,9 +33,25 @@ RETURN_PROCESS_STATUSES: frozenset[ItemStatus] = frozenset(
     }
 )
 
+# Statuses that store re-import must not peel, qty-trim, price-overwrite, or
+# re-attach tracking on. Only purchased (and similar open) lines stay mutable.
+STORE_REIMPORT_LOCKED_STATUSES: frozenset[ItemStatus] = frozenset(
+    {
+        ItemStatus.SHIPPED,
+        ItemStatus.SUBMITTED,
+        ItemStatus.SCANNED,
+        *RETURN_PROCESS_STATUSES,
+    }
+)
+
 
 def item_in_return_process(item: "Item") -> bool:
     return item.status in RETURN_PROCESS_STATUSES
+
+
+def item_locked_for_store_reimport(item: "Item") -> bool:
+    """True when store re-apply must leave this line's qty/status/tracking alone."""
+    return item.status in STORE_REIMPORT_LOCKED_STATUSES
 
 
 def advance_item_to_shipped(item: "Item") -> None:

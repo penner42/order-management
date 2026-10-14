@@ -32,7 +32,7 @@ from app.models import (
 from app.models.item import (
     ItemStatus,
     advance_item_to_shipped,
-    item_in_return_process,
+    item_locked_for_store_reimport,
 )
 from app.schemas.store_import import (
     DirectApplyBody,
@@ -724,8 +724,10 @@ def _sync_existing_item_quantities_and_prices(
         inc_qty = incoming["total_quantity"]
         inc_price = incoming["unit_price"]
 
+        unlocked = [i for i in group if not item_locked_for_store_reimport(i)]
+
         if inc_price is not None:
-            for item in group:
+            for item in unlocked:
                 item.price_paid = inc_price
 
         current_total = sum(i.quantity or 1 for i in group)
@@ -733,7 +735,9 @@ def _sync_existing_item_quantities_and_prices(
             continue
 
         if inc_qty > current_total:
-            target = min(group, key=lambda i: (bool(i.shipment_items), i.id))
+            if not unlocked:
+                continue
+            target = min(unlocked, key=lambda i: (bool(i.shipment_items), i.id))
             target.quantity = (target.quantity or 1) + (inc_qty - current_total)
             continue
 
@@ -741,8 +745,9 @@ def _sync_existing_item_quantities_and_prices(
         # Prefer trimming untracked / placeholder lines before anything that
         # already has a real tracking number (e.g. Amazon 3+3 later shipping
         # as one package must not delete the newly tracked row).
+        # Never trim shipped/submitted/scanned/return-process lines.
         for item in sorted(
-            group,
+            unlocked,
             key=lambda i: (
                 _item_has_tracking(i),
                 bool(i.payment_line_items),
@@ -1277,15 +1282,15 @@ def _apply_items_and_shipments(
     def find_existing_item_for_tracking(
         name: str, db_key: str | None, tracking_key: str | None
     ) -> Item | None:
-        # Return-process items keep their existing shipments; store re-imports
-        # must not attach outbound/return-label tracking to them.
+        # Shipped/submitted/scanned/return-process lines keep their qty and
+        # shipments; store re-imports must not peel or re-attach tracking.
         candidates = [
             ei
             for ei in existing_items
             if (ei.description or "").strip() == name
             and ei.id not in used_existing_item_ids
             and ei.id in pre_existing_item_ids
-            and not item_in_return_process(ei)
+            and not item_locked_for_store_reimport(ei)
         ]
         if not candidates:
             return None
@@ -1319,6 +1324,8 @@ def _apply_items_and_shipments(
 
     def allocate_item_for_slice(item: Item, slice_qty: int, item_name: str) -> Item:
         """Keep *slice_qty* units on *item*; peel the rest into a new unlinked line."""
+        if item_locked_for_store_reimport(item):
+            return item
         qty = item.quantity or 1
         keep = min(max(slice_qty, 1), qty)
         if qty <= keep:
@@ -1524,7 +1531,7 @@ def _apply_items_and_shipments(
             return existing_shipment
 
         if item_to_link:
-            if item_in_return_process(item_to_link):
+            if item_locked_for_store_reimport(item_to_link):
                 return None
             for si in item_to_link.shipment_items:
                 s = existing_shipments_by_id.get(si.shipment_id)
@@ -1676,6 +1683,8 @@ def _apply_items_and_shipments(
                     # remaining units happens after the loop if needed.
                     continue
 
+                if item_locked_for_store_reimport(existing_item):
+                    continue
                 take = min(remaining, existing_item.quantity or 1)
                 allocated_item = allocate_item_for_slice(
                     existing_item, take, name
@@ -1697,16 +1706,16 @@ def _apply_items_and_shipments(
 
             if remaining > 0 and existing_order:
                 # Do not invent new lines for trackings that would have attached
-                # to return-process items (return labels, etc.).
-                return_qty = sum(
+                # to locked lines (shipped/submitted/scanned/return-process).
+                locked_qty = sum(
                     (ei.quantity or 1)
                     for ei in existing_items
                     if (ei.description or "").strip() == name
                     and ei.id in pre_existing_item_ids
-                    and item_in_return_process(ei)
+                    and item_locked_for_store_reimport(ei)
                 )
-                if return_qty:
-                    remaining = max(0, remaining - return_qty)
+                if locked_qty:
+                    remaining = max(0, remaining - locked_qty)
 
             if remaining > 0:
                 # No (more) existing lines to attach — create the leftover
