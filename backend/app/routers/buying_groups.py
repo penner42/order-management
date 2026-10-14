@@ -14,7 +14,6 @@ from app.database import SessionLocal, get_db
 from app.models import BrowserImportLog, BuyingGroup, User
 from app.models.user import get_default_app_user_id
 from app.schemas.buying_group import (
-    DEFAULT_RECEIVED_CHECK_CRON,
     DEFAULT_TRACKING_SUBMIT_CRON,
     BuyingGroupCheckReceivingResponse,
     BuyingGroupCreate,
@@ -431,6 +430,11 @@ def run_scheduled_tracking_submit(group_id: int) -> bool:
                 group_id,
                 result.submitted_count,
             )
+        # Always follow scheduled submit with a receiving check when the group
+        # supports it — including when there were no trackings to submit.
+        group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
+        if group:
+            _run_followup_received_check(db, group, scheduled=True)
         return True
     except Exception as exc:
         logger.exception("Scheduled tracking submit failed for buying group %s", group_id)
@@ -468,74 +472,39 @@ def _stamp_received_check_last_run(db: Session, group_id: int) -> datetime:
     return now
 
 
-def list_due_received_check_group_ids(db: Session) -> list[int]:
-    """Return buying group ids whose received-check schedule is due."""
-    from app.browser_automation.scheduler import schedule_due
+def _run_followup_received_check(
+    db: Session,
+    group: BuyingGroup,
+    *,
+    scheduled: bool,
+) -> bool:
+    """Run warehouse received check after tracking submit when the group supports it.
 
-    now = datetime.now(timezone.utc)
-    rows = (
-        db.query(BuyingGroup)
-        .filter(BuyingGroup.received_check_enabled.is_(True))
-        .order_by(BuyingGroup.id)
-        .all()
-    )
-    out: list[int] = []
-    for group in rows:
-        if not schedule_due(
-            enabled=True,
-            cron_expr=str(group.received_check_cron or DEFAULT_RECEIVED_CHECK_CRON),
-            last_run_at=group.received_check_last_run_at,
-            now=now,
-        ):
-            continue
-        ready, reason = receiving_check_group_ready(group)
-        if not ready:
-            group_name = (group.name or "").strip() or f"group {group.id}"
-            write_group_tracking_log(
-                group=group,
-                group_name=group_name,
-                scheduled=True,
-                level="error",
-                event_type="received_check_error",
-                message=reason or "Buying group API is not configured",
-                mode="received_check",
-            )
-            group.received_check_last_run_at = now
-            db.commit()
-            continue
-        out.append(group.id)
-    return out
+    Returns True when a check was attempted. Skips (False) when the framework/credentials
+    are not ready for receiving — no separate cron schedule.
+    """
+    group_id = group.id
+    group_name = (group.name or "").strip() or f"group {group_id}"
+    ready, reason = receiving_check_group_ready(group)
+    if not ready:
+        logger.info(
+            "Skipping received check after tracking submit for buying group %s: %s",
+            group_id,
+            reason or "not configured for receiving",
+        )
+        return False
 
-
-def run_scheduled_received_check(group_id: int) -> bool:
-    """Run a scheduled warehouse received check for one buying group."""
-    db = SessionLocal()
     try:
-        group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
-        if not group or not group.received_check_enabled:
-            return False
-        ready, reason = receiving_check_group_ready(group)
-        group_name = (group.name or "").strip() or f"group {group_id}"
-        if not ready:
-            write_group_tracking_log(
-                group=group,
-                group_name=group_name,
-                scheduled=True,
-                level="error",
-                event_type="received_check_error",
-                message=reason or "Buying group API is not configured",
-                mode="received_check",
-            )
-            _stamp_received_check_last_run(db, group_id)
-            return False
-
         write_group_tracking_log(
             group=group,
             group_name=group_name,
-            scheduled=True,
+            scheduled=scheduled,
             level="info",
             event_type="received_check_started",
-            message="Started received check (scheduled).",
+            message=(
+                "Started received check "
+                f"({'scheduled follow-up' if scheduled else 'manual'})."
+            ),
             mode="received_check",
         )
         result = check_receiving_for_group(db, buying_group_id=group_id)
@@ -549,14 +518,14 @@ def run_scheduled_received_check(group_id: int) -> bool:
             write_group_tracking_log(
                 group=group,
                 group_name=group_name,
-                scheduled=True,
+                scheduled=scheduled,
                 level="error",
                 event_type="received_check_error",
                 message=result.error,
                 mode="received_check",
             )
             logger.warning(
-                "Scheduled received check for buying group %s failed: %s",
+                "Received check after tracking submit for buying group %s failed: %s",
                 group_id,
                 result.error,
             )
@@ -570,28 +539,30 @@ def run_scheduled_received_check(group_id: int) -> bool:
         write_group_tracking_log(
             group=group,
             group_name=group_name,
-            scheduled=True,
+            scheduled=scheduled,
             level="updates" if actionable else "info",
             event_type="received_check_finished",
             message=summary,
             mode="received_check",
         )
         logger.info(
-            "Scheduled received check for buying group %s: %s actionable match(es)",
+            "Received check after tracking submit for buying group %s: %s actionable match(es)",
             group_id,
             actionable,
         )
         return True
     except Exception as exc:
-        logger.exception("Scheduled received check failed for buying group %s", group_id)
+        logger.exception(
+            "Received check after tracking submit failed for buying group %s", group_id
+        )
         try:
             db.rollback()
         except Exception:
             pass
         write_group_tracking_log(
-            group=None,
-            group_name=f"group {group_id}",
-            scheduled=True,
+            group=group,
+            group_name=group_name,
+            scheduled=scheduled,
             level="error",
             event_type="received_check_error",
             message=str(exc).strip() or exc.__class__.__name__,
@@ -604,5 +575,3 @@ def run_scheduled_received_check(group_id: int) -> bool:
                 "Failed to stamp received_check_last_run_at for buying group %s", group_id
             )
         return False
-    finally:
-        db.close()

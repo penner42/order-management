@@ -20,7 +20,6 @@ const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH = '/v1/order/add_trackings'
 const DEALANDRUNNER_DEFAULT_BASE_URL = 'https://api.dealandrunner.com'
 const BFMR_DEFAULT_BASE_URL = 'https://api.bfmr.com'
 const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
-const DEFAULT_RECEIVED_CHECK_CRON = '0 */6 * * *'
 
 function usesUsernamePassword(framework: string | null | undefined): boolean {
   return (
@@ -214,8 +213,6 @@ type EditDraft = {
   api_password: string
   tracking_submit_enabled: boolean
   tracking_submit_cron: string
-  received_check_enabled: boolean
-  received_check_cron: string
 }
 
 function emptyDraft(): EditDraft {
@@ -231,8 +228,6 @@ function emptyDraft(): EditDraft {
     api_password: '',
     tracking_submit_enabled: false,
     tracking_submit_cron: DEFAULT_TRACKING_SUBMIT_CRON,
-    received_check_enabled: false,
-    received_check_cron: DEFAULT_RECEIVED_CHECK_CRON,
   }
 }
 
@@ -249,8 +244,6 @@ function draftFromGroup(g: BuyingGroup): EditDraft {
     api_password: g.api_password ?? '',
     tracking_submit_enabled: !!g.tracking_submit_enabled,
     tracking_submit_cron: g.tracking_submit_cron?.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
-    received_check_enabled: !!g.received_check_enabled,
-    received_check_cron: g.received_check_cron?.trim() || DEFAULT_RECEIVED_CHECK_CRON,
   }
 }
 
@@ -327,10 +320,6 @@ export default function BuyingGroups() {
           ? draft.tracking_submit_enabled
           : false,
         tracking_submit_cron: draft.tracking_submit_cron.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
-        received_check_enabled: supportsCheckReceiving(draft.api_framework)
-          ? draft.received_check_enabled
-          : false,
-        received_check_cron: draft.received_check_cron.trim() || DEFAULT_RECEIVED_CHECK_CRON,
       })
       setGroups((prev) => sortGroupsByName(prev.map((p) => (p.id === updated.id ? updated : p))))
       setEditing(null)
@@ -429,9 +418,10 @@ export default function BuyingGroups() {
       </div>
       <p className="text-sm text-ink-muted mb-8">
         Add aliases to match shipping names and address lines on store imports. Configure API
-        credentials and optional schedules to batch-submit tracking numbers and check warehouse
-        receiving. For Parsefile, BuyingGroup.com, and BFMR groups, received checks land on the
-        Receiving page for review and apply.
+        credentials and an optional schedule to batch-submit tracking numbers; warehouse receiving
+        is checked automatically right after each scheduled submit. Manual submit and check buttons
+        stay separate. For Parsefile, BuyingGroup.com, BFMR, and USABG groups, received checks land
+        on the Receiving page for review and apply.
       </p>
       {submitAlert && (
         <p className="mb-4 text-sm text-ink dark:text-gray-200 rounded-lg border border-brand-200 dark:border-gray-600 bg-brand-50/50 dark:bg-gray-700/40 px-3 py-2">
@@ -722,45 +712,14 @@ export default function BuyingGroups() {
                             />
                           </label>
                           <p className="text-[11px] text-ink-muted">
-                            Last run: {formatLastRun(g.tracking_submit_last_run_at)}
-                          </p>
-                        </div>
-                      )}
-                      {supportsCheckReceiving(draft.api_framework) && (
-                        <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
-                          <label className="inline-flex items-center gap-2 text-sm text-ink">
-                            <input
-                              type="checkbox"
-                              checked={draft.received_check_enabled}
-                              onChange={(e) =>
-                                setDraft((d) => ({
-                                  ...d,
-                                  received_check_enabled: e.target.checked,
-                                }))
-                              }
-                              disabled={saving}
-                              className="rounded border-brand-300"
-                            />
-                            <span>Auto-check receiving</span>
-                          </label>
-                          <label className="block">
-                            <span className="text-xs text-ink-muted">
-                              Cron (local time; min hour day month weekday)
-                            </span>
-                            <input
-                              type="text"
-                              className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm font-mono"
-                              placeholder={DEFAULT_RECEIVED_CHECK_CRON}
-                              value={draft.received_check_cron}
-                              onChange={(e) =>
-                                setDraft((d) => ({ ...d, received_check_cron: e.target.value }))
-                              }
-                              disabled={saving}
-                              spellCheck={false}
-                            />
-                          </label>
-                          <p className="text-[11px] text-ink-muted">
-                            Last run: {formatLastRun(g.received_check_last_run_at)}
+                            Last submit: {formatLastRun(g.tracking_submit_last_run_at)}
+                            {supportsCheckReceiving(draft.api_framework) && (
+                              <>
+                                {' '}
+                                · Receiving is checked automatically after each scheduled submit
+                                (last: {formatLastRun(g.received_check_last_run_at)})
+                              </>
+                            )}
                           </p>
                         </div>
                       )}
@@ -825,7 +784,14 @@ export default function BuyingGroups() {
                             ? `on (${g.tracking_submit_cron?.trim() || DEFAULT_TRACKING_SUBMIT_CRON})`
                             : 'off'}
                         </span>
-                        <span>Last: {formatLastRun(g.tracking_submit_last_run_at)}</span>
+                        <span>Last submit: {formatLastRun(g.tracking_submit_last_run_at)}</span>
+                        {supportsCheckReceiving(g.api_framework) && (
+                          <span>
+                            Receiving after submit
+                            {g.tracking_submit_enabled ? '' : ' (when auto-submit is on)'}: last{' '}
+                            {formatLastRun(g.received_check_last_run_at)}
+                          </span>
+                        )}
                         <button
                           type="button"
                           onClick={() => runTrackingSubmit(g.id)}
@@ -848,13 +814,7 @@ export default function BuyingGroups() {
                     )}
                     {supportsCheckReceiving(g.api_framework) && !supportsTrackingSubmit(g.api_framework) && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
-                        <span>
-                          Auto-check:{' '}
-                          {g.received_check_enabled
-                            ? `on (${g.received_check_cron?.trim() || DEFAULT_RECEIVED_CHECK_CRON})`
-                            : 'off'}
-                        </span>
-                        <span>Last: {formatLastRun(g.received_check_last_run_at)}</span>
+                        <span>Last receiving check: {formatLastRun(g.received_check_last_run_at)}</span>
                         <button
                           type="button"
                           onClick={() => runCheckReceiving(g.id)}
@@ -863,17 +823,6 @@ export default function BuyingGroups() {
                         >
                           {checkingReceivingGroupId === g.id ? 'Checking…' : 'Check receiving'}
                         </button>
-                      </div>
-                    )}
-                    {supportsCheckReceiving(g.api_framework) && supportsTrackingSubmit(g.api_framework) && (
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
-                        <span>
-                          Auto-check:{' '}
-                          {g.received_check_enabled
-                            ? `on (${g.received_check_cron?.trim() || DEFAULT_RECEIVED_CHECK_CRON})`
-                            : 'off'}
-                        </span>
-                        <span>Last: {formatLastRun(g.received_check_last_run_at)}</span>
                       </div>
                     )}
                   </div>
