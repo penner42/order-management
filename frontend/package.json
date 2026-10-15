@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "playwright test",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui --ui-host 0.0.0.0 --ui-port 9323"
+    "test:e2e:ui": "playwright test --ui --ui-host 0.0.0.0 --ui-port 9323",
+    "test:typecheck": "tsc -p tsconfig.tests.json"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -17,6 +18,8 @@
     "react-router-dom": "^7.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.0",
+    "@types/node": "^20.19.43",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
@@ -24,7 +27,6 @@
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.16",
     "typescript": "~5.6.2",
-    "vite": "^6.0.1",
-    "@playwright/test": "1.61.0"
+    "vite": "^6.0.1"
   }
 }

@@ -11,19 +11,16 @@ function isIgnoredWalmartTracking(trackingNumber: unknown): boolean {
 type ImportShipment = {
   shipmentId?: string | null
   trackingNumber?: string | null
-  [key: string]: unknown
 }
 
 type ImportItem = {
-  shipments?: Array<{ shipmentId?: string | null; [key: string]: unknown }> | null
-  [key: string]: unknown
+  shipments?: Array<{ shipmentId?: string | null }> | null
 }
 
 type ImportPayload = {
   store?: string | null
   shipments?: ImportShipment[] | null
   items?: ImportItem[] | null
-  [key: string]: unknown
 }
 
 /**

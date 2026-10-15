@@ -1,12 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import type { Payment, BuyingGroup, Order, Item, Shipment } from '../api/types'
-
-function parseDecimal(s: string | null | undefined): number {
-  if (s == null || s === '') return 0
-  const n = parseFloat(String(s).replace(/,/g, ''))
-  return Number.isFinite(n) ? n : 0
-}
+import { parseDecimal } from '../utils/decimal'
 
 function formatMoney(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -676,6 +671,9 @@ export default function Payments() {
           onClick={() => !creating && setAddPaymentOpen(false)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add payment"
             className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col m-4"
             onClick={(e) => e.stopPropagation()}
           >
@@ -930,6 +928,9 @@ export default function Payments() {
           onClick={() => !editSaving && setEditPayment(null)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Edit payment"
             className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col m-4"
             onClick={(e) => e.stopPropagation()}
           >
@@ -993,6 +994,7 @@ export default function Payments() {
                                     <input
                                       type="number"
                                       className="w-24 rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-1 py-0.5 text-right text-sm text-ink"
+                                      aria-label="Allocated amount"
                                       value={editAllocValue}
                                       onChange={(e) => setEditAllocValue(e.target.value)}
                                       onBlur={() => saveAllocatedAmount(li.id)}

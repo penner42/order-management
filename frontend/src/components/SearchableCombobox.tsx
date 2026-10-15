@@ -41,7 +41,7 @@ export function SearchableCombobox<T extends SearchableOption>({
   const [dropdownPosition, setDropdownPosition] = useState<{ top: number; left: number; width: number } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const dropdownRef = useRef<HTMLUListElement>(null)
+  const dropdownRef = useRef<HTMLUListElement | null>(null)
 
   const displayValue = value?.name ?? ''
   const q = query.trim().toLowerCase()
@@ -161,6 +161,7 @@ export function SearchableCombobox<T extends SearchableOption>({
         ref={inputRef}
         type="text"
         className={inputClassName ?? 'rounded-lg border border-brand-200 px-3 py-2 text-ink w-full min-w-[160px] focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent disabled:opacity-60 disabled:cursor-not-allowed'}
+        aria-label={label ?? placeholder}
         placeholder={placeholder}
         value={query}
         onChange={handleInputChange}

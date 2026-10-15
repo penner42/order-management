@@ -21,6 +21,9 @@ export function ConfirmDialog({
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onCancel}>
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={message}
         className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-md w-full mx-4 border border-brand-200/80 dark:border-gray-700"
         onClick={(e) => e.stopPropagation()}
       >

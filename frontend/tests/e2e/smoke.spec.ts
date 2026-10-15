@@ -1,15 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, signIn } from './fixtures'
 
 const adminUsername = process.env.TEST_ADMIN_USERNAME ?? 'admin'
 const adminPassword = process.env.TEST_ADMIN_PASSWORD ?? 'admin'
-
-async function signIn(page: Page, username: string, password: string) {
-  await page.goto('/login')
-  await page.getByLabel('Username').fill(username)
-  await page.getByLabel('Password').fill(password)
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-}
 
 test('protected pages redirect to sign in', async ({ page }) => {
   await page.goto('/stores')
@@ -31,34 +24,15 @@ test('admin can sign in and sign out through the frontend proxy', async ({ page 
   await expect(page).toHaveURL(/\/login$/)
 })
 
-test('a regular user can load orders and stores from PostgreSQL', async ({ page, request }) => {
-  const login = await request.post('/api/auth/login', {
-    data: { username: adminUsername, password: adminPassword },
-  })
-  expect(login.ok()).toBeTruthy()
-  const { access_token } = await login.json()
-  const headers = { Authorization: `Bearer ${access_token}` }
-  const username = `e2e-${randomUUID()}`
-  const password = randomUUID()
-  const created = await request.post('/api/admin/users', {
-    headers, data: { username, password, role: 'user' },
-  })
-  expect(created.ok()).toBeTruthy()
-  const user = await created.json()
-
-  try {
-    const ordersResponse = page.waitForResponse(r => r.url().includes('/api/orders') && r.request().method() === 'GET')
-    await signIn(page, username, password)
-    expect((await ordersResponse).ok()).toBeTruthy()
-    await expect(page.getByRole('heading', { name: 'Orders', exact: true })).toBeVisible()
-    const storesResponse = page.waitForResponse(r => new URL(r.url()).pathname.replace(/\/$/, '') === '/api/stores')
-    await page.getByRole('link', { name: 'Stores', exact: true }).click()
-    expect((await storesResponse).ok()).toBeTruthy()
-    await expect(page.getByRole('heading', { name: 'Stores', exact: true })).toBeVisible()
-  } finally {
-    const deleted = await request.delete(`/api/admin/users/${user.id}`, { headers })
-    expect(deleted.ok()).toBeTruthy()
-  }
+test('a regular user can load orders and stores from PostgreSQL', async ({ app }) => {
+  const orders = app.waitForResponse(response => response.url().includes('/api/orders') && response.request().method() === 'GET')
+  await app.reload()
+  expect((await orders).ok()).toBeTruthy()
+  await expect(app.getByRole('heading', { name: 'Orders', exact: true })).toBeVisible()
+  const stores = app.waitForResponse(response => new URL(response.url()).pathname.replace(/\/$/, '') === '/api/stores')
+  await app.getByRole('link', { name: 'Stores', exact: true }).click()
+  expect((await stores).ok()).toBeTruthy()
+  await expect(app.getByRole('heading', { name: 'Stores', exact: true })).toBeVisible()
 })
 
 test('tracking proxy reaches the package tracking service', async ({ request }) => {

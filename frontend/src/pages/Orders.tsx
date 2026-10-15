@@ -1501,7 +1501,6 @@ export default function Orders() {
     return Math.max(0, totalPaid - discount)
   }
   const orderPayout = (
-    orderId: number,
     items: { id: number; price_sold?: string | null; quantity?: number }[],
     insuranceCost: string | null | undefined
   ) => {
@@ -2331,12 +2330,14 @@ export default function Orders() {
             const discount = orderEdits[o.id]?.order_discount ?? o.order_discount ?? '0'
             const insurance = orderEdits[o.id]?.insurance_cost ?? o.insurance_cost ?? '0'
             const totalPaid = orderTotals(o.items ?? [], discount)
-            const totalPayout = orderPayout(o.id, o.items ?? [], insurance)
+            const totalPayout = orderPayout(o.items ?? [], insurance)
             const itemCount = o.items?.length ?? 0
 
             return (
               <div
                 key={o.id}
+                role="region"
+                aria-label={`Order ${o.id}`}
                 className="flex flex-col lg:flex-row gap-0 border-2 border-brand-400 dark:border-gray-400 rounded-xl overflow-hidden bg-brand-50/50 dark:bg-gray-600/80"
               >
                 {/* Left: vertical order box */}
@@ -2347,6 +2348,7 @@ export default function Orders() {
                     <label className="text-xs text-ink-muted shrink-0 w-14">Order #</label>
                     <input
                       type="text"
+                      aria-label="Order number"
                       value={orderEdits[o.id]?.store_order_number ?? (o.store_order_number ?? '')}
                       onChange={(e) =>
                         setOrderEdits((prev) => ({ ...prev, [o.id]: { ...prev[o.id], store_order_number: e.target.value } }))
@@ -2799,6 +2801,7 @@ export default function Orders() {
                                       <input
                                         type="number"
                                         min={1}
+                                        aria-label="Quantity"
                                         value={itemEdits[item.id]?.quantity ?? (item.quantity ?? 1)}
                                         onChange={(e) => {
                                           const n = parseInt(e.target.value, 10)
@@ -2811,7 +2814,6 @@ export default function Orders() {
                                         }}
                                         disabled={savingItemId === item.id}
                                         className={`w-16 h-9 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
-                                        aria-label="Quantity"
                                       />
                                       <select
                                         value={itemEdits[item.id]?.status ?? item.status}
@@ -3089,6 +3091,7 @@ export default function Orders() {
                                       <input
                                         type="number"
                                         min={1}
+                                        aria-label="Quantity"
                                         value={itemEdits[item.id]?.quantity ?? (item.quantity ?? 1)}
                                         onChange={(e) => {
                                           const n = parseInt(e.target.value, 10)
@@ -3168,6 +3171,7 @@ export default function Orders() {
                                     <td className="py-1 px-2">
                                       <input
                                         type="text"
+                                        aria-label="Purchase price"
                                         value={itemEdits[item.id]?.price_paid ?? (item.price_paid ?? '')}
                                         onChange={(e) =>
                                           setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], price_paid: e.target.value } }))
@@ -3184,6 +3188,7 @@ export default function Orders() {
                                     <td className="py-1 px-2">
                                       <input
                                         type="text"
+                                        aria-label="Payout price"
                                         value={itemEdits[item.id]?.price_sold ?? (item.price_sold ?? '')}
                                         onChange={(e) =>
                                           setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], price_sold: e.target.value } }))

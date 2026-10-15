@@ -72,7 +72,7 @@ export interface PaymentMethod {
   id: number
   user_id: number | null
   reward_id: number | null
-  parent_id?: number | null
+  parent_id: number | null
   reward?: Reward | null
   label: string
   created_at: string

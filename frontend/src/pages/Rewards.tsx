@@ -77,12 +77,13 @@ export default function Rewards() {
             <li className="py-8 text-center text-ink-muted">No rewards yet.</li>
           ) : (
             rewards.map((r) => (
-              <li key={r.id} className="flex items-center justify-between px-4 py-3">
+              <li aria-label={`Reward ${r.id}`} key={r.id} className="flex items-center justify-between px-4 py-3">
                 {editing === r.id ? (
                   <>
                     <input
                       type="text"
                       className="rounded border border-brand-200 px-2 py-1 flex-1 max-w-sm"
+                      aria-label="Reward name"
                       value={newName}
                       onChange={(e) => setNewName(e.target.value)}
                       autoFocus

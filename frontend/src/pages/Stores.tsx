@@ -176,12 +176,13 @@ export default function Stores() {
             ) : (
               stores.map((s) => (
                 <Fragment key={s.id}>
-                  <tr className="border-b border-brand-100 dark:border-gray-700 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-700/30">
+                  <tr aria-label={`Store ${s.id}`} className="border-b border-brand-100 dark:border-gray-700 last:border-0 hover:bg-brand-50/50 dark:hover:bg-gray-700/30">
                     <td className="py-3 px-4 font-medium text-brand-700 dark:text-brand-400">
                       {editingStoreId === s.id ? (
                         <input
                           type="text"
                           className="rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 w-full max-w-xs text-ink"
+                          aria-label="Store name"
                           value={editStoreName}
                           onChange={(e) => setEditStoreName(e.target.value)}
                           autoFocus
@@ -267,12 +268,13 @@ export default function Stores() {
                               <li className="py-2 text-sm text-ink-muted">No accounts yet.</li>
                             ) : (
                               (accountsByStore[s.id] ?? []).map((a) => (
-                                <li key={a.id} className="flex items-center justify-between py-2">
+                                <li aria-label={`Store account ${a.id}`} key={a.id} className="flex items-center justify-between py-2">
                                   {editingAccountId === a.id ? (
                                     <>
                                       <input
                                         type="text"
                                         className="rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 flex-1 max-w-sm text-ink text-sm"
+                                        aria-label="Account name"
                                         value={editAccountName}
                                         onChange={(e) => setEditAccountName(e.target.value)}
                                         autoFocus

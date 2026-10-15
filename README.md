@@ -59,11 +59,22 @@ The runner uses a separate dependency volume and leaves the development server's
 dependencies alone. See the [Playwright Docker documentation](https://playwright.dev/docs/docker)
 for the browser image requirements.
 
-The smoke suite checks authentication, regular-user orders/stores, and both API
-proxies against the real backend, tracking service, and PostgreSQL. It reads admin
-credentials from `.env`, creates a uniquely named temporary regular user, and deletes
-that user in cleanup. It does not reset or seed the database. If a runner is forcibly
-terminated, an `e2e-` user may remain and can be deleted in Admin.
+The suite covers authentication and session expiry, stores/accounts and rewards
+(create, rename, reload, cancel/confirm deletion), parent/child payment methods and
+per-store earnings, order item edits and totals, Walmart import review/application,
+and payment allocation totals including bonuses. Utility regressions cover decimal
+inputs and Walmart email-delivery filtering. Imports and payment workflows use
+local fixtures and the real API/PostgreSQL; they do not contact retailers or UPS.
+Only the session-expiry test intercepts an API response to return a deliberate 401.
+
+Tests read admin credentials from `.env` and create temporary regular users and
+uniquely named records. A shared ID registry deletes test-created payments, items,
+orders, shipments, accounts, payment methods, stores, rewards, and buying groups in
+dependency order, verifies their deletion, then removes the temporary user. Tests
+scope actions to their own records because some API lists contain shared data.
+The suite never resets or globally seeds the database. A forcibly terminated runner
+may leave `e2e-` records behind; cleanup failures fail the test rather than being
+silently ignored.
 
 Reports are saved in `frontend/playwright-report/`; failure screenshots and traces
 are in `frontend/test-results/`. The runner defaults to UID/GID 1000 so reports
@@ -86,6 +97,9 @@ Other development commands:
 ```bash
 # TypeScript check and frontend bundle
 docker compose exec frontend npm run build
+
+# Strict TypeScript check for Playwright fixtures and tests
+docker compose exec frontend npm run test:typecheck
 
 # Backend unit tests (Python's built-in unittest runner)
 docker compose exec backend python -m unittest discover -s tests -v

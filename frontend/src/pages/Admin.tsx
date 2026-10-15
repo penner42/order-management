@@ -110,7 +110,7 @@ export default function Admin() {
 
   async function handleCreateBackup() {
     try {
-      const data = await api.post<{ message: string; filename: string }>('/admin/create-backup')
+      const data = await api.post<{ message: string; filename: string }>('/admin/create-backup', {})
       setAlertMessage(`Backup created: ${data.filename}`)
     } catch (err) {
       setAlertMessage(err instanceof Error ? err.message : 'Failed to create backup')
@@ -144,7 +144,7 @@ export default function Admin() {
 
   async function handleSeedDev() {
     try {
-      const data = await api.post<{ message: string; skipped: boolean }>('/admin/seed-dev')
+      const data = await api.post<{ message: string; skipped: boolean }>('/admin/seed-dev', {})
       setAlertMessage(data.message)
     } catch (err) {
       setAlertMessage(err instanceof Error ? err.message : 'Failed to load sample data')

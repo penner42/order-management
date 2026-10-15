@@ -1531,7 +1531,9 @@ def _apply_items_and_shipments(
             return existing_shipment
 
         if item_to_link:
-            if item_locked_for_store_reimport(item_to_link):
+            # Newly imported tracked lines already have SHIPPED status, but
+            # still need their initial shipment. Only existing lines are locked.
+            if item_to_link.id in pre_existing_item_ids and item_locked_for_store_reimport(item_to_link):
                 return None
             for si in item_to_link.shipment_items:
                 s = existing_shipments_by_id.get(si.shipment_id)

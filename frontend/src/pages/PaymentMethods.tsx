@@ -31,7 +31,7 @@ export default function PaymentMethods() {
   const [addingSubForParentId, setAddingSubForParentId] = useState<number | null>(null)
   const [subMethodLabel, setSubMethodLabel] = useState('')
 
-  const startEdit = async (m: PaymentMethod) => {
+  const startEdit = async (m: Pick<PaymentMethodNested, 'id' | 'label' | 'reward_id'>) => {
     setEditing(m.id)
     setEditLabel(m.label)
     setEditRewardId(m.reward_id ?? '')
@@ -133,7 +133,7 @@ export default function PaymentMethods() {
   const addSubMethod = async (parentId: number, label: string) => {
     if (!label.trim()) return
     try {
-      const created = await api.post<PaymentMethod & { sub_methods?: PaymentMethod['sub_methods'] }>('/payment-methods', {
+      const created = await api.post<PaymentMethod>('/payment-methods', {
         label: label.trim(),
         parent_id: parentId,
       })
@@ -203,6 +203,7 @@ export default function PaymentMethods() {
             methods.map((m) => (
               <Fragment key={m.id}>
                 <li
+                  aria-label={`Payment method ${m.id}`}
                   className={`flex items-center justify-between px-4 py-3 gap-4 ${editing === m.id ? 'relative z-10' : ''}`}
                 >
                   {editing === m.id ? (
@@ -212,6 +213,7 @@ export default function PaymentMethods() {
                           <input
                             type="text"
                             className="rounded border border-brand-200 dark:border-gray-600 px-2 py-1 max-w-sm bg-white dark:bg-gray-700 text-ink"
+                            aria-label="Payment method label"
                             value={editLabel}
                             onChange={(e) => setEditLabel(e.target.value)}
                             autoFocus
@@ -250,6 +252,7 @@ export default function PaymentMethods() {
                                         min="0"
                                         className="w-full rounded border border-brand-200 dark:border-gray-600 px-2 py-1 bg-white dark:bg-gray-700 text-ink"
                                         placeholder="0"
+                                        aria-label={`Points per dollar at ${e.store.name}`}
                                         value={editPointsPerDollar[e.store_id] ?? ''}
                                         onChange={(ev) =>
                                           setEditPointsPerDollar((prev) => ({ ...prev, [e.store_id]: ev.target.value }))
@@ -352,6 +355,7 @@ export default function PaymentMethods() {
                 {(m.sub_methods ?? []).map((sub) => (
                   <li
                     key={sub.id}
+                    aria-label={`Payment method ${sub.id}`}
                     className={`flex items-center justify-between px-4 py-2 pl-8 gap-4 border-t border-brand-100 dark:border-gray-700 ${editing === sub.id ? 'relative z-10 bg-brand-50/30 dark:bg-gray-700/30' : ''}`}
                   >
                     {editing === sub.id ? (
@@ -361,6 +365,7 @@ export default function PaymentMethods() {
                             <input
                               type="text"
                               className="rounded border border-brand-200 dark:border-gray-600 px-2 py-1 max-w-sm bg-white dark:bg-gray-700 text-ink text-sm"
+                              aria-label="Payment method label"
                               value={editLabel}
                               onChange={(e) => setEditLabel(e.target.value)}
                               autoFocus
@@ -399,6 +404,7 @@ export default function PaymentMethods() {
                                           min="0"
                                           className="w-full rounded border border-brand-200 dark:border-gray-600 px-2 py-1 bg-white dark:bg-gray-700 text-ink text-sm"
                                           placeholder="0"
+                                          aria-label={`Points per dollar at ${e.store.name}`}
                                           value={editPointsPerDollar[e.store_id] ?? ''}
                                           onChange={(ev) =>
                                             setEditPointsPerDollar((prev) => ({ ...prev, [e.store_id]: ev.target.value }))
