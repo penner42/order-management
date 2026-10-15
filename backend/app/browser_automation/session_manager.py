@@ -226,8 +226,28 @@ class SessionManager:
                     await self._warm_then_goto(existing.page, warm_url=warm_url, start_url=start_url)
                 return existing
 
-            await self.acquire_slot()
-            try:
+        # Capacity can only be released by close_session(), which also needs
+        # _global_lock to remove the session. Never wait for a permit while
+        # holding that lock.
+        await self.acquire_slot()
+        slot_transferred = False
+        try:
+            async with self._global_lock:
+                # Another caller may have created this profile while this task
+                # waited for capacity. Reuse it and return this task's permit.
+                existing = self._sessions.get(profile_id)
+                if existing:
+                    existing.mode = mode
+                    if retailer:
+                        existing.retailer = retailer
+                    if start_url:
+                        await self._warm_then_goto(
+                            existing.page,
+                            warm_url=warm_url,
+                            start_url=start_url,
+                        )
+                    return existing
+
                 engine = browser_engine_for_retailer(retailer or "")
                 user_data = str(profile_user_data_dir(profile_id, browser=engine))
                 headless = bool(settings.browser_headless)
@@ -279,6 +299,9 @@ class SessionManager:
                     retailer=retailer,
                 )
                 self._sessions[profile_id] = session
+                # close_session now owns this permit and will release it after
+                # the registered browser has shut down.
+                slot_transferred = True
                 self._attach_page_listeners(session)
                 logger.info(
                     "Started browser profile=%s browser=%s retailer=%s headless=%s mode=%s",
@@ -293,9 +316,9 @@ class SessionManager:
                 if start_url and mode != "login":
                     await self._warm_then_goto(page, warm_url=warm_url, start_url=start_url)
                 return session
-            except Exception:
+        finally:
+            if not slot_transferred:
                 self.release_slot()
-                raise
 
     async def close_session(self, profile_id: int) -> None:
         async with self._global_lock:
