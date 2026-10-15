@@ -51,7 +51,7 @@ def item_in_return_process(item: "Item") -> bool:
 
 def item_locked_for_store_reimport(item: "Item") -> bool:
     """True when store re-apply must leave this line's qty/status/tracking alone."""
-    return item.status in STORE_REIMPORT_LOCKED_STATUSES
+    return bool(item.payment_line_items) or item.status in STORE_REIMPORT_LOCKED_STATUSES
 
 
 def advance_item_to_shipped(item: "Item") -> None:

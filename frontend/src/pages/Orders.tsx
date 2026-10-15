@@ -177,9 +177,14 @@ const DEFAULT_STATUSES: EffectiveItemStatus[] = [
   'lost_package',
 ]
 
-/** Item-only statuses (for status dropdown; payment status is on Payment). */
-const ITEM_STATUSES_FOR_EDIT: ItemStatus[] = [
-  'purchased', 'shipped', 'submitted', 'scanned', 'canceled',
+function isPaymentStatus(status: string | null): boolean {
+  return status === 'payment_requested' || status === 'payment_sent' || status === 'payment_received'
+}
+
+/** Payment statuses remain visible, but can only be changed on the Payments page. */
+const ITEM_STATUSES_FOR_EDIT: EffectiveItemStatus[] = [
+  'purchased', 'shipped', 'submitted', 'scanned',
+  'payment_requested', 'payment_sent', 'payment_received', 'canceled',
   'needs_review',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
   'lost_package',
@@ -1335,21 +1340,14 @@ export default function Orders() {
     const now = new Date().toISOString()
     try {
       const next = getNextStatus(getEffectiveItemStatus(toUpdate[0]))
-      if (next === 'payment_sent' || next === 'payment_received') {
-        const paymentId = toUpdate[0].payment_id
-        if (!paymentId) return
-        await api.patch(`/payments/${paymentId}`, next === 'payment_sent' ? { payment_sent_at: now } : { payment_received_at: now })
-        const ordersData = await api.get<OrderListPage>(ordersPath)
-        applyOrdersPage(ordersData)
-      } else {
-        for (const item of toUpdate) {
-          const n = getNextStatus(getEffectiveItemStatus(item))
-          if (n && n !== 'payment_requested' && n !== 'payment_sent' && n !== 'payment_received') {
-            const dateField = STATUS_TO_DATE_FIELD[n]
-            const payload: Partial<Item> = { status: n }
-            if (dateField) (payload as any)[dateField] = now.slice(0, 19)
-            await updateItem(item.id, payload)
-          }
+      if (isPaymentStatus(next)) return
+      for (const item of toUpdate) {
+        const n = getNextStatus(getEffectiveItemStatus(item))
+        if (n && !isPaymentStatus(n)) {
+          const dateField = STATUS_TO_DATE_FIELD[n]
+          const payload: Partial<Item> = { status: n as ItemStatus }
+          if (dateField) (payload as any)[dateField] = now.slice(0, 19)
+          await updateItem(item.id, payload)
         }
       }
     } finally {
@@ -1406,7 +1404,7 @@ export default function Orders() {
       setItemEdits((prev) => { const next = { ...prev }; delete next[itemId]; return next })
       setTrackingEdits((prev) => { const next = { ...prev }; delete next[itemId]; return next })
     } catch (e) {
-      console.error(e)
+      setTrackingSubmitAlert(e instanceof Error ? e.message : 'Request failed')
     } finally {
       setDeletingItemId(null)
     }
@@ -1439,7 +1437,7 @@ export default function Orders() {
         return next
       })
     } catch (e) {
-      console.error(e)
+      setTrackingSubmitAlert(e instanceof Error ? e.message : 'Request failed')
     }
   }
 
@@ -1465,7 +1463,7 @@ export default function Orders() {
         const next = { ...prev }; delete next[itemId]; return next
       })
     } catch (e) {
-      console.error(e)
+      setTrackingSubmitAlert(e instanceof Error ? e.message : 'Request failed')
     }
   }
 
@@ -1477,7 +1475,7 @@ export default function Orders() {
       setOrderEdits((prev) => { const next = { ...prev }; delete next[orderId]; return next })
       setPaymentEdits((prev) => { const next = { ...prev }; delete next[orderId]; return next })
     } catch (e) {
-      console.error(e)
+      setTrackingSubmitAlert(e instanceof Error ? e.message : 'Request failed')
     } finally {
       setDeletingOrderId(null)
     }
@@ -2754,9 +2752,9 @@ export default function Orders() {
                           )}
                           <button
                             type="button"
-                            title="Delete order"
+                            title={o.items?.some((item) => item.payment_id != null) ? 'Cannot delete an order linked to a payment' : 'Delete order'}
                             onClick={() => setConfirmDeleteOrderId(o.id)}
-                            disabled={deletingOrderId === o.id}
+                            disabled={deletingOrderId === o.id || o.items?.some((item) => item.payment_id != null)}
                             className="p-2 rounded text-red-600 hover:text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40 transition disabled:opacity-50"
                             aria-label="Delete order"
                           >
@@ -2782,7 +2780,7 @@ export default function Orders() {
                             const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
                             const isSubmitted = lowestNext === 'submitted'
                             const isScanned = lowestNext === 'scanned'
-                            const hideAdvanceButton = lowestNext === 'payment_requested'
+                            const hideAdvanceButton = isPaymentStatus(lowestNext)
                             const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
                             const trackingInfo = trackingInfoByItemId[item.id] ?? null
 
@@ -2816,7 +2814,7 @@ export default function Orders() {
                                         className={`w-16 h-9 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm text-center focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       />
                                       <select
-                                        value={itemEdits[item.id]?.status ?? item.status}
+                                        value={itemEdits[item.id]?.status ?? effectiveStatus}
                                         onChange={(e) => {
                                           const s = e.target.value as ItemStatus
                                           setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], status: s } }))
@@ -2827,7 +2825,7 @@ export default function Orders() {
                                         aria-label="Status"
                                       >
                                         {ITEM_STATUSES_FOR_EDIT.map((val) => (
-                                          <option key={val} value={val}>
+                                          <option key={val} value={val} disabled={isPaymentStatus(val)} className={isPaymentStatus(val) ? 'text-gray-400' : undefined}>
                                             {STATUS_LABELS[val]}
                                           </option>
                                         ))}
@@ -2935,8 +2933,9 @@ export default function Orders() {
                                         <button
                                           type="button"
                                           onClick={() => setSplitModalItem(item)}
-                                          className="p-2 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition"
-                                          title="Split for separate shipping"
+                                          disabled={item.payment_id != null}
+                                          className="p-2 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition disabled:opacity-50"
+                                          title={item.payment_id != null ? 'Cannot split a line linked to a payment' : 'Split for separate shipping'}
                                           aria-label="Split for separate shipping"
                                         >
                                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}>
@@ -2961,9 +2960,9 @@ export default function Orders() {
                                       <button
                                         type="button"
                                         onClick={() => setConfirmDeleteItemId(item.id)}
-                                        disabled={deletingItemId === item.id}
+                                        disabled={deletingItemId === item.id || item.payment_id != null}
                                         className="p-2 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
-                                        title="Delete line item"
+                                        title={item.payment_id != null ? 'Cannot delete a line linked to a payment' : 'Delete line item'}
                                         aria-label="Delete line item"
                                       >
                                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -3045,9 +3044,9 @@ export default function Orders() {
                                   )}
                                   <button
                                     type="button"
-                                    title="Delete order"
+                                    title={o.items?.some((item) => item.payment_id != null) ? 'Cannot delete an order linked to a payment' : 'Delete order'}
                                     onClick={() => setConfirmDeleteOrderId(o.id)}
-                                    disabled={deletingOrderId === o.id}
+                                    disabled={deletingOrderId === o.id || o.items?.some((item) => item.payment_id != null)}
                                     className="p-1.5 rounded text-red-600 hover:text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40 transition disabled:opacity-50"
                                     aria-label="Delete order"
                                   >
@@ -3074,7 +3073,7 @@ export default function Orders() {
                                 const advanceLabel = lowestNext ? STATUS_LABELS[lowestNext] ?? lowestNext : null
                                 const isSubmitted = lowestNext === 'submitted'
                                 const isScanned = lowestNext === 'scanned'
-                                const hideAdvanceButton = lowestNext === 'payment_requested'
+                                const hideAdvanceButton = isPaymentStatus(lowestNext)
                                 const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
                                 const trackingInfo = trackingInfoByItemId[item.id] ?? null
                                 return (
@@ -3245,7 +3244,7 @@ export default function Orders() {
                                     </td>
                                     <td className="py-1 px-2">
                                       <select
-                                        value={itemEdits[item.id]?.status ?? item.status}
+                                        value={itemEdits[item.id]?.status ?? effectiveStatus}
                                         onChange={(e) => {
                                           const s = e.target.value as ItemStatus
                                           setItemEdits((prev) => ({ ...prev, [item.id]: { ...prev[item.id], status: s } }))
@@ -3255,7 +3254,7 @@ export default function Orders() {
                                         className={`min-w-[6.5rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       >
                                         {ITEM_STATUSES_FOR_EDIT.map((val) => (
-                                          <option key={val} value={val}>
+                                          <option key={val} value={val} disabled={isPaymentStatus(val)} className={isPaymentStatus(val) ? 'text-gray-400' : undefined}>
                                             {STATUS_LABELS[val]}
                                           </option>
                                         ))}
@@ -3293,8 +3292,9 @@ export default function Orders() {
                                           <button
                                             type="button"
                                             onClick={() => setSplitModalItem(item)}
-                                            className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition shrink-0"
-                                            title="Split for separate shipping"
+                                            disabled={item.payment_id != null}
+                                            className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-brand-100 dark:hover:bg-gray-600 transition shrink-0 disabled:opacity-50"
+                                            title={item.payment_id != null ? 'Cannot split a line linked to a payment' : 'Split for separate shipping'}
                                             aria-label="Split for separate shipping"
                                           >
                                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}>
@@ -3321,9 +3321,9 @@ export default function Orders() {
                                         <button
                                           type="button"
                                           onClick={() => setConfirmDeleteItemId(item.id)}
-                                          disabled={deletingItemId === item.id}
+                                          disabled={deletingItemId === item.id || item.payment_id != null}
                                           className="p-1 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
-                                          title="Delete line item"
+                                          title={item.payment_id != null ? 'Cannot delete a line linked to a payment' : 'Delete line item'}
                                           aria-label="Delete line item"
                                         >
                                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3405,7 +3405,7 @@ export default function Orders() {
                             <option value="mark_submitted">Mark as Submitted</option>
                             <option value="mark_scanned">Mark scanned</option>
                             <option disabled>────────────</option>
-                            <option value="delete_items">Delete items</option>
+                            <option value="delete_items" disabled={(o.items ?? []).some((item) => selectedItemIds.has(item.id) && item.payment_id != null)}>Delete items</option>
                           </select>
                           {getBulkActionState(o.id).action === 'input_tracking' && (
                             <>

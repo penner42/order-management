@@ -1,22 +1,22 @@
-"""Regression tests for item edits that interact with payment allocations."""
+"""Item operations must preserve payments created on the Payments page."""
 from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
-from decimal import Decimal
 
+from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Item, Payment, PaymentLineItem
+from app.models import Item, Order, Payment, PaymentLineItem
 from app.models.item import ItemStatus
-from app.routers.items import bulk_update_items, split_item, update_item
+from app.routers.items import bulk_delete_items, bulk_update_items, delete_item, split_item, update_item
+from app.routers.orders import delete_order
 from app.schemas.item import (
-    ItemBulkUpdateEntry,
-    ItemBulkUpdateRequest,
-    ItemSplitRequest,
-    ItemUpdate,
+    ItemBulkDeleteRequest, ItemBulkUpdateEntry, ItemBulkUpdateRequest,
+    ItemCreate, ItemSplitRequest, ItemUpdate,
 )
 
 
@@ -25,173 +25,94 @@ class ItemPaymentUpdateTests(unittest.TestCase):
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.session = sessionmaker(bind=self.engine)()
+        self.session.add(Order(id=1, store_id=1))
+        self.session.commit()
 
     def tearDown(self) -> None:
         self.session.close()
         self.engine.dispose()
 
-    def _paid_scanned_item(self) -> Item:
-        item = Item(
-            order_id=1,
-            description="Original description",
-            status=ItemStatus.SCANNED,
-            quantity=1,
-            price_sold=100,
-        )
-        payment = Payment(
-            buying_group_id=1,
-            payment_requested_at=datetime.now(timezone.utc),
-        )
-        self.session.add_all([item, payment])
+    def _paid_item(self) -> Item:
+        item = Item(order_id=1, description="Original", status=ItemStatus.SCANNED, quantity=2, price_sold=100)
+        self.session.add(item)
         self.session.flush()
-        self.session.add(
-            PaymentLineItem(payment_id=payment.id, item_id=item.id, amount=100)
-        )
+        for amount in (125, 75):
+            payment = Payment(buying_group_id=1, payment_requested_at=datetime.now(timezone.utc))
+            self.session.add(payment)
+            self.session.flush()
+            self.session.add(PaymentLineItem(payment_id=payment.id, item_id=item.id, amount=amount))
         self.session.commit()
         return item
 
-    def assert_payment_preserved(self) -> None:
-        self.assertEqual(self.session.query(PaymentLineItem).count(), 1)
-        self.assertEqual(self.session.query(Payment).count(), 1)
+    def assert_payments_preserved(self, item_id: int) -> None:
+        self.session.expire_all()
+        allocations = self.session.query(PaymentLineItem).order_by(PaymentLineItem.id).all()
+        self.assertEqual([(row.item_id, row.amount) for row in allocations], [(item_id, 125), (item_id, 75)])
+        self.assertEqual(self.session.query(Payment).count(), 2)
 
-    def test_patch_non_status_edit_preserves_payment(self) -> None:
-        item = self._paid_scanned_item()
+    def test_patch_edits_and_earlier_status_preserve_payments(self) -> None:
+        item = self._paid_item()
+        for data in (ItemUpdate(description="Corrected"), ItemUpdate(status=ItemStatus.PURCHASED)):
+            update_item(item.id, data, db=self.session, _=None)
+            self.assert_payments_preserved(item.id)
 
-        update_item(
-            item.id,
-            ItemUpdate(description="Corrected description"),
-            db=self.session,
-            _=None,
-        )
-
-        self.assert_payment_preserved()
-
-    def test_bulk_non_status_edit_preserves_payment(self) -> None:
-        item = self._paid_scanned_item()
-
-        bulk_update_items(
-            ItemBulkUpdateRequest(
-                updates=[
-                    ItemBulkUpdateEntry(
-                        item_id=item.id,
-                        description="Corrected description",
-                    )
-                ]
-            ),
-            db=self.session,
-            _=None,
-        )
-
-        self.assert_payment_preserved()
-
-    def test_explicit_earlier_status_removes_payment(self) -> None:
-        item = self._paid_scanned_item()
-
-        update_item(
-            item.id,
-            ItemUpdate(status=ItemStatus.SCANNED),
-            db=self.session,
-            _=None,
-        )
-
-        self.assertEqual(self.session.query(PaymentLineItem).count(), 0)
-        self.assertEqual(self.session.query(Payment).count(), 0)
-
-    def test_manual_split_redistributes_full_payment_allocation(self) -> None:
-        item = Item(
-            order_id=1,
-            description="Two units",
-            status=ItemStatus.SCANNED,
-            quantity=2,
-            price_sold=100,
-        )
-        payment = Payment(
-            buying_group_id=1,
-            payment_requested_at=datetime.now(timezone.utc),
-        )
-        self.session.add_all([item, payment])
-        self.session.flush()
-        self.session.add(
-            PaymentLineItem(payment_id=payment.id, item_id=item.id, amount=200)
-        )
-        self.session.commit()
-
-        result = split_item(
-            item.id,
-            ItemSplitRequest(keep_quantity=1),
-            db=self.session,
-            _=None,
-        )
-
-        allocations = {
-            row.item_id: row.amount
-            for row in self.session.query(PaymentLineItem).all()
-        }
-        self.assertEqual(allocations[result.kept.id], 100)
-        self.assertEqual(allocations[result.split_off.id], 100)
-        self.assertEqual(sum(allocations.values()), 200)
-
-    def test_manual_split_rounding_preserves_each_payment_total(self) -> None:
-        item = Item(
-            order_id=1,
-            description="Three units",
-            status=ItemStatus.SCANNED,
-            quantity=3,
-            price_sold=100,
-        )
-        payments = [
-            Payment(
-                buying_group_id=1,
-                payment_requested_at=datetime.now(timezone.utc),
+    def test_bulk_edits_and_earlier_status_preserve_payments(self) -> None:
+        item = self._paid_item()
+        for changes in ({"description": "Corrected"}, {"status": ItemStatus.SCANNED}):
+            bulk_update_items(
+                ItemBulkUpdateRequest(updates=[ItemBulkUpdateEntry(item_id=item.id, **changes)]),
+                db=self.session, _=None,
             )
-            for _ in range(2)
-        ]
-        self.session.add_all([item, *payments])
-        self.session.flush()
-        self.session.add_all(
-            [
-                PaymentLineItem(
-                    payment_id=payments[0].id,
-                    item_id=item.id,
-                    amount=100,
-                ),
-                PaymentLineItem(
-                    payment_id=payments[1].id,
-                    item_id=item.id,
-                    amount=50,
-                ),
-            ]
-        )
+            self.assert_payments_preserved(item.id)
+
+    def test_payment_statuses_cannot_be_assigned_to_items(self) -> None:
+        for status in ("payment_requested", "payment_sent", "payment_received"):
+            for schema, fields in (
+                (ItemCreate, {"order_id": 1, "status": status}),
+                (ItemUpdate, {"status": status}),
+                (ItemBulkUpdateEntry, {"item_id": 1, "status": status}),
+                (ItemSplitRequest, {"keep_quantity": 1, "split_off_status": status}),
+            ):
+                with self.subTest(schema=schema.__name__, status=status), self.assertRaises(ValidationError):
+                    schema(**fields)
+
+    def test_linked_item_cannot_be_split_or_deleted(self) -> None:
+        item = self._paid_item()
+        for action in (
+            lambda: split_item(item.id, ItemSplitRequest(keep_quantity=1), db=self.session, _=None),
+            lambda: delete_item(item.id, db=self.session, _=None),
+            lambda: delete_order(1, db=self.session, _=None),
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                action()
+            self.assertEqual(caught.exception.status_code, 409)
+            self.assert_payments_preserved(item.id)
+            self.assertEqual(self.session.get(Item, item.id).quantity, 2)
+            self.assertIsNotNone(self.session.get(Order, 1))
+
+    def test_bulk_delete_rejects_entire_selection_when_one_line_has_payments(self) -> None:
+        paid = self._paid_item()
+        unpaid = Item(order_id=1, quantity=1)
+        self.session.add(unpaid)
         self.session.commit()
+        with self.assertRaises(HTTPException) as caught:
+            bulk_delete_items(ItemBulkDeleteRequest(item_ids=[unpaid.id, paid.id]), db=self.session, _=None)
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIsNotNone(self.session.get(Item, unpaid.id))
+        self.assert_payments_preserved(paid.id)
 
-        result = split_item(
-            item.id,
-            ItemSplitRequest(keep_quantity=1),
-            db=self.session,
-            _=None,
-        )
-
-        by_payment: dict[int, dict[int, Decimal]] = {}
-        for row in self.session.query(PaymentLineItem).all():
-            by_payment.setdefault(row.payment_id, {})[row.item_id] = row.amount
-        self.assertEqual(
-            by_payment[payments[0].id][result.kept.id], Decimal("33.33")
-        )
-        self.assertEqual(
-            by_payment[payments[0].id][result.split_off.id], Decimal("66.67")
-        )
-        self.assertEqual(
-            by_payment[payments[1].id][result.kept.id], Decimal("16.67")
-        )
-        self.assertEqual(
-            by_payment[payments[1].id][result.split_off.id], Decimal("33.33")
-        )
-        self.assertEqual(
-            sum(by_payment[payments[0].id].values()), Decimal("100.00")
-        )
-        self.assertEqual(
-            sum(by_payment[payments[1].id].values()), Decimal("50.00")
-        )
+    def test_unlinked_items_can_be_split_and_deleted(self) -> None:
+        item = Item(order_id=1, quantity=2)
+        self.session.add(item)
+        self.session.commit()
+        result = split_item(item.id, ItemSplitRequest(keep_quantity=1), db=self.session, _=None)
+        self.assertEqual(result.kept.quantity, 1)
+        self.assertEqual(result.split_off.quantity, 1)
+        delete_item(result.split_off.id, db=self.session, _=None)
+        bulk_delete_items(ItemBulkDeleteRequest(item_ids=[item.id]), db=self.session, _=None)
+        delete_order(1, db=self.session, _=None)
+        self.assertEqual(self.session.query(Item).count(), 0)
+        self.assertEqual(self.session.query(Order).count(), 0)
 
 
 if __name__ == "__main__":

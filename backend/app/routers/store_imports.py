@@ -50,7 +50,6 @@ from app.utils.ignored_zip_codes import (
     shipping_postal_code_from_payload,
 )
 from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
-from app.utils.item_splitting import redistribute_item_payment_allocations
 
 router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
 
@@ -1412,13 +1411,6 @@ def _apply_items_and_shipments(
         )
         db.add(remainder)
         db.flush()
-        redistribute_item_payment_allocations(
-            db,
-            original_item=item,
-            split_off_item=remainder,
-            original_quantity=qty,
-            kept_quantity=keep,
-        )
         existing_items.append(remainder)
         # Later shipment slices must be able to attach to this peel (same
         # payout/pricing as the original). Without this, find_existing_item

@@ -181,7 +181,7 @@ class StoreReimportShipmentAllocationTests(unittest.TestCase):
             ],
         )
 
-    def test_automated_split_redistributes_payment_allocation(self) -> None:
+    def test_reimport_preserves_payment_linked_item_and_allocation(self) -> None:
         item, _ = self._add_item(status=ItemStatus.PURCHASED, quantity=2)
         payment = Payment(
             buying_group_id=1,
@@ -201,8 +201,12 @@ class StoreReimportShipmentAllocationTests(unittest.TestCase):
         allocations = self.session.query(PaymentLineItem).order_by(
             PaymentLineItem.item_id
         ).all()
-        self.assertEqual(len(allocations), 2)
-        self.assertEqual([row.amount for row in allocations], [100, 100])
+        self.assertEqual(len(allocations), 1)
+        self.assertEqual(allocations[0].item_id, item.id)
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(item.status, ItemStatus.PURCHASED)
+        self.assertEqual(item.shipment_items, [])
+        self.assertEqual([row.amount for row in allocations], [200])
         self.assertEqual(sum(row.amount for row in allocations), 200)
         self.assertEqual({row.payment_id for row in allocations}, {payment.id})
 

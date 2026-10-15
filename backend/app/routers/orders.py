@@ -534,6 +534,8 @@ def delete_order(order_id: int, db: Session = Depends(get_db), _: User = Depends
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    if any(item.payment_line_items for item in order.items):
+        raise HTTPException(status_code=409, detail="Cannot delete an order with lines linked to a payment. Update the payment on the Payments page first.")
     db.delete(order)
     db.commit()
     return None

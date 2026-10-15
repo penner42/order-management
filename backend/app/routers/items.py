@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, selectinload, joinedload
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Item, Order, Shipment, ShipmentItem, User, Payment, PaymentLineItem
+from app.models import Item, Order, Shipment, ShipmentItem, User, PaymentLineItem
 from app.models.item import ItemStatus
 from app.schemas.item import (
     ItemBulkDeleteRequest,
@@ -29,7 +29,6 @@ from app.utils.buying_group_apis.submit_tracking import (
     tracking_number_for_item,
 )
 from app.utils.dates import to_date_only
-from app.utils.item_splitting import redistribute_item_payment_allocations
 
 logger = logging.getLogger(__name__)
 
@@ -40,31 +39,6 @@ _ITEM_DATE_FIELDS = frozenset({
     "return_sent_at", "return_received_at", "return_refunded_at",
     "lost_package_at",
 })
-
-# Statuses that are "earlier" than payment_requested; moving item to these removes it from its payment
-_STATUSES_BEFORE_PAYMENT_REQUESTED = frozenset(
-    {
-        ItemStatus.PURCHASED,
-        ItemStatus.SHIPPED,
-        ItemStatus.SUBMITTED,
-        ItemStatus.SCANNED,
-    }
-)
-
-
-def _remove_item_from_payment_if_earlier_status(item: Item, db: Session) -> None:
-    """If item is in an earlier-than-payment_requested status, remove from payment; delete payment if empty."""
-    if item.status not in _STATUSES_BEFORE_PAYMENT_REQUESTED:
-        return
-    line_item = db.query(PaymentLineItem).filter(PaymentLineItem.item_id == item.id).first()
-    if not line_item:
-        return
-    payment_id = line_item.payment_id
-    db.delete(line_item)
-    if db.query(PaymentLineItem).filter(PaymentLineItem.payment_id == payment_id).count() == 0:
-        payment = db.query(Payment).filter(Payment.id == payment_id).first()
-        if payment:
-            db.delete(payment)
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -105,7 +79,6 @@ def bulk_update_items(
 ):
     """Update multiple items in a single request. delivered_at in entry is applied to the item's shipment."""
     updated: list[Item] = []
-    payment_status_updates: list[Item] = []
     newly_submitted: list[Item] = []
     for entry in data.updates:
         item = (
@@ -143,11 +116,7 @@ def bulk_update_items(
             and prev_status != ItemStatus.SUBMITTED
         ):
             newly_submitted.append(item)
-        if "status" in payload:
-            payment_status_updates.append(item)
         updated.append(item)
-    for item in payment_status_updates:
-        _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     for item in updated:
         db.refresh(item)
@@ -229,6 +198,8 @@ def bulk_delete_items(
     missing = set(data.item_ids) - found_ids
     if missing:
         raise HTTPException(status_code=404, detail=f"Items not found: {sorted(missing)}")
+    if any(item.payment_line_items for item in items):
+        raise HTTPException(status_code=409, detail="Cannot delete lines linked to a payment. Update the payment on the Payments page first.")
     for item in items:
         db.delete(item)
     db.commit()
@@ -246,6 +217,8 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
     )
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
+    if item.payment_line_items:
+        raise HTTPException(status_code=409, detail="Cannot split a line linked to a payment. Update the payment on the Payments page first.")
     qty = getattr(item, "quantity", 1)
     keep = data.keep_quantity
     if keep < 1 or keep >= qty:
@@ -277,13 +250,6 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
     )
     db.add(new_item)
     db.flush()
-    redistribute_item_payment_allocations(
-        db,
-        original_item=item,
-        split_off_item=new_item,
-        original_quantity=qty,
-        kept_quantity=keep,
-    )
     if data.copy_tracking:
         shipment_id = None
         for si in item.shipment_items or []:
@@ -485,8 +451,6 @@ def update_item(item_id: int, data: ItemUpdate, db: Session = Depends(get_db), _
             setattr(item, k, to_date_only(v) if v is not None else None)
         else:
             setattr(item, k, v)
-    if "status" in payload:
-        _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     db.refresh(item)
     return item
@@ -497,6 +461,8 @@ def delete_item(item_id: int, db: Session = Depends(get_db), _: User = Depends(g
     item = db.query(Item).filter(Item.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
+    if item.payment_line_items:
+        raise HTTPException(status_code=409, detail="Cannot delete a line linked to a payment. Update the payment on the Payments page first.")
     db.delete(item)
     db.commit()
     return None
