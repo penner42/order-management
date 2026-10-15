@@ -6,8 +6,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypeVar
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import (
@@ -208,6 +209,27 @@ def _iso_date(dt: datetime | None) -> str | None:
     if dt is None:
         return None
     return dt.isoformat()
+
+
+_Receipt = TypeVar("_Receipt")
+
+
+def _receipts_since_first_order(
+    db: Session, rows: list[_Receipt], *, date_field: str
+) -> list[_Receipt]:
+    """Ignore receipts predating OM history, retaining undated rows and the first day."""
+    earliest = db.query(func.min(Order.purchase_date)).scalar()
+    if earliest is None:
+        return rows
+    if earliest.tzinfo is None:
+        earliest = earliest.replace(tzinfo=timezone.utc)
+    cutoff = to_date_only(earliest)
+    eligible = []
+    for row in rows:
+        received_at = _parse_created_date(getattr(row, date_field))
+        if received_at is None or received_at >= cutoff:
+            eligible.append(row)
+    return eligible
 
 
 def _index_received_by_tracking(
@@ -1514,7 +1536,7 @@ def _check_receiving_usabg(
             receiving_status_by_po=status_by_po,
         )
 
-    receipts = fetched.rows
+    receipts = _receipts_since_first_order(db, fetched.rows, date_field="scanned_at")
     lots = _usabg_lots_from_receipts(receipts)
     lots_by_tn: dict[str, list[dict[str, Any]]] = {}
     lots_by_id: dict[str, dict[str, Any]] = {}
@@ -1777,7 +1799,7 @@ def _check_receiving_dealandrunner(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
-    receipts = fetched.rows
+    receipts = _receipts_since_first_order(db, fetched.rows, date_field="timestamp")
     lots = _dnr_lots_from_receipts(receipts)
     lots_by_tn: dict[str, list[dict[str, Any]]] = {}
     lots_by_id: dict[str, dict[str, Any]] = {}
@@ -2143,7 +2165,7 @@ def _check_receiving_parsefile(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
-    received_rows = api_result.rows
+    received_rows = _receipts_since_first_order(db, api_result.rows, date_field="created_date")
     raw_csv = api_result.raw_csv
 
     by_tracking = _index_received_by_tracking(received_rows)
@@ -2420,6 +2442,7 @@ def _check_receiving_buyinggroup(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
+    receipts = _receipts_since_first_order(db, receipts, date_field="created_dt")
     by_tracking = _index_bg_receipts_by_tracking(receipts)
     supply_by_tn: dict[str, int] = {}
     meta_by_tn: dict[str, dict[str, Any]] = {}
@@ -2727,7 +2750,7 @@ def _check_receiving_bfmr(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
-    receipts = fetched.rows
+    receipts = _receipts_since_first_order(db, fetched.rows, date_field="scanned_at")
     by_tracking = _index_bfmr_by_tracking(receipts)
     all_pending_trackings = {
         tn.casefold()
