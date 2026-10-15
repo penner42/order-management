@@ -1235,23 +1235,23 @@ def _apply_items_and_shipments(
         s.id: s for s in existing_shipments
     }
 
-    existing_item_keys: set[tuple[str, str]] = set()
+    existing_item_tracking_keys: set[tuple[str, str]] = set()
     for ei in existing_items:
         desc = (ei.description or "").strip()
         if not ei.shipment_items:
-            existing_item_keys.add((desc, ""))
+            existing_item_tracking_keys.add((desc, ""))
             continue
         for si in ei.shipment_items:
             s = existing_shipments_by_id.get(si.shipment_id)
             if not s:
-                existing_item_keys.add((desc, ""))
+                existing_item_tracking_keys.add((desc, ""))
                 continue
             walmart_original = _walmart_tracking_from_notes(s.notes)
             if walmart_original:
-                existing_item_keys.add((desc, walmart_original))
+                existing_item_tracking_keys.add((desc, walmart_original))
             tracking = (s.tracking_number or "").strip() if s.tracking_number else ""
             if tracking:
-                existing_item_keys.add((desc, tracking))
+                existing_item_tracking_keys.add((desc, tracking))
 
     existing_shipments_by_lookup_key = _shipments_by_lookup_key(existing_shipments)
     pre_existing_item_ids: set[int] = {ei.id for ei in existing_items}
@@ -1265,6 +1265,7 @@ def _apply_items_and_shipments(
     shipments_created: dict[str, Shipment] = {}
     used_existing_item_ids: set[int] = set()
     linked_item_ids: set[int] = set()
+    processed_slice_keys: set[tuple[int, int, str]] = set()
 
     def item_tracking_keys(item: Item) -> set[str]:
         if not item.shipment_items:
@@ -1277,6 +1278,76 @@ def _apply_items_and_shipments(
                 continue
             keys.update(_shipment_db_keys(s) or {""})
         return keys
+
+    # Reserve locked quantities against exact incoming tracking matches before
+    # mutable rows are considered. This prevents processing order from letting
+    # an already-represented shipment consume an unshipped row intended for a
+    # later, genuinely new tracking number.
+    locked_items_by_name: dict[str, list[Item]] = {}
+    locked_remaining_by_item_id: dict[int, int] = {}
+    for existing_item in existing_items:
+        if (
+            existing_item.id not in pre_existing_item_ids
+            or not item_locked_for_store_reimport(existing_item)
+        ):
+            continue
+        item_name = (existing_item.description or "").strip()
+        locked_items_by_name.setdefault(item_name, []).append(existing_item)
+        locked_remaining_by_item_id[existing_item.id] = existing_item.quantity or 1
+
+    locked_coverage_by_slice: dict[tuple[int, int], int] = {}
+    for incoming_item_index, incoming_item in enumerate(items):
+        incoming_name = (incoming_item.get("name") or "").strip()
+        locked_candidates = locked_items_by_name.get(incoming_name, [])
+        if not locked_candidates:
+            continue
+        for incoming_slice_index, incoming_slice in enumerate(
+            incoming_item.get("shipments") or []
+        ):
+            incoming_sid_raw = incoming_slice.get("shipmentId")
+            incoming_sid = (
+                incoming_sid_raw if isinstance(incoming_sid_raw, str) else None
+            )
+            incoming_src = shipments_by_id.get(incoming_sid) or {} if incoming_sid else {}
+            incoming_tracking, incoming_original, _ = _item_slice_key(
+                store_name,
+                external_order_id,
+                incoming_src.get("trackingNumber"),
+                incoming_sid,
+                fulfillment_type=_shipment_fulfillment_type(incoming_src),
+            )
+            incoming_keys = {
+                key for key in (incoming_original, incoming_tracking) if key
+            }
+            if not incoming_keys:
+                continue
+            try:
+                requested = max(int(incoming_slice.get("quantity") or 1), 1)
+            except (TypeError, ValueError):
+                requested = 1
+            covered = 0
+            for locked_item in locked_candidates:
+                available = locked_remaining_by_item_id.get(locked_item.id, 0)
+                if available <= 0:
+                    continue
+                if incoming_keys.isdisjoint(item_tracking_keys(locked_item)):
+                    continue
+                take = min(requested - covered, available)
+                covered += take
+                locked_remaining_by_item_id[locked_item.id] = available - take
+                if covered >= requested:
+                    break
+            if covered:
+                locked_coverage_by_slice[
+                    (incoming_item_index, incoming_slice_index)
+                ] = covered
+
+    unmatched_locked_qty_by_name: dict[str, int] = {}
+    for item_name, locked_candidates in locked_items_by_name.items():
+        unmatched_locked_qty_by_name[item_name] = sum(
+            locked_remaining_by_item_id.get(item.id, 0)
+            for item in locked_candidates
+        )
 
 
     def find_existing_item_for_tracking(
@@ -1348,7 +1419,7 @@ def _apply_items_and_shipments(
         # payout/pricing as the original). Without this, find_existing_item
         # skips the remainder and creates a new line with price_sold=0.
         pre_existing_item_ids.add(remainder.id)
-        existing_item_keys.add((item_name, ""))
+        existing_item_tracking_keys.add((item_name, ""))
         return item
 
     def _inherited_payout_for_name(item_name: str):
@@ -1601,8 +1672,7 @@ def _apply_items_and_shipments(
 
         if not shipments_slices:
             quantity = item_data.get("quantities", {}).get("ordered") or 1
-            key = (name, "", item_index, quantity)
-            if key in existing_item_keys:
+            if (name, "") in existing_item_tracking_keys:
                 continue
             if existing_order:
                 continue
@@ -1618,10 +1688,10 @@ def _apply_items_and_shipments(
             )
             db.add(item)
             existing_items.append(item)
-            existing_item_keys.add(key)
+            existing_item_tracking_keys.add((name, ""))
             continue
 
-        for slice_data in shipments_slices:
+        for slice_index, slice_data in enumerate(shipments_slices):
             shipment_id = slice_data.get("shipmentId")
             sid = shipment_id if isinstance(shipment_id, str) else None
             src = shipments_by_id.get(sid) or {} if sid else {}
@@ -1635,15 +1705,35 @@ def _apply_items_and_shipments(
             )
             db_key = walmart_original or tracking_key
 
-            slice_qty = slice_data.get("quantity") or 1
-            key = (name, slice_key, item_index, slice_qty)
-            if key in existing_item_keys:
-                get_or_create_shipment_for_slice(sid)
+            try:
+                slice_qty = max(int(slice_data.get("quantity") or 1), 1)
+            except (TypeError, ValueError):
+                slice_qty = 1
+            processed_key = (item_index, slice_index, slice_key)
+            if processed_key in processed_slice_keys:
                 continue
+            processed_slice_keys.add(processed_key)
 
             incoming_keys = {k for k in (db_key, tracking_key) if k}
-            remaining = max(int(slice_qty), 1)
+            exact_locked_coverage = locked_coverage_by_slice.get(
+                (item_index, slice_index), 0
+            )
+            remaining = max(slice_qty - exact_locked_coverage, 0)
             linked_any = False
+
+            if exact_locked_coverage:
+                # The corresponding locked row already owns this shipment.
+                # Refresh shipment metadata without relinking the item.
+                get_or_create_shipment_for_slice(sid, allow_create=False)
+
+            # Any locked quantity not reserved to an exact tracking match can
+            # represent a retailer tracking replacement. Consume it once, prior
+            # to mutable rows, so a replacement does not duplicate the item.
+            unmatched_locked = unmatched_locked_qty_by_name.get(name, 0)
+            if remaining > 0 and unmatched_locked > 0:
+                covered = min(remaining, unmatched_locked)
+                remaining -= covered
+                unmatched_locked_qty_by_name[name] = unmatched_locked - covered
 
             while remaining > 0:
                 existing_item = find_existing_item_for_tracking(
@@ -1656,11 +1746,15 @@ def _apply_items_and_shipments(
                 if (db_key and db_key in item_keys) or (
                     tracking_key and tracking_key in item_keys
                 ):
+                    take = min(remaining, existing_item.quantity or 1)
+                    allocated_item = allocate_item_for_slice(
+                        existing_item, take, name
+                    )
                     get_or_create_shipment_for_slice(
                         sid,
-                        item_to_link=existing_item,
+                        item_to_link=allocated_item,
                     )
-                    remaining -= existing_item.quantity or 1
+                    remaining -= take
                     linked_any = True
                     continue
 
@@ -1704,20 +1798,7 @@ def _apply_items_and_shipments(
                     )
                 remaining -= take
                 linked_any = True
-                existing_item_keys.discard((name, ""))
-
-            if remaining > 0 and existing_order:
-                # Do not invent new lines for trackings that would have attached
-                # to locked lines (shipped/submitted/scanned/return-process).
-                locked_qty = sum(
-                    (ei.quantity or 1)
-                    for ei in existing_items
-                    if (ei.description or "").strip() == name
-                    and ei.id in pre_existing_item_ids
-                    and item_locked_for_store_reimport(ei)
-                )
-                if locked_qty:
-                    remaining = max(0, remaining - locked_qty)
+                existing_item_tracking_keys.discard((name, ""))
 
             if remaining > 0:
                 # No (more) existing lines to attach — create the leftover
@@ -1753,8 +1834,9 @@ def _apply_items_and_shipments(
                     relink_item_to_shipment(item, shipment, shipped=has_tracking)
 
             if linked_any or remaining > 0:
-                existing_item_keys.discard((name, ""))
-            existing_item_keys.add(key)
+                existing_item_tracking_keys.discard((name, ""))
+            if slice_key:
+                existing_item_tracking_keys.add((name, slice_key))
 
     # Second pass: update existing shipments' delivered_at / notes even when
     # there are no new items for a given tracking number. This ensures that
