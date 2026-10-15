@@ -6,6 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { api, getStoredToken } from '../api/client'
+import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { AlertDialog } from '../components/AlertDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
@@ -249,6 +250,7 @@ function buildOrdersPath(opts: {
 }
 
 export default function Orders() {
+  const groupSubmissionsEnabled = useGroupSubmissionsEnabled()
   const [orders, setOrders] = useState<Order[]>([])
   const [groups, setGroups] = useState<BuyingGroup[]>([])
   const [loading, setLoading] = useState(true)
@@ -2890,9 +2892,9 @@ export default function Orders() {
                                         <button
                                           type="button"
                                           onClick={() => submitTrackingToApi(item.id)}
-                                          disabled={submittingTrackingItemId === item.id}
+                                          disabled={!groupSubmissionsEnabled || submittingTrackingItemId === item.id}
                                           className="shrink-0 px-2 py-1 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
-                                          title="Submit tracking to buying group"
+                                          title={groupSubmissionsEnabled ? 'Submit tracking to buying group' : 'Group submissions are disabled in this environment'}
                                           aria-label="Submit tracking to buying group"
                                         >
                                           {submittingTrackingItemId === item.id ? '…' : 'Submit'}
@@ -3157,9 +3159,9 @@ export default function Orders() {
                                           <button
                                             type="button"
                                             onClick={() => submitTrackingToApi(item.id)}
-                                            disabled={submittingTrackingItemId === item.id}
+                                            disabled={!groupSubmissionsEnabled || submittingTrackingItemId === item.id}
                                             className="shrink-0 px-1.5 py-0.5 rounded text-xs font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
-                                            title="Submit tracking to buying group"
+                                            title={groupSubmissionsEnabled ? 'Submit tracking to buying group' : 'Group submissions are disabled in this environment'}
                                             aria-label="Submit tracking to buying group"
                                           >
                                             {submittingTrackingItemId === item.id ? '…' : 'Submit'}

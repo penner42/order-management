@@ -130,6 +130,12 @@ class BfmrParseAndFilterTests(unittest.TestCase):
 
 
 class BfmrSubmitPayloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests replace the network with fixtures and exercise the enabled path.
+        patcher = mock.patch("app.config.settings.group_submissions_enabled", True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_entry_to_tracker_data_create_shipment(self) -> None:
         entry = bfmr_api.BfmrTrackingEntry(
             reserve_id="1997368",

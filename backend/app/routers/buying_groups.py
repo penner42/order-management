@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.submission_policy import require_group_submissions_enabled
 from app.auth import get_current_user
 from app.database import SessionLocal, get_db
 from app.models import BrowserImportLog, BuyingGroup, User
@@ -242,6 +244,7 @@ def _run_tracking_submit(
     scheduled: bool = False,
 ) -> BuyingGroupSubmitTrackingResponse:
     """Batch-submit pending trackings, stamp last_run_at, and log start/result."""
+    require_group_submissions_enabled()
     ready, reason = group_ready(group)
     if not ready:
         raise HTTPException(status_code=400, detail=reason or "Buying group API is not configured")
@@ -292,6 +295,7 @@ def submit_buying_group_trackings(
     _: User = Depends(get_current_user),
 ):
     """Batch-submit all shipped items with tracking for this buying group."""
+    require_group_submissions_enabled()
     group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
@@ -342,6 +346,8 @@ def list_due_tracking_submit_group_ids(db: Session) -> list[int]:
     Groups that are due but not API-ready are logged and stamped so we do not
     silently no-op every scheduler tick.
     """
+    if not settings.group_submissions_enabled:
+        return []
     from app.browser_automation.scheduler import schedule_due
 
     now = datetime.now(timezone.utc)
@@ -380,6 +386,8 @@ def list_due_tracking_submit_group_ids(db: Session) -> list[int]:
 
 def run_scheduled_tracking_submit(group_id: int) -> bool:
     """Run a scheduled tracking submit for one buying group. Returns True if started."""
+    if not settings.group_submissions_enabled:
+        return False
     db = SessionLocal()
     try:
         group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()

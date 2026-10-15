@@ -269,3 +269,15 @@ order-management/
 ├── docker-compose.yml
 └── README.md
 ```
+
+### Group submissions in development
+
+The development Compose configuration sets `GROUP_SUBMISSIONS_ENABLED=false`.
+Manual and scheduled group submissions are blocked by the backend, including
+tracking and submission notes. Group lookups, authentication, receiving checks,
+and store imports remain available. Restoring a production database cannot
+change this environment setting. Existing submission schedules are ignored.
+
+The production Compose override sets `GROUP_SUBMISSIONS_ENABLED=true`. Deployments
+that do not use that override must explicitly set this variable on the backend
+to allow submissions. No database migration is needed.

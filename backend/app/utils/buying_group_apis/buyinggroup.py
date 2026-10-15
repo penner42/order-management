@@ -9,6 +9,7 @@ Flow:
 """
 from __future__ import annotations
 
+from app.submission_policy import require_group_submissions_enabled
 import hashlib
 import http.client
 import json
@@ -1226,6 +1227,7 @@ def submit_trackings(
     trackings: list[BuyinggroupTrackingEntry],
     timeout_seconds: float = 30.0,
 ) -> BuyinggroupSubmitResult:
+    require_group_submissions_enabled()
     if not trackings:
         raise ValueError("At least one tracking entry is required")
 

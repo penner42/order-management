@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload, joinedload
 
+from app.submission_policy import require_group_submissions_enabled
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Item, Order, Shipment, ShipmentItem, User, PaymentLineItem
@@ -275,6 +276,7 @@ def submit_item_tracking(
     _: User = Depends(get_current_user),
 ):
     """Submit this item's tracking number to the order's buying-group API."""
+    require_group_submissions_enabled()
     item = (
         db.query(Item)
         .filter(Item.id == item_id)

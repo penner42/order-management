@@ -7,6 +7,8 @@ class Settings(BaseSettings):
 
     app_name: str = "Order Management System"
     debug: bool = False
+    # Explicit production opt-in; production snapshots cannot enable submissions.
+    group_submissions_enabled: bool = False
 
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/order_management"

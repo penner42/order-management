@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
+import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { BuyingGroup, BuyingGroupApiFramework } from '../api/types'
 
@@ -260,6 +261,7 @@ function sortGroupsByName(groups: BuyingGroup[]): BuyingGroup[] {
 }
 
 export default function BuyingGroups() {
+  const groupSubmissionsEnabled = useGroupSubmissionsEnabled()
   const navigate = useNavigate()
   const [groups, setGroups] = useState<BuyingGroup[]>([])
   const [loading, setLoading] = useState(true)
@@ -425,6 +427,11 @@ export default function BuyingGroups() {
         stay separate. For Parsefile, BuyingGroup.com, BFMR, and USABG groups, received checks land
         on the Receiving page for review and apply.
       </p>
+      {!groupSubmissionsEnabled && (
+        <p className="mb-4 text-sm text-ink-muted" role="status">
+          Group submissions are disabled in this environment. Lookups and receiving checks remain available.
+        </p>
+      )}
       {submitAlert && (
         <p className="mb-4 text-sm text-ink dark:text-gray-200 rounded-lg border border-brand-200 dark:border-gray-600 bg-brand-50/50 dark:bg-gray-700/40 px-3 py-2">
           {submitAlert}
@@ -685,14 +692,15 @@ export default function BuyingGroups() {
                           <label className="inline-flex items-center gap-2 text-sm text-ink">
                             <input
                               type="checkbox"
-                              checked={draft.tracking_submit_enabled}
+                              checked={groupSubmissionsEnabled && draft.tracking_submit_enabled}
+                              title={!groupSubmissionsEnabled ? 'Group submissions are disabled in this environment' : undefined}
                               onChange={(e) =>
                                 setDraft((d) => ({
                                   ...d,
                                   tracking_submit_enabled: e.target.checked,
                                 }))
                               }
-                              disabled={saving}
+                              disabled={saving || !groupSubmissionsEnabled}
                               className="rounded border-brand-300"
                             />
                             <span>Auto-submit tracking</span>
@@ -782,7 +790,7 @@ export default function BuyingGroups() {
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
                         <span>
                           Auto-submit:{' '}
-                          {g.tracking_submit_enabled
+                          {!groupSubmissionsEnabled ? 'disabled in this environment' : g.tracking_submit_enabled
                             ? `on (${g.tracking_submit_cron?.trim() || DEFAULT_TRACKING_SUBMIT_CRON})`
                             : 'off'}
                         </span>
@@ -797,7 +805,8 @@ export default function BuyingGroups() {
                         <button
                           type="button"
                           onClick={() => runTrackingSubmit(g.id)}
-                          disabled={!canSubmitTrackings(g) || submittingGroupId === g.id}
+                          title={!groupSubmissionsEnabled ? 'Group submissions are disabled in this environment' : undefined}
+                          disabled={!groupSubmissionsEnabled || !canSubmitTrackings(g) || submittingGroupId === g.id}
                           className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs text-ink hover:bg-brand-50 dark:hover:bg-gray-700 disabled:opacity-50"
                         >
                           {submittingGroupId === g.id ? 'Submitting…' : 'Submit trackings now'}

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.submission_policy import require_group_submissions_enabled
 from app.utils.buying_group_apis import parsefile_crypto
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,7 @@ def submit_trackings(
     trackings: list[ParsefileTrackingEntry],
     timeout_seconds: float = 30.0,
 ) -> ParsefileSubmitResult:
+    require_group_submissions_enabled()
     if not trackings:
         raise ValueError("At least one tracking entry is required")
     if not (bearer_token or "").strip():

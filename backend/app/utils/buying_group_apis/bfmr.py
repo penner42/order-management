@@ -6,6 +6,7 @@ Submit: ``POST /api/v2/my-tracker`` create-shipment (RID + PID + order_no + TN +
 """
 from __future__ import annotations
 
+from app.submission_policy import require_group_submissions_enabled
 import json
 import urllib.error
 import urllib.parse
@@ -642,6 +643,7 @@ def submit_trackings(
     timeout_seconds: float = 30.0,
 ) -> BfmrSubmitResult:
     """POST create/update shipment rows to ``/api/v2/my-tracker`` (max 500 per request)."""
+    require_group_submissions_enabled()
     if not (api_key or "").strip():
         raise ValueError("api_key is required")
     if not (api_secret or "").strip():

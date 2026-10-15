@@ -1,6 +1,7 @@
 """USABG (api.usabuying.group) tracking submission + PO receiving client."""
 from __future__ import annotations
 
+from app.submission_policy import require_group_submissions_enabled
 import hashlib
 import json
 import threading
@@ -536,6 +537,7 @@ def upsert_tracking_note(
     timeout_seconds: float = 30.0,
 ) -> None:
     """Create or update the Note column for a tracking (POST /notes or PUT /notes/{id})."""
+    require_group_submissions_enabled()
     comment = (comment or "").strip()
     if not comment:
         raise ValueError("comment is required")
@@ -568,6 +570,7 @@ def submit_trackings(
     trackings: list[UsabgTrackingEntry],
     timeout_seconds: float = 30.0,
 ) -> UsabgSubmitResult:
+    require_group_submissions_enabled()
     if not trackings:
         raise ValueError("At least one tracking entry is required")
 

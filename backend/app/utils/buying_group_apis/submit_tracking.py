@@ -10,6 +10,7 @@ from typing import Sequence
 
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from app.submission_policy import require_group_submissions_enabled
 from app.models import BuyingGroup, Item, Order, ShipmentItem
 from app.models.item import ItemStatus
 from app.utils.buying_group_apis import bfmr as bfmr_api
@@ -507,6 +508,7 @@ def submit_item_tracking_to_group(
     the same buying group), the submitted amount is the sum of all siblings and
     ``item_ids`` lists every sibling so the caller can mark them all submitted.
     """
+    require_group_submissions_enabled()
     items = list(sibling_items) if sibling_items is not None else [item]
     if not any(i.id == item.id for i in items):
         items = [item, *items]
@@ -842,6 +844,7 @@ def batch_submit_pending_trackings(
 
     Only marks items SUBMITTED after a successful API call.
     """
+    require_group_submissions_enabled()
     from app.models import Shipment
 
     group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()

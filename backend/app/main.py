@@ -109,3 +109,8 @@ app.include_router(ignored_zip_codes.router, prefix="/api")
 @app.get("/")
 def root():
     return {"message": "Order Management API", "docs": "/docs"}
+
+
+@app.get("/api/capabilities", dependencies=[Depends(get_current_user)])
+def capabilities():
+    return {"group_submissions_enabled": settings.group_submissions_enabled}
