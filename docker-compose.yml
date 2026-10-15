@@ -24,6 +24,7 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/order_management
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       BROWSER_EXTENSION_DIR: /browser-extension
