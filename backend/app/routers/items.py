@@ -29,6 +29,7 @@ from app.utils.buying_group_apis.submit_tracking import (
     tracking_number_for_item,
 )
 from app.utils.dates import to_date_only
+from app.utils.item_splitting import redistribute_item_payment_allocations
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +277,13 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
     )
     db.add(new_item)
     db.flush()
+    redistribute_item_payment_allocations(
+        db,
+        original_item=item,
+        split_off_item=new_item,
+        original_quantity=qty,
+        kept_quantity=keep,
+    )
     if data.copy_tracking:
         shipment_id = None
         for si in item.shipment_items or []:

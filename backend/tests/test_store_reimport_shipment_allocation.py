@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Item, Order, Shipment, ShipmentItem
+from app.models import Item, Order, Payment, PaymentLineItem, Shipment, ShipmentItem
 from app.models.item import ItemStatus
 from app.routers.store_imports import _apply_items_and_shipments
 
@@ -179,6 +180,31 @@ class StoreReimportShipmentAllocationTests(unittest.TestCase):
                 (1, ItemStatus.SHIPPED, "TRACK-B"),
             ],
         )
+
+    def test_automated_split_redistributes_payment_allocation(self) -> None:
+        item, _ = self._add_item(status=ItemStatus.PURCHASED, quantity=2)
+        payment = Payment(
+            buying_group_id=1,
+            payment_requested_at=datetime.now(timezone.utc),
+        )
+        self.session.add(payment)
+        self.session.flush()
+        self.session.add(
+            PaymentLineItem(payment_id=payment.id, item_id=item.id, amount=200)
+        )
+        self.session.commit()
+
+        self._apply(
+            [("shipment-a", "TRACK-A", 1), ("shipment-b", "TRACK-B", 1)]
+        )
+
+        allocations = self.session.query(PaymentLineItem).order_by(
+            PaymentLineItem.item_id
+        ).all()
+        self.assertEqual(len(allocations), 2)
+        self.assertEqual([row.amount for row in allocations], [100, 100])
+        self.assertEqual(sum(row.amount for row in allocations), 200)
+        self.assertEqual({row.payment_id for row in allocations}, {payment.id})
 
     def test_tracking_replacement_without_mutable_item_preserves_locked_row(self) -> None:
         locked, shipment = self._add_item(
