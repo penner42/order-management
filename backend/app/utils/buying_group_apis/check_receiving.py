@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, TypeVar
@@ -278,6 +278,11 @@ def actionable_count_from_payload(payload: dict[str, Any]) -> int:
     return sum(1 for m in matches if isinstance(m, dict) and _is_actionable_match_dict(m))
 
 
+def _receipt_details(row: Any) -> dict[str, Any]:
+    """Keep provider-specific receipt fields, including Decimal values, in JSON."""
+    return json.loads(json.dumps(asdict(row), default=str))
+
+
 def save_receiving_review_pending(db: Session, payload: dict[str, Any]) -> int:
     """Upsert or clear pending review for one buying group. Returns actionable match count."""
     buying_group_id = int(payload["buying_group_id"])
@@ -287,7 +292,23 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any]) -> int:
         .filter(ReceivingReviewPending.buying_group_id == buying_group_id)
         .first()
     )
-    if count <= 0:
+    # Unknown receipts are a separate review queue. Keep them when a later check
+    # no longer returns them (for example, outside a provider's date window).
+    previous = existing.payload if existing and isinstance(existing.payload, dict) else {}
+    known_trackings = _known_shipment_trackings(db)
+    unknown_by_key = {}
+    for receipt in [*(previous.get("unknown_receipts") or []), *(payload.get("unknown_receipts") or [])]:
+        trackings = receipt.get("tracking_numbers") or [receipt["tracking_number"]]
+        if any(tn.strip().casefold() in known_trackings for tn in trackings):
+            continue
+        key = (
+            (receipt.get("receipt_id") or "").casefold(),
+            receipt["tracking_number"].strip().casefold(),
+            receipt.get("description"),
+        )
+        unknown_by_key[key] = receipt
+    payload = {**payload, "unknown_receipts": list(unknown_by_key.values())}
+    if count <= 0 and not payload["unknown_receipts"]:
         if existing is not None:
             db.delete(existing)
         db.commit()
@@ -324,7 +345,7 @@ def list_receiving_review_pending_payloads(db: Session) -> list[dict[str, Any]]:
         payload = row.payload
         if not isinstance(payload, dict):
             continue
-        if actionable_count_from_payload(payload) > 0:
+        if actionable_count_from_payload(payload) > 0 or payload.get("unknown_receipts"):
             out.append(payload)
     return out
 
@@ -419,7 +440,7 @@ def prune_receiving_review_pending(
     ]
     payload = {**payload, "matches": new_matches}
     count = actionable_count_from_payload(payload)
-    if count <= 0:
+    if count <= 0 and not payload.get("unknown_receipts"):
         db.delete(existing)
         db.commit()
         return 0, True
@@ -1633,6 +1654,8 @@ def _check_receiving_usabg(
             {
                 "receipt_id": row.receipt_id,
                 "tracking_number": tn,
+                "tracking_numbers": [tn],
+                "source_data": _receipt_details(row),
                 "bg_order_id": row.purchase_id,
                 "description": row.received_item,
                 "quantity": row.quantity,
@@ -2004,6 +2027,8 @@ def _check_receiving_dealandrunner(
             {
                 "receipt_id": row.system_transaction_id,
                 "tracking_number": tns[0],
+                "tracking_numbers": tns,
+                "source_data": _receipt_details(row),
                 "bg_order_id": None,
                 "description": row.product_name,
                 "quantity": 1,
@@ -2302,6 +2327,8 @@ def _check_receiving_parsefile(
             {
                 "receipt_id": row.receipt_id,
                 "tracking_number": tn,
+                "tracking_numbers": row.tracking_numbers,
+                "source_data": _receipt_details(row),
                 "bg_order_id": None,
                 "description": (row.item or "").strip() or None,
                 "quantity": row.qty,
@@ -2603,6 +2630,13 @@ def _check_receiving_buyinggroup(
             {
                 "receipt_id": row.receipt_id,
                 "tracking_number": tn,
+                "tracking_numbers": list(dict.fromkeys(
+                    t.strip() for t in (row.tracking_id, row.alt_tracking_id) if t and t.strip()
+                )),
+                "source_data": {
+                    "receipt": _receipt_details(row),
+                    "analytics": [_receipt_details(a) for a in analytics_list],
+                },
                 "bg_order_id": row.order_id or (analytics.order_id if analytics else None),
                 "description": description,
                 "quantity": qty,
@@ -2927,6 +2961,8 @@ def _check_receiving_bfmr(
             {
                 "receipt_id": _bfmr_receipt_id(row),
                 "tracking_number": tn,
+                "tracking_numbers": [tn],
+                "source_data": _receipt_details(row),
                 "bg_order_id": row.order_id,
                 "description": (row.item_name or row.deal_title or "").strip() or None,
                 "quantity": received_qty,

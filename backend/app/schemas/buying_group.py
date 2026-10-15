@@ -244,6 +244,8 @@ class ReceivingReviewUnknownReceipt(BaseModel):
 
     receipt_id: str | None = None
     tracking_number: str
+    tracking_numbers: list[str] = Field(default_factory=list)
+    source_data: dict = Field(default_factory=dict)
     bg_order_id: str | None = None
     description: str | None = None
     quantity: int | None = None

@@ -13,7 +13,7 @@ from app.config import settings
 from app.submission_policy import require_group_submissions_enabled
 from app.auth import get_current_user
 from app.database import SessionLocal, get_db
-from app.models import BrowserImportLog, BuyingGroup, User
+from app.models import BrowserImportLog, BuyingGroup, ReceivingReviewPending, User
 from app.models.user import get_default_app_user_id
 from app.schemas.buying_group import (
     DEFAULT_TRACKING_SUBMIT_CRON,
@@ -308,7 +308,7 @@ def check_buying_group_receiving(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Search warehouse receipts for submitted trackings; open a review session when matches exist."""
+    """Search warehouse receipts and open review for matches or unknown trackings."""
     group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
@@ -325,7 +325,8 @@ def check_buying_group_receiving(
         raise HTTPException(status_code=502, detail=result.error)
 
     review_path = (
-        f"/receiving-review?highlight={group_id}" if actionable > 0 else None
+        f"/receiving-review?highlight={group_id}"
+        if db.get(ReceivingReviewPending, group_id) is not None else None
     )
     return BuyingGroupCheckReceivingResponse(
         buying_group_id=result.buying_group_id,

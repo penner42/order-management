@@ -43,6 +43,8 @@ interface ReceivingUnmatched {
 interface ReceivingUnknownReceipt {
   receipt_id: string | null
   tracking_number: string
+  tracking_numbers?: string[]
+  source_data?: Record<string, unknown>
   bg_order_id: string | null
   description: string | null
   quantity: number | null
@@ -318,6 +320,7 @@ function ReceivingGroupSection({
             {session.buying_group_name}
             <span className="ml-2 text-sm font-normal text-ink-muted">
               ({remainingToApply} to apply
+              {unknownReceipts.length > 0 ? ` · ${unknownReceipts.length} unknown receipts to review` : ''}
               {appliedCount > 0 ? ` · ${appliedCount} applied` : ''})
             </span>
           </button>
@@ -515,21 +518,71 @@ function ReceivingGroupSection({
             </>
           )}
 
-          {(unmatched.length > 0 || unknownReceipts.length > 0 || session.raw_csv) && (
+          {unknownReceipts.length > 0 && (
+            <div className="mb-6">
+              <h2 className="font-semibold text-ink dark:text-gray-100 mb-1">
+                Unknown tracking numbers ({unknownReceipts.length} {unknownReceipts.length === 1 ? 'receipt' : 'receipts'})
+              </h2>
+              <p className="text-sm text-ink-muted dark:text-gray-400 mb-3">
+                Warehouse receipts with tracking numbers missing from Order Manager. Saved for separate review.
+              </p>
+              <div className="overflow-x-auto rounded-xl border border-brand-200/80 dark:border-gray-700">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left border-b border-brand-200 dark:border-gray-600 bg-brand-50/40 dark:bg-gray-800/60">
+                      {['Tracking', 'Item', 'Quantity', 'Unit price', 'Total', 'Receipt / group order', 'Status', 'Dates', 'Delivery / notes', 'Details'].map((label) => (
+                        <th key={label} className="py-2 px-3 font-medium text-ink-muted whitespace-nowrap">{label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {unknownReceipts.map((receipt, index) => (
+                      <tr key={`${receipt.receipt_id}:${receipt.tracking_number}:${index}`} className="border-b border-brand-100 dark:border-gray-700 last:border-0 text-ink dark:text-gray-100">
+                        <td className="py-2 px-3 align-top font-mono text-xs">
+                          {(receipt.tracking_numbers?.length ? receipt.tracking_numbers : [receipt.tracking_number]).map((tn) => <div key={tn}>{tn}</div>)}
+                        </td>
+                        <td className="py-2 px-3 align-top min-w-[12rem]">{receipt.description || '—'}</td>
+                        <td className="py-2 px-3 align-top tabular-nums">{receipt.quantity ?? '—'}</td>
+                        <td className="py-2 px-3 align-top tabular-nums whitespace-nowrap">{fmtMoney(receipt.received_price)}</td>
+                        <td className="py-2 px-3 align-top tabular-nums whitespace-nowrap">{fmtMoney(receipt.received_ext_total)}</td>
+                        <td className="py-2 px-3 align-top text-xs">
+                          <div>Receipt: {receipt.receipt_id || '—'}</div>
+                          <div>Group order: {receipt.bg_order_id || '—'}</div>
+                        </td>
+                        <td className="py-2 px-3 align-top">{receipt.received_status || '—'}</td>
+                        <td className="py-2 px-3 align-top text-xs min-w-[10rem]">
+                          <div>Created: {receipt.created_dt || '—'}</div>
+                          <div>Scanned: {receipt.scanned_at || '—'}</div>
+                        </td>
+                        <td className="py-2 px-3 align-top min-w-[10rem] whitespace-pre-wrap">
+                          <div>{receipt.delivery || '—'}</div>
+                          {receipt.note && <div className="mt-1">{receipt.note}</div>}
+                        </td>
+                        <td className="py-2 px-3 align-top">
+                          {receipt.source_data && Object.keys(receipt.source_data).length > 0 ? (
+                            <details>
+                              <summary className="cursor-pointer text-brand-600 dark:text-brand-400 whitespace-nowrap">All receipt details</summary>
+                              <pre className="mt-2 text-xs whitespace-pre-wrap break-all min-w-[16rem] max-h-80 overflow-auto">{JSON.stringify(receipt.source_data, null, 2)}</pre>
+                            </details>
+                          ) : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {(unmatched.length > 0 || session.raw_csv) && (
             <div className="mb-2">
               <button
                 type="button"
                 onClick={() => setShowExtra((v) => !v)}
                 className="text-xs text-brand-600 dark:text-brand-400 hover:underline"
               >
-                {showExtra ? 'Hide' : 'Show'} unmatched, unknown receipts, and API raw response
+                {showExtra ? 'Hide' : 'Show'} unmatched items and API raw response
               </button>
-            </div>
-          )}
-
-          {showExtra && unknownReceipts.length > 0 && (
-            <div className="mb-4 text-sm text-ink-muted">
-              {unknownReceipts.length} warehouse receipt(s) not in Order Manager (informational).
             </div>
           )}
 
@@ -630,7 +683,7 @@ export default function ReceivingReview() {
         <div>
           <h1 className="text-xl font-semibold text-ink dark:text-gray-100">Receiving</h1>
           <p className="text-sm text-ink-muted dark:text-gray-400 mt-1">
-            Warehouse matches grouped by buying group. Apply to mark items scanned with receipt IDs.
+            Warehouse matches and unknown tracking numbers grouped by buying group. Apply matches to mark items scanned with receipt IDs.
           </p>
         </div>
         <Link
@@ -643,7 +696,7 @@ export default function ReceivingReview() {
 
       {sessions.length === 0 ? (
         <div className="rounded-xl border border-brand-200/80 dark:border-gray-700 px-4 py-8 text-center">
-          <p className="text-ink-muted dark:text-gray-400 mb-3">No pending received updates.</p>
+          <p className="text-ink-muted dark:text-gray-400 mb-3">No pending received updates or unknown tracking numbers.</p>
           <p className="text-sm text-ink-muted dark:text-gray-500 mb-4">
             Run <span className="font-medium">Check receiving</span> on a buying group or enable auto-check
             on a schedule.
