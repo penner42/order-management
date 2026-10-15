@@ -626,7 +626,7 @@ export default function BuyingGroups() {
                             <input
                               type="password"
                               className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                              placeholder="Parsefile portal password"
+                              placeholder={`${draft.name.trim() || 'Buying group'} portal password`}
                               value={draft.api_password}
                               onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}
                               disabled={saving}

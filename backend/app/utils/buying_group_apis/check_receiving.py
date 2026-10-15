@@ -2161,7 +2161,7 @@ def _check_receiving_parsefile(
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
-            error=reason or "Buying group Parsefile API is not configured",
+            error=reason or f"{group_name} API is not configured",
         )
 
     unscanned_items, pending, all_trackings = _collect_pending(db, buying_group_id=buying_group_id)
@@ -2347,7 +2347,7 @@ def _check_receiving_parsefile(
     split_off = _split_off_count(matches)
     checked_summary = (
         f"Checked {len(pending)} unscanned item(s) / {len(all_trackings)} tracking number(s) "
-        f"against Parsefile ({len(received_rows)} received row(s))."
+        f"against {group_name} ({len(received_rows)} received row(s))."
     )
 
     matched_ids = {m.item_id for m in matches}
@@ -2356,10 +2356,10 @@ def _check_receiving_parsefile(
     if not pending and not unknown_receipts and not matches:
         message = (
             "No shipped/submitted (unscanned) items with tracking numbers for this buying group, "
-            "and no unknown Parsefile receipts."
+            f"and no unknown {group_name} receipts."
             if not unscanned_items
             else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
-            "and no unknown Parsefile receipts."
+            f"and no unknown {group_name} receipts."
         )
         payload = {
             "buying_group_id": buying_group_id,
@@ -2392,14 +2392,14 @@ def _check_receiving_parsefile(
         parts.append(part)
     if unknown_receipts:
         parts.append(
-            f"{len(unknown_receipts)} Parsefile receipt(s) with tracking not in Order Manager"
+            f"{len(unknown_receipts)} {group_name} receipt(s) with tracking not in Order Manager"
         )
     if not matches and not unknown_receipts:
         bits = [checked_summary]
         if not_found:
             bits.append(f"{not_found} local item(s) not found as received.")
         if void_skipped:
-            bits.append(f"{void_skipped} voided at Parsefile.")
+            bits.append(f"{void_skipped} voided at {group_name}.")
         message = " ".join(bits) + " Nothing to review."
     else:
         message = ". ".join(parts) + f". {checked_summary}"

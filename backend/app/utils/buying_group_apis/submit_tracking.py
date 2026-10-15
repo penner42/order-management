@@ -673,10 +673,11 @@ def _parsefile_submission_ids(
     email = (group.api_email or "").strip()
     password = (portal_password if portal_password is not None else group.api_password or "").strip()
     base_url = (group.base_url or "").strip()
+    group_name = (group.name or "").strip() or "Buying group"
     if not password:
-        return {}, "Submission ID not retrieved (set Parsefile portal password on the buying group)."
+        return {}, f"Submission ID not retrieved (set the portal password for {group_name})."
     if not email or not base_url:
-        return {}, "Submission ID not retrieved (Parsefile email/base URL missing)."
+        return {}, f"Submission ID not retrieved ({group_name} email/base URL missing)."
     try:
         looked = parsefile_api.lookup_submission_ids(
             base_url=base_url,
