@@ -1,8 +1,10 @@
 """Order Management System - FastAPI application."""
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.auth import get_current_user
 from app.routers import (
     admin,
     auth,
@@ -24,7 +26,27 @@ from app.routers import (
 )
 from app.admin_bootstrap import ensure_admin_user
 
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title=settings.app_name, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(get_current_user)])
+def openapi_schema():
+    return app.openapi()
+
+
+@app.get("/docs", include_in_schema=False, dependencies=[Depends(get_current_user)])
+def swagger_docs():
+    return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Swagger UI")
+
+
+@app.get("/docs/oauth2-redirect", include_in_schema=False, dependencies=[Depends(get_current_user)])
+def swagger_redirect():
+    return get_swagger_ui_oauth2_redirect_html()
+
+
+@app.get("/redoc", include_in_schema=False, dependencies=[Depends(get_current_user)])
+def redoc_docs():
+    return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

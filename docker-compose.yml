@@ -67,11 +67,12 @@ services:
     volumes:
       - ./package-tracking:/app
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/openapi.json"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 5s
       timeout: 5s
       retries: 10
     environment:
+      ORDER_MANAGEMENT_API_BASE: http://backend:8000
       UPS_CLIENT: ${UPS_CLIENT:-}
       UPS_SECRET: ${UPS_SECRET:-}
 

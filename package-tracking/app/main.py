@@ -5,8 +5,11 @@ import time
 import uuid
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from pydantic import BaseModel
+
+from app.auth import require_user
 
 # UPS OAuth: production https://onlinetools.ups.com/security/v1/oauth/token
 # Sandbox: https://wwwcie.ups.com/security/v1/oauth/token
@@ -33,7 +36,38 @@ class LinkResponse(BaseModel):
     results: list[LinkResult]
 
 
-app = FastAPI(title="Package Tracking API")
+app = FastAPI(
+    title="Package Tracking API",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+@app.get("/health", include_in_schema=False)
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(require_user)])
+def openapi_schema():
+    return app.openapi()
+
+
+@app.get("/docs", include_in_schema=False, dependencies=[Depends(require_user)])
+def swagger_docs():
+    # Relative URLs work both directly and through the frontend's /tracking proxy.
+    return get_swagger_ui_html(openapi_url="./openapi.json", title=f"{app.title} - Swagger UI")
+
+
+@app.get("/docs/oauth2-redirect", include_in_schema=False, dependencies=[Depends(require_user)])
+def swagger_redirect():
+    return get_swagger_ui_oauth2_redirect_html()
+
+
+@app.get("/redoc", include_in_schema=False, dependencies=[Depends(require_user)])
+def redoc_docs():
+    return get_redoc_html(openapi_url="./openapi.json", title=f"{app.title} - ReDoc")
 
 
 def _normalize(tracking: str) -> str:
@@ -223,13 +257,13 @@ def detect_carrier_and_link(tracking_number: str) -> LinkResult:
     return LinkResult(carrier=carrier, url=_tracking_url(carrier, t))
 
 
-@app.post("/link", response_model=LinkResponse)
+@app.post("/link", response_model=LinkResponse, dependencies=[Depends(require_user)])
 def link(body: LinkRequest) -> LinkResponse:
     results = [detect_carrier_and_link(tn) for tn in body.tracking_numbers]
     return LinkResponse(results=results)
 
 
-@app.get("/ups-token")
+@app.get("/ups-token", dependencies=[Depends(require_user)])
 def ups_token() -> dict:
     """Return a UPS OAuth access token for use in subsequent UPS API requests (e.g. tracking)."""
     token = get_ups_token()
@@ -262,7 +296,7 @@ def _parse_ups_track_response(data: dict) -> TrackResponse:
         if not isinstance(activities, list):
             activities = [activities] if activities else []
         delivered_at: str | None = None
-        
+
         for act in activities:
             status = act.get("status") or {}
             if isinstance(status, dict):
@@ -319,13 +353,13 @@ def fetch_ups_track(tracking_number: str) -> TrackResponse:
     return _parse_ups_track_response(data)
 
 
-@app.get("/track", response_model=TrackResponse)
+@app.get("/track", response_model=TrackResponse, dependencies=[Depends(require_user)])
 def track(tracking_number: str) -> TrackResponse:
     """Return tracking status (Delivered / InTransit / Unknown) and optional delivered_at. UPS only."""
     return fetch_ups_track(tracking_number)
 
 
-@app.get("/")
+@app.get("/", dependencies=[Depends(require_user)])
 def root() -> dict:
     return {"message": "Package Tracking API", "docs": "/docs"}
 

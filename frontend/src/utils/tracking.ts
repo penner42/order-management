@@ -1,3 +1,10 @@
+import { getStoredToken } from '../api/client'
+
+function authHeaders(): Record<string, string> {
+  const token = getStoredToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
 export interface TrackingInfo {
   carrier: string | null
   url: string | null
@@ -23,6 +30,7 @@ export async function getTrackingInfoBulk(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...authHeaders(),
       },
       body: JSON.stringify({ tracking_numbers: trimmed }),
     })
@@ -59,6 +67,7 @@ export async function testUpsCredentials(): Promise<UpsTestResult> {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
+        ...authHeaders(),
       },
     })
 
