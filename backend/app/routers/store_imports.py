@@ -538,7 +538,13 @@ def _incoming_item_is_canceled(item_data: dict[str, Any]) -> bool:
     return False
 
 
-def _normalized_payload_is_canceled(normalized: dict[str, Any]) -> bool:
+def _normalized_order_is_canceled(normalized: dict[str, Any]) -> bool:
+    """Return whether the payload explicitly marks the whole order canceled.
+
+    Item and shipment statuses describe only their own records. Retailers may
+    also report a partially canceled fulfillment state when another item in the
+    same order has shipped, which must not cancel the shipped sibling.
+    """
     candidates: list[Any] = [
         normalized.get("status"),
         normalized.get("orderStatus"),
@@ -556,20 +562,11 @@ def _normalized_payload_is_canceled(normalized: dict[str, Any]) -> bool:
         )
 
     for candidate in candidates:
-        if _status_text_indicates_canceled(candidate):
-            return True
-
-    for shipment in normalized.get("shipments") or []:
-        if not isinstance(shipment, dict):
-            continue
-        status_info = shipment.get("status") or {}
-        if isinstance(status_info, dict):
-            for key in ("normalizedStatus", "rawStatusType", "message"):
-                if _status_text_indicates_canceled(status_info.get(key)):
-                    return True
-
-    for item in normalized.get("items") or []:
-        if isinstance(item, dict) and _incoming_item_is_canceled(item):
+        status_text = _coerce_status_text(candidate).strip().lower()
+        if (
+            "partial" not in status_text
+            and ("canceled" in status_text or "cancelled" in status_text)
+        ):
             return True
 
     # Do not treat cancellations.orderLevel / itemLevelReasons as cancel proof.
@@ -631,7 +628,7 @@ def _apply_canceled_statuses(
     *,
     db: Session | None = None,
 ) -> None:
-    order_canceled = _normalized_payload_is_canceled(normalized)
+    order_canceled = _normalized_order_is_canceled(normalized)
     if incoming_by_name is None:
         incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
 
@@ -829,7 +826,7 @@ def _build_order_diff(
             )
 
     incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
-    order_is_canceled = _normalized_payload_is_canceled(normalized)
+    order_is_canceled = _normalized_order_is_canceled(normalized)
     tracking_by_id = _items_have_tracking(db, existing_items)
     items_by_desc: dict[str, list[Item]] = {}
     for item in existing_items:
