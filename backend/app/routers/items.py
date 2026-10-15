@@ -104,6 +104,7 @@ def bulk_update_items(
 ):
     """Update multiple items in a single request. delivered_at in entry is applied to the item's shipment."""
     updated: list[Item] = []
+    payment_status_updates: list[Item] = []
     newly_submitted: list[Item] = []
     for entry in data.updates:
         item = (
@@ -141,8 +142,10 @@ def bulk_update_items(
             and prev_status != ItemStatus.SUBMITTED
         ):
             newly_submitted.append(item)
+        if "status" in payload:
+            payment_status_updates.append(item)
         updated.append(item)
-    for item in updated:
+    for item in payment_status_updates:
         _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     for item in updated:
@@ -468,12 +471,14 @@ def update_item(item_id: int, data: ItemUpdate, db: Session = Depends(get_db), _
     item = db.query(Item).filter(Item.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    for k, v in payload.items():
         if k in _ITEM_DATE_FIELDS:
             setattr(item, k, to_date_only(v) if v is not None else None)
         else:
             setattr(item, k, v)
-    _remove_item_from_payment_if_earlier_status(item, db)
+    if "status" in payload:
+        _remove_item_from_payment_if_earlier_status(item, db)
     db.commit()
     db.refresh(item)
     return item
