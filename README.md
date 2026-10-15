@@ -11,76 +11,101 @@ A full-stack order management system for reselling: track orders (with store and
 - **Frontend:** React 18, TypeScript, Vite, Tailwind CSS
 - **Database:** PostgreSQL (multi-user ready; `user_id` on orders, stores, etc.)
 
-## Quick start (Docker)
+## Development (Docker only)
 
-Run everything with one command:
+The current Compose stack is the development environment. The host only needs
+Docker Engine and Docker Compose; Node, Python, browsers, and dependencies run in
+containers. Production is deployed separately.
+
+On a fresh checkout, copy `.env.sample` to `.env` and set the admin credentials.
+Existing checkouts can keep their `.env` and data volumes.
 
 ```bash
-cd order-management
-docker compose up --build
+docker compose up -d --build --wait
 ```
 
 - **App:** http://localhost:5173
-- **Package tracking API docs (tracking features):** http://localhost:8080/docs
-- **API docs:** If you expose the backend port (see note below), then http://localhost:8000/docs
-- **PostgreSQL:** localhost:5432 (user `postgres`, password `postgres`, db `order_management`)
+- **Backend API docs:** http://localhost:8000/docs (bound to host loopback)
+- **Package tracking docs:** http://localhost:8080/docs
+- **PostgreSQL:** localhost:5432 (`postgres` / `postgres`, database `order_management`)
 
-Note: in the current `docker-compose.yml`, the backend port mapping is intentionally commented out. The frontend proxies `/api` to the backend, so the app works without exposing `8000`. If you want to browse OpenAPI directly, uncomment `backend.ports` (the `8000:8000` mapping) and restart with `docker compose up --build`.
+The backend applies migrations and ensures the admin user from `.env` at startup.
+Sign in with those credentials. The admin can create regular users for the order
+management screens.
 
-The backend runs migrations and ensures an admin user on startup (from `ADMIN_USERNAME` / `ADMIN_PASSWORD`, default `admin` / `admin`). Log in at the app, then create stores, buying groups, payment methods, and orders.
+Frontend, backend, and tracking source directories are mounted into their
+containers. Vite updates the browser when frontend code changes; Uvicorn reloads
+when Python code changes. Compose Watch is no longer required. Migrations added
+while the backend is running can be applied with
+`docker compose exec backend alembic upgrade head`.
 
-To run in the background: `docker compose up -d --build`.
+Frontend dependencies live in a Docker volume, separate from host `node_modules`.
+`npm ci` runs on frontend startup. After changing its lockfile, restart the frontend:
+`docker compose restart frontend`. After changing Python requirements or Dockerfiles,
+run `docker compose up -d --build --wait` again.
 
----
+### Tests and build checks
 
-### Running without Docker
-
-**1. PostgreSQL** – Start Postgres and create a database, or use the db service only:
-
-```bash
-docker compose up -d db
-```
-
-**2. Backend:**
-
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/order_management"
-export ADMIN_USERNAME=admin
-export ADMIN_PASSWORD=admin
-alembic upgrade head
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-**2.5. Package tracking service (optional, for UPS tracking):**
+Run the real browser tests entirely in Docker:
 
 ```bash
-cd ../package-tracking
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-export UPS_CLIENT="your_ups_client_id"
-export UPS_SECRET="your_ups_secret"
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
+docker compose --profile test run --build --rm frontend-tests
 ```
 
-If `UPS_CLIENT` / `UPS_SECRET` are not set, the service can still generate tracking links (`POST /link`), but UPS status lookups (`GET /track`) will fail.
+This builds a Playwright runner with matching browser and npm package versions,
+waits for healthy app services, and accesses the app at `http://frontend:5173` on
+the Compose network. Inside a runner, `localhost` refers to that runner itself.
+The runner uses a separate dependency volume and leaves the development server's
+dependencies alone. See the [Playwright Docker documentation](https://playwright.dev/docs/docker)
+for the browser image requirements.
 
-**3. Frontend:**
+The smoke suite checks authentication, regular-user orders/stores, and both API
+proxies against the real backend, tracking service, and PostgreSQL. It reads admin
+credentials from `.env`, creates a uniquely named temporary regular user, and deletes
+that user in cleanup. It does not reset or seed the database. If a runner is forcibly
+terminated, an `e2e-` user may remain and can be deleted in Admin.
+
+Reports are saved in `frontend/playwright-report/`; failure screenshots and traces
+are in `frontend/test-results/`. The runner defaults to UID/GID 1000 so reports
+remain editable on the host. On Linux with a different user ID, set
+`LOCAL_UID=$(id -u) LOCAL_GID=$(id -g)` before the Compose command.
+To view the report from a container:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+docker compose --profile test run --rm --no-deps -p 127.0.0.1:9323:9323 frontend-tests npx playwright show-report --host 0.0.0.0 --port 9323
 ```
 
-Open http://localhost:5173 and log in with the admin credentials. The frontend proxies:
+Open http://localhost:9323. For interactive browser test debugging:
 
-- `/api` -> `API_PROXY_TARGET` (default `http://127.0.0.1:8000`)
-- `/tracking` -> `PACKAGE_TRACKING_PROXY_TARGET` (default `http://127.0.0.1:8080`)
+```bash
+docker compose --profile test run --rm -p 127.0.0.1:9323:9323 frontend-tests npm run test:e2e:ui
+```
+
+Other development commands:
+
+```bash
+# TypeScript check and frontend bundle
+docker compose exec frontend npm run build
+
+# Backend unit tests (Python's built-in unittest runner)
+docker compose exec backend python -m unittest discover -s tests -v
+
+# Shells and logs
+docker compose exec frontend sh
+docker compose exec backend bash
+docker compose logs -f backend frontend package-tracking
+
+# Stop the environment, preserving database, invoices, and browser profiles
+docker compose down
+```
+
+Use `docker compose down` without `-v` to preserve data. Source changes are visible
+immediately through bind mounts; changes to container configuration require
+`docker compose up -d --wait`.
+
+The frontend proxies `/api` to `backend:8000` (including WebSockets) and `/tracking`
+to `package-tracking:8080`. UPS status lookups require `UPS_CLIENT` / `UPS_SECRET`;
+tracking link generation works without them.
 
 ## Data model (multi-user ready)
 
@@ -111,7 +136,7 @@ All API routes are under `/api`. Auth: send `Authorization: Bearer <token>` (fro
 - **Browser profiles:** `GET/POST /api/browser-profiles`, `DELETE /api/browser-profiles/{id}`, `POST .../login/start|done|cancel`, `POST .../import`, `GET /api/browser-profiles/jobs/{job_id}`, WebSocket `.../live?token=`
 - **Shipments:** `GET/POST /api/shipments`, `GET/PATCH/DELETE /api/shipments/{id}`
 
-OpenAPI docs: http://localhost:8000/docs (only if the backend port is exposed; see the Docker quick-start note above)
+OpenAPI docs: http://localhost:8000/docs (available on host loopback in the development stack)
 
 ## Browser extension
 

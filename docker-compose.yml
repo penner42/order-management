@@ -19,12 +19,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    # ports:
-    #   - "8000:8000"
+    ports:
+      - "127.0.0.1:8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/order_management
-      ADMIN_USERNAME: ${ADMIN_USERNAME}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       BROWSER_EXTENSION_DIR: /browser-extension
       WEB_EXT_API_KEY: ${WEB_EXT_API_KEY:-}
       WEB_EXT_API_SECRET: ${WEB_EXT_API_SECRET:-}
@@ -41,25 +42,19 @@ services:
       DISPLAY: ":99"
     shm_size: "2gb"
     volumes:
+      - ./backend:/app
       - ./browser-extension:/browser-extension
       - invoice_data:/data/invoices
       - browser_profiles_data:/data/browser_profiles
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./backend
-          target: /app
-          ignore:
-            - __pycache__
-            - "*.pyc"
-            - .git
-        - action: rebuild
-          path: ./backend/requirements.txt
-        - action: rebuild
-          path: ./backend/Dockerfile
 
   package-tracking:
     build:
@@ -67,22 +62,17 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload --reload-dir /app/app
+    volumes:
+      - ./package-tracking:/app
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/openapi.json"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     environment:
       UPS_CLIENT: ${UPS_CLIENT:-}
       UPS_SECRET: ${UPS_SECRET:-}
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./package-tracking
-          target: /app
-          ignore:
-            - __pycache__
-            - "*.pyc"
-            - .git
-        - action: rebuild
-          path: ./package-tracking/requirements.txt
-        - action: rebuild
-          path: ./package-tracking/Dockerfile
 
   frontend:
     build:
@@ -94,25 +84,45 @@ services:
       API_PROXY_TARGET: http://backend:8000
       VITE_PACKAGE_TRACKING_API_BASE: /tracking
       PACKAGE_TRACKING_PROXY_TARGET: http://package-tracking:8080
+    # Install from the lockfile on startup so the dependency volume follows package changes.
+    command: sh -c 'npm ci && npm run dev -- --host 0.0.0.0 --port 5173 --strictPort'
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5173').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     depends_on:
-      - backend
-    develop:
-      watch:
-        - action: sync
-          path: ./frontend
-          target: /app
-          ignore:
-            - node_modules
-            - dist
-            - .git
-        - action: rebuild
-          path: ./frontend/package.json
-        - action: rebuild
-          path: ./frontend/package-lock.json
-        - action: rebuild
-          path: ./frontend/Dockerfile
+      backend:
+        condition: service_healthy
+      package-tracking:
+        condition: service_healthy
+
+  frontend-tests:
+    profiles: [test]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.test
+    init: true
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    shm_size: "1gb"
+    environment:
+      PLAYWRIGHT_BASE_URL: http://frontend:5173
+      TEST_ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      TEST_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./frontend:/app
+      # Each one-off runner gets the dependencies from its freshly built image.
+      - /app/node_modules
+    depends_on:
+      frontend:
+        condition: service_healthy
 
 volumes:
+  frontend_node_modules:
   pgdata:
   invoice_data:
   browser_profiles_data:

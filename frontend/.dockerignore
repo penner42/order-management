@@ -4,3 +4,7 @@ dist
 *.log
 .env
 .env.*
+
+playwright-report
+test-results
+*.tsbuildinfo

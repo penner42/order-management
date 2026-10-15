@@ -53,3 +53,7 @@ browser-extension/.keys/
 browser-extension/.env
 browser-extension/*.crx
 browser-extension/*.xpi
+
+# Browser test artifacts
+frontend/playwright-report/
+frontend/test-results/
