@@ -1,9 +1,16 @@
-import { useEffect, useState, Fragment } from 'react'
+import { useCallback, useEffect, useState, Fragment } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import BrowserProfileControls from '../components/BrowserProfileControls'
 import { api } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import type { Store, StoreAccount } from '../api/types'
+import type { Store, StoreAccount, BrowserProfile } from '../api/types'
 
 export default function Stores() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const expandedStoreId = Number(searchParams.get('store_id')) || null
+  const selectedAccountId = Number(searchParams.get('account_id')) || null
+  const [profiles, setProfiles] = useState<BrowserProfile[]>([])
+  const [error, setError] = useState<string | null>(null)
   const [stores, setStores] = useState<Store[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
   const [loading, setLoading] = useState(true)
@@ -16,7 +23,25 @@ export default function Stores() {
   const [confirmDeleteStoreId, setConfirmDeleteStoreId] = useState<number | null>(null)
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState<{ storeId: number; accountId: number } | null>(null)
 
+  const loadProfiles = useCallback(async () => {
+    await api.get<BrowserProfile[]>('/browser-profiles').then(setProfiles).catch(err => setError(String(err)))
+  }, [])
+
+  function expandStore(storeId: number) {
+    const next = new URLSearchParams(searchParams)
+    if (expandedStoreId === storeId) next.delete('store_id')
+    else next.set('store_id', String(storeId))
+    next.delete('account_id')
+    setSearchParams(next)
+  }
+
+  function profileDeletionNotice(storeId: number | null, accountId?: number) {
+    const affected = profiles.filter(p => accountId != null ? p.store_account_id === accountId : p.store_id === storeId)
+    return affected.length ? ` Browser profiles (${affected.map(p => p.store_account_name ?? 'Store profile').join(', ')}) and their stored cookies will also be deleted; active browser work will stop.` : ''
+  }
+
   function loadStores() {
+    loadProfiles()
     api
       .get<Store[]>('/stores')
       .then((list) => {
@@ -33,13 +58,32 @@ export default function Stores() {
         })
         setAccountsByStore(byStore)
       })
-      .catch(console.error)
+      .catch(err => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false))
   }
 
   useEffect(() => {
     loadStores()
   }, [])
+
+  useEffect(() => {
+    if (expandedStoreId == null) return
+    const interval = window.setInterval(loadProfiles, 5000)
+    return () => window.clearInterval(interval)
+  }, [expandedStoreId, loadProfiles])
+
+  useEffect(() => {
+    if (selectedAccountId == null) return
+    const owner = stores.find(store => (accountsByStore[store.id] ?? []).some(account => account.id === selectedAccountId))
+    if (!owner) return
+    if (expandedStoreId !== owner.id) {
+      const next = new URLSearchParams(searchParams)
+      next.set('store_id', String(owner.id))
+      setSearchParams(next, { replace: true })
+    } else {
+      document.getElementById(`store-account-${selectedAccountId}`)?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [selectedAccountId, expandedStoreId, stores, accountsByStore, searchParams, setSearchParams])
 
   const createStore = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -50,12 +94,16 @@ export default function Stores() {
       setAccountsByStore((prev) => ({ ...prev, [created.id]: [] }))
       setCreateName('')
     } catch (err) {
-      console.error(err)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
   const startEditStore = (s: Store) => {
     setEditingStoreId(s.id)
+    const next = new URLSearchParams(searchParams)
+    next.set('store_id', String(s.id))
+    next.delete('account_id')
+    setSearchParams(next)
     setEditStoreName(s.name)
     setNewAccountName('')
     setEditingAccountId(null)
@@ -66,8 +114,9 @@ export default function Stores() {
       const updated = await api.patch<Store>(`/stores/${editingStoreId}`, { name: editStoreName.trim() })
       setStores((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
       setEditingStoreId(null)
+      void loadProfiles()
     } catch (err) {
-      console.error(err)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
   const cancelEditStore = () => setEditingStoreId(null)
@@ -83,7 +132,7 @@ export default function Stores() {
       })
       if (editingStoreId === id) setEditingStoreId(null)
     } catch (err) {
-      console.error(err)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setConfirmDeleteStoreId(null)
     }
@@ -100,7 +149,7 @@ export default function Stores() {
       }))
       setNewAccountName('')
     } catch (err) {
-      console.error(err)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -119,8 +168,9 @@ export default function Stores() {
         [storeId]: (prev[storeId] ?? []).map((acc) => (acc.id === updated.id ? updated : acc)),
       }))
       setEditingAccountId(null)
+      void loadProfiles()
     } catch (err) {
-      console.error(err)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
   const cancelEditAccount = () => setEditingAccountId(null)
@@ -133,7 +183,7 @@ export default function Stores() {
         [storeId]: (prev[storeId] ?? []).filter((a) => a.id !== accountId),
       }))
     } catch (err) {
-      console.error(err)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setConfirmDeleteAccount(null)
     }
@@ -144,6 +194,7 @@ export default function Stores() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-ink mb-8">Stores</h1>
+      {error && <p role="alert" className="mb-4 text-red-600 dark:text-red-400">{error}</p>}
       <form onSubmit={createStore} className="flex gap-2 mb-6">
         <input
           type="text"
@@ -156,7 +207,7 @@ export default function Stores() {
           Add store
         </button>
       </form>
-      <div className="w-full md:w-fit md:min-w-[600px] md:max-w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div className="w-full bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 shadow-sm overflow-hidden">
         <div className="w-full overflow-x-auto">
         <table className="min-w-full">
           <thead className="bg-brand-100/50 dark:bg-gray-700/50 border-b border-brand-200/80 dark:border-gray-700">
@@ -188,13 +239,14 @@ export default function Stores() {
                           autoFocus
                         />
                       ) : (
-                        s.name
+                        <button type="button" onClick={() => expandStore(s.id)} aria-expanded={expandedStoreId === s.id} aria-controls={`store-details-${s.id}`} className="text-left hover:underline">{s.name}</button>
                       )}
                     </td>
                     <td className="py-3 px-4 text-sm text-ink-muted dark:text-gray-400">
                       {(accountsByStore[s.id] ?? []).map((a) => a.name).join(', ') || '—'}
                     </td>
                     <td className="py-3 px-4 text-right">
+                      <button type="button" onClick={() => expandStore(s.id)} aria-expanded={expandedStoreId === s.id} aria-controls={`store-details-${s.id}`} className="text-sm text-brand-600 dark:text-brand-400 hover:underline mb-2">{expandedStoreId === s.id ? 'Hide details' : 'Manage'}</button>
                       {editingStoreId === s.id ? (
                         <div className="flex gap-2 justify-end">
                           <button
@@ -240,10 +292,13 @@ export default function Stores() {
                       )}
                     </td>
                   </tr>
-                  {editingStoreId === s.id && (
-                    <tr key={`${s.id}-accounts`}>
+                  {expandedStoreId === s.id && (
+                    <tr id={`store-details-${s.id}`} key={`${s.id}-accounts`}>
                       <td colSpan={3} className="bg-brand-50/50 dark:bg-gray-700/20 p-4">
-                        <div className="max-w-2xl">
+                        <div className="min-w-0">
+                          <section aria-label={`${s.name} store browser profile`} className="mb-6">
+                            <BrowserProfileControls storeId={s.id} accountId={null} profiles={profiles} stores={stores} accounts={Object.values(accountsByStore).flat()} onChange={loadProfiles} />
+                          </section>
                           <h3 className="text-sm font-medium text-ink dark:text-gray-200 mb-3">Store accounts</h3>
                           <form
                             onSubmit={(e) => addAccount(s.id, e)}
@@ -268,7 +323,8 @@ export default function Stores() {
                               <li className="py-2 text-sm text-ink-muted">No accounts yet.</li>
                             ) : (
                               (accountsByStore[s.id] ?? []).map((a) => (
-                                <li aria-label={`Store account ${a.id}`} key={a.id} className="flex items-center justify-between py-2">
+                                <li aria-label={`Store account ${a.id}`} id={`store-account-${a.id}`} key={a.id} className={`py-4 ${selectedAccountId === a.id ? 'ring-2 ring-brand-500 rounded-lg px-3' : ''}`}>
+                                  <div className="flex flex-wrap gap-2 items-center justify-between mb-3">
                                   {editingAccountId === a.id ? (
                                     <>
                                       <input
@@ -325,6 +381,8 @@ export default function Stores() {
                                       </div>
                                     </>
                                   )}
+                                  </div>
+                                  <BrowserProfileControls storeId={s.id} accountId={a.id} profiles={profiles} stores={stores} accounts={Object.values(accountsByStore).flat()} onChange={loadProfiles} />
                                 </li>
                               ))
                             )}
@@ -342,7 +400,7 @@ export default function Stores() {
       </div>
       <ConfirmDialog
         open={confirmDeleteStoreId !== null}
-        message="Delete this store? Orders linked to it will remain but cannot be edited for store/account."
+        message={`Delete this store? Stores with linked orders cannot be deleted.${profileDeletionNotice(confirmDeleteStoreId)}`}
         confirmLabel="Delete store"
         danger
         onConfirm={() => confirmDeleteStoreId !== null && deleteStore(confirmDeleteStoreId)}
@@ -350,7 +408,7 @@ export default function Stores() {
       />
       <ConfirmDialog
         open={confirmDeleteAccount !== null}
-        message="Delete this store account?"
+        message={`Delete this store account?${profileDeletionNotice(confirmDeleteAccount?.storeId ?? null, confirmDeleteAccount?.accountId)}`}
         confirmLabel="Delete"
         danger
         onConfirm={() =>

@@ -33,7 +33,8 @@ def _normalize_cron(value: str) -> str:
 
 
 class BrowserProfileCreate(BaseModel):
-    store_account_id: int
+    store_id: int | None = None
+    store_account_id: int | None = None
     retailer: Retailer = "walmart"
 
 
@@ -41,6 +42,7 @@ class BrowserProfileScheduleUpdate(BaseModel):
     """Partial update for per-profile import schedules and linked store account."""
 
     store_account_id: int | None = None
+    store_id: int | None = None
     full_check_enabled: bool | None = None
     full_check_cron: str | None = Field(default=None, max_length=64)
     full_check_max_pages: int | None = Field(default=None, ge=1, le=50)
@@ -57,7 +59,7 @@ class BrowserProfileScheduleUpdate(BaseModel):
 
 class BrowserProfileRead(BaseModel):
     id: int
-    store_account_id: int
+    store_account_id: int | None
     retailer: str
     status: str
     last_error: str | None = None
@@ -72,7 +74,7 @@ class BrowserProfileRead(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     # Nested display helpers (populated by router)
-    store_id: int | None = None
+    store_id: int
     store_name: str | None = None
     store_account_name: str | None = None
 

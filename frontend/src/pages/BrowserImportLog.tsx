@@ -270,13 +270,13 @@ export default function BrowserImportLogPage() {
         <h1 className="text-2xl font-semibold text-ink dark:text-gray-100">Log</h1>
         <div className="flex flex-wrap gap-3 text-sm">
           <Link
-            to="/browser-automation"
+            to="/settings/stores"
             className="text-brand-600 dark:text-brand-400 hover:underline"
           >
-            Browser automation
+            Stores
           </Link>
           <Link
-            to="/buying-groups"
+            to="/settings/buying-groups"
             className="text-brand-600 dark:text-brand-400 hover:underline"
           >
             Buying groups

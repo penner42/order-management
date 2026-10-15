@@ -4,7 +4,7 @@ import { test as base, expect, type APIRequestContext, type Page, type Response 
 type Entity = { id: number }
 type Cleanup = { path: string; priority: number }
 const priority: Record<string, number> = {
-  payments: 100, items: 90, orders: 80, shipments: 70,
+  'browser-profiles': 110, payments: 100, items: 90, orders: 80, shipments: 70,
   'payment-methods': 60, stores: 40, rewards: 30, 'buying-groups': 20,
 }
 
@@ -59,7 +59,7 @@ export class TestData {
       this.pending.push(response.json().then((entity: { order_id: number }) => { this.track('/orders', entity.order_id) }))
       return
     }
-    if (!/^\/(stores(?:\/\d+\/accounts)?|rewards|payment-methods|orders|items|payments|buying-groups)$/.test(path)) return
+    if (!/^\/(stores(?:\/\d+\/accounts)?|browser-profiles|rewards|payment-methods|orders|items|payments|buying-groups)$/.test(path)) return
     this.pending.push(response.json().then((entity: Entity) => { this.track(path, entity.id) }))
   }
 

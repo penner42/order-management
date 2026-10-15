@@ -57,6 +57,7 @@ router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
 
 # In-memory store for short-lived bulk import sessions.
 _bulk_sessions: Dict[str, list[StoreOrderImportPayload]] = {}
+_bulk_session_owners: dict[str, tuple[int | None, int | None]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1144,7 @@ def _create_or_find_order(
     store_name: str,
     current_user: User,
     store_account_id: int | None = None,
+    store_id: int | None = None,
 ) -> Order:
     """Return an existing order matched by store_order_number, or create a new one."""
     existing = (
@@ -1151,8 +1153,6 @@ def _create_or_find_order(
         .first()
     )
     if existing:
-        if store_account_id is not None and existing.store_account_id is None:
-            existing.store_account_id = store_account_id
         return existing
 
     external_order = normalized.get("externalOrder") or {}
@@ -1163,7 +1163,7 @@ def _create_or_find_order(
         else None
     )
 
-    store = _get_or_create_store(db, _resolve_store_name(store_name), current_user.id)
+    store = db.get(Store, store_id) if store_id is not None else _get_or_create_store(db, _resolve_store_name(store_name), current_user.id)
 
     incoming_discount = normalized.get("orderDiscount")
     order_discount: float = 0.0
@@ -2025,6 +2025,7 @@ def apply_store_order_payload(
     current_user: User,
     *,
     store_account_id: int | None = None,
+    store_id: int | None = None,
     buying_group_id: int | None = None,
     item_payouts: list[float | None] | None = None,
     payment_methods: list | None = None,
@@ -2042,6 +2043,11 @@ def apply_store_order_payload(
         account = db.query(StoreAccount).filter(StoreAccount.id == store_account_id).first()
         if not account:
             raise HTTPException(status_code=400, detail="Store account not found")
+        if store_id is not None and store_id != account.store_id:
+            raise HTTPException(status_code=400, detail="Account does not belong to this store")
+        store_id = account.store_id
+    if store_id is not None and db.get(Store, store_id) is None:
+        raise HTTPException(status_code=400, detail="Store not found")
 
     if buying_group_id is not None:
         group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()
@@ -2056,7 +2062,7 @@ def apply_store_order_payload(
     )
 
     order = _create_or_find_order(
-        db, normalized, external_order_id, payload.store, current_user, store_account_id
+        db, normalized, external_order_id, payload.store, current_user, store_account_id, store_id
     )
 
     if not is_existing_order:
@@ -2139,6 +2145,7 @@ def apply_store_order_direct(
         body.payload,
         current_user,
         store_account_id=body.store_account_id,
+        store_id=body.store_id,
         buying_group_id=body.buying_group_id,
         item_payouts=body.item_payouts,
         payment_methods=body.payment_methods,
@@ -2187,6 +2194,7 @@ def create_bulk_import_session(
         )
 
     _bulk_sessions[token] = sanitized
+    _bulk_session_owners[token] = (body.store_id, body.store_account_id)
     return BulkImportSessionResponse(token=token)
 
 
@@ -2207,4 +2215,5 @@ def get_bulk_import_session(
         if payload.invoiceHtml:
             prewarm_invoice_pdf(payload.invoiceHtml)
 
-    return BulkImportSessionPayloads(orders=payloads)
+    store_id, account_id = _bulk_session_owners.get(token, (None, None))
+    return BulkImportSessionPayloads(orders=payloads, store_id=store_id, store_account_id=account_id)

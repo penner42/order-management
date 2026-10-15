@@ -18,8 +18,13 @@ import Portals from './pages/Portals'
 import ExtensionAuth from './pages/ExtensionAuth'
 import BrowserExtension from './pages/BrowserExtension'
 import Settings from './pages/Settings'
-import BrowserAutomation from './pages/BrowserAutomation'
+import IgnoredZipCodes from './pages/IgnoredZipCodes'
 import BrowserImportLog from './pages/BrowserImportLog'
+
+function LegacyRedirect({ to }: { to: string }) {
+  const { search, hash } = useLocation()
+  return <Navigate to={`${to}${search}${hash}`} replace />
+}
 
 function DarkToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
@@ -79,15 +84,8 @@ function AppShell() {
     }
     return [
       { to: '/', label: 'Orders' },
-      { to: '/buying-groups', label: 'Buying Groups' },
       { to: '/receiving-review', label: 'Receiving' },
-      { to: '/rewards', label: 'Rewards' },
-      { to: '/payment-methods', label: 'Payment Methods' },
       { to: '/payments', label: 'Payments' },
-      { to: '/stores', label: 'Stores' },
-      { to: '/portals', label: 'Portals' },
-      { to: '/extension', label: 'Extension' },
-      { to: '/browser-automation', label: 'Browser automation' },
       { to: '/browser-import-log', label: 'Log' },
       { to: '/settings', label: 'Settings' },
     ]
@@ -125,10 +123,11 @@ function AppShell() {
           >
             Order Management
           </NavLink>
-          <nav className="hidden md:flex flex-1 min-w-0 gap-1 overflow-x-auto">
+          <nav aria-label="Main navigation" className="hidden md:flex flex-1 min-w-0 gap-1 overflow-x-auto">
             {navItems.map((item) => (
               <NavLink
                 key={item.to}
+                end={item.to === "/"}
                 to={item.to}
                 className={({ isActive }) =>
                   `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
@@ -142,7 +141,7 @@ function AppShell() {
             <DarkToggle />
             {user.role !== 'admin' && (
               <NavLink
-                to="/profile"
+                to="/settings/account"
                 className={({ isActive }) => `hidden md:inline text-sm ${isActive ? 'text-brand-700 dark:text-brand-400 font-medium' : 'text-ink-muted hover:text-ink dark:text-gray-400 dark:hover:text-gray-100'}`}
               >
                 {user.username}
@@ -188,10 +187,11 @@ function AppShell() {
               <div className="font-semibold text-brand-800 dark:text-gray-100">Menu</div>
             </div>
             <div className="py-2 flex-1 overflow-auto">
-              <div className="flex flex-col gap-1">
+              <nav aria-label="Mobile navigation" className="flex flex-col gap-1">
                 {navItems.map((item) => (
                   <NavLink
                     key={item.to}
+                    end={item.to === "/"}
                     to={item.to}
                     className={({ isActive }) =>
                       `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
@@ -200,16 +200,16 @@ function AppShell() {
                     {item.label}
                   </NavLink>
                 ))}
-              </div>
+              </nav>
               {user.role !== 'admin' && (
                 <div className="mt-3 pt-3 border-t border-brand-100/70 dark:border-gray-700">
                   <NavLink
-                    to="/profile"
+                    to="/settings/account"
                     className={({ isActive }) =>
                       `block px-3 py-2 rounded-md text-sm transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100 font-medium' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
                     }
                   >
-                    Profile ({user.username})
+                    Account ({user.username})
                   </NavLink>
                 </div>
               )}
@@ -233,17 +233,28 @@ function AppShell() {
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
           <Route path="/receiving-review" element={<ReceivingReview />} />
-          <Route path="/buying-groups" element={<BuyingGroups />} />
-          <Route path="/rewards" element={<Rewards />} />
-          <Route path="/payment-methods" element={<PaymentMethods />} />
+          <Route path="/buying-groups" element={<LegacyRedirect to="/settings/buying-groups" />} />
+          <Route path="/rewards" element={<LegacyRedirect to="/settings/rewards" />} />
+          <Route path="/payment-methods" element={<LegacyRedirect to="/settings/payment-methods" />} />
           <Route path="/payments" element={<Payments />} />
-          <Route path="/stores" element={<Stores />} />
-          <Route path="/portals" element={<Portals />} />
-          <Route path="/extension" element={<BrowserExtension />} />
-          <Route path="/browser-automation" element={<BrowserAutomation />} />
+          <Route path="/stores" element={<LegacyRedirect to="/settings/stores" />} />
+          <Route path="/portals" element={<LegacyRedirect to="/settings/portals" />} />
+          <Route path="/extension" element={user.role === 'admin' ? <BrowserExtension /> : <LegacyRedirect to="/settings/extension" />} />
+          <Route path="/browser-automation" element={<LegacyRedirect to="/settings/stores" />} />
           <Route path="/browser-import-log" element={<BrowserImportLog />} />
-          <Route path="/profile" element={<Profile />} />
-          <Route path="/settings" element={<Settings />} />
+          <Route path="/profile" element={<LegacyRedirect to="/settings/account" />} />
+          <Route path="/settings" element={<Settings />}>
+            <Route index element={<LegacyRedirect to="/settings/account" />} />
+            <Route path="account" element={<Profile />} />
+            <Route path="buying-groups" element={<BuyingGroups />} />
+            <Route path="stores" element={<Stores />} />
+            <Route path="ignored-zip-codes" element={<IgnoredZipCodes />} />
+            <Route path="payment-methods" element={<PaymentMethods />} />
+            <Route path="rewards" element={<Rewards />} />
+            <Route path="portals" element={<Portals />} />
+            <Route path="extension" element={<BrowserExtension />} />
+            <Route path="*" element={<LegacyRedirect to="/settings/account" />} />
+          </Route>
           {user.role === 'admin' && <Route path="/admin" element={<Admin />} />}
           <Route path="*" element={<Navigate to={user.role === 'admin' ? '/admin' : '/'} replace />} />
         </Routes>

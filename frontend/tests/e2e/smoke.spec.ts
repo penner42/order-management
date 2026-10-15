@@ -30,6 +30,7 @@ test('a regular user can load orders and stores from PostgreSQL', async ({ app }
   expect((await orders).ok()).toBeTruthy()
   await expect(app.getByRole('heading', { name: 'Orders', exact: true })).toBeVisible()
   const stores = app.waitForResponse(response => new URL(response.url()).pathname.replace(/\/$/, '') === '/api/stores')
+  await app.getByRole('link', { name: 'Settings', exact: true }).click()
   await app.getByRole('link', { name: 'Stores', exact: true }).click()
   expect((await stores).ok()).toBeTruthy()
   await expect(app.getByRole('heading', { name: 'Stores', exact: true })).toBeVisible()

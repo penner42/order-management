@@ -17,6 +17,7 @@ test('session survives refresh and an API 401 returns to sign in', async ({ app 
   await app.reload()
   await expect(app.getByRole('heading', { name: 'Orders', exact: true })).toBeVisible()
   await app.route('**/api/stores', route => route.fulfill({ status: 401, json: { detail: 'Session expired' } }))
+  await app.getByRole('link', { name: 'Settings', exact: true }).click()
   await app.getByRole('link', { name: 'Stores', exact: true }).click()
   await expect(app).toHaveURL(/\/login$/)
   expect(await app.evaluate(() => localStorage.getItem('auth_token'))).toBeNull()
@@ -24,7 +25,7 @@ test('session survives refresh and an API 401 returns to sign in', async ({ app 
 
 test('stores and accounts support edits, persistence and confirmed deletion', async ({ app, data }) => {
   const name = data.name('store')
-  await app.goto('/stores')
+  await app.goto('/settings/stores')
   await app.getByPlaceholder('New store name').fill(name)
   const store = await createThroughUI(app, '/stores', () => app.getByRole('button', { name: 'Add store', exact: true }).click())
   const row = app.getByRole('row', { name: `Store ${store.id}`, exact: true })
@@ -63,7 +64,7 @@ test('stores and accounts support edits, persistence and confirmed deletion', as
 
 test('rewards support edits, persistence and confirmed deletion', async ({ app, data }) => {
   const name = data.name('reward')
-  await app.goto('/rewards')
+  await app.goto('/settings/rewards')
   await app.getByPlaceholder('New reward name').fill(name)
   const reward = await createThroughUI(app, '/rewards', () => app.getByRole('button', { name: 'Add', exact: true }).click())
   const row = app.getByRole('listitem', { name: `Reward ${reward.id}`, exact: true })
@@ -88,7 +89,7 @@ test('parent and child payment methods save rewards and per-store earnings', asy
   const rewardName = data.name('points')
   await data.create('/rewards', { name: rewardName })
   const parentName = data.name('card')
-  await app.goto('/payment-methods')
+  await app.goto('/settings/payment-methods')
   await app.getByRole('button', { name: 'Add payment method', exact: true }).click()
   await app.getByPlaceholder('e.g. Visa ****1234, PayPal - Amex').fill(parentName)
   await app.getByLabel('Rewards type').fill(rewardName)

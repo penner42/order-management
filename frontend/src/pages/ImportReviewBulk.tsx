@@ -367,6 +367,7 @@ export default function ImportReviewBulk() {
   const [applyErrorByIndex, setApplyErrorByIndex] = useState<Record<number, string | null>>({})
   const [collapsedByIndex, setCollapsedByIndex] = useState<Record<number, boolean>>({})
   const [selectedBuyingGroupIdByIndex, setSelectedBuyingGroupIdByIndex] = useState<Record<number, number | null>>({})
+  const [sourceOwner, setSourceOwner] = useState<{ store_id: number; store_account_id: number | null } | null>(null)
   const [selectedAccountIdByIndex, setSelectedAccountIdByIndex] = useState<Record<number, number | null>>({})
   const [selectedPaymentMethodIdByIndex, setSelectedPaymentMethodIdByIndex] = useState<Record<number, number | null>>({})
   const [itemPayoutsByIndex, setItemPayoutsByIndex] = useState<Record<number, string[]>>({})
@@ -385,8 +386,10 @@ export default function ImportReviewBulk() {
     setError(null)
     setDisplayIndexOrder(null)
     api
-      .get<{ orders: NormalizedPayload[] }>(`/integrations/stores/orders/bulk-session/${encodeURIComponent(token)}`)
+      .get<{ orders: NormalizedPayload[]; store_id?: number | null; store_account_id?: number | null }>(`/integrations/stores/orders/bulk-session/${encodeURIComponent(token)}`)
       .then((res) => {
+        setSourceOwner(res.store_id != null ? { store_id: res.store_id, store_account_id: res.store_account_id ?? null } : null)
+        setSelectedAccountIdByIndex({})
         const orders = (Array.isArray(res.orders) ? res.orders : []).map((order) =>
           stripIgnoredWalmartImportSlices(order)
         )
@@ -590,7 +593,17 @@ export default function ImportReviewBulk() {
       const next = { ...prev }
 
       for (let i = 0; i < payloads.length; i++) {
-        if (next[i] != null) continue
+        if (Object.prototype.hasOwnProperty.call(next, i)) continue
+        if (diffs[i]?.is_existing_order && diffs[i]?.current_order) {
+          next[i] = diffs[i]!.current_order!.store_account_id
+          changed = true
+          continue
+        }
+        if (sourceOwner) {
+          next[i] = sourceOwner.store_account_id
+          changed = true
+          continue
+        }
         const store = findStoreForPayload(payloads[i], stores)
         if (!store) continue
         const storeAccounts = accountsByStore[store.id] ?? []
@@ -602,7 +615,7 @@ export default function ImportReviewBulk() {
 
       return changed ? next : prev
     })
-  }, [payloads, stores, accountsByStore])
+  }, [payloads, stores, accountsByStore, sourceOwner, diffs])
 
   if (!token || payloads.length === 0) {
     return (
@@ -655,6 +668,7 @@ export default function ImportReviewBulk() {
       await api.post('/integrations/stores/orders/apply', {
         payload,
         store_account_id: storeAccountId,
+        store_id: sourceOwner?.store_id,
         buying_group_id: buyingGroupId,
         item_payouts: itemPayouts,
         payment_methods:
@@ -731,7 +745,7 @@ export default function ImportReviewBulk() {
           const showAsNewCanceled = isCanceled && !isExisting
           const showAsIgnoredZip =
             isIgnoredZip && !(isCanceled && !isExisting)
-          const store = findStoreForPayload(p, stores)
+          const store = sourceOwner ? stores.find(s => s.id === sourceOwner.store_id) : findStoreForPayload(p, stores)
           const storeAccounts = store ? (accountsByStore[store.id] ?? []) : []
           const itemChangesCount = countActionableItemChanges(diff)
           const newTrackingCount = countNewTrackingNumbers(diff)

@@ -572,14 +572,12 @@ function LiveBrowserView({
   )
 }
 
-export default function BrowserAutomation() {
-  const [profiles, setProfiles] = useState<BrowserProfile[]>([])
-  const [stores, setStores] = useState<Store[]>([])
-  const [accounts, setAccounts] = useState<StoreAccount[]>([])
-  const [loading, setLoading] = useState(true)
+export default function BrowserProfileControls({ storeId, accountId, profiles, stores, accounts, onChange }: {
+  storeId: number; accountId: number | null; profiles: BrowserProfile[]; stores: Store[];
+  accounts: StoreAccount[]; onChange: () => Promise<void>
+}) {
   const [error, setError] = useState<string | null>(null)
-  const [selectedAccountId, setSelectedAccountId] = useState<number | ''>('')
-  const [selectedRetailer, setSelectedRetailer] = useState<'amazon' | 'walmart' | 'costco'>('walmart')
+  const [selectedRetailer, setSelectedRetailer] = useState<'' | 'amazon' | 'walmart' | 'costco'>('')
   const [loginProfileId, setLoginProfileId] = useState<number | null>(null)
   const [loginSuggestedUrl, setLoginSuggestedUrl] = useState('https://www.walmart.com/')
   const [maxPagesByProfile, setMaxPagesByProfile] = useState<Record<number, number>>({})
@@ -588,80 +586,43 @@ export default function BrowserAutomation() {
   const [editingAccountProfileId, setEditingAccountProfileId] = useState<number | null>(null)
   const [savingAccountProfileId, setSavingAccountProfileId] = useState<number | null>(null)
   const [jobsByProfile, setJobsByProfile] = useState<Record<number, BrowserJob>>({})
-  const pollRef = useRef<number | null>(null)
-
   const load = useCallback(() => {
     setError(null)
-    Promise.all([
-      api.get<BrowserProfile[]>('/browser-profiles'),
-      api.get<Store[]>('/stores'),
-      api.get<StoreAccount[]>('/store-accounts'),
-    ])
-      .then(([plist, slist, alist]) => {
-        setProfiles(plist)
-        setStores(slist)
-        setAccounts(alist)
-        setScheduleByProfile((prev) => {
-          const next: Record<number, ScheduleDraft> = {}
-          for (const p of plist) {
-            const server = scheduleDraftFromProfile(p)
-            const local = prev[p.id]
-            if (!local) {
-              next[p.id] = server
-              continue
-            }
-            const dirty =
-              local.full_check_enabled !== server.full_check_enabled ||
-              local.full_check_cron !== server.full_check_cron ||
-              local.full_check_max_pages !== server.full_check_max_pages ||
-              local.unshipped_check_enabled !== server.unshipped_check_enabled ||
-              local.unshipped_check_cron !== server.unshipped_check_cron
-            next[p.id] = dirty ? local : server
-          }
-          return next
-        })
-        setMaxPagesByProfile((prev) => {
-          const next = { ...prev }
-          for (const p of plist) {
-            if (next[p.id] == null) next[p.id] = p.full_check_max_pages ?? 3
-          }
-          return next
-        })
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setLoading(false))
-  }, [])
+    return onChange()
+  }, [onChange])
 
+  const ownerProfiles = profiles.filter(p => p.store_id === storeId && p.store_account_id === accountId)
+  const ownerProfileId = ownerProfiles[0]?.id
+  const ownerStatus = ownerProfiles[0]?.status
   useEffect(() => {
-    load()
-  }, [load])
-
-  useEffect(() => {
-    return () => {
-      if (pollRef.current != null) window.clearInterval(pollRef.current)
+    if (ownerProfileId == null) return
+    let cancelled = false
+    const refreshJob = async () => {
+      try {
+        const job = await api.get<BrowserJob | null>(`/browser-profiles/${ownerProfileId}/job`)
+        if (!cancelled && job) {
+          setJobsByProfile(prev => ({ ...prev, [ownerProfileId]: job }))
+          if (ownerStatus === 'importing' && ['succeeded', 'failed', 'cancelled'].includes(job.status)) load()
+        }
+      } catch { /* Existing profile errors are shown by load(). */ }
     }
-  }, [])
-
-  const accountOptions = accounts.filter(
-    (a) => !profiles.some((p) => p.store_account_id === a.id)
-  )
-
-  const accountsAvailableForProfile = (profile: BrowserProfile) =>
-    accounts.filter(
-      (a) =>
-        a.id === profile.store_account_id ||
-        !profiles.some((p) => p.store_account_id === a.id)
-    )
-
+    void refreshJob()
+    const interval = ownerStatus === 'importing' ? window.setInterval(refreshJob, 2000) : null
+    return () => { cancelled = true; if (interval != null) window.clearInterval(interval) }
+  }, [ownerProfileId, ownerStatus, load])
+  const ownerOptions = [
+    ...stores.map(store => ({ key: `store:${store.id}`, storeId: store.id, accountId: null as number | null, label: `${store.name} — Store profile` })),
+    ...accounts.map(account => ({ key: `account:${account.id}`, storeId: account.store_id, accountId: account.id as number | null, label: `${stores.find(s => s.id === account.store_id)?.name ?? 'Store'} — ${account.name}` })),
+  ]
   const createProfile = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (selectedAccountId === '') return
+    if (!selectedRetailer) return
     try {
       await api.post<BrowserProfile>('/browser-profiles', {
-        store_account_id: selectedAccountId,
+        store_id: storeId,
+        store_account_id: accountId,
         retailer: selectedRetailer,
       })
-      setSelectedAccountId('')
       load()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -707,23 +668,6 @@ export default function BrowserAutomation() {
     }
   }
 
-  const pollJob = (profileId: number, jobId: string) => {
-    if (pollRef.current != null) window.clearInterval(pollRef.current)
-    pollRef.current = window.setInterval(async () => {
-      try {
-        const job = await api.get<BrowserJob>(`/browser-profiles/jobs/${jobId}`)
-        setJobsByProfile((prev) => ({ ...prev, [profileId]: job }))
-        if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
-          if (pollRef.current != null) window.clearInterval(pollRef.current)
-          pollRef.current = null
-          load()
-        }
-      } catch {
-        // keep polling briefly
-      }
-    }, 1000)
-  }
-
   const startImport = async (
     profileId: number,
     opts?: { mode?: 'full' | 'unshipped'; autoApply?: boolean; maxPages?: number }
@@ -734,7 +678,7 @@ export default function BrowserAutomation() {
     const maxPages =
       opts?.maxPages ??
       (mode === 'full'
-        ? (schedule?.full_check_max_pages ?? maxPagesByProfile[profileId] ?? 3)
+        ? (schedule?.full_check_max_pages ?? maxPagesByProfile[profileId] ?? profiles.find(p => p.id === profileId)?.full_check_max_pages ?? 3)
         : 1)
     const autoApply = opts?.autoApply ?? mode === 'unshipped'
     try {
@@ -753,7 +697,6 @@ export default function BrowserAutomation() {
           message: 'Queued…',
         },
       }))
-      pollJob(profileId, res.job_id)
       load()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -794,7 +737,7 @@ export default function BrowserAutomation() {
     }
     try {
       const updated = await api.patch<BrowserProfile>(`/browser-profiles/${profileId}`, body)
-      setProfiles((prev) => prev.map((p) => (p.id === profileId ? updated : p)))
+      await load()
       setScheduleByProfile((prev) => ({ ...prev, [profileId]: scheduleDraftFromProfile(updated) }))
       setMaxPagesByProfile((prev) => ({
         ...prev,
@@ -807,19 +750,23 @@ export default function BrowserAutomation() {
     }
   }
 
-  const changeProfileAccount = async (profileId: number, storeAccountId: number) => {
+  const changeProfileAccount = async (profileId: number, ownerKey: string) => {
+    const owner = ownerOptions.find(option => option.key === ownerKey)
+    if (!owner) return
+    const storeAccountId = owner.accountId
     const profile = profiles.find((p) => p.id === profileId)
-    if (!profile || profile.store_account_id === storeAccountId) {
+    if (!profile || (profile.store_id === owner.storeId && profile.store_account_id === storeAccountId)) {
       setEditingAccountProfileId(null)
       return
     }
     setSavingAccountProfileId(profileId)
     setError(null)
     try {
-      const updated = await api.patch<BrowserProfile>(`/browser-profiles/${profileId}`, {
+      await api.patch<BrowserProfile>(`/browser-profiles/${profileId}`, {
+        store_id: owner.storeId,
         store_account_id: storeAccountId,
       })
-      setProfiles((prev) => prev.map((p) => (p.id === profileId ? updated : p)))
+      await load()
       setEditingAccountProfileId(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -831,15 +778,15 @@ export default function BrowserAutomation() {
   const unlockProfile = async (profileId: number) => {
     setError(null)
     try {
-      const updated = await api.post<BrowserProfile>(`/browser-profiles/${profileId}/unlock`, {})
-      setProfiles((prev) => prev.map((p) => (p.id === profileId ? updated : p)))
+      await api.post<BrowserProfile>(`/browser-profiles/${profileId}/unlock`, {})
+      await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
   }
 
   const deleteProfile = async (profileId: number) => {
-    if (!confirm('Delete this browser profile? Stored cookies for this account will be removed from the server.')) {
+    if (!confirm('Delete this browser profile? Stored cookies for this store or account will be removed from the server.')) {
       return
     }
     try {
@@ -850,49 +797,18 @@ export default function BrowserAutomation() {
     }
   }
 
-  const storeNameForAccount = (accountId: number) => {
-    const acc = accounts.find((a) => a.id === accountId)
-    if (!acc) return ''
-    return stores.find((s) => s.id === acc.store_id)?.name ?? ''
-  }
-
-  if (loading) {
-    return <p className="text-ink-muted dark:text-gray-400">Loading…</p>
-  }
-
   return (
     <div>
-      <div className="flex flex-wrap items-start justify-between gap-4 mb-2">
-        <h1 className="text-2xl font-semibold text-ink dark:text-gray-100">Browser automation</h1>
-        <Link
-          to="/browser-import-log"
-          className="text-sm text-brand-600 dark:text-brand-400 hover:underline"
-        >
-          View log
-        </Link>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h3 className="font-medium text-ink dark:text-gray-100">Browser profile</h3>
+        <Link to="/browser-import-log?category=stores" className="text-sm text-brand-600 dark:text-brand-400 hover:underline">View log</Link>
       </div>
-      <p className="text-sm text-ink-muted dark:text-gray-400 mb-6 max-w-2xl">
-        Run a Camoufox (anti-detect Firefox) session on the server for each store account. Log in once
-        in the embedded view (MFA supported); then import orders or schedule automatic checks. Full
-        check scans the first N order-history pages; unshipped check refreshes every order on that
-        account that still lacks tracking (including placeholder shipments). Login opens a blank page — use the address bar / Home
-        to open the store yourself.
-      </p>
-
       {error && (
-        <p className="mb-4 text-sm text-red-600 dark:text-red-400">{error}</p>
+        <p role="alert" className="mb-4 text-sm text-red-600 dark:text-red-400">{error}</p>
       )}
 
-      <section className="mb-8 max-w-xl">
-        <h2 className="text-lg font-medium text-ink dark:text-gray-100 mb-2">Add browser profile</h2>
-        <p className="text-xs text-ink-muted dark:text-gray-400 mb-3">
-          Create a{' '}
-          <Link to="/stores" className="text-brand-600 hover:underline dark:text-brand-400">
-            Store Account
-          </Link>{' '}
-          first (for Amazon, name it with the login email for auto-matching), then attach a browser
-          profile here.
-        </p>
+      {ownerProfiles.length === 0 && <section className="mb-4 max-w-xl">
+        <p className="text-xs text-ink-muted dark:text-gray-400 mb-3">Add a browser profile to log in, import orders, and schedule checks for this {accountId == null ? 'store' : 'account'}.</p>
         <form onSubmit={createProfile} className="flex flex-wrap gap-2 items-end">
           <label className="min-w-[8rem]">
             <span className="block text-xs text-ink-muted dark:text-gray-400 mb-1">Retailer</span>
@@ -900,53 +816,28 @@ export default function BrowserAutomation() {
               className="w-full rounded-lg border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-3 py-2 text-sm text-ink dark:text-gray-100"
               value={selectedRetailer}
               onChange={(e) =>
-                setSelectedRetailer(e.target.value as 'amazon' | 'walmart' | 'costco')
+                setSelectedRetailer(e.target.value as '' | 'amazon' | 'walmart' | 'costco')
               }
             >
+              <option value="">Select retailer…</option>
               <option value="walmart">Walmart</option>
               <option value="amazon">Amazon</option>
               <option value="costco">Costco</option>
             </select>
           </label>
-          <label className="flex-1 min-w-[12rem]">
-            <span className="block text-xs text-ink-muted dark:text-gray-400 mb-1">Store account</span>
-            <select
-              className="w-full rounded-lg border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-3 py-2 text-sm text-ink dark:text-gray-100"
-              value={selectedAccountId}
-              onChange={(e) =>
-                setSelectedAccountId(e.target.value ? Number(e.target.value) : '')
-              }
-            >
-              <option value="">Select account…</option>
-              {accountOptions.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {storeNameForAccount(a.id)} — {a.name}
-                </option>
-              ))}
-            </select>
-          </label>
           <button
             type="submit"
-            disabled={selectedAccountId === ''}
+            disabled={!selectedRetailer}
             className="rounded-lg bg-brand-600 text-white px-3 py-2 text-sm font-medium hover:bg-brand-700 disabled:opacity-50"
           >
             Add profile
           </button>
         </form>
-        {accountOptions.length === 0 && (
-          <p className="text-xs text-ink-muted dark:text-gray-400 mt-2">
-            All store accounts already have a browser profile, or none exist yet.
-          </p>
-        )}
-      </section>
+      </section>}
 
       <section>
-        <h2 className="text-lg font-medium text-ink dark:text-gray-100 mb-3">Profiles</h2>
-        {profiles.length === 0 ? (
-          <p className="text-sm text-ink-muted dark:text-gray-400">No browser profiles yet.</p>
-        ) : (
           <ul className="space-y-3">
-            {profiles.map((p) => {
+            {ownerProfiles.map((p) => {
               const job = jobsByProfile[p.id]
               const maxPages = maxPagesByProfile[p.id] ?? p.full_check_max_pages ?? 3
               const schedule = scheduleByProfile[p.id] ?? scheduleDraftFromProfile(p)
@@ -971,19 +862,17 @@ export default function BrowserAutomation() {
                             autoFocus
                             disabled={savingAccountProfileId === p.id}
                             className="rounded-lg border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-2 py-1 text-sm font-medium text-ink dark:text-gray-100"
-                            value={p.store_account_id}
+                            value={p.store_account_id == null ? `store:${p.store_id}` : `account:${p.store_account_id}`}
                             onChange={(e) =>
-                              void changeProfileAccount(p.id, Number(e.target.value))
+                              void changeProfileAccount(p.id, e.target.value)
                             }
                             onKeyDown={(e) => {
                               if (e.key === 'Escape') setEditingAccountProfileId(null)
                             }}
-                            aria-label="Store account"
+                            aria-label="Profile owner"
                           >
-                            {accountsAvailableForProfile(p).map((a) => (
-                              <option key={a.id} value={a.id}>
-                                {storeNameForAccount(a.id)} — {a.name}
-                              </option>
+                            {ownerOptions.filter(owner => !profiles.some(other => other.id !== p.id && other.store_id === owner.storeId && other.store_account_id === owner.accountId)).map(owner => (
+                              <option key={owner.key} value={owner.key}>{owner.label}</option>
                             ))}
                           </select>
                           <button
@@ -998,15 +887,15 @@ export default function BrowserAutomation() {
                       ) : (
                         <div className="font-medium text-ink dark:text-gray-100 flex items-center gap-1">
                           <span>
-                            {p.store_name ?? 'Store'} — {p.store_account_name ?? 'Account'}
+                            {p.store_name ?? 'Store'}{p.store_account_name ? ` — ${p.store_account_name}` : ' — Store profile'}
                           </span>
                           <button
                             type="button"
                             onClick={() => setEditingAccountProfileId(p.id)}
                             disabled={busy}
                             className="p-1 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition disabled:opacity-50"
-                            title="Change account"
-                            aria-label="Change account"
+                            title="Move profile"
+                            aria-label="Move profile"
                           >
                             <svg
                               className="w-3.5 h-3.5"
@@ -1050,6 +939,10 @@ export default function BrowserAutomation() {
                       )}
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
+                      {p.status === 'login_in_progress' && <button type="button" onClick={() => {
+                        setLoginSuggestedUrl(p.retailer === 'amazon' ? 'https://www.amazon.com/' : p.retailer === 'costco' ? 'https://www.costco.com/' : 'https://www.walmart.com/')
+                        setLoginProfileId(p.id)
+                      }} className="rounded-lg bg-brand-600 text-white px-3 py-1.5 text-sm">Resume login</button>}
                       <button
                         type="button"
                         onClick={() => startLogin(p.id)}
@@ -1255,7 +1148,6 @@ export default function BrowserAutomation() {
               )
             })}
           </ul>
-        )}
       </section>
 
       {loginProfileId != null && (

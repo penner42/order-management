@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -15,7 +16,8 @@ from app.auth import decode_token, get_current_user
 from app.browser_automation.amazon_import import run_amazon_import
 from app.browser_automation.common import LoginRequiredError, post_bulk_session
 from app.browser_automation.costco_import import run_costco_import
-from app.browser_automation.jobs import create_job, get_job, update_job
+from app.browser_automation.jobs import create_job, get_job, update_job, latest_profile_job
+from sqlalchemy.exc import IntegrityError
 from app.browser_automation.paths import all_profile_data_dirs, clear_profile_browser_locks
 from app.browser_automation.session_manager import (
     login_home_url_for_retailer,
@@ -33,6 +35,7 @@ from app.models import (
     Shipment,
     ShipmentItem,
     StoreAccount,
+    Store,
     User,
 )
 from app.utils.ignored_zip_codes import shipping_postal_code_from_payload
@@ -60,9 +63,45 @@ router = APIRouter(prefix="/browser-profiles", tags=["browser-profiles"])
 SUPPORTED_RETAILERS = {"amazon", "walmart", "costco"}
 
 
+_import_tasks: dict[int, asyncio.Task] = {}
+
+
+def _resolve_owner(db: Session, store_id: int | None, account_id: int | None) -> tuple[int, int | None]:
+    if account_id is not None:
+        account = db.get(StoreAccount, account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="Store account not found.")
+        if store_id is not None and store_id != account.store_id:
+            raise HTTPException(status_code=400, detail="Account does not belong to this store.")
+        store_id = account.store_id
+    if store_id is None:
+        raise HTTPException(status_code=400, detail="A store or store account is required.")
+    if db.get(Store, store_id) is None:
+        raise HTTPException(status_code=404, detail="Store not found.")
+    return store_id, account_id
+
+
+def _check_owner_available(db: Session, store_id: int, account_id: int | None, exclude_id: int | None = None) -> None:
+    query = db.query(BrowserProfile).filter(
+        BrowserProfile.store_id == store_id, BrowserProfile.store_account_id == account_id,
+    )
+    if exclude_id is not None:
+        query = query.filter(BrowserProfile.id != exclude_id)
+    if query.first() is not None:
+        raise HTTPException(status_code=400, detail="A browser profile already exists for this store or account.")
+
+
+def _commit_profile(db: Session) -> None:
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="A browser profile already exists for this store or account.")
+
+
 def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
     account = profile.store_account
-    store = account.store if account else None
+    store = profile.store
     return BrowserProfileRead(
         id=profile.id,
         store_account_id=profile.store_account_id,
@@ -85,7 +124,7 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
     )
 
 
-def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[str]:
+def _unshipped_store_order_numbers(db: Session, store_account_id: int | None, store_id: int) -> list[str]:
     """Store order numbers for this account that still need tracking.
 
     An item counts as unshipped when it is not canceled, lost, shipped,
@@ -121,7 +160,7 @@ def _unshipped_store_order_numbers(db: Session, store_account_id: int) -> list[s
     rows = (
         db.query(Order.id, Order.store_order_number)
         .join(Item, Item.order_id == Order.id)
-        .filter(Order.store_account_id == store_account_id)
+        .filter(Order.store_id == store_id, Order.store_account_id == store_account_id)
         .filter(Order.store_order_number.isnot(None))
         .filter(Order.store_order_number != "")
         .filter(Order.status != "personal")
@@ -275,7 +314,7 @@ def _external_order_id_from_payload(payload: StoreOrderImportPayload) -> str | N
 
 def _profile_account_labels(profile: BrowserProfile) -> tuple[str | None, str | None]:
     account = profile.store_account
-    store = account.store if account else None
+    store = profile.store
     return (store.name if store else None, account.name if account else None)
 
 
@@ -425,7 +464,7 @@ def _import_log_read(row: BrowserImportLog) -> BrowserImportLogRead:
 def _get_profile_or_404(db: Session, profile_id: int) -> BrowserProfile:
     profile = (
         db.query(BrowserProfile)
-        .options(joinedload(BrowserProfile.store_account).joinedload(StoreAccount.store))
+        .options(joinedload(BrowserProfile.store), joinedload(BrowserProfile.store_account))
         .filter(BrowserProfile.id == profile_id)
         .first()
     )
@@ -441,7 +480,7 @@ def list_browser_profiles(
 ):
     rows = (
         db.query(BrowserProfile)
-        .options(joinedload(BrowserProfile.store_account).joinedload(StoreAccount.store))
+        .options(joinedload(BrowserProfile.store), joinedload(BrowserProfile.store_account))
         .order_by(BrowserProfile.id)
         .all()
     )
@@ -497,28 +536,14 @@ def create_browser_profile(
 ):
     if data.retailer not in SUPPORTED_RETAILERS:
         raise HTTPException(status_code=400, detail=f"Unsupported retailer: {data.retailer}")
-    account = (
-        db.query(StoreAccount)
-        .options(joinedload(StoreAccount.store))
-        .filter(StoreAccount.id == data.store_account_id)
-        .first()
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail="Store account not found.")
-    existing = (
-        db.query(BrowserProfile)
-        .filter(BrowserProfile.store_account_id == data.store_account_id)
-        .first()
-    )
-    if existing:
-        raise HTTPException(status_code=400, detail="A browser profile already exists for this store account.")
+    store_id, account_id = _resolve_owner(db, data.store_id, data.store_account_id)
+    _check_owner_available(db, store_id, account_id)
     profile = BrowserProfile(
-        store_account_id=data.store_account_id,
-        retailer=data.retailer,
-        status="logged_out",
+        store_id=store_id, store_account_id=account_id,
+        retailer=data.retailer, status="logged_out",
     )
     db.add(profile)
-    db.commit()
+    _commit_profile(db)
     db.refresh(profile)
     # Reload relationships for response
     profile = _get_profile_or_404(db, profile.id)
@@ -533,28 +558,19 @@ def update_browser_profile_schedule(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
-    if data.store_account_id is not None and data.store_account_id != profile.store_account_id:
-        account = (
-            db.query(StoreAccount)
-            .filter(StoreAccount.id == data.store_account_id)
-            .first()
-        )
-        if not account:
-            raise HTTPException(status_code=404, detail="Store account not found.")
-        taken = (
-            db.query(BrowserProfile)
-            .filter(
-                BrowserProfile.store_account_id == data.store_account_id,
-                BrowserProfile.id != profile_id,
-            )
-            .first()
-        )
-        if taken:
-            raise HTTPException(
-                status_code=400,
-                detail="A browser profile already exists for this store account.",
-            )
-        profile.store_account_id = data.store_account_id
+    if {"store_id", "store_account_id"} & data.model_fields_set:
+        account_id = data.store_account_id
+        target_store = data.store_id
+        if target_store is None and account_id is None:
+            target_store = profile.store_id
+        store_id, account_id = _resolve_owner(db, target_store, account_id)
+        if (store_id, account_id) != (profile.store_id, profile.store_account_id):
+            if profile.status in ("importing", "login_in_progress"):
+                raise HTTPException(status_code=400, detail="Finish the active login or import before moving this profile.")
+            _check_owner_available(db, store_id, account_id, exclude_id=profile_id)
+            profile.store_id = store_id
+            profile.store_account_id = account_id
+            db.expire(profile, ["store", "store_account"])
     if data.full_check_enabled is not None:
         profile.full_check_enabled = data.full_check_enabled
     if data.full_check_cron is not None:
@@ -565,8 +581,20 @@ def update_browser_profile_schedule(
         profile.unshipped_check_enabled = data.unshipped_check_enabled
     if data.unshipped_check_cron is not None:
         profile.unshipped_check_cron = data.unshipped_check_cron
-    db.commit()
+    _commit_profile(db)
     return _profile_read(_get_profile_or_404(db, profile_id))
+
+
+@router.get("/{profile_id}", response_model=BrowserProfileRead)
+def get_browser_profile(profile_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    return _profile_read(_get_profile_or_404(db, profile_id))
+
+
+@router.get("/{profile_id}/job", response_model=BrowserJobRead | None)
+def get_profile_job(profile_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    _get_profile_or_404(db, profile_id)
+    job = latest_profile_job(profile_id)
+    return job.to_dict() if job else None
 
 
 @router.delete("/{profile_id}", status_code=204)
@@ -576,14 +604,35 @@ async def delete_browser_profile(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
-    await session_manager.close_session(profile_id)
-    dirs = all_profile_data_dirs(profile_id)
-    db.delete(profile)
+    paths = await remove_browser_profiles(db, [profile])
     db.commit()
-    for path in dirs:
+    delete_profile_data_dirs(paths)
+    return None
+
+
+async def remove_browser_profiles(db: Session, profiles: list[BrowserProfile]) -> list[Path]:
+    """Stop import tasks and browsers before deleting their persisted owners."""
+    paths = []
+    for profile in profiles:
+        task = _import_tasks.get(profile.id)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        job = latest_profile_job(profile.id)
+        if job and job.status in ("queued", "running"):
+            update_job(job.id, status="cancelled", message="Profile removed.")
+        await session_manager.close_session(profile.id)
+        paths.extend(all_profile_data_dirs(profile.id))
+        db.delete(profile)
+    db.flush()
+    return paths
+
+
+def delete_profile_data_dirs(paths: list[Path]) -> None:
+    """Remove cookies only after the database deletion has committed."""
+    for path in paths:
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
-    return None
 
 
 @router.post("/{profile_id}/unlock", response_model=BrowserProfileRead)
@@ -865,7 +914,7 @@ def _queue_import(
     profile.last_error = None
     db.commit()
 
-    asyncio.create_task(
+    task = asyncio.create_task(
         _run_import_job(
             job.id,
             profile.id,
@@ -875,8 +924,11 @@ def _queue_import(
             auto_apply=auto_apply,
             scheduled=scheduled,
             store_account_id=profile.store_account_id,
+            store_id=profile.store_id,
         )
     )
+    _import_tasks[profile.id] = task
+    task.add_done_callback(lambda done: _import_tasks.pop(profile.id, None) if _import_tasks.get(profile.id) is done else None)
     return ImportStartResponse(job_id=job.id, profile_id=profile.id, status="queued")
 
 
@@ -995,7 +1047,8 @@ async def _run_import_job(
     max_pages: int,
     auto_apply: bool,
     scheduled: bool,
-    store_account_id: int,
+    store_account_id: int | None,
+    store_id: int,
 ) -> None:
     label = retailer.capitalize()
     mode_label = "full check" if mode == "full" else "unshipped check"
@@ -1010,7 +1063,7 @@ async def _run_import_job(
     try:
         profile = (
             db.query(BrowserProfile)
-            .options(joinedload(BrowserProfile.store_account).joinedload(StoreAccount.store))
+            .options(joinedload(BrowserProfile.store), joinedload(BrowserProfile.store_account))
             .filter(BrowserProfile.id == profile_id)
             .first()
         )
@@ -1038,7 +1091,7 @@ async def _run_import_job(
         try:
             order_ids: list[str] | None = None
             if mode == "unshipped":
-                order_ids = _unshipped_store_order_numbers(db, store_account_id)
+                order_ids = _unshipped_store_order_numbers(db, store_account_id, store_id)
                 if not order_ids:
                     now = datetime.now(timezone.utc)
                     _set_profile_status(
@@ -1147,6 +1200,7 @@ async def _run_import_job(
                             payload,
                             apply_user,
                             store_account_id=store_account_id,
+                            store_id=store_id,
                             commit=False,
                         )
                         order = db.query(Order).filter(Order.id == order_id).first()
@@ -1398,7 +1452,7 @@ async def _run_import_job(
                     finished_ok = True
                     return
 
-                token, review_url = post_bulk_session(orders)
+                token, review_url = post_bulk_session(orders, store_id=store_id, store_account_id=store_account_id)
                 _set_profile_status(
                     db,
                     profile_id,
@@ -1424,6 +1478,11 @@ async def _run_import_job(
                     finish_msg = finish_msg.rstrip(".") + f" ({len(errors)} failed)."
                 log_finished(finish_msg)
                 finished_ok = True
+        except asyncio.CancelledError:
+            db.rollback()
+            update_job(job_id, status="cancelled", message="Profile removed.")
+            finished_ok = True
+            raise
         except LoginRequiredError as exc:
             _set_profile_status(
                 db, profile_id, status="login_required", last_error=str(exc)

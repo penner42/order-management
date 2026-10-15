@@ -57,6 +57,12 @@ def get_job(job_id: str) -> BrowserJob | None:
         return _jobs.get(job_id)
 
 
+def latest_profile_job(profile_id: int) -> BrowserJob | None:
+    with _lock:
+        return max((job for job in _jobs.values() if job.profile_id == profile_id),
+                   key=lambda job: job.created_at, default=None)
+
+
 def update_job(job_id: str, **kwargs: Any) -> BrowserJob | None:
     with _lock:
         job = _jobs.get(job_id)

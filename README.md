@@ -158,12 +158,23 @@ The **browser-extension** folder contains a Chrome/Firefox extension that can re
 
 ## Browser automation (Walmart / Amazon)
 
-The app can run **Camoufox (anti-detect Firefox) on the API host** with one persistent profile per store account. Use **Browser automation** in the nav:
+The main navigation contains **Orders**, **Receiving**, **Payments**, **Log**, and **Settings**.
+Configuration lives in Settings: account/password and CSV export, buying groups,
+stores/accounts, ignored zip codes, payment methods, rewards, portals, and browser extension setup.
+Settings has a sidebar on desktop and a section picker on phones. Old configuration URLs redirect to their new Settings locations.
 
-1. Create a Store Account (for Amazon, name it with the login email for import matching).
-2. Add a browser profile and choose **Walmart** or **Amazon**.
+The app can run **Camoufox (anti-detect Firefox) on the API host** with one persistent browser profile directly on each store and one per subaccount. Open **Settings → Stores** and choose **Manage** on a store:
+
+1. Use the store-level browser profile area, or add a subaccount and use its profile area (for Amazon, name subaccounts with the login email for import matching).
+2. Add a browser profile in that area and choose **Walmart**, **Amazon**, or **Costco**.
 3. Click **Log in** and complete sign-in (including MFA) in the embedded live view, then **Done**.
 4. Click **Import now** to walk order history; when finished, open **Import Review** to apply orders.
+5. Configure full/unshipped check schedules in the same profile area. Store profiles check orders without a subaccount; subaccount profiles check only their own orders. **Log** stays in the main navigation.
+
+Each profile can be moved to a store or account that has no profile, preserving its
+ID, cookies, and schedules. Deleting a profile or its owner stops active browser
+work and removes its cookies after the database deletion succeeds. Stores with
+linked orders cannot be deleted until those orders are moved or deleted.
 
 Notes:
 
@@ -226,6 +237,8 @@ order-management/
 ├── frontend/
 │   ├── src/
 │   │   ├── api/
+│   │   ├── components/
+│   │   │   └── BrowserProfileControls.tsx
 │   │   ├── contexts/
 │   │   ├── pages/
 │   │   │   ├── Orders.tsx

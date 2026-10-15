@@ -1,5 +1,5 @@
-"""Browser automation profiles — persistent Camoufox sessions per store account."""
-from sqlalchemy import Boolean, Column, Integer, String, Text, ForeignKey, DateTime, UniqueConstraint
+"""Persistent browser sessions owned by stores or store accounts."""
+from sqlalchemy import Boolean, Column, Integer, String, Text, ForeignKey, DateTime, UniqueConstraint, Index, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -7,16 +7,22 @@ from app.database import Base
 
 
 class BrowserProfile(Base):
-    """One automated browser profile tied to a store account (retailer login identity)."""
+    """One automated browser profile per store or retailer login account."""
 
     __tablename__ = "browser_profiles"
-    __table_args__ = (UniqueConstraint("store_account_id", name="uq_browser_profiles_store_account_id"),)
+    __table_args__ = (
+        UniqueConstraint("store_account_id", name="uq_browser_profiles_store_account_id"),
+        Index("uq_browser_profiles_direct_store", "store_id", unique=True,
+              postgresql_where=text("store_account_id IS NULL"),
+              sqlite_where=text("store_account_id IS NULL")),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False, index=True)
     store_account_id = Column(
         Integer,
         ForeignKey("store_accounts.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     # Retailer key for the scraper (amazon | walmart | costco). Independent of stores.name.
@@ -41,3 +47,4 @@ class BrowserProfile(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     store_account = relationship("StoreAccount", back_populates="browser_profile")
+    store = relationship("Store", back_populates="browser_profiles")

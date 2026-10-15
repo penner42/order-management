@@ -191,7 +191,7 @@ export default function Profile() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-ink mb-8">Profile</h1>
+      <h1 className="text-2xl font-semibold text-ink dark:text-gray-100 mb-8">Account</h1>
       <div className="max-w-md space-y-6">
         <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 p-6">
           <h2 className="text-lg font-medium text-ink dark:text-gray-100 mb-4">Change password</h2>

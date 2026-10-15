@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import User, Store, StoreAccount
+from app.models import User, Store, StoreAccount, BrowserProfile, Order
 from app.models.user import get_default_app_user_id
 from app.schemas.store import (
     StoreRead,
@@ -56,12 +56,18 @@ def update_store(store_id: int, data: StoreUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{store_id}", status_code=204)
-def delete_store(store_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_store(store_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     store = db.query(Store).filter(Store.id == store_id).first()
     if not store:
         raise HTTPException(status_code=404, detail="Store not found")
+    if db.query(Order.id).filter(Order.store_id == store_id).first():
+        raise HTTPException(status_code=400, detail="Move or delete this store's orders before deleting the store.")
+    from app.routers.browser_profiles import remove_browser_profiles, delete_profile_data_dirs
+    paths = await remove_browser_profiles(db, db.query(BrowserProfile).filter(BrowserProfile.store_id == store_id).all())
+    db.expire(store, ["browser_profiles", "accounts"])
     db.delete(store)
     db.commit()
+    delete_profile_data_dirs(paths)
     return None
 
 
@@ -117,13 +123,17 @@ def update_store_account(
 
 
 @router.delete("/{store_id}/accounts/{account_id}", status_code=204)
-def delete_store_account(store_id: int, account_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+async def delete_store_account(store_id: int, account_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     account = db.query(StoreAccount).filter(
         StoreAccount.id == account_id,
         StoreAccount.store_id == store_id,
     ).first()
     if not account:
         raise HTTPException(status_code=404, detail="Store account not found")
+    from app.routers.browser_profiles import remove_browser_profiles, delete_profile_data_dirs
+    paths = await remove_browser_profiles(db, db.query(BrowserProfile).filter(BrowserProfile.store_account_id == account_id).all())
+    db.expire(account, ["browser_profile"])
     db.delete(account)
     db.commit()
+    delete_profile_data_dirs(paths)
     return None

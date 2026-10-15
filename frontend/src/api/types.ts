@@ -248,7 +248,7 @@ export type BrowserProfileStatus =
 
 export interface BrowserProfile {
   id: number
-  store_account_id: number
+  store_account_id: number | null
   retailer: string
   status: BrowserProfileStatus | string
   last_error: string | null
@@ -262,13 +262,14 @@ export interface BrowserProfile {
   unshipped_check_last_run_at: string | null
   created_at?: string | null
   updated_at?: string | null
-  store_id?: number | null
+  store_id: number
   store_name?: string | null
   store_account_name?: string | null
 }
 
 export interface BrowserProfileScheduleUpdate {
-  store_account_id?: number
+  store_id?: number
+  store_account_id?: number | null
   full_check_enabled?: boolean
   full_check_cron?: string
   full_check_max_pages?: number

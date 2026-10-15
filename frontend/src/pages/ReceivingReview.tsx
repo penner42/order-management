@@ -617,7 +617,7 @@ export default function ReceivingReview() {
       <div className="max-w-2xl mx-auto">
         <h1 className="text-xl font-semibold text-ink dark:text-gray-100 mb-2">Receiving</h1>
         <p className="text-sm text-red-600 dark:text-red-400 mb-4">{error}</p>
-        <Link to="/buying-groups" className="text-brand-600 dark:text-brand-400 hover:underline text-sm">
+        <Link to="/settings/buying-groups" className="text-brand-600 dark:text-brand-400 hover:underline text-sm">
           Back to Buying Groups
         </Link>
       </div>
@@ -634,7 +634,7 @@ export default function ReceivingReview() {
           </p>
         </div>
         <Link
-          to="/buying-groups"
+          to="/settings/buying-groups"
           className="text-sm text-brand-600 dark:text-brand-400 hover:underline whitespace-nowrap"
         >
           Buying Groups
@@ -648,7 +648,7 @@ export default function ReceivingReview() {
             Run <span className="font-medium">Check receiving</span> on a buying group or enable auto-check
             on a schedule.
           </p>
-          <Link to="/buying-groups" className="text-brand-600 dark:text-brand-400 hover:underline text-sm">
+          <Link to="/settings/buying-groups" className="text-brand-600 dark:text-brand-400 hover:underline text-sm">
             Go to Buying Groups
           </Link>
         </div>

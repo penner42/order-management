@@ -29,13 +29,13 @@ async def inject_scripts_for_evaluate(page: Page, paths: Sequence[Path]) -> None
         await page.evaluate("(code) => { (0, eval)(code); }", source)
 
 
-def post_bulk_session(orders: list[dict[str, Any]]) -> tuple[str, str]:
+def post_bulk_session(orders: list[dict[str, Any]], *, store_id: int | None = None, store_account_id: int | None = None) -> tuple[str, str]:
     """Create an in-memory bulk import session. Returns (token, review_url)."""
     from app.routers.store_imports import create_bulk_import_session
     from app.schemas.store_import import BulkImportSessionCreate, StoreOrderImportPayload
 
     payloads = [StoreOrderImportPayload.model_validate(o) for o in orders]
-    result = create_bulk_import_session(BulkImportSessionCreate(orders=payloads))
+    result = create_bulk_import_session(BulkImportSessionCreate(orders=payloads, store_id=store_id, store_account_id=store_account_id))
     token = result.token
     base = settings.app_public_base_url.rstrip("/")
     review_url = f"{base}/import-review/bulk?token={token}"

@@ -58,6 +58,7 @@ class DirectApplyBody(BaseModel):
     """Payload + user selections to create/update an order directly (no staging row)."""
 
     payload: StoreOrderImportPayload
+    store_id: int | None = None
     store_account_id: int | None = None
     buying_group_id: int | None = None
     item_payouts: list[float | None] | None = None
@@ -74,6 +75,8 @@ class BulkImportSessionCreate(BaseModel):
     """Create a short-lived bulk import session from multiple normalized payloads."""
 
     orders: list[StoreOrderImportPayload]
+    store_id: int | None = None
+    store_account_id: int | None = None
 
 
 class BulkImportSessionResponse(BaseModel):
@@ -86,3 +89,5 @@ class BulkImportSessionPayloads(BaseModel):
     """Resolved bulk session payloads for the frontend review UI."""
 
     orders: list[StoreOrderImportPayload]
+    store_id: int | None = None
+    store_account_id: int | None = None

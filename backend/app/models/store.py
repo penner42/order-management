@@ -18,6 +18,7 @@ class Store(Base):
     user = relationship("User", back_populates="stores")
     accounts = relationship("StoreAccount", back_populates="store", cascade="all, delete-orphan")
     orders = relationship("Order", back_populates="store")
+    browser_profiles = relationship("BrowserProfile", back_populates="store", cascade="all, delete-orphan")
     payment_method_earnings = relationship(
         "PaymentMethodStoreEarnings",
         back_populates="store",
