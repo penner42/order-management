@@ -8,10 +8,10 @@ function timestamp(value: string | null | undefined) {
 export function DuplicateAuditDetails({ order, findings }: { order: Order; findings: DuplicateAuditFinding[] }) {
   const itemIds = new Set(findings.flatMap(finding => finding.item_ids))
   return (
-    <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-3 text-sm text-ink dark:text-gray-100 space-y-2">
+    <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-gray-800 p-3 text-sm text-ink dark:text-gray-200 space-y-2">
       <div className="flex flex-wrap justify-between gap-2">
-        <strong>{findings.some(f => f.confidence === 'likely') ? 'Likely duplicate' : 'Possible duplicate'}</strong>
-        <Link to={`/?order_id=${order.id}`} className="text-brand-700 dark:text-brand-400 underline">
+        <strong className="dark:text-amber-200">{findings.some(f => f.confidence === 'likely') ? 'Likely duplicate' : 'Possible duplicate'}</strong>
+        <Link to={`/?order_id=${order.id}`} className="text-brand-700 dark:text-amber-300 underline hover:text-brand-900 dark:hover:text-amber-200">
           Review in Orders
         </Link>
       </div>
@@ -25,11 +25,11 @@ export function DuplicateAuditDetails({ order, findings }: { order: Order; findi
         ))}
       </ul>
       <details>
-        <summary className="cursor-pointer">Line IDs, receipts, and timestamps</summary>
+        <summary className="cursor-pointer dark:text-gray-200">Line IDs, receipts, and timestamps</summary>
         <div className="overflow-x-auto mt-2">
-          <table className="w-full text-xs text-left whitespace-nowrap">
-            <thead><tr>{['Line', 'Description', 'Receipt', 'Created', 'Updated', 'Scanned'].map(label => <th key={label} className="px-2 py-1">{label}</th>)}</tr></thead>
-            <tbody>{order.items.filter(item => itemIds.has(item.id)).map(item => (
+          <table className="w-full text-xs text-left whitespace-nowrap text-ink dark:text-gray-200">
+            <thead className="dark:bg-gray-900/50 dark:text-gray-300"><tr>{['Line', 'Description', 'Receipt', 'Created', 'Updated', 'Scanned'].map(label => <th key={label} className="px-2 py-1">{label}</th>)}</tr></thead>
+            <tbody className="divide-y divide-amber-200 dark:divide-gray-700">{order.items.filter(item => itemIds.has(item.id)).map(item => (
               <tr key={item.id}>
                 <td className="px-2 py-1">#{item.id}</td>
                 <td className="px-2 py-1">{item.description || '—'}</td>
