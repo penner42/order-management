@@ -41,7 +41,7 @@ test('unknown receipts are visible within each buying group, including groups wi
   await expect(beta.getByText('UNKNOWN-BETA', { exact: true })).toBeVisible()
 })
 
-test('manual receipt review offers an explicit split, unlink, and apply, then displays receipt fields on Orders', async ({ app, data }) => {
+test('manual receipt review offers an explicit split, unlink, and apply while Orders hides receipt fields', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('receipt-store') })
   const group = await data.create('/buying-groups', { name: data.name('receipt-group') })
   const orderNumber = data.name('receipt-order')
@@ -142,14 +142,11 @@ test('manual receipt review offers an explicit split, unlink, and apply, then di
   const savedShipment = await data.get<{ tracking_number: string; notes: string }>(`/shipments/${shipment.id}`)
   expect(savedShipment).toMatchObject({ tracking_number: originalTracking, notes: 'Original shipment notes' })
   await app.goto(`/?q=${encodeURIComponent(orderNumber)}`)
-  const receiptFields = app.getByRole('group', { name: `Receipt details for item ${item.id}`, exact: true })
-  await expect(receiptFields.getByLabel('Receipt ID', { exact: true })).toHaveValue(receipt.receipt_id)
-  const trackingInput = receiptFields.getByLabel('Receipt tracking number', { exact: true })
-  await expect(trackingInput).toHaveValue('WRONG-SCAN')
-  await trackingInput.fill('CORRECTED-RECEIPT-SCAN')
-  const patched = app.waitForResponse(response => response.url().endsWith(`/api/items/${item.id}`) && response.request().method() === 'PATCH')
-  await trackingInput.blur()
-  expect((await patched).ok()).toBeTruthy()
-  await app.reload()
-  await expect(receiptFields.getByLabel('Receipt tracking number', { exact: true })).toHaveValue('CORRECTED-RECEIPT-SCAN')
+  await expect(app.getByPlaceholder('Description').first()).toHaveValue('Receipt test headphones')
+  await expect(app.getByLabel('Receipt ID', { exact: true })).toHaveCount(0)
+  await expect(app.getByLabel('Receipt tracking number', { exact: true })).toHaveCount(0)
+  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({
+    receipt_id: receipt.receipt_id,
+    receipt_tracking_number: 'WRONG-SCAN',
+  })
 })
