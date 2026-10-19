@@ -22,7 +22,7 @@ from app.schemas.item import (
     ItemUpdate,
 )
 from app.utils.item_split import split_item_record
-from app.utils.receiving_links import apply_manual_link
+from app.utils.receiving_links import apply_manual_link, validate_manual_link_batch
 from app.utils.buying_group_apis.submit_tracking import (
     find_shipped_items_sharing_tracking,
     group_ready,
@@ -82,6 +82,7 @@ def bulk_update_items(
     """Update multiple items in a single request. delivered_at in entry is applied to the item's shipment."""
     updated: list[Item] = []
     newly_submitted: list[Item] = []
+    validate_manual_link_batch(db, data.updates)
     for entry in data.updates:
         item = (
             db.query(Item)

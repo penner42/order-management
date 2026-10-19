@@ -189,10 +189,17 @@ function ReceivingGroupSection({
   )
 
   const setRow = (key: string, patch: Partial<RowEdit>) => {
-    setEdits((prev) => ({
-      ...prev,
-      [key]: { ...prev[key], ...patch },
-    }))
+    setEdits((prev) => {
+      const next = { ...prev, [key]: { ...prev[key], ...patch } }
+      const receiptKey = matches.find(m => rowKey(m) === key)?.manual_receipt_key
+      if (receiptKey && patch.selected !== undefined) {
+        for (const m of matches.filter(m => m.manual_receipt_key === receiptKey)) {
+          const sibling = rowKey(m)
+          next[sibling] = { ...next[sibling], selected: patch.selected }
+        }
+      }
+      return next
+    })
   }
 
   const selectAll = (selected: boolean) => {

@@ -1,6 +1,70 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('unknown receipt selects whole items across searches and pages up to its total', async ({ app }) => {
+  const receipt = { receipt_key: 'multi', receipt_id: 'MULTI', tracking_number: 'UNKNOWN', quantity: 3 }
+  const candidates = [2, 1, 4].map((quantity, index) => ({
+    item_id: 800 + index, order_id: 900 + index, store_order_number: `ORDER-${index}`,
+    description: `Headphones ${index}`, quantity, status: 'submitted', receipt_id: null,
+    receipt_tracking_number: null, tracking_numbers: [], payment_linked: false, store: 'Test store',
+  }))
+  const matches = candidates.slice(0, 2).map(item => ({
+    ...item, tracking_number: receipt.tracking_number, receipt_tracking_number: receipt.tracking_number,
+    receipt_id: receipt.receipt_id, row_id: `manual:multi:${item.item_id}`, manual_receipt_key: 'multi',
+    received_ext_total: String(item.quantity * 25), expected_amount: String(item.quantity * 20),
+  }))
+  let staged = false
+  const session = () => ({ buying_group_id: 901, buying_group_name: 'Multiple orders',
+    matches: staged ? matches : [], unknown_receipts: staged ? [] : [receipt] })
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [session()] }))
+  await app.route('**/api/buying-groups/receiving-review/candidates?*', route => {
+    const params = new URL(route.request().url()).searchParams
+    const items = params.get('q') ? [candidates[1]] : params.get('page') === '2' ? [candidates[1]] : [candidates[0], candidates[2]]
+    return route.fulfill({ json: { items, total: params.get('q') ? 1 : 26 } })
+  })
+  await app.route('**/api/buying-groups/receiving-review/link', route => {
+    expect(route.request().postDataJSON().item_ids.sort()).toEqual([800, 801])
+    expect(route.request().postDataJSON().split_quantity).toBeUndefined()
+    staged = true
+    return route.fulfill({ json: session() })
+  })
+  await app.route('**/api/buying-groups/receiving-review/unlink', route => {
+    expect(route.request().postDataJSON().receipt_key).toBe('multi')
+    staged = false
+    return route.fulfill({ json: session() })
+  })
+  await app.goto('/receiving-review')
+  await app.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
+  await app.getByRole('button', { name: 'Link to order item' }).click()
+  const dialog = app.getByRole('dialog', { name: 'Link receipt to order items', exact: true })
+  const add = dialog.getByRole('button', { name: 'Add to review', exact: true })
+  await expect(dialog.getByRole('checkbox').nth(1)).toBeDisabled()
+  await dialog.getByRole('checkbox').first().check()
+  await expect(add).toBeDisabled()
+  await dialog.getByRole('button', { name: 'Next', exact: true }).click()
+  await dialog.getByRole('checkbox').check()
+  await expect(dialog.getByText('Selected 3 of 3 units across 2 order items.')).toBeVisible()
+  await expect(add).toBeEnabled()
+  await dialog.getByLabel('Search order number, description, or receipt ID').fill('Headphones 1')
+  await expect(dialog.getByRole('checkbox')).toBeChecked()
+  await expect(add).toBeEnabled()
+  await dialog.getByRole('button', { name: 'Remove Headphones 0', exact: true }).click()
+  await expect(add).toBeDisabled()
+  await dialog.getByLabel('Search order number, description, or receipt ID').fill('')
+  await dialog.getByRole('checkbox').first().check()
+  await add.click()
+  const selections = app.getByRole('checkbox', { name: /Select item Headphones/ })
+  await expect(selections).toHaveCount(2)
+  await selections.first().uncheck()
+  await expect(selections.nth(1)).not.toBeChecked()
+  await selections.first().check()
+  await expect(selections.nth(1)).toBeChecked()
+  await app.getByRole('button', { name: 'Unlink', exact: true }).first().click()
+  await app.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
+  await expect(app.getByRole('button', { name: 'Link to order item' })).toBeVisible()
+  await expect(selections).toHaveCount(0)
+})
+
 test('unknown receipts are visible within each buying group, including groups with no matches', async ({ app }) => {
   await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({
     json: [
@@ -25,7 +89,8 @@ test('unknown receipts are visible within each buying group, including groups wi
   await app.goto('/receiving-review')
   const alpha = app.locator('section').filter({ hasText: 'Warehouse Alpha' })
   const beta = app.locator('section').filter({ hasText: 'Warehouse Beta' })
-  await expect(alpha.getByRole('heading', { name: 'Unknown tracking numbers (1 receipt)', exact: true })).toBeVisible()
+  await alpha.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
+  await beta.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
   for (const text of ['UNKNOWN-ALPHA', 'ALTERNATE-ALPHA', 'Wireless headphones', '$25.00', '$50.00',
     'receipt-alpha', 'group-order-alpha', 'Received', '2026-10-15T12:00:00Z', 'Main warehouse', 'Box needs review']) {
     await expect(alpha.getByText(text, { exact: false }).first()).toBeVisible()
@@ -37,11 +102,13 @@ test('unknown receipts are visible within each buying group, including groups wi
   await expect(alpha.locator('pre')).toContainText('warehouse-123')
   await expect(app.getByRole('button', { name: /Apply \d+ selected/ })).toHaveCount(0)
   await app.reload()
+  await alpha.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
+  await beta.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
   await expect(alpha.getByText('UNKNOWN-ALPHA', { exact: true })).toBeVisible()
   await expect(beta.getByText('UNKNOWN-BETA', { exact: true })).toBeVisible()
 })
 
-test('manual receipt review offers an explicit split, unlink, and apply while Orders hides receipt fields', async ({ app, data }) => {
+test('manual receipt review requires a manual split, then supports unlink and apply', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('receipt-store') })
   const group = await data.create('/buying-groups', { name: data.name('receipt-group') })
   const orderNumber = data.name('receipt-order')
@@ -66,7 +133,6 @@ test('manual receipt review offers an explicit split, unlink, and apply while Or
   }
   let staged = false
   let applied = false
-  let splitDone = false
   const session = () => ({
     buying_group_id: group.id, buying_group_name: data.name('receipt-group'),
     matches: staged && !applied ? [match] : [], unknown_receipts: staged || applied ? [] : [receipt],
@@ -87,17 +153,8 @@ test('manual receipt review offers an explicit split, unlink, and apply while Or
   await app.route('**/api/buying-groups/receiving-review/link', async route => {
     const body = route.request().postDataJSON()
     expect(body).toMatchObject({ buying_group_id: group.id, receipt_key: receipt.receipt_key,
-      item_id: item.id, receipt_tracking_number: 'WRONG-SCAN' })
-    if (!splitDone) {
-      expect(body).toMatchObject({ split_quantity: 1, split_target: 'kept' })
-      const split = await data.request.post(`/api/items/${item.id}/split`, {
-        headers: data.headers, data: { keep_quantity: 1, copy_tracking: true },
-      })
-      expect(split.ok()).toBeTruthy()
-      splitDone = true
-    } else {
-      expect(body.split_quantity).toBeUndefined()
-    }
+      item_ids: [item.id], receipt_tracking_number: 'WRONG-SCAN' })
+    expect(body.split_quantity).toBeUndefined()
     staged = true
     await route.fulfill({ json: session() })
   })
@@ -118,19 +175,29 @@ test('manual receipt review offers an explicit split, unlink, and apply while Or
   await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
 
   await app.goto('/receiving-review')
+  await app.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
   await app.getByRole('button', { name: 'Link to order item' }).click()
-  const dialog = app.getByRole('dialog', { name: 'Link receipt to order item' })
+  const dialog = app.getByRole('dialog', { name: 'Link receipt to order items', exact: true })
   await dialog.getByLabel('Search order number, description, or receipt ID').fill(orderNumber)
-  await dialog.getByRole('radio').check()
-  await expect(dialog.getByText('Explicitly split 3 units into 1 for this receipt and 2 remaining.', { exact: false })).toBeVisible()
+  await expect(dialog.getByRole('checkbox')).toBeDisabled()
+  await expect(dialog.getByText('Exceeds the remaining receipt quantity.', { exact: false })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Add to review', exact: true })).toBeDisabled()
   expect((await data.get<Item>(`/items/${item.id}`)).quantity).toBe(3)
-  await dialog.getByRole('button', { name: 'Split and add to review' }).click()
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  const split = await data.request.post(`/api/items/${item.id}/split`, {
+    headers: data.headers, data: { keep_quantity: 1, copy_tracking: true },
+  })
+  expect(split.ok()).toBeTruthy()
+  await app.getByRole('button', { name: 'Link to order item' }).click()
+  await dialog.getByRole('checkbox').check()
+  await dialog.getByRole('button', { name: 'Add to review', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   await expect(app.getByText('Manually linked', { exact: false })).toBeVisible()
   expect((await data.get<Item>(`/items/${item.id}`)).receipt_id).toBeNull()
   await app.getByRole('button', { name: 'Unlink', exact: true }).click()
+  await app.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
   await app.getByRole('button', { name: 'Link to order item' }).click()
-  await dialog.getByRole('radio').check()
+  await dialog.getByRole('checkbox').check()
   await dialog.getByRole('button', { name: 'Add to review', exact: true }).click()
   await app.reload()
   await expect(app.getByText('Manually linked', { exact: false })).toBeVisible()

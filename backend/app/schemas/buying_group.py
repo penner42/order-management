@@ -265,11 +265,11 @@ class ReceivingReviewPruneResponse(BaseModel):
 class ReceivingReceiptLinkRequest(BaseModel):
     buying_group_id: int
     receipt_key: str
-    item_id: int
+    item_ids: list[int] = Field(default_factory=list)
+    item_id: int | None = None  # Older clients may still select one whole line.
     receipt_tracking_number: str
     confirm_full_quantity: bool = False
     split_quantity: int | None = Field(default=None, gt=0)
-    split_target: Literal["kept", "split_off"] = "kept"
 
 
 class ReceivingReceiptUnlinkRequest(BaseModel):

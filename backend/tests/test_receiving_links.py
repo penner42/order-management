@@ -107,7 +107,8 @@ class ReceiptLinkTests(unittest.TestCase):
         self.item.receipt_tracking_number = "OLD-SCAN"
         self.item.quantity = 5
         self.db.commit()
-        result = self.link(split_quantity=2, split_target="split_off")
+        split = split_item(self.item.id, ItemSplitRequest(keep_quantity=3, copy_tracking=True), db=self.db, _=None)
+        result = self.link(item_id=split.split_off.id)
         match = result["matches"][0]
         new = self.db.get(Item, match["item_id"])
         self.assertNotEqual(new.id, self.item.id)
@@ -239,6 +240,79 @@ class ReceiptLinkTests(unittest.TestCase):
         self.assertEqual(results["items"][0]["status"], "canceled")
         self.assertEqual(results["items"][0]["tracking_numbers"], ["ORIGINAL"])
 
+    def multi_link(self):
+        order = Order(store_id=self.store.id, buying_group_id=self.group.id, store_order_number="ORDER-456")
+        self.db.add(order)
+        self.db.flush()
+        second = Item(order_id=order.id, description="More headphones", quantity=1,
+                      status=ItemStatus.SUBMITTED, price_sold=20)
+        self.db.add(second)
+        self.db.commit()
+        self.receipt.update(quantity=3, received_ext_total="75.00")
+        self.save()
+        result = self.link(item_id=None, item_ids=[self.item.id, second.id])
+        return second, result["matches"]
+
+    def test_multiple_order_items_allocate_total_and_apply_together(self):
+        second, matches = self.multi_link()
+        self.assertEqual([m["quantity"] for m in matches], [2, 1])
+        self.assertEqual([m["received_ext_total"] for m in matches], ["50.00", "25.00"])
+        self.assertEqual(len({m["row_id"] for m in matches}), 2)
+        self.assertTrue(all(m["amount_discrepancy"] for m in matches))
+        self.save()
+        self.assertEqual(len(self.db.get(ReceivingReviewPending, self.group.id).payload["matches"]), 2)
+        with self.assertRaises(HTTPException):
+            self.apply(matches[0])
+        self.db.rollback()
+        self.assertIsNone(self.item.receipt_id)
+        self.assertEqual(len(self.db.get(ReceivingReviewPending, self.group.id).payload["matches"]), 2)
+        bulk_update_items(ItemBulkUpdateRequest(updates=[{
+            "item_id": m["item_id"], "receipt_id": m["receipt_id"],
+            "receiving_group_id": self.group.id, "receiving_row_id": m["row_id"],
+        } for m in matches]), db=self.db, _=None)
+        for item in [self.item, second]:
+            self.assertEqual(item.status, ItemStatus.SCANNED)
+            self.assertEqual(item.receipt_tracking_number, "INCORRECT")
+        self.assertIsNone(self.db.get(ReceivingReviewPending, self.group.id))
+
+    def test_unlink_returns_one_whole_receipt_for_multiple_items(self):
+        _, matches = self.multi_link()
+        result = unlink_receipt(self.db, self.group.id, matches[0]["manual_receipt_key"])
+        self.assertEqual(result["matches"], [])
+        self.assertEqual(len(result["unknown_receipts"]), 1)
+        self.assertEqual(result["unknown_receipts"][0]["quantity"], 3)
+        self.assertEqual(result["unknown_receipts"][0]["received_ext_total"], "75.00")
+
+    def test_stale_second_allocation_rolls_back_entire_receipt(self):
+        second, matches = self.multi_link()
+        second.quantity = 2
+        self.db.commit()
+        with self.assertRaises(HTTPException):
+            bulk_update_items(ItemBulkUpdateRequest(updates=[{
+                "item_id": m["item_id"], "receipt_id": m["receipt_id"],
+                "receiving_group_id": self.group.id, "receiving_row_id": m["row_id"],
+            } for m in matches]), db=self.db, _=None)
+        self.db.rollback()
+        self.assertIsNone(self.item.receipt_id)
+        self.assertIsNone(second.receipt_id)
+        self.assertEqual(len(self.db.get(ReceivingReviewPending, self.group.id).payload["matches"]), 2)
+
+    def test_rejects_over_under_duplicate_and_automatic_split_without_mutation(self):
+        for changes in ({"item_ids": [self.item.id, self.item.id], "item_id": None},
+                        {"split_quantity": 1}):
+            with self.assertRaises(HTTPException):
+                self.link(**changes)
+            self.db.rollback()
+        for quantity in [1, 3]:
+            self.receipt["quantity"] = quantity
+            self.save()
+            with self.assertRaises(HTTPException):
+                self.link()
+            self.db.rollback()
+            self.assertEqual(self.item.quantity, 2)
+            self.assertEqual(self.db.query(Item).count(), 1)
+            self.assertEqual(len(self.db.get(ReceivingReviewPending, self.group.id).payload["unknown_receipts"]), 1)
+
 
 @unittest.skipUnless(settings.database_url.startswith("postgresql"), "requires PostgreSQL in Docker")
 class PostgresReceiptLinkTests(unittest.TestCase):
@@ -262,25 +336,36 @@ class PostgresReceiptLinkTests(unittest.TestCase):
                 item = Item(order_id=order.id, quantity=3, status=ItemStatus.SUBMITTED, price_sold=20)
                 db.add(item)
                 db.commit()
-                receipt = {"receipt_id": "PG-RECEIPT", "tracking_number": "BAD-SCAN", "quantity": 1}
+                other_order = Order(store_id=store.id, buying_group_id=group.id)
+                db.add(other_order)
+                db.flush()
+                other_item = Item(order_id=other_order.id, quantity=1, status=ItemStatus.SUBMITTED, price_sold=20)
+                db.add(other_item)
+                db.commit()
+                receipt = {"receipt_id": "PG-RECEIPT", "tracking_number": "BAD-SCAN", "quantity": 2,
+                           "received_ext_total": "50.00"}
                 save_receiving_review_pending(db, {"buying_group_id": group.id, "buying_group_name": group.name,
                     "matches": [], "unknown_receipts": [receipt]})
+                split_item(item.id, ItemSplitRequest(keep_quantity=1), db=db, _=None)
                 session = link_receipt(db, ReceivingReceiptLinkRequest(buying_group_id=group.id,
-                    receipt_key=receipt_key(receipt), item_id=item.id, receipt_tracking_number="BAD-SCAN", split_quantity=1))
-                match = session["matches"][0]
+                    receipt_key=receipt_key(receipt), item_ids=[item.id, other_item.id], receipt_tracking_number="BAD-SCAN"))
+                matches = session["matches"]
                 item_id = item.id
+                other_id = other_item.id
                 group_id = group.id
                 # Confirmation is a separate HTTP request, with a fresh identity map.
                 # Reusing the staged item hides refresh's joined eager-load behavior.
                 db.expunge_all()
-                bulk_update_items(ItemBulkUpdateRequest(updates=[{"item_id": item_id,
+                bulk_update_items(ItemBulkUpdateRequest(updates=[{"item_id": m["item_id"],
                     "receipt_id": "PG-RECEIPT", "receiving_group_id": group_id,
-                    "receiving_row_id": match["row_id"]}]), db=db, _=None)
+                    "receiving_row_id": m["row_id"]} for m in matches]), db=db, _=None)
                 item = db.get(Item, item_id)
                 self.assertEqual(item.receipt_tracking_number, "BAD-SCAN")
                 self.assertEqual(item.quantity, 1)
                 self.assertEqual(item.status, ItemStatus.SCANNED)
-                self.assertEqual(db.query(Item).count(), 2)
+                self.assertEqual(db.get(Item, other_id).receipt_tracking_number, "BAD-SCAN")
+                self.assertEqual(db.get(Item, other_id).status, ItemStatus.SCANNED)
+                self.assertEqual(db.query(Item).count(), 3)
                 self.assertIsNone(db.get(ReceivingReviewPending, group_id))
         finally:
             if engine is not None:

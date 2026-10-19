@@ -12,9 +12,8 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import Item, Order, ReceivingReviewPending, ShipmentItem
 from app.models.item import ItemStatus
-from app.schemas.item import ItemSplitRequest, ItemBulkUpdateEntry
+from app.schemas.item import ItemBulkUpdateEntry
 from app.schemas.buying_group import ReceivingReceiptLinkRequest
-from app.utils.item_split import split_item_record
 
 
 OPEN_STATUSES = {ItemStatus.PURCHASED, ItemStatus.SHIPPED, ItemStatus.SUBMITTED, ItemStatus.NEEDS_REVIEW}
@@ -113,57 +112,61 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
     receipt = next((r for r in receipts if receipt_key(r) == body.receipt_key), None)
     if receipt is None:
         raise HTTPException(409, "Receipt is no longer unknown. Refresh receiving review.")
-    item = db.query(Item).filter_by(id=body.item_id).with_for_update().first()
-    if item is None or item.order.buying_group_id != body.buying_group_id:
+    ids = body.item_ids or ([body.item_id] if body.item_id is not None else [])
+    if not ids or len(set(ids)) != len(ids) or (body.item_ids and body.item_id is not None):
+        raise HTTPException(400, "Select each order line once.")
+    if body.split_quantity is not None:
+        raise HTTPException(400, "Split order lines manually on Orders before linking a receipt.")
+    items = db.query(Item).filter(Item.id.in_(ids)).order_by(Item.id).with_for_update(of=Item).all()
+    if len(items) != len(ids) or any(i.order.buying_group_id != body.buying_group_id for i in items):
         raise HTTPException(404, "Order line not found in this buying group.")
     matches = list(payload.get("matches") or [])
-    if any(m.get("item_id") == item.id and m.get("manual_receipt") for m in matches):
+    if any(m.get("item_id") in ids and m.get("manual_receipt") for m in matches):
         raise HTTPException(409, "This line already has a pending manual receipt. Apply or unlink it first.")
     tracking = body.receipt_tracking_number.strip()
     allowed = [receipt.get("tracking_number") or "", *(receipt.get("tracking_numbers") or [])]
     if tracking not in [tn.strip() for tn in allowed] or not tracking:
         raise HTTPException(400, "Choose a tracking number reported on this receipt.")
+    selected_qty = sum(i.quantity for i in items)
     qty = receipt.get("quantity")
     if qty is None or qty <= 0:
         if not body.confirm_full_quantity:
-            raise HTTPException(400, "Confirm that this receipt covers the entire selected line.")
-        qty = body.split_quantity if body.split_quantity is not None else item.quantity
-    if body.split_quantity is not None:
-        if body.split_quantity != qty or not 0 < qty < item.quantity:
-            raise HTTPException(400, "Split quantity must match the receipt and be smaller than the line quantity.")
-        # Validate the destination before splitting so failures leave quantities intact.
-        if body.split_target == "kept":
-            _check_receipt(item, receipt.get("receipt_id"))
-        original_id = item.id
-        keep = qty if body.split_target == "kept" else item.quantity - qty
-        split_off = split_item_record(db, item, ItemSplitRequest(keep_quantity=keep, copy_tracking=True))
-        if body.split_target == "split_off":
-            item = split_off
-        # Existing automatic allocations are stale after an explicit split.
-        matches = [m for m in matches if m.get("item_id") != original_id]
-    elif qty != item.quantity:
-        raise HTTPException(409, "Receipt and line quantities differ. Split the line explicitly first.")
-    _check_receipt(item, receipt.get("receipt_id"))
-    expected = Decimal(item.price_sold or 0) * item.quantity
+            raise HTTPException(400, "Confirm that this receipt covers all selected lines.")
+        qty = selected_qty
+    if selected_qty != qty:
+        raise HTTPException(409, "Selected quantities must equal the receipt quantity. Split larger lines manually on Orders first.")
+    for item in items:
+        _check_receipt(item, receipt.get("receipt_id"))
     try:
         total = Decimal(str(receipt.get("received_ext_total")))
-        discrepancy = abs(total - expected) > Decimal("0.01")
+        if not total.is_finite():
+            total = None
     except (InvalidOperation, TypeError):
-        discrepancy = False
-    match = {
-        "item_id": item.id, "order_id": item.order_id,
-        "store_order_number": item.order.store_order_number, "description": item.description,
-        "quantity": item.quantity, "tracking_number": tracking, "receipt_tracking_number": tracking,
-        "price_sold": str(item.price_sold or 0), "expected_amount": str(expected),
-        "receipt_id": receipt.get("receipt_id"), "scanned_at": receipt.get("scanned_at"),
-        "received_item": receipt.get("description"), "received_qty": receipt.get("quantity"),
-        "received_price": receipt.get("received_price"), "received_ext_total": receipt.get("received_ext_total"),
-        "received_status": receipt.get("received_status"), "amount_discrepancy": discrepancy,
-        "selected": True, "row_id": f"manual:{body.receipt_key}", "manual_receipt_key": body.receipt_key,
-        "manual_receipt": receipt, "match_kind": "received",
-        "update_receipt_only": bool(item.payment_line_items) or item.status not in OPEN_STATUSES,
-    }
-    payload["matches"] = [m for m in matches if m.get("item_id") != item.id] + [match]
+        total = None
+    allocations = []
+    allocated = Decimal(0)
+    for index, item in enumerate(items):
+        expected = Decimal(item.price_sold or 0) * item.quantity
+        amount = None if total is None else (
+            total - allocated if index == len(items) - 1
+            else (total * item.quantity / qty).quantize(Decimal("0.01")))
+        if amount is not None:
+            allocated += amount
+        allocations.append({
+            "item_id": item.id, "order_id": item.order_id,
+            "store_order_number": item.order.store_order_number, "description": item.description,
+            "quantity": item.quantity, "tracking_number": tracking, "receipt_tracking_number": tracking,
+            "price_sold": str(item.price_sold or 0), "expected_amount": str(expected),
+            "receipt_id": receipt.get("receipt_id"), "scanned_at": receipt.get("scanned_at"),
+            "received_item": receipt.get("description"), "received_qty": item.quantity,
+            "received_price": receipt.get("received_price"), "received_ext_total": str(amount) if amount is not None else None,
+            "received_status": receipt.get("received_status"),
+            "amount_discrepancy": amount is not None and abs(amount - expected) > Decimal("0.01"),
+            "selected": True, "row_id": f"manual:{body.receipt_key}:{item.id}", "manual_receipt_key": body.receipt_key,
+            "manual_receipt": receipt, "match_kind": "received",
+            "update_receipt_only": bool(item.payment_line_items) or item.status not in OPEN_STATUSES,
+        })
+    payload["matches"] = [m for m in matches if m.get("item_id") not in ids] + allocations
     payload["unknown_receipts"] = [r for r in receipts if receipt_key(r) != body.receipt_key]
     store_payload(db, row, payload)
     db.commit()
@@ -180,10 +183,27 @@ def unlink_receipt(db: Session, group_id: int, key: str) -> dict:
     receipts = {receipt_key(r): r for r in payload.get("unknown_receipts") or []}
     receipts[key] = match["manual_receipt"]
     payload["unknown_receipts"] = list(receipts.values())
-    payload["matches"] = [m for m in matches if m is not match]
+    payload["matches"] = [m for m in matches if m.get("manual_receipt_key") != key]
     store_payload(db, row, payload)
     db.commit()
     return with_receipt_keys(payload)
+
+
+def validate_manual_link_batch(db: Session, entries: list[ItemBulkUpdateEntry]) -> None:
+    """All allocations of a receipt must be consumed in the same transaction."""
+    manual = [e for e in entries if e.receiving_group_id is not None or e.receiving_row_id]
+    if any(e.receiving_group_id is None or not e.receiving_row_id for e in manual):
+        raise HTTPException(400, "Both receiving group and row are required.")
+    for group_id in sorted({e.receiving_group_id for e in manual}):
+        row = pending_row(db, group_id)
+        submitted = [(e.receiving_row_id, e.item_id) for e in manual if e.receiving_group_id == group_id]
+        if len(set(submitted)) != len(submitted):
+            raise HTTPException(400, "Select each receipt allocation once.")
+        matches = [m for m in row.payload.get("matches", []) if m.get("manual_receipt")]
+        keys = {m["manual_receipt_key"] for m in matches if (m["row_id"], m["item_id"]) in submitted}
+        required = {(m["row_id"], m["item_id"]) for m in matches if m["manual_receipt_key"] in keys}
+        if not required.issubset(set(submitted)):
+            raise HTTPException(409, "Apply all linked items for this receipt together.")
 
 
 def apply_manual_link(db: Session, item: Item, entry: ItemBulkUpdateEntry, changes: dict) -> dict:
