@@ -1,6 +1,43 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('receipt candidates hide received lines by default and show dates and expected payouts', async ({ app, data }) => {
+  const store = await data.create('/stores', { name: data.name('matching-store') })
+  const group = await data.create('/buying-groups', { name: data.name('matching-group') })
+  await data.create('/orders', {
+    store_id: store.id, buying_group_id: group.id, store_order_number: data.name('matching-order'),
+    purchase_date: '2026-10-01T12:00:00Z',
+    items: [
+      { description: 'Unreceived headphones', quantity: 2, status: 'submitted', price_sold: '12.34',
+        submitted_at: '2026-10-03T12:00:00Z' },
+      { description: 'Received headphones', quantity: 2, status: 'scanned', price_sold: '23.45',
+        submitted_at: '2026-10-04T12:00:00Z', scanned_at: '2026-10-05T12:00:00Z' },
+    ],
+  })
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
+    buying_group_id: group.id, buying_group_name: data.name('matching-group'), matches: [],
+    unknown_receipts: [{ receipt_key: 'dates-payout', receipt_id: 'DATES', tracking_number: 'UNKNOWN', quantity: 2 }],
+  }] }))
+  await app.goto('/receiving-review')
+  await app.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
+  await app.getByRole('button', { name: 'Link to order item' }).click()
+  const dialog = app.getByRole('dialog', { name: 'Link receipt to order items', exact: true })
+  const showReceived = dialog.getByRole('checkbox', { name: 'Show lines already received', exact: true })
+  await expect(showReceived).not.toBeChecked()
+  await expect(dialog.getByText('1 order lines in this buying group')).toBeVisible()
+  await expect(dialog.getByRole('checkbox', { name: /Received headphones/ })).toHaveCount(0)
+  await expect(dialog.getByText('Expected payout: $24.68 total · $12.34 per unit')).toBeVisible()
+  await expect(dialog.getByText('Purchased: 2026-10-01 · Submitted: 2026-10-03 · Received: —')).toBeVisible()
+  await showReceived.check()
+  await expect(dialog.getByText('2 order lines in this buying group')).toBeVisible()
+  await expect(dialog.getByRole('checkbox', { name: /Received headphones/ })).toBeVisible()
+  await expect(dialog.getByText('Expected payout: $46.90 total · $23.45 per unit')).toBeVisible()
+  await expect(dialog.getByText('Purchased: 2026-10-01 · Submitted: 2026-10-04 · Received: 2026-10-05')).toBeVisible()
+  await showReceived.uncheck()
+  await expect(dialog.getByText('1 order lines in this buying group')).toBeVisible()
+  await expect(dialog.getByRole('checkbox', { name: /Received headphones/ })).toHaveCount(0)
+})
+
 test('unknown receipt selects whole items across searches and pages up to its total', async ({ app }) => {
   const receipt = { receipt_key: 'multi', receipt_id: 'MULTI', tracking_number: 'UNKNOWN', quantity: 3 }
   const candidates = [2, 1, 4].map((quantity, index) => ({
@@ -38,20 +75,21 @@ test('unknown receipt selects whole items across searches and pages up to its to
   await app.getByRole('button', { name: 'Link to order item' }).click()
   const dialog = app.getByRole('dialog', { name: 'Link receipt to order items', exact: true })
   const add = dialog.getByRole('button', { name: 'Add to review', exact: true })
-  await expect(dialog.getByRole('checkbox').nth(1)).toBeDisabled()
-  await dialog.getByRole('checkbox').first().check()
+  const candidateCheckboxes = dialog.getByRole('checkbox', { name: /ORDER-/ })
+  await expect(candidateCheckboxes.nth(1)).toBeDisabled()
+  await candidateCheckboxes.first().check()
   await expect(add).toBeDisabled()
   await dialog.getByRole('button', { name: 'Next', exact: true }).click()
-  await dialog.getByRole('checkbox').check()
+  await candidateCheckboxes.check()
   await expect(dialog.getByText('Selected 3 of 3 units across 2 order items.')).toBeVisible()
   await expect(add).toBeEnabled()
   await dialog.getByLabel('Search order number, description, or receipt ID').fill('Headphones 1')
-  await expect(dialog.getByRole('checkbox')).toBeChecked()
+  await expect(candidateCheckboxes).toBeChecked()
   await expect(add).toBeEnabled()
   await dialog.getByRole('button', { name: 'Remove Headphones 0', exact: true }).click()
   await expect(add).toBeDisabled()
   await dialog.getByLabel('Search order number, description, or receipt ID').fill('')
-  await dialog.getByRole('checkbox').first().check()
+  await dialog.getByRole('checkbox', { name: /ORDER-0/ }).check()
   await add.click()
   const selections = app.getByRole('checkbox', { name: /Select item Headphones/ })
   await expect(selections).toHaveCount(2)
@@ -179,7 +217,8 @@ test('manual receipt review requires a manual split, then supports unlink and ap
   await app.getByRole('button', { name: 'Link to order item' }).click()
   const dialog = app.getByRole('dialog', { name: 'Link receipt to order items', exact: true })
   await dialog.getByLabel('Search order number, description, or receipt ID').fill(orderNumber)
-  await expect(dialog.getByRole('checkbox')).toBeDisabled()
+  const candidateCheckbox = dialog.getByRole('checkbox', { name: /Receipt test headphones/ })
+  await expect(candidateCheckbox).toBeDisabled()
   await expect(dialog.getByText('Exceeds the remaining receipt quantity.', { exact: false })).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Add to review', exact: true })).toBeDisabled()
   expect((await data.get<Item>(`/items/${item.id}`)).quantity).toBe(3)
@@ -189,7 +228,7 @@ test('manual receipt review requires a manual split, then supports unlink and ap
   })
   expect(split.ok()).toBeTruthy()
   await app.getByRole('button', { name: 'Link to order item' }).click()
-  await dialog.getByRole('checkbox').check()
+  await candidateCheckbox.check()
   await dialog.getByRole('button', { name: 'Add to review', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   await expect(app.getByText('Manually linked', { exact: false })).toBeVisible()
@@ -197,7 +236,7 @@ test('manual receipt review requires a manual split, then supports unlink and ap
   await app.getByRole('button', { name: 'Unlink', exact: true }).click()
   await app.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
   await app.getByRole('button', { name: 'Link to order item' }).click()
-  await dialog.getByRole('checkbox').check()
+  await candidateCheckbox.check()
   await dialog.getByRole('button', { name: 'Add to review', exact: true }).click()
   await app.reload()
   await expect(app.getByText('Manually linked', { exact: false })).toBeVisible()

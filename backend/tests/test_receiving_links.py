@@ -1,5 +1,6 @@
 """Manual receiving links preserve original tracking and apply atomically."""
 from datetime import datetime, timezone
+from decimal import Decimal
 import unittest
 from uuid import uuid4
 
@@ -228,7 +229,7 @@ class ReceiptLinkTests(unittest.TestCase):
         update_item(self.item.id, ItemUpdate(receipt_tracking_number="EDITED"), db=self.db, _=None)
         self.assertEqual(self.item.receipt_tracking_number, "EDITED")
 
-    def test_candidate_search_includes_all_statuses_but_only_same_group(self):
+    def test_candidate_search_includes_canceled_lines_but_only_same_group(self):
         self.item.status = ItemStatus.CANCELED
         other_order = Order(store_id=self.store.id, buying_group_id=self.other_group.id)
         self.db.add(other_order)
@@ -239,6 +240,38 @@ class ReceiptLinkTests(unittest.TestCase):
         self.assertEqual(results["total"], 1)
         self.assertEqual(results["items"][0]["status"], "canceled")
         self.assertEqual(results["items"][0]["tracking_numbers"], ["ORIGINAL"])
+
+    def test_candidates_hide_received_lines_unless_requested(self):
+        for changes in ({"status": ItemStatus.SCANNED},
+                        {"scanned_at": datetime(2026, 10, 15, tzinfo=timezone.utc)},
+                        {"receipt_id": "RECEIVED"}, {"receipt_tracking_number": "WAREHOUSE-SCAN"}):
+            self.db.add(Item(order_id=self.order.id, quantity=1, description="Already received", **changes))
+        self.db.commit()
+        result = candidate_lines(self.db, self.group.id, "", 1)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual([i["item_id"] for i in result["items"]], [self.item.id])
+        self.assertEqual(candidate_lines(self.db, self.group.id, "Already received", 1)["total"], 0)
+        included = candidate_lines(self.db, self.group.id, "", 1, include_received=True)
+        self.assertEqual(included["total"], 5)
+        self.assertEqual(candidate_lines(self.db, self.group.id, "Already received", 1, include_received=True)["total"], 4)
+
+    def test_candidate_dates_and_expected_payout(self):
+        self.order.purchase_date = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        self.item.submitted_at = datetime(2026, 10, 3, tzinfo=timezone.utc)
+        self.item.price_sold = Decimal("23.45")
+        self.db.commit()
+        result = candidate_lines(self.db, self.group.id, "", 1)["items"][0]
+        self.assertEqual(result["purchase_date"].date().isoformat(), "2026-10-01")
+        self.assertEqual(result["submitted_at"].date().isoformat(), "2026-10-03")
+        self.assertIsNone(result["scanned_at"])
+        self.assertEqual(result["price_sold"], "23.45")
+        self.assertEqual(result["expected_amount"], "46.90")
+        self.item.purchased_at = datetime(2026, 10, 2, tzinfo=timezone.utc)
+        self.item.scanned_at = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        self.db.commit()
+        result = candidate_lines(self.db, self.group.id, "", 1, include_received=True)["items"][0]
+        self.assertEqual(result["purchase_date"].date().isoformat(), "2026-10-02")
+        self.assertEqual(result["scanned_at"].date().isoformat(), "2026-10-05")
 
     def multi_link(self):
         order = Order(store_id=self.store.id, buying_group_id=self.group.id, store_order_number="ORDER-456")

@@ -18,6 +18,11 @@ interface Candidate {
   description: string | null
   quantity: number
   status: string
+  purchase_date: string | null
+  submitted_at: string | null
+  scanned_at: string | null
+  price_sold: string
+  expected_amount: string
   receipt_id: string | null
   receipt_tracking_number: string | null
   payment_linked: boolean
@@ -32,6 +37,7 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
 }) {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+  const [includeReceived, setIncludeReceived] = useState(false)
   const [result, setResult] = useState<{ items: Candidate[]; total: number }>({ items: [], total: 0 })
   const [selected, setSelected] = useState<Candidate[]>([])
   const [tracking, setTracking] = useState(receipt.tracking_number)
@@ -44,13 +50,13 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
     setLoading(true)
     const timer = window.setTimeout(() => {
       api.get<{ items: Candidate[]; total: number }>(
-        `/buying-groups/receiving-review/candidates?buying_group_id=${groupId}&page=${page}&q=${encodeURIComponent(search)}`
+        `/buying-groups/receiving-review/candidates?buying_group_id=${groupId}&page=${page}&q=${encodeURIComponent(search)}&include_received=${includeReceived}`
       ).then(data => { if (active) { setResult(data); setError(null) } })
         .catch(e => { if (active) setError(e instanceof Error ? e.message : 'Could not load order lines') })
         .finally(() => { if (active) setLoading(false) })
     }, 250)
     return () => { active = false; window.clearTimeout(timer) }
-  }, [groupId, page, search])
+  }, [groupId, page, search, includeReceived])
 
   const quantity = receipt.quantity != null && receipt.quantity > 0 ? receipt.quantity : null
   const selectedQuantity = selected.reduce((sum, item) => sum + item.quantity, 0)
@@ -58,6 +64,9 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
   const invalid = !selected.length || loading || saving || (quantity != null && selectedQuantity !== quantity) ||
     (!quantity && !confirmFull) || selected.some(conflict) || !receipt.receipt_key
   const inputClass = 'w-full rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm'
+  const date = (value: string | null) => value ? value.slice(0, 10) : '—'
+  const money = (value: string) => value != null && Number.isFinite(Number(value))
+    ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value)) : '—'
 
   const stage = async () => {
     if (invalid) return
@@ -88,6 +97,12 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
         <label className="block text-sm mb-3">Search order number, description, or receipt ID
           <input autoFocus className={inputClass} value={search} disabled={saving} onChange={e => { setSearch(e.target.value); setPage(1) }} />
         </label>
+        <label className="flex items-center gap-2 text-sm mb-3">
+          <input type="checkbox" checked={includeReceived} disabled={saving} onChange={e => {
+            setIncludeReceived(e.target.checked); setPage(1)
+          }} />
+          Show lines already received
+        </label>
         <div aria-live="polite" className="text-sm mb-2">{loading ? 'Loading order lines…' : `${result.total} order lines in this buying group`}</div>
         <div className="space-y-2 max-h-64 overflow-y-auto mb-3">
           {!loading && result.items.map(item => (
@@ -102,6 +117,8 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
               <span className="text-sm">
                 <span className="font-medium">{item.store_order_number || `Order ${item.order_id}`} · {item.store || 'Store'} · {item.quantity} × {item.description || 'Item'}</span>
                 <span className="block">Status: {item.status}{item.payment_linked ? ' · Linked to payment' : ''}</span>
+                <span className="block">Expected payout: {money(item.expected_amount)} total · {money(item.price_sold)} per unit</span>
+                <span className="block text-xs">Purchased: {date(item.purchase_date)} · Submitted: {date(item.submitted_at)} · Received: {date(item.scanned_at)}</span>
                 <span className="block font-mono text-xs">Original tracking: {item.tracking_numbers.filter(Boolean).join(', ') || '—'}</span>
                 <span className="block text-xs">Receipt: {item.receipt_id || '—'} · Receipt tracking: {item.receipt_tracking_number || '—'}</span>
                 {conflict(item) && <span className="block text-xs text-amber-700">Already has a different receipt.</span>}
@@ -118,7 +135,7 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
         </div>
         <p aria-live="polite" className="text-sm mb-2">Selected {selectedQuantity}{quantity != null ? ` of ${quantity}` : ''} units across {selected.length} order items.</p>
         {selected.length > 0 && <ul className="text-sm mb-3">{selected.map(item => <li key={item.item_id}>
-          {item.store_order_number || `Order ${item.order_id}`} · {item.quantity} × {item.description || 'Item'}{' '}
+          {item.store_order_number || `Order ${item.order_id}`} · {item.quantity} × {item.description || 'Item'} · Expected payout: {money(item.expected_amount)}{' '}
           <button type="button" disabled={saving} className="text-brand-600" onClick={() => {
             setSelected(prev => prev.filter(i => i.item_id !== item.item_id)); setConfirmFull(false)
           }} aria-label={`Remove ${item.description || item.item_id}`}>Remove</button>

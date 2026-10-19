@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import Item, Order, ReceivingReviewPending, ShipmentItem
@@ -77,8 +77,14 @@ def store_payload(db: Session, row: ReceivingReviewPending, payload: dict) -> No
         row.updated_at = datetime.now(timezone.utc)
 
 
-def candidate_lines(db: Session, group_id: int, search: str, page: int) -> dict:
+def candidate_lines(db: Session, group_id: int, search: str, page: int, include_received: bool = False) -> dict:
     query = db.query(Item).join(Order).filter(Order.buying_group_id == group_id)
+    if not include_received:
+        query = query.filter(
+            Item.status != ItemStatus.SCANNED, Item.scanned_at.is_(None),
+            func.trim(func.coalesce(Item.receipt_id, "")) == "",
+            func.trim(func.coalesce(Item.receipt_tracking_number, "")) == "",
+        )
     if search.strip():
         escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         term = f"%{escaped}%"
@@ -94,6 +100,10 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int) -> dict:
         "item_id": i.id, "order_id": i.order_id, "store_order_number": i.order.store_order_number,
         "store": i.order.store.name if i.order.store else None,
         "description": i.description, "quantity": i.quantity, "status": i.status.value,
+        "purchase_date": i.purchased_at or i.order.purchase_date,
+        "submitted_at": i.submitted_at, "scanned_at": i.scanned_at,
+        "price_sold": str(i.price_sold or 0),
+        "expected_amount": str(Decimal(i.price_sold or 0) * i.quantity),
         "receipt_id": i.receipt_id, "receipt_tracking_number": i.receipt_tracking_number,
         "payment_linked": bool(i.payment_line_items),
         "tracking_numbers": [si.shipment.tracking_number for si in i.shipment_items if si.shipment],
