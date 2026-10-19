@@ -87,10 +87,15 @@ export default function MonarchSettings() {
         })} onCancel={() => void action(async () => { await api.post(`/browser-profiles/${profile.id}/login/cancel`, {}); setLogin(false); await refresh() })} />}
         <fieldset disabled={disabled} className="space-y-3">
           <legend className="font-semibold">Receiving bank accounts</legend>
-          {!settings.accounts.length && <p>After logging in, use Check now to discover your accounts. Then select accounts and save.</p>}
-          {settings.accounts.map(account => <label key={account.id} className="flex gap-2 items-center">
-            <input type="checkbox" checked={settings.selected_account_ids.includes(account.id)} onChange={e => setSettings({ ...settings, selected_account_ids: e.target.checked ? [...settings.selected_account_ids, account.id] : settings.selected_account_ids.filter(id => id !== account.id) })} />{account.name}
-          </label>)}
+          <details open>
+            <summary className="cursor-pointer font-medium">Cash and investment accounts ({settings.selected_account_ids.length} selected of {settings.accounts.length})</summary>
+            <div className="mt-3 space-y-2">
+              {!settings.accounts.length && <p>Use Check now to discover cash and investment accounts, then select accounts and save.</p>}
+              {settings.accounts.map(account => <label key={account.id} className="flex gap-2 items-center">
+                <input type="checkbox" checked={settings.selected_account_ids.includes(account.id)} onChange={e => setSettings({ ...settings, selected_account_ids: e.target.checked ? [...settings.selected_account_ids, account.id] : settings.selected_account_ids.filter(id => id !== account.id) })} />{account.name}
+              </label>)}
+            </div>
+          </details>
           <h3 className="font-semibold">Sender keywords</h3>
           <p>One keyword or phrase per line. Matched against the merchant and original bank description.</p>
           {groups.map(group => <label key={group.id} className="block">{group.name}

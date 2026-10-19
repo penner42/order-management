@@ -44,7 +44,7 @@ class MonarchTests(unittest.TestCase):
         profile = BrowserProfile(integration="monarch", retailer="monarch", status="ready")
         self.db.add_all([self.item, profile])
         self.db.flush()
-        self.connection = MonarchConnection(id=1, browser_profile_id=profile.id, accounts=[{"id": "bank", "name": "Bank"}],
+        self.connection = MonarchConnection(id=1, browser_profile_id=profile.id, accounts=[{"id": "bank", "name": "Bank", "type": "depository"}],
             selected_account_ids=["bank"], sender_rules={str(self.group.id): ["sender"]})
         self.db.add(self.connection)
         self.deposit = MonarchDeposit(transaction_id="tx1", account_id="bank", account_name="Bank", amount=Decimal("30"),
@@ -209,6 +209,17 @@ class MonarchTests(unittest.TestCase):
             monarch.queue_check(self.db, MonarchCheckRequest())
         self.assertEqual(caught.exception.status_code, 409)
 
+    def test_settings_hide_ineligible_accounts_and_reject_selecting_them(self):
+        self.connection.accounts = [*self.connection.accounts, {"id": "card", "name": "Cash rewards", "type": "credit"}]
+        self.connection.selected_account_ids = ["bank", "card"]
+        self.db.commit()
+        value = monarch.get_settings(db=self.db, _=self.user)
+        self.assertEqual([row["id"] for row in value["accounts"]], ["bank"])
+        self.assertEqual(value["selected_account_ids"], ["bank"])
+        with self.assertRaises(HTTPException) as caught:
+            monarch.update_settings(MonarchSettingsUpdate(selected_account_ids=["card"], sender_rules={}), db=self.db, _=self.user)
+        self.assertEqual(caught.exception.status_code, 400)
+
 
 class MonarchAdapterTests(unittest.TestCase):
     def payload(self, **changes):
@@ -222,7 +233,15 @@ class MonarchAdapterTests(unittest.TestCase):
         self.assertEqual(total, 1)
         self.assertEqual(rows[0]["amount"], Decimal("10.01"))
         self.assertFalse(rows[0]["pending"])
-        self.assertEqual(parse_accounts({"data": {"accounts": [{"id": "a", "displayName": "Bank"}]}}), [{"id": "a", "name": "Bank"}])
+        self.assertEqual(parse_accounts({"data": {"accounts": [{"id": "a", "displayName": "Bank", "type": {"name": "depository"}}]}}), [{"id": "a", "name": "Bank", "type": "depository"}])
+
+    def test_accounts_include_cash_and_investments_only(self):
+        types = ("depository", "brokerage", "credit", "vehicle", "loan", "real_estate", "other_asset")
+        accounts = [{"id": kind, "displayName": "Checking", "type": {"name": kind}} for kind in types]
+        result = parse_accounts({"data": {"accounts": accounts}})
+        self.assertEqual([account["id"] for account in result], ["depository", "brokerage"])
+        with self.assertRaises(MonarchCaptureError):
+            parse_accounts({"data": {"accounts": [{"id": "missing", "displayName": "Bank"}]}})
 
     def test_malformed_pending_identifiers_amount_dates_and_errors(self):
         for changes in ({"pending": None}, {"pending": "false"}, {"id": None}, {"date": "bad"}, {"amount": "NaN"}, {"amount": "1.001"}, {"account": {}}, {"merchant": None}, {"plaidName": None}):
@@ -239,6 +258,7 @@ class CapturePage:
         self.handler = None
         self.filters = []
         self.infinite = infinite
+        self.accounts = [{"id": "bank", "displayName": "Bank", "type": {"name": "depository"}}]
 
     def on(self, event, handler): self.handler = handler
     def remove_listener(self, event, handler): self.handler = None
@@ -259,7 +279,7 @@ class CapturePage:
     async def goto(self, url, **kwargs):
         self.url = url
         if url.endswith("/accounts"):
-            await self.emit({"data": {"accounts": [{"id": "bank", "displayName": "Bank"}]}}, "query { accounts { id displayName } }")
+            await self.emit({"data": {"accounts": self.accounts}}, "query { accounts { id displayName type { name } } }")
         else:
             await self.emit({"data": {"allTransactions": {"totalCount": self.total}}}, "query Web_GetTransactionsSummaryCard($filters: TransactionFilterInput) { allTransactions(filters: $filters) { totalCount } }")
             await self.emit_batch()
@@ -292,7 +312,7 @@ class MonarchBrowserCaptureTests(unittest.IsolatedAsyncioTestCase):
         page = CapturePage([[self.row()], [self.row("two")]], 2)
         accounts, rows = await capture_monarch(page, date(2026, 10, 1), date(2026, 10, 19), ["bank"])
         self.assertEqual([row["transaction_id"] for row in rows], ["one", "two"])
-        self.assertEqual(accounts, [{"id": "bank", "name": "Bank"}])
+        self.assertEqual(accounts, [{"id": "bank", "name": "Bank", "type": "depository"}])
         self.assertEqual(page.filters, [{"startDate": "2026-10-01", "endDate": "2026-10-19", "accounts": ["bank"]}] * 2)
         self.assertIsNone(page.handler)
 
@@ -315,6 +335,13 @@ class MonarchBrowserCaptureTests(unittest.IsolatedAsyncioTestCase):
         _, rows = await capture_monarch(page, date(2026, 10, 1), date(2026, 10, 19), ["bank"])
         self.assertEqual(len(rows), 3)
         self.assertEqual(page.index, 2)
+
+    async def test_previously_selected_credit_accounts_are_excluded_from_checks(self):
+        page = CapturePage([[self.row()]], 1)
+        page.accounts.append({"id": "card", "displayName": "Cash rewards", "type": {"name": "credit"}})
+        accounts, _ = await capture_monarch(page, date(2026, 10, 1), date(2026, 10, 19), ["bank", "card"])
+        self.assertEqual([account["id"] for account in accounts], ["bank"])
+        self.assertEqual(page.filters[0]["accounts"], ["bank"])
 
     async def test_expired_login_is_distinguished_from_format_failure(self):
         page = SimpleNamespace(url="https://app.monarch.com/login")

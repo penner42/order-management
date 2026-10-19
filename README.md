@@ -195,7 +195,9 @@ interactive browser. Use **Home** to open Monarch and complete login/MFA, then
 profile volume retains the session.
 
 Use **Check now** once to discover accounts. Select receiving accounts, add sender
-keywords for each buying group (one phrase per line), and save. Further checks
+keywords for each buying group (one phrase per line), and save. The collapsible
+account list includes only cash and investment accounts, classified by Monarch.
+Further checks
 read deposits from those accounts for the last 90 days. Both dates can be supplied
 for a manual backfill. Optional daily checks run at **8:00 a.m.
 America/Los_Angeles**, including daylight saving changes; they start disabled and

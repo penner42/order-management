@@ -670,6 +670,25 @@ class SessionManager:
         except Exception as exc:
             logger.debug("paste SPA nudge failed: %s", exc)
 
+    async def _focused_monarch_code_input(self, session: LiveSession) -> bool:
+        """Recognize the focused OTP cell, including cells after the first digit.
+
+        Monarch puts autocomplete=one-time-code on the first cell (and a hidden
+        aggregate input), while subsequent cells have autocomplete=off.
+        """
+        if session.retailer != "monarch":
+            return False
+        try:
+            return bool(await session.page.evaluate("""() => {
+                const input = document.activeElement;
+                if (!(input instanceof HTMLInputElement) || input.disabled || input.readOnly) return false;
+                if (input.autocomplete === 'one-time-code') return true;
+                const group = input.closest('[role="group"]');
+                return !!group?.querySelector('input[autocomplete="one-time-code"]');
+            }"""))
+        except Exception:
+            return False
+
     async def dispatch_input(self, session: LiveSession, message: dict) -> None:
         """Forward mouse/keyboard events from the UI into Playwright."""
         page = session.page
@@ -731,13 +750,18 @@ class SessionManager:
                 text = str(message.get("text") or key)
                 if text:
                     try:
-                        await page.keyboard.type(text, delay=0)
+                        if await self._focused_monarch_code_input(session):
+                            # The code widget accepts text insertion/paste reliably;
+                            # replayed key events can interfere with its cell handling.
+                            await self._paste_into_focused(page, text)
+                        else:
+                            await page.keyboard.type(text, delay=0)
                     except Exception as exc:
-                        logger.debug("keyboard type %r failed: %s", text, exc)
+                        logger.debug("keyboard text entry failed (%s)", type(exc).__name__)
                         try:
                             await page.keyboard.insert_text(text)
                         except Exception as exc2:
-                            logger.debug("keyboard insert_text %r failed: %s", text, exc2)
+                            logger.debug("keyboard text insertion failed (%s)", type(exc2).__name__)
                 return
             try:
                 if event == "down":

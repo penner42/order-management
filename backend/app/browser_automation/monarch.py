@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse
 
 from app.browser_automation.common import LoginRequiredError
+from app.monarch import RECEIVING_ACCOUNT_TYPES
 
 HOME = "https://app.monarch.com"
 API_HOSTS = {"api.monarch.com", "api.monarchmoney.com", "app.monarch.com", "app.monarchmoney.com"}
@@ -40,7 +41,11 @@ def parse_accounts(payload):
     for row in accounts:
         if not isinstance(row, dict) or not row.get("id") or not isinstance(row.get("displayName"), str):
             raise MonarchCaptureError("Monarch account identifiers or names are missing.")
-        result.append({"id": str(row["id"]), "name": row["displayName"]})
+        account_type = row.get("type")
+        if not isinstance(account_type, dict) or not isinstance(account_type.get("name"), str):
+            raise MonarchCaptureError("Monarch account types are missing. Refresh account discovery.")
+        if account_type["name"] in RECEIVING_ACCOUNT_TYPES:
+            result.append({"id": str(row["id"]), "name": row["displayName"], "type": account_type["name"]})
     return result
 
 
@@ -126,7 +131,9 @@ async def capture_monarch(page, start_date, end_date, selected_accounts):
             else:
                 payload = await response.json()
                 if isinstance(payload, dict) and "accounts" in (payload.get("data") or {}):
-                    accounts_queue.put_nowait(parse_accounts(payload))
+                    accounts = parse_accounts(payload)
+                    known_ids = {str(row["id"]) for row in payload["data"]["accounts"]}
+                    accounts_queue.put_nowait((accounts, known_ids))
         except Exception:
             # Never retain the response or include provider error messages/credentials in logs.
             queue = transactions_queue if is_transaction_list_query(locals().get("body")) else accounts_queue
@@ -164,11 +171,13 @@ async def capture_monarch(page, start_date, end_date, selected_accounts):
     await page.route("**/*graphql*", filter_query)
     try:
         await page.goto(f"{HOME}/accounts", wait_until="domcontentloaded", timeout=60000)
-        accounts = await _get_captured(accounts_queue, page)
+        accounts, known_ids = await _get_captured(accounts_queue, page)
+        if not set(selected_accounts) <= known_ids:
+            raise MonarchCaptureError("A selected Monarch account is unavailable. Update account selection.")
+        allowed_ids = {row["id"] for row in accounts}
+        selected_accounts = [account_id for account_id in selected_accounts if account_id in allowed_ids]
         if not selected_accounts:
             return accounts, []
-        if not set(selected_accounts) <= {row["id"] for row in accounts}:
-            raise MonarchCaptureError("A selected Monarch account is unavailable. Update account selection.")
         await page.goto(f"{HOME}/transactions", wait_until="domcontentloaded", timeout=60000)
         rows, seen, expected_total = [], set(), None
         for _ in range(1000):

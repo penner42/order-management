@@ -3,7 +3,7 @@ import type { BrowserProfile } from './types'
 export const MONARCH = '/integrations/monarch'
 export interface MonarchSettings {
   profile: BrowserProfile | null
-  accounts: { id: string; name: string }[]
+  accounts: { id: string; name: string; type: 'depository' | 'brokerage' }[]
   selected_account_ids: string[]
   sender_rules: Record<string, string[]>
   daily_enabled: boolean

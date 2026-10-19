@@ -13,7 +13,7 @@ from app.auth import get_current_user
 from app.database import SessionLocal, get_db
 from app.models import BrowserProfile, BuyingGroup, Payment, User, MonarchConnection, MonarchDeposit, MonarchConfirmation, MonarchPaymentReceipt
 from app.monarch import (PACIFIC, confirm_receipt, deposit_evidence, next_daily_check, payment_choice,
-                        require_connection, suggest_matches, undo_receipt, upsert_deposits)
+                        require_connection, suggest_matches, undo_receipt, upsert_deposits, receiving_accounts)
 from app.schemas.monarch import MonarchSettingsUpdate, MonarchCheckRequest, MonarchConfirmRequest, MonarchDismissRequest
 from app.browser_automation.common import LoginRequiredError
 from app.browser_automation.jobs import create_job, get_job, update_job
@@ -30,8 +30,10 @@ def settings_read(connection):
     if connection is None:
         return {"profile": None, "accounts": [], "selected_account_ids": [], "sender_rules": {},
                 "daily_enabled": False, "next_check_at": None, "last_check_at": None, "last_error": None}
-    return {"profile": _profile_read(connection.profile), "accounts": connection.accounts,
-            "selected_account_ids": connection.selected_account_ids, "sender_rules": connection.sender_rules,
+    accounts = receiving_accounts(connection.accounts)
+    allowed_ids = {account["id"] for account in accounts}
+    return {"profile": _profile_read(connection.profile), "accounts": accounts,
+            "selected_account_ids": [account_id for account_id in connection.selected_account_ids if account_id in allowed_ids], "sender_rules": connection.sender_rules,
             "daily_enabled": connection.daily_enabled, "next_check_at": connection.next_check_at,
             "last_check_at": connection.last_check_at, "last_error": connection.last_error}
 
@@ -63,8 +65,8 @@ def update_settings(data: MonarchSettingsUpdate, db: Session = Depends(get_db), 
     connection = require_connection(db, lock=True)
     if connection.profile.status in ("importing", "login_in_progress"):
         raise HTTPException(409, "Finish the current check or login before changing settings.")
-    if not set(data.selected_account_ids) <= {row["id"] for row in connection.accounts}:
-        raise HTTPException(400, "Choose discovered Monarch accounts.")
+    if not set(data.selected_account_ids) <= {row["id"] for row in receiving_accounts(connection.accounts)}:
+        raise HTTPException(400, "Choose discovered cash or investment accounts.")
     group_ids = {str(row.id) for row in db.query(BuyingGroup).all()}
     if not set(data.sender_rules) <= group_ids:
         raise HTTPException(400, "Unknown buying group in sender rules.")
@@ -128,8 +130,11 @@ async def run_check(profile_id, job_id, start, end):
         accounts, rows = await capture_monarch(session.page, start, end, selected)
         await session_manager.close_session(profile_id)
         connection = require_connection(db, lock=True)
+        allowed_ids = {account["id"] for account in accounts}
+        selected = [account_id for account_id in selected if account_id in allowed_ids]
         count = upsert_deposits(db, rows, start, end, selected) if selected else 0
         connection.accounts = accounts
+        connection.selected_account_ids = selected
         connection.last_check_at = datetime.now(timezone.utc)
         connection.last_error = None
         connection.profile.status = "ready"

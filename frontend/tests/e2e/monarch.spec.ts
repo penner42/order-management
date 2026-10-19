@@ -6,7 +6,7 @@ function settings(): MonarchSettings {
     profile: { id: 999999, integration: 'monarch', store_id: null, store_account_id: null, retailer: 'monarch', status: 'ready', last_error: null,
       last_import_at: null, full_check_enabled: false, full_check_cron: '0 0 * * *', full_check_max_pages: 3, full_check_last_run_at: null,
       unshipped_check_enabled: false, unshipped_check_cron: '0 */6 * * *', unshipped_check_last_run_at: null },
-    accounts: [{ id: 'a', name: 'Receiving checking' }, { id: 'b', name: 'Second checking' }],
+    accounts: [{ id: 'a', name: 'Receiving checking', type: 'depository' }, { id: 'b', name: 'Investment cash', type: 'brokerage' }],
     selected_account_ids: ['a'], sender_rules: { '42': ['Sender'] }, daily_enabled: false, next_check_at: null, last_check_at: null, last_error: null,
   }
 }
@@ -44,7 +44,14 @@ test('Monarch settings saves accounts and keywords, logs in, and checks a backfi
   })
   await app.goto('/settings/monarch')
   await expect(app.getByRole('heading', { name: 'Monarch', exact: true })).toBeVisible()
-  await app.getByLabel('Second checking').check()
+  const accountsToggle = app.locator('summary').filter({ hasText: 'Cash and investment accounts' })
+  await expect(accountsToggle).toHaveText('Cash and investment accounts (1 selected of 2)')
+  await accountsToggle.click()
+  await expect(app.getByLabel('Receiving checking')).toBeHidden()
+  await expect(app.getByRole('textbox', { name: 'Example group', exact: true })).toBeVisible()
+  await accountsToggle.click()
+  await app.getByLabel('Investment cash').check()
+  await expect(accountsToggle).toHaveText('Cash and investment accounts (2 selected of 2)')
   await app.getByRole('textbox', { name: 'Example group', exact: true }).fill('Sender\nACH sender')
   await app.getByLabel('Check daily at 8:00 a.m. America/Los_Angeles').check()
   await app.getByRole('button', { name: 'Save Monarch settings' }).click()

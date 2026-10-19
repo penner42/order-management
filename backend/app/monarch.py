@@ -15,6 +15,12 @@ from app.models import Payment, MonarchConnection, MonarchDeposit, MonarchConfir
 PACIFIC = ZoneInfo("America/Los_Angeles")
 SEARCH_LIMIT = 20000
 RESULT_LIMIT = 30
+RECEIVING_ACCOUNT_TYPES = frozenset({"depository", "brokerage"})
+
+
+def receiving_accounts(accounts):
+    """Only Monarch cash and investment accounts can receive payment deposits."""
+    return [account for account in accounts if account.get("type") in RECEIVING_ACCOUNT_TYPES]
 
 
 def next_daily_check(now=None):
