@@ -23,6 +23,12 @@ class Payment(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     buying_group = relationship("BuyingGroup", back_populates="payments")
+    monarch_receipt_link = relationship("MonarchPaymentReceipt", uselist=False)
+
+    @property
+    def monarch_receipt(self):
+        return self.monarch_receipt_link.evidence if self.monarch_receipt_link else None
+
     line_items = relationship(
         "PaymentLineItem",
         back_populates="payment",

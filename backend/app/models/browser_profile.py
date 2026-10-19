@@ -1,5 +1,5 @@
 """Persistent browser sessions owned by stores or store accounts."""
-from sqlalchemy import Boolean, Column, Integer, String, Text, ForeignKey, DateTime, UniqueConstraint, Index, text
+from sqlalchemy import Boolean, Column, Integer, String, Text, ForeignKey, DateTime, UniqueConstraint, CheckConstraint, Index, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -11,6 +11,7 @@ class BrowserProfile(Base):
 
     __tablename__ = "browser_profiles"
     __table_args__ = (
+        CheckConstraint("(integration IS NOT NULL AND integration = 'monarch' AND retailer = 'monarch' AND store_id IS NULL AND store_account_id IS NULL) OR (integration IS NULL AND store_id IS NOT NULL AND retailer <> 'monarch')", name="ck_browser_profile_owner"),
         UniqueConstraint("store_account_id", name="uq_browser_profiles_store_account_id"),
         Index("uq_browser_profiles_direct_store", "store_id", unique=True,
               postgresql_where=text("store_account_id IS NULL"),
@@ -18,7 +19,8 @@ class BrowserProfile(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    store_id = Column(Integer, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id", ondelete="CASCADE"), nullable=True, index=True)
+    integration = Column(String(64), nullable=True, unique=True)
     store_account_id = Column(
         Integer,
         ForeignKey("store_accounts.id", ondelete="CASCADE"),

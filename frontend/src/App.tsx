@@ -20,6 +20,8 @@ import BrowserExtension from './pages/BrowserExtension'
 import Settings from './pages/Settings'
 import IgnoredZipCodes from './pages/IgnoredZipCodes'
 import BrowserImportLog from './pages/BrowserImportLog'
+import MonarchSettings from './pages/MonarchSettings'
+import MonarchReview from './pages/MonarchReview'
 
 function LegacyRedirect({ to }: { to: string }) {
   const { search, hash } = useLocation()
@@ -239,6 +241,7 @@ function AppShell() {
           <Route path="/rewards" element={<LegacyRedirect to="/settings/rewards" />} />
           <Route path="/payment-methods" element={<LegacyRedirect to="/settings/payment-methods" />} />
           <Route path="/payments" element={<Payments />} />
+          <Route path="/payments/monarch" element={<MonarchReview />} />
           <Route path="/stores" element={<LegacyRedirect to="/settings/stores" />} />
           <Route path="/portals" element={<LegacyRedirect to="/settings/portals" />} />
           <Route path="/extension" element={user.role === 'admin' ? <BrowserExtension /> : <LegacyRedirect to="/settings/extension" />} />
@@ -252,6 +255,7 @@ function AppShell() {
             <Route path="stores" element={<Stores />} />
             <Route path="ignored-zip-codes" element={<IgnoredZipCodes />} />
             <Route path="payment-methods" element={<PaymentMethods />} />
+            <Route path="monarch" element={<MonarchSettings />} />
             <Route path="rewards" element={<Rewards />} />
             <Route path="portals" element={<Portals />} />
             <Route path="extension" element={<BrowserExtension />} />

@@ -37,6 +37,12 @@ class BrowserProfileMigrationTests(unittest.TestCase):
             with engine.begin() as conn:
                 conn.execute(text("INSERT INTO browser_profiles(store_id,retailer) VALUES (:store,'walmart')"), {'store': store_id})
             from sqlalchemy.exc import IntegrityError
+            # Integration profiles have their own owner and retain the existing profile namespace.
+            with engine.begin() as conn:
+                conn.execute(text("INSERT INTO browser_profiles(integration,retailer,status) VALUES ('monarch','monarch','logged_out')"))
+            for values in ["NULL, NULL, 'amazon'", "NULL, 'monarch', 'monarch'", f"{store_id}, 'monarch', 'monarch'"]:
+                with self.assertRaises(IntegrityError), engine.begin() as conn:
+                    conn.execute(text(f"INSERT INTO browser_profiles(store_id,integration,retailer) VALUES ({values})"))
             for values in [{'store': store_id, 'account': None}, {'store': store_id, 'account': account_id}]:
                 with self.assertRaises(IntegrityError), engine.begin() as conn:
                     conn.execute(text("INSERT INTO browser_profiles(store_id,store_account_id,retailer) VALUES (:store,:account,'walmart')"), values)

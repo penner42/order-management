@@ -15,7 +15,7 @@ def profiles_root() -> Path:
 
 def browser_engine_for_retailer(retailer: str) -> str:
     """Costco Azure B2C and Amazon automations use Chromium; Walmart stays on Camoufox."""
-    if (retailer or "").strip().lower() in {"amazon", "costco"}:
+    if (retailer or "").strip().lower() in {"amazon", "costco", "monarch"}:
         return "chromium"
     return "camoufox"
 

@@ -24,6 +24,7 @@ from app.routers import (
     browser_extension,
     browser_profiles,
     ignored_zip_codes,
+    monarch,
 )
 from app.admin_bootstrap import ensure_admin_user
 
@@ -93,6 +94,7 @@ async def on_shutdown():
     from app.browser_automation.scheduler import stop_scheduler
 
     await stop_scheduler()
+    await monarch.stop_checks()
 
 app.include_router(admin.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
@@ -111,6 +113,7 @@ app.include_router(store_imports.router, prefix="/api")
 app.include_router(browser_extension.router, prefix="/api")
 app.include_router(browser_profiles.router, prefix="/api")
 app.include_router(ignored_zip_codes.router, prefix="/api")
+app.include_router(monarch.router, prefix="/api")
 
 
 @app.get("/")

@@ -59,6 +59,7 @@ class BrowserProfileScheduleUpdate(BaseModel):
 
 class BrowserProfileRead(BaseModel):
     id: int
+    integration: str | None = None
     store_account_id: int | None
     retailer: str
     status: str
@@ -74,7 +75,7 @@ class BrowserProfileRead(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     # Nested display helpers (populated by router)
-    store_id: int
+    store_id: int | None
     store_name: str | None = None
     store_account_name: str | None = None
 

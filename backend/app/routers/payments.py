@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import User, Payment, PaymentLineItem, Item
+from app.monarch import lock_editable_payment
 from app.schemas.payment import (
     PaymentRead,
     PaymentCreate,
@@ -88,9 +89,11 @@ def update_payment(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    payment = db.query(Payment).filter(Payment.id == payment_id).first()
+    payment = db.query(Payment).filter(Payment.id == payment_id).with_for_update().populate_existing().first()
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
+    if {"payment_bonus", "payment_received_at"} & data.model_fields_set:
+        lock_editable_payment(db, payment_id)
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(payment, k, v)
     db.commit()
@@ -100,7 +103,7 @@ def update_payment(
 
 @router.delete("/{payment_id}", status_code=204)
 def delete_payment(payment_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    payment = db.query(Payment).filter(Payment.id == payment_id).first()
+    payment = lock_editable_payment(db, payment_id)
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     db.delete(payment)
@@ -115,7 +118,7 @@ def add_payment_line_item(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    payment = db.query(Payment).filter(Payment.id == payment_id).first()
+    payment = lock_editable_payment(db, payment_id)
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     item = _ensure_item_from_buying_group(data.item_id, payment.buying_group_id, db)
@@ -172,6 +175,7 @@ def remove_payment_line_item(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    lock_editable_payment(db, payment_id)
     line_item = (
         db.query(PaymentLineItem)
         .filter(PaymentLineItem.id == line_item_id, PaymentLineItem.payment_id == payment_id)
@@ -192,6 +196,7 @@ def update_payment_line_item(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    lock_editable_payment(db, payment_id)
     line_item = (
         db.query(PaymentLineItem)
         .options(joinedload(PaymentLineItem.item).joinedload(Item.order))

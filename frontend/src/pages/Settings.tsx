@@ -8,6 +8,7 @@ const groups = [
     { path: 'ignored-zip-codes', label: 'Ignored zip codes' },
   ] },
   { label: 'Payments and rewards', sections: [
+    { path: 'monarch', label: 'Monarch' },
     { path: 'payment-methods', label: 'Payment methods' },
     { path: 'rewards', label: 'Rewards' },
     { path: 'portals', label: 'Portals' },

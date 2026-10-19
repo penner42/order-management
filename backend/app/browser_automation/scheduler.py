@@ -100,7 +100,7 @@ def list_due_profile_jobs(db: Session) -> list[tuple[int, str, int]]:
     # Only ready profiles — avoid spinning browsers every minute when login is needed.
     rows = (
         db.query(BrowserProfile)
-        .filter(BrowserProfile.status == "ready")
+        .filter(BrowserProfile.status == "ready", BrowserProfile.integration.is_(None))
         .order_by(BrowserProfile.id)
         .all()
     )
@@ -121,6 +121,9 @@ async def _tick() -> None:
     from app.routers.browser_profiles import start_scheduled_import
     from app.buying_group_schedules import list_due_group_ids
     from app.routers.buying_groups import run_scheduled_group
+    from app.routers.monarch import scheduled_tick
+
+    await scheduled_tick()
 
     db = SessionLocal()
     try:

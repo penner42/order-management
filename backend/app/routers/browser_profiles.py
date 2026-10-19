@@ -104,6 +104,7 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
     store = profile.store
     return BrowserProfileRead(
         id=profile.id,
+        integration=profile.integration,
         store_account_id=profile.store_account_id,
         retailer=profile.retailer,
         status=profile.status,
@@ -558,6 +559,8 @@ def update_browser_profile_schedule(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
+    if profile.integration:
+        raise HTTPException(status_code=409, detail="Manage this integration from its settings page.")
     if {"store_id", "store_account_id"} & data.model_fields_set:
         account_id = data.store_account_id
         target_store = data.store_id
@@ -604,6 +607,8 @@ async def delete_browser_profile(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
+    if profile.integration:
+        raise HTTPException(status_code=409, detail="Integration browser profiles cannot be deleted while connected.")
     paths = await remove_browser_profiles(db, [profile])
     db.commit()
     delete_profile_data_dirs(paths)
@@ -686,7 +691,10 @@ async def start_login(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
-    if profile.retailer not in SUPPORTED_RETAILERS:
+    profile = db.query(BrowserProfile).filter_by(id=profile_id).with_for_update().populate_existing().one()
+    if profile.status in ("importing", "login_in_progress"):
+        raise HTTPException(status_code=409, detail="A check or login is already active.")
+    if profile.retailer not in SUPPORTED_RETAILERS | {"monarch"}:
         raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
 
     # Suggested first URL for the live-view address bar. We intentionally do NOT
@@ -723,6 +731,8 @@ async def finish_login(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
+    if profile.status == "importing":
+        raise HTTPException(status_code=409, detail="A check is active.")
     session = session_manager.get(profile_id)
     if not session:
         profile.status = "login_required"
@@ -760,6 +770,8 @@ async def cancel_login(
     _: User = Depends(get_current_user),
 ):
     profile = _get_profile_or_404(db, profile_id)
+    if profile.status == "importing":
+        raise HTTPException(status_code=409, detail="A check is active.")
     await session_manager.close_session(profile_id)
     if profile.status == "login_in_progress":
         profile.status = "login_required"

@@ -213,6 +213,7 @@ export interface PaymentLineItem {
 }
 
 export interface Payment {
+  monarch_receipt?: { confirmation_id: number; transaction_id: string; posted_date: string; amount: string; account_name: string; merchant: string } | null
   id: number
   buying_group_id: number
   payment_id: string | null
@@ -257,6 +258,7 @@ export type BrowserProfileStatus =
 
 export interface BrowserProfile {
   id: number
+  integration?: string | null
   store_account_id: number | null
   retailer: string
   status: BrowserProfileStatus | string
@@ -271,7 +273,7 @@ export interface BrowserProfile {
   unshipped_check_last_run_at: string | null
   created_at?: string | null
   updated_at?: string | null
-  store_id: number
+  store_id: number | null
   store_name?: string | null
   store_account_name?: string | null
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import type { Payment, BuyingGroup, Order, Item, Shipment } from '../api/types'
 import { parseDecimal } from '../utils/decimal'
@@ -502,6 +503,7 @@ export default function Payments() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-ink mb-8">Payments</h1>
+      <Link className="inline-block underline mb-4 text-brand-700 dark:text-brand-300" to="/payments/monarch">Monarch review</Link>
       <div className="mb-4 flex items-center gap-4">
         <div className="flex items-center gap-2">
           <label htmlFor="filter-group" className="text-sm text-ink-muted">
@@ -590,7 +592,9 @@ export default function Payments() {
                   </td>
                   <td className="py-3 px-4 text-sm text-ink-muted">
                     {p.payment_received_at ? (
-                      new Date(p.payment_received_at).toLocaleDateString()
+                      <>{new Date(p.payment_received_at).toLocaleDateString()}
+                        {p.monarch_receipt && <Link className="block underline" to="/payments/monarch" title={`${p.monarch_receipt.account_name}: ${p.monarch_receipt.merchant}, ${p.monarch_receipt.amount}`}>Monarch receipt</Link>}
+                      </>
                     ) : p.payment_sent_at ? (
                       <button
                         type="button"
@@ -617,8 +621,9 @@ export default function Payments() {
                         onClick={() => {
                           api.get<Payment>(`/payments/${p.id}`).then(setEditPayment).catch(console.error)
                         }}
+                        disabled={!!p.monarch_receipt}
                         className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition"
-                        title="Edit payment"
+                        title={p.monarch_receipt ? 'Undo the Monarch receipt confirmation before editing' : 'Edit payment'}
                         aria-label="Edit payment"
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -628,8 +633,9 @@ export default function Payments() {
                       <button
                         type="button"
                         onClick={() => setDeleteConfirmPayment(p)}
+                        disabled={!!p.monarch_receipt}
                         className="p-1.5 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
-                        title="Delete payment"
+                        title={p.monarch_receipt ? 'Undo the Monarch receipt confirmation before deleting' : 'Delete payment'}
                         aria-label="Delete payment"
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>

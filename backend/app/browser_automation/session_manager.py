@@ -893,6 +893,8 @@ def login_warm_url_for_retailer(retailer: str) -> str:
 
 
 def login_home_url_for_retailer(retailer: str) -> str:
+    if retailer == "monarch":
+        return "https://app.monarch.com"
     if retailer == "walmart":
         return WALMART_HOME_URL
     if retailer == "costco":
@@ -901,6 +903,9 @@ def login_home_url_for_retailer(retailer: str) -> str:
 
 
 async def retailer_session_logged_in(page: Page, retailer: str) -> bool:
+    if retailer == "monarch":
+        from app.browser_automation.monarch import monarch_session_logged_in
+        return await monarch_session_logged_in(page)
     if retailer == "walmart":
         return await walmart_session_logged_in(page)
     if retailer == "costco":

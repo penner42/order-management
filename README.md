@@ -187,6 +187,54 @@ OpenAPI docs: http://localhost:8000/docs (available on host loopback in the deve
 
 The **browser-extension** folder contains a Chrome/Firefox extension that can read order numbers from store order pages (e.g. Walmart). Use it to paste order numbers into the app for import/preview. See `browser-extension/README.md` for installation and usage.
 
+## Monarch payment receipts
+
+Open **Settings → Monarch**, choose **Set up Monarch**, and log in using the
+interactive browser. Use **Home** to open Monarch and complete login/MFA, then
+**Done**. Credentials are entered directly into Monarch; the existing browser
+profile volume retains the session.
+
+Use **Check now** once to discover accounts. Select receiving accounts, add sender
+keywords for each buying group (one phrase per line), and save. Further checks
+read deposits from those accounts for the last 90 days. Both dates can be supplied
+for a manual backfill. Optional daily checks run at **8:00 a.m.
+America/Los_Angeles**, including daylight saving changes; they start disabled and
+pause when login is required or a check fails. Check now retries after an error.
+
+Open **Payments → Monarch review** to choose an exact-total suggestion or select
+whole payments manually. Suggestions use sender keywords and dates from the sent
+date (request date when unsent) through 30 days later, including bonuses. Combined
+suggestions stay within one buying group; manual selections may cross groups.
+Searches are bounded and disclose when manual matching is needed. Amounts use
+exact cents; this version assumes USD, like the rest of Order Manager.
+
+Confirmation sets received dates to the deposit date and retains a receipt
+snapshot and reviewer. Pending transactions cannot confirm receipt. A deposit and
+payment can each be used once. Undo from the **Confirmed** review view before
+editing amounts, line items, received dates, or deleting a confirmed payment.
+Undo retains the audit record and makes the payments available for review again.
+Dismissed deposits can be restored from **All deposits**.
+
+Monarch is read only: the integration never edits its transactions or moves money.
+Bank synchronization delays still apply. Changes to imported evidence are shown
+on confirmed receipts and require review; they do not silently rewrite receipts.
+Split deposits are currently unsupported and cause a visible check error.
+
+The browser adapter captures the web app's transaction responses and navigates its
+pagination. This is an undocumented interface: missing fields, incomplete pages,
+and provider errors fail the check without importing partial data. The adapter's
+contract is covered by synthetic fixtures; validate it with a live authenticated
+check before relying on it with your account. Session tokens and raw provider
+payloads are not written to application logs.
+
+Authenticated endpoints are under `/api/integrations/monarch`: connection settings
+(`GET/PATCH`), `/connect` (`POST`), `/checks` (`POST`, optional `start_date` and
+`end_date`), `/jobs/{id}` and `/review` (`GET`), `/deposits/{id}/confirm` (`POST`),
+`/deposits/{id}` (`PATCH` dismissal), and `/confirmations/{id}/undo` (`POST`).
+Login and live view reuse `/api/browser-profiles/{id}`. Apply migration `074` in
+each environment before running this version; existing profiles and volumes are
+preserved.
+
 ## Browser automation (Walmart / Amazon)
 
 The main navigation contains **Orders**, **Receiving**, **Payments**, **Log**, and **Settings**.

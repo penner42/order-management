@@ -150,6 +150,10 @@ def delete_buying_group(group_id: int, db: Session = Depends(get_db), _: User = 
     group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
+    from app.models import Payment, MonarchPaymentReceipt
+    payments = db.query(Payment).filter_by(buying_group_id=group_id).order_by(Payment.id).with_for_update().all()
+    if any(db.get(MonarchPaymentReceipt, payment.id) for payment in payments):
+        raise HTTPException(status_code=409, detail="Undo Monarch receipt confirmations before deleting this buying group.")
     db.delete(group)
     db.flush()
     rebuild_schedules(db)

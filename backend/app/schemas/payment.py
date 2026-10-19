@@ -59,6 +59,7 @@ class PaymentLineItemUpdate(BaseModel):
 
 class PaymentRead(PaymentBase, TimestampsMixin):
     id: int
+    monarch_receipt: dict | None = None
     buying_group: BuyingGroupSummary | None = None
     line_items: list[PaymentLineItemRead] = []
 

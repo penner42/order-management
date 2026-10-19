@@ -88,7 +88,7 @@ const MAX_VIEWPORT_HEIGHT = 1440
 /** ~40 Hz pointer moves — responsive without flooding the WS. */
 const MOUSE_MOVE_MIN_MS = 24
 
-function LiveBrowserView({
+export function LiveBrowserView({
   profileId,
   suggestedUrl,
   onDone,
@@ -264,12 +264,14 @@ function LiveBrowserView({
     wsRef.current = ws
 
     ws.onopen = () => {
+      if (wsRef.current !== ws) return
       openedRef.current = true
       setConnected(true)
       setError(null)
       sendResize(true)
     }
     ws.onclose = (ev) => {
+      if (wsRef.current !== ws) return
       setConnected(false)
       if (!openedRef.current) {
         setError(
@@ -277,11 +279,17 @@ function LiveBrowserView({
             'Behind a reverse proxy, /api must upgrade WebSockets (HTTP/1.1, Upgrade + Connection headers). ' +
             'Backend logs show a plain GET 404/426 when the upgrade is missing.'
         )
+      } else {
+        setError(
+          'Live browser connection closed. The server may have restarted. ' +
+            'Cancel this view and start login again; saved browser cookies are preserved.'
+        )
       }
     }
     // onerror always fires before onclose; don't surface it alone (false positives).
     ws.onerror = () => {}
     ws.onmessage = (ev) => {
+      if (wsRef.current !== ws) return
       try {
         const msg = JSON.parse(ev.data as string)
         if (msg.type === 'frame' && msg.data) {
