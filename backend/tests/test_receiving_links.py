@@ -268,14 +268,20 @@ class PostgresReceiptLinkTests(unittest.TestCase):
                 session = link_receipt(db, ReceivingReceiptLinkRequest(buying_group_id=group.id,
                     receipt_key=receipt_key(receipt), item_id=item.id, receipt_tracking_number="BAD-SCAN", split_quantity=1))
                 match = session["matches"][0]
-                bulk_update_items(ItemBulkUpdateRequest(updates=[{"item_id": item.id,
-                    "receipt_id": "PG-RECEIPT", "receiving_group_id": group.id,
+                item_id = item.id
+                group_id = group.id
+                # Confirmation is a separate HTTP request, with a fresh identity map.
+                # Reusing the staged item hides refresh's joined eager-load behavior.
+                db.expunge_all()
+                bulk_update_items(ItemBulkUpdateRequest(updates=[{"item_id": item_id,
+                    "receipt_id": "PG-RECEIPT", "receiving_group_id": group_id,
                     "receiving_row_id": match["row_id"]}]), db=db, _=None)
+                item = db.get(Item, item_id)
                 self.assertEqual(item.receipt_tracking_number, "BAD-SCAN")
                 self.assertEqual(item.quantity, 1)
                 self.assertEqual(item.status, ItemStatus.SCANNED)
                 self.assertEqual(db.query(Item).count(), 2)
-                self.assertIsNone(db.get(ReceivingReviewPending, group.id))
+                self.assertIsNone(db.get(ReceivingReviewPending, group_id))
         finally:
             if engine is not None:
                 engine.dispose()

@@ -192,7 +192,9 @@ def apply_manual_link(db: Session, item: Item, entry: ItemBulkUpdateEntry, chang
     if set(changes) - {"receipt_id", "receipt_tracking_number", "status", "scanned_at", "price_sold"}:
         raise HTTPException(400, "Apply receipt details separately from other line edits.")
     row = pending_row(db, entry.receiving_group_id)
-    db.refresh(item, with_for_update=True)
+    # Refresh retains the caller's joined eager loads; lock only the item so
+    # PostgreSQL does not try to lock nullable order/buying-group join rows.
+    db.refresh(item, with_for_update={"of": Item})
     payload = dict(row.payload)
     match = next((m for m in payload.get("matches", [])
                   if m.get("row_id") == entry.receiving_row_id and m.get("manual_receipt")), None)
