@@ -241,16 +241,24 @@ class ReceiptLinkTests(unittest.TestCase):
         self.assertEqual(results["items"][0]["status"], "canceled")
         self.assertEqual(results["items"][0]["tracking_numbers"], ["ORIGINAL"])
 
-    def test_candidates_hide_received_lines_unless_requested(self):
+    def test_candidates_only_hide_lines_with_receipt_details(self):
         for changes in ({"status": ItemStatus.SCANNED},
                         {"scanned_at": datetime(2026, 10, 15, tzinfo=timezone.utc)},
                         {"receipt_id": "RECEIVED"}, {"receipt_tracking_number": "WAREHOUSE-SCAN"}):
             self.db.add(Item(order_id=self.order.id, quantity=1, description="Already received", **changes))
+        payment = Payment(buying_group_id=self.group.id, payment_requested_at=datetime.now(timezone.utc))
+        self.db.add(payment)
+        self.db.flush()
+        self.db.add(PaymentLineItem(payment_id=payment.id, item_id=self.item.id, amount=40))
+        self.item.status = ItemStatus.SCANNED
+        self.item.scanned_at = datetime(2026, 10, 15, tzinfo=timezone.utc)
         self.db.commit()
         result = candidate_lines(self.db, self.group.id, "", 1)
-        self.assertEqual(result["total"], 1)
-        self.assertEqual([i["item_id"] for i in result["items"]], [self.item.id])
-        self.assertEqual(candidate_lines(self.db, self.group.id, "Already received", 1)["total"], 0)
+        self.assertEqual(result["total"], 3)
+        paid = next(i for i in result["items"] if i["item_id"] == self.item.id)
+        self.assertTrue(paid["payment_linked"])
+        self.assertEqual(paid["status"], "scanned")
+        self.assertEqual(candidate_lines(self.db, self.group.id, "Already received", 1)["total"], 2)
         included = candidate_lines(self.db, self.group.id, "", 1, include_received=True)
         self.assertEqual(included["total"], 5)
         self.assertEqual(candidate_lines(self.db, self.group.id, "Already received", 1, include_received=True)["total"], 4)

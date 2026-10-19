@@ -81,7 +81,6 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int, include_
     query = db.query(Item).join(Order).filter(Order.buying_group_id == group_id)
     if not include_received:
         query = query.filter(
-            Item.status != ItemStatus.SCANNED, Item.scanned_at.is_(None),
             func.trim(func.coalesce(Item.receipt_id, "")) == "",
             func.trim(func.coalesce(Item.receipt_tracking_number, "")) == "",
         )

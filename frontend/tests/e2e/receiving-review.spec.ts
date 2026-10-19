@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
-test('receipt candidates hide received lines by default and show dates and expected payouts', async ({ app, data }) => {
+test('receipt candidates only hide lines with receipts and show dates and expected payouts', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('matching-store') })
   const group = await data.create('/buying-groups', { name: data.name('matching-group') })
   await data.create('/orders', {
@@ -11,7 +11,9 @@ test('receipt candidates hide received lines by default and show dates and expec
       { description: 'Unreceived headphones', quantity: 2, status: 'submitted', price_sold: '12.34',
         submitted_at: '2026-10-03T12:00:00Z' },
       { description: 'Received headphones', quantity: 2, status: 'scanned', price_sold: '23.45',
-        submitted_at: '2026-10-04T12:00:00Z', scanned_at: '2026-10-05T12:00:00Z' },
+        submitted_at: '2026-10-04T12:00:00Z', scanned_at: '2026-10-05T12:00:00Z', receipt_id: 'EXISTING' },
+      { description: 'Scanned without receipt', quantity: 1, status: 'scanned', price_sold: '10.00',
+        scanned_at: '2026-10-06T12:00:00Z' },
     ],
   })
   await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
@@ -22,19 +24,20 @@ test('receipt candidates hide received lines by default and show dates and expec
   await app.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
   await app.getByRole('button', { name: 'Link to order item' }).click()
   const dialog = app.getByRole('dialog', { name: 'Link receipt to order items', exact: true })
-  const showReceived = dialog.getByRole('checkbox', { name: 'Show lines already received', exact: true })
+  const showReceived = dialog.getByRole('checkbox', { name: 'Show lines with receipts', exact: true })
   await expect(showReceived).not.toBeChecked()
-  await expect(dialog.getByText('1 order lines in this buying group')).toBeVisible()
+  await expect(dialog.getByText('2 order lines in this buying group')).toBeVisible()
+  await expect(dialog.getByRole('checkbox', { name: /Scanned without receipt/ })).toBeVisible()
   await expect(dialog.getByRole('checkbox', { name: /Received headphones/ })).toHaveCount(0)
   await expect(dialog.getByText('Expected payout: $24.68 total · $12.34 per unit')).toBeVisible()
   await expect(dialog.getByText('Purchased: 2026-10-01 · Submitted: 2026-10-03 · Received: —')).toBeVisible()
   await showReceived.check()
-  await expect(dialog.getByText('2 order lines in this buying group')).toBeVisible()
+  await expect(dialog.getByText('3 order lines in this buying group')).toBeVisible()
   await expect(dialog.getByRole('checkbox', { name: /Received headphones/ })).toBeVisible()
   await expect(dialog.getByText('Expected payout: $46.90 total · $23.45 per unit')).toBeVisible()
   await expect(dialog.getByText('Purchased: 2026-10-01 · Submitted: 2026-10-04 · Received: 2026-10-05')).toBeVisible()
   await showReceived.uncheck()
-  await expect(dialog.getByText('1 order lines in this buying group')).toBeVisible()
+  await expect(dialog.getByText('2 order lines in this buying group')).toBeVisible()
   await expect(dialog.getByRole('checkbox', { name: /Received headphones/ })).toHaveCount(0)
 })
 

@@ -101,7 +101,7 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
           <input type="checkbox" checked={includeReceived} disabled={saving} onChange={e => {
             setIncludeReceived(e.target.checked); setPage(1)
           }} />
-          Show lines already received
+          Show lines with receipts
         </label>
         <div aria-live="polite" className="text-sm mb-2">{loading ? 'Loading order lines…' : `${result.total} order lines in this buying group`}</div>
         <div className="space-y-2 max-h-64 overflow-y-auto mb-3">
