@@ -92,6 +92,9 @@ class BuyinggroupSubmitResult:
     enrich_errors: list[str] = field(default_factory=list)
     # tracking number -> display + API ids
     submission_ids: dict[str, BuyinggroupSubmissionIds] = field(default_factory=dict)
+    # Explicit per-tracking outcomes let batch callers leave unresolved items pending.
+    succeeded: list[str] | None = None
+    failed: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -635,8 +638,18 @@ def add_trackings(
     if status >= 400:
         detail = _error_detail(raw, raw_text)
         raise RuntimeError(f"BuyingGroup add_trackings failed (HTTP {status}): {detail}")
-    _raise_if_fail_status(raw, url=url, raw_text=raw_text)
+    duplicates = _response_trackings(raw, "duplicate_trackings")
+    if not duplicates.intersection(t.casefold() for t in numbers) or _is_auth_failure(status, raw, raw_text):
+        _raise_if_fail_status(raw, url=url, raw_text=raw_text)
     return status, raw if raw is not None else {"raw": raw_text}
+
+
+def _response_trackings(raw: Any, key: str) -> set[str]:
+    payload = raw.get("payload") if isinstance(raw, dict) else None
+    values = payload.get(key) if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        return set()
+    return {value.strip().casefold() for value in values if isinstance(value, str) and value.strip()}
 
 
 def _orders_from_payload(raw: Any) -> list[dict[str, Any]]:
@@ -780,24 +793,13 @@ def find_order_by_tracking(
         if isinstance(status_val, str) and status_val.strip().upper() == "FAIL":
             raise RuntimeError(f"BuyingGroup get_orders failed: {_error_detail(raw, _text)}")
     rows = _orders_from_payload(raw)
-    tn_key = tn.casefold()
+    tn_key = tn.casefold().replace(" ", "").replace("-", "")
     for row in rows:
-        parsed = _parse_order_row(row, fallback_tracking=tn)
+        parsed = _parse_order_row(row)
         if not parsed:
             continue
-        if not parsed.tracking_id or parsed.tracking_id.casefold() == tn_key:
+        if parsed.tracking_id.casefold().replace(" ", "").replace("-", "") == tn_key:
             return parsed
-        # Accept close matches (API sometimes returns spaced/dashed variants).
-        if parsed.tracking_id.casefold().replace(" ", "") == tn_key.replace(" ", ""):
-            return parsed
-    if len(rows) == 1:
-        return _parse_order_row(rows[0], fallback_tracking=tn)
-    if rows:
-        # Filter was by tracking_id; prefer the first parseable row.
-        for row in rows:
-            parsed = _parse_order_row(row, fallback_tracking=tn)
-            if parsed:
-                return parsed
     return None
 
 
@@ -1287,7 +1289,19 @@ def submit_trackings(
     )
 
     message = _message_from_add_payload(raw, count=len(tracking_list))
-    affected = len(tracking_list)
+    duplicates = _response_trackings(raw, "duplicate_trackings")
+    added = _response_trackings(raw, "added_trackings")
+    rejected = _response_trackings(raw, "invalid_trackings") | _response_trackings(raw, "invalid_otps")
+    payload = raw.get("payload") if isinstance(raw, dict) else None
+    explicit_outcomes = isinstance(payload, dict) and any(
+        isinstance(payload.get(key), list)
+        for key in ("added_trackings", "duplicate_trackings", "invalid_trackings", "invalid_otps")
+    )
+    succeeded = {
+        tn.casefold() for tn in tracking_list
+        if tn.casefold() not in duplicates | rejected
+        and (not explicit_outcomes or tn.casefold() in added)
+    }
 
     enriched_count = 0
     enrich_errors: list[str] = []
@@ -1295,6 +1309,9 @@ def submit_trackings(
     for entry in trackings:
         tn = (entry.tracking or "").strip()
         if not tn:
+            continue
+        is_duplicate = tn.casefold() in duplicates and tn.casefold() not in rejected
+        if tn.casefold() not in succeeded and not is_duplicate:
             continue
         needs_enrich = bool(
             (entry.order_num or "").strip()
@@ -1327,6 +1344,8 @@ def submit_trackings(
                 if attempt < 5:
                     time.sleep(1.0)
             if row is None:
+                if is_duplicate:
+                    raise RuntimeError("duplicate tracking could not be verified in get_orders; left pending")
                 if needs_enrich:
                     raise RuntimeError("order not found after submit (get_orders empty)")
                 logger.warning(
@@ -1335,10 +1354,19 @@ def submit_trackings(
                 )
                 continue
 
+            if is_duplicate:
+                succeeded.add(tn.casefold())
+                logger.info(
+                    "BuyingGroup verified existing tracking %s (display=%s api=%s)",
+                    tn, row.display_order_id, row.order_id,
+                )
             submission_ids[tn] = BuyinggroupSubmissionIds(
                 display_id=row.display_order_id or None,
                 api_id=row.order_id or None,
             )
+
+            if is_duplicate:
+                continue
 
             if not needs_enrich:
                 logger.info(
@@ -1387,6 +1415,17 @@ def submit_trackings(
             enrich_errors.append(err)
             logger.warning("BuyingGroup enrich/lookup failed: %s", err)
 
+    successful_trackings = [tn for tn in tracking_list if tn.casefold() in succeeded]
+    failed_trackings = [tn for tn in tracking_list if tn.casefold() not in succeeded]
+    if duplicates:
+        verified = len({tn.casefold() for tn in successful_trackings} & duplicates)
+        message = (
+            f"Submitted {len(successful_trackings) - verified} new tracking number(s); "
+            f"verified {verified} already present in BuyingGroup.com."
+        )
+    if failed_trackings:
+        message += f"\nLeft pending ({len(failed_trackings)}): {', '.join(failed_trackings)}."
+
     if enriched_count and enrich_errors:
         message = (
             f"{message}\nEnriched {enriched_count} tracking(s); "
@@ -1398,11 +1437,13 @@ def submit_trackings(
         message = f"{message}\nEnrich failed: {'; '.join(enrich_errors[:3])}"
 
     return BuyinggroupSubmitResult(
-        success=True,
+        success=bool(successful_trackings),
         message=message,
-        affected=affected,
+        affected=len(successful_trackings),
         raw=raw if isinstance(raw, (dict, list)) else None,
         enriched_count=enriched_count,
         enrich_errors=enrich_errors,
         submission_ids=submission_ids,
+        succeeded=successful_trackings,
+        failed=failed_trackings,
     )

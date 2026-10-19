@@ -565,6 +565,8 @@ def submit_item_tracking_to_group(
         # Prefer summed amount already computed for siblings.
         entry.amount = amount
         result = submit_buyinggroup_trackings(group, [entry])
+        if not result.success:
+            raise RuntimeError(result.message or "BuyingGroup tracking could not be verified")
         ids_map = _buyinggroup_submission_ids(result)
         return SubmitResult(
             message=result.message,
@@ -990,6 +992,14 @@ def batch_submit_pending_trackings(
             )
             message = api_result.message
             submission_ids_by_tracking = _buyinggroup_submission_ids(api_result)
+            if api_result.succeeded is not None:
+                ok_tns = {tn.casefold() for tn in api_result.succeeded}
+                item_ids = [
+                    item.id for item, _order, tracking in pending
+                    if tracking.strip().casefold() in ok_tns
+                ]
+                if not item_ids:
+                    raise RuntimeError(message or "BuyingGroup tracking submit failed")
         elif framework == "dealandrunner":
             base_url = group.base_url
             email = str(group.api_username)
