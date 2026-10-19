@@ -32,6 +32,7 @@ services:
       WEB_EXT_API_KEY: ${WEB_EXT_API_KEY:-}
       WEB_EXT_API_SECRET: ${WEB_EXT_API_SECRET:-}
       INVOICE_DIR: /data/invoices
+      APPLICATION_LOG_FILE: /data/logs/application.log
       BROWSER_PROFILES_DIR: /data/browser_profiles
       BROWSER_MAX_CONCURRENT: ${BROWSER_MAX_CONCURRENT:-2}
       # Headless browsers are heavily bot-flagged by Walmart; headed Camoufox + Xvfb is the default.
@@ -47,6 +48,7 @@ services:
       - ./backend:/app
       - ./browser-extension:/browser-extension
       - invoice_data:/data/invoices
+      - application_logs:/data/logs
       - browser_profiles_data:/data/browser_profiles
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/"]
@@ -125,6 +127,7 @@ services:
         condition: service_healthy
 
 volumes:
+  application_logs:
   frontend_node_modules:
   pgdata:
   invoice_data:

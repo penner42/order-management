@@ -4,6 +4,7 @@ from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html, get_swagge
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.application_logging import configure_application_logging
 from app.auth import get_current_user
 from app.routers import (
     admin,
@@ -25,6 +26,12 @@ from app.routers import (
     ignored_zip_codes,
 )
 from app.admin_bootstrap import ensure_admin_user
+
+configure_application_logging(
+    settings.application_log_file,
+    settings.application_log_max_bytes,
+    settings.application_log_backups,
+)
 
 app = FastAPI(title=settings.app_name, docs_url=None, redoc_url=None, openapi_url=None)
 

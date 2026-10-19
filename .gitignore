@@ -35,6 +35,8 @@ backend/data/browser_profiles/
 .DS_Store
 Thumbs.db
 *.log
+data/logs/
+backend/data/logs/
 browser-extension/stores/walmart/sample.json
 browser-extension/order.json
 .cursor/graphqldata

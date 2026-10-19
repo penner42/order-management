@@ -1,5 +1,6 @@
 """Application configuration."""
 from pydantic_settings import BaseSettings
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -7,6 +8,9 @@ class Settings(BaseSettings):
 
     app_name: str = "Order Management System"
     debug: bool = False
+    application_log_file: str = "data/logs/application.log"
+    application_log_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    application_log_backups: int = Field(default=5, ge=1)
     # Explicit production opt-in; production snapshots cannot enable submissions.
     group_submissions_enabled: bool = False
 

@@ -117,6 +117,37 @@ Use `docker compose down` without `-v` to preserve data. Source changes are visi
 immediately through bind mounts; changes to container configuration require
 `docker compose up -d --wait`.
 
+The backend also writes a rotating JSON application log to
+`/data/logs/application.log` inside its container. The `application_logs` Docker
+volume preserves it across container recreation. It records committed events from
+the Log screen (including database event IDs, category, job/profile, order,
+tracking numbers, schedule, and message), plus application INFO/WARNING/ERROR
+messages and available exception tracebacks. BuyingGroup API failures include the
+HTTP status and response body (limited to 16 KiB, with credential fields redacted;
+authentication response bodies are omitted). Batch submission failures include the
+group and tracking numbers. Logs use UTC timestamps. Existing database events are
+not backfilled, and old API responses cannot be recovered.
+
+After deploying this change, recreate the backend to attach the new log volume:
+
+```bash
+# Development; use your normal production Compose override when deploying there.
+docker compose up -d --no-deps --wait backend
+
+# Follow the file, including across rotation.
+docker compose exec backend tail -F /data/logs/application.log
+
+# Copy the current file to the host.
+docker compose cp backend:/data/logs/application.log ./application.log
+```
+
+The defaults retain the current 10 MiB file and five rotated backups
+(`application.log.1` through `.5`). To change retention, pass
+`APPLICATION_LOG_MAX_BYTES` and `APPLICATION_LOG_BACKUPS` in the backend service's
+environment; `APPLICATION_LOG_FILE` selects the file path. Use a persistent mount
+if changing the path. These files contain order and tracking information.
+The Log screen continues to use the database; no migration is required.
+
 The frontend proxies `/api` to `backend:8000` (including WebSockets) and `/tracking`
 to `package-tracking:8080`. UPS status lookups require `UPS_CLIENT` / `UPS_SECRET`;
 tracking link generation works without them.

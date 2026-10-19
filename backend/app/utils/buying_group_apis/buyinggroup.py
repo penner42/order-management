@@ -10,6 +10,7 @@ Flow:
 from __future__ import annotations
 
 from app.submission_policy import require_group_submissions_enabled
+from app.application_logging import redact
 import hashlib
 import http.client
 import json
@@ -398,10 +399,16 @@ def _http_post(
     try:
         raw = _parse_json_body(status, raw_text)
     except RuntimeError:
+        _log_failed_response(url, status, raw_text)
         if status >= 400:
             detail = raw_text.strip()[:400] or f"HTTP {status}"
             raise RuntimeError(f"BuyingGroup API error {status} at {url}: {detail}")
         raise
+
+    if status >= 400 or (
+        isinstance(raw, dict) and str(raw.get("status", "")).strip().upper() == "FAIL"
+    ):
+        _log_failed_response(url, status, raw)
 
     if status >= 400:
         if authed and _is_auth_failure(status, raw, raw_text):
@@ -409,6 +416,23 @@ def _http_post(
         detail = _error_detail(raw, raw_text)
         raise RuntimeError(f"BuyingGroup API error {status} at {url}: {detail}")
     return status, raw_text, raw
+
+
+def _log_failed_response(url: str, status: int, response: Any) -> None:
+    parsed = urlparse(url)
+    # Auth responses can include session credentials; retain only their HTTP status.
+    auth_endpoint = parsed.path in (TOKEN_GET_PATH, TOKEN_REFRESH_PATH)
+    sanitized = json.dumps(redact(response), ensure_ascii=False, default=str)
+    logger.warning(
+        "BuyingGroup API failure response",
+        extra={"details": {
+            "method": "POST",
+            "url": f"{parsed.scheme}://{parsed.hostname}{parsed.path}",
+            "http_status": status,
+            "response": "[auth response omitted]" if auth_endpoint else sanitized[:16384],
+            "response_truncated": not auth_endpoint and len(sanitized) > 16384,
+        }},
+    )
 
 
 def _multipart_request(

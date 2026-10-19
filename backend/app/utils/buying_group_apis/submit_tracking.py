@@ -1144,6 +1144,10 @@ def batch_submit_pending_trackings(
             buying_group_id,
             group_name,
             exc,
+            exc_info=True,
+            extra={"details": {"buying_group_id": buying_group_id,
+                               "buying_group_name": group_name,
+                               "tracking_numbers": tracking_numbers}},
         )
         try:
             db.rollback()
