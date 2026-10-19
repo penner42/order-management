@@ -550,10 +550,10 @@ function ReceivingGroupSection({
           )}
 
           {unknownReceipts.length > 0 && (
-            <div className="mb-6">
-              <h2 className="font-semibold text-ink dark:text-gray-100 mb-1">
+            <details className="mb-6">
+              <summary className="cursor-pointer font-semibold text-ink dark:text-gray-100 mb-1">
                 Unknown tracking numbers ({unknownReceipts.length} {unknownReceipts.length === 1 ? 'receipt' : 'receipts'})
-              </h2>
+              </summary>
               <p className="text-sm text-ink-muted dark:text-gray-400 mb-3">
                 Warehouse receipts with tracking numbers missing from Order Manager. Link a receipt to an order item to review and apply it.
               </p>
@@ -605,7 +605,7 @@ function ReceivingGroupSection({
                   </tbody>
                 </table>
               </div>
-            </div>
+            </details>
           )}
 
           {(unmatched.length > 0 || session.raw_csv) && (
