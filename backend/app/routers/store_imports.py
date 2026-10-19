@@ -680,6 +680,71 @@ def _aggregate_incoming_items_by_name(
     return by_name
 
 
+def _match_retitled_items(
+    normalized: dict[str, Any], existing_items: list[Item], existing_shipments: list[Shipment]
+) -> dict[str, Any]:
+    """Reuse an unambiguous shipment line when the retailer changes its title.
+
+    Tracking alone is insufficient: packages can contain multiple products.
+    Require a single product on both sides, equal quantity and equal unit cost.
+    Preserve the local description and all downstream receipt/payment data.
+    """
+    incoming = normalized.get("items") or []
+    incoming_by_name = _aggregate_incoming_items_by_name(incoming)
+    existing_by_name: dict[str, list[Item]] = {}
+    existing_names_by_tracking: dict[str, set[str]] = {}
+    shipments_by_id = {s.id: s for s in existing_shipments}
+    for item in existing_items:
+        name = (item.description or "").strip()
+        existing_by_name.setdefault(name, []).append(item)
+        for link in item.shipment_items:
+            shipment = shipments_by_id.get(link.shipment_id)
+            if shipment:
+                for key in _shipment_db_keys(shipment):
+                    existing_names_by_tracking.setdefault(key, set()).add(name)
+
+    sources = {s.get("shipmentId"): s for s in normalized.get("shipments") or []}
+    incoming_names_by_tracking: dict[str, set[str]] = {}
+    for item in incoming:
+        name = (item.get("name") or "").strip()
+        for link in item.get("shipments") or []:
+            tracking = (sources.get(link.get("shipmentId"), {}).get("trackingNumber") or "").strip()
+            if tracking:
+                incoming_names_by_tracking.setdefault(tracking, set()).add(name)
+
+    candidates: dict[str, set[str]] = {}
+    for tracking, names in incoming_names_by_tracking.items():
+        local_names = existing_names_by_tracking.get(tracking, set())
+        if len(names) != 1 or len(local_names) != 1:
+            continue
+        name = next(iter(names))
+        local_name = next(iter(local_names))
+        if name in existing_by_name or local_name in incoming_by_name:
+            continue
+        rows = existing_by_name[local_name]
+        summary = incoming_by_name[name]
+        price = summary["unit_price"]
+        if (
+            price is not None
+            and sum(row.quantity for row in rows) == summary["total_quantity"]
+            and all(row.price_paid is not None and not _prices_differ_for_diff(
+                _normalize_price_for_diff(row.price_paid), price
+            ) for row in rows)
+        ):
+            candidates.setdefault(name, set()).add(local_name)
+
+    aliases = {name: next(iter(names)) for name, names in candidates.items() if len(names) == 1}
+    # Two incoming titles must never claim the same local product.
+    aliases = {name: target for name, target in aliases.items()
+               if list(aliases.values()).count(target) == 1}
+    if not aliases:
+        return normalized
+    return {**normalized, "items": [
+        {**item, "name": aliases.get((item.get("name") or "").strip(), item.get("name"))}
+        for item in incoming
+    ]}
+
+
 def _sync_existing_item_quantities_and_prices(
     db: Session,
     normalized: dict[str, Any],
@@ -808,6 +873,8 @@ def _build_order_diff(
             if existing_shipment_ids
             else []
         )
+
+    normalized = _match_retitled_items(normalized, existing_items, existing_shipments)
 
     # --- Item comparison (aggregate by description since items may be split per shipment) ---
     existing_by_desc: dict[str, dict[str, Any]] = {}
@@ -1231,6 +1298,9 @@ def _apply_items_and_shipments(
     existing_shipments_by_id: dict[int, Shipment] = {
         s.id: s for s in existing_shipments
     }
+
+    normalized = _match_retitled_items(normalized, existing_items, existing_shipments)
+    items = normalized.get("items") or []
 
     existing_item_tracking_keys: set[tuple[str, str]] = set()
     for ei in existing_items:

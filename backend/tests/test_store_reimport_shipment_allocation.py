@@ -10,7 +10,9 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Item, Order, Payment, PaymentLineItem, Shipment, ShipmentItem
 from app.models.item import ItemStatus
-from app.routers.store_imports import _apply_items_and_shipments
+from app.routers.store_imports import _apply_items_and_shipments, _build_order_diff
+from app.routers.items import bulk_update_items
+from app.schemas.item import ItemBulkUpdateRequest
 
 
 class StoreReimportShipmentAllocationTests(unittest.TestCase):
@@ -145,6 +147,62 @@ class StoreReimportShipmentAllocationTests(unittest.TestCase):
         self.assertEqual(self._item_rows(), first_rows)
         self.assertEqual(self.session.query(Item).count(), 2)
         self.assertEqual(self.session.query(Shipment).count(), 2)
+
+    def test_scan_then_retitled_store_refresh_preserves_original_line(self) -> None:
+        item, shipment = self._add_item(
+            status=ItemStatus.SUBMITTED, quantity=2, tracking="ORDER-1"
+        )
+        original_id, shipment_id = item.id, shipment.id
+        bulk_update_items(ItemBulkUpdateRequest(updates=[{
+            "item_id": item.id, "status": "scanned", "receipt_id": "RECEIPT-1",
+            "scanned_at": "2026-10-15T12:00:00Z",
+        }]), db=self.session, _=None)
+        self.assertEqual(self.session.query(Item).count(), 1)
+        payload = self._payload([("shipment-a", "ORDER-1", 2)])
+        payload["items"][0]["name"] = "Updated retailer title"
+        for _ in range(2):
+            diff = _build_order_diff(self.session, self.order, payload)
+            self.assertEqual(diff["items"]["added"], [])
+            _apply_items_and_shipments(
+                self.session, payload, "walmart", self.order,
+                external_order_id="ORDER-1", existing_order=True,
+            )
+            self.session.commit()
+            self.session.expire_all()
+        item = self.session.get(Item, original_id)
+        self.assertEqual(self.session.query(Item).count(), 1)
+        self.assertEqual((item.description, item.quantity, item.status),
+                         ("Product", 2, ItemStatus.SCANNED))
+        self.assertEqual((item.price_sold, item.receipt_id), (100, "RECEIPT-1"))
+        self.assertIsNotNone(item.scanned_at)
+        self.assertEqual(item.shipment_items[0].shipment_id, shipment_id)
+        self.assertEqual(payload["items"][0]["name"], "Updated retailer title")
+
+    def test_retitled_refresh_matches_walmart_original_tracking(self) -> None:
+        _, shipment = self._add_item(status=ItemStatus.SCANNED, tracking="ORDER-1")
+        shipment.notes = "Walmart tracking: 55512345678901234567"
+        self.session.commit()
+        payload = self._payload([("shipment-a", "55512345678901234567", 1)])
+        payload["items"][0]["name"] = "Updated retailer title"
+        _apply_items_and_shipments(
+            self.session, payload, "walmart", self.order,
+            external_order_id="ORDER-1", existing_order=True,
+        )
+        self.session.commit()
+        self.assertEqual(self.session.query(Item).count(), 1)
+
+    def test_shared_tracking_does_not_merge_distinct_products(self) -> None:
+        self._add_item(status=ItemStatus.SCANNED, tracking="TRACK-A")
+        other, _ = self._add_item(status=ItemStatus.SCANNED, tracking="TRACK-A")
+        other.description = "Another product"
+        self.session.commit()
+        payload = self._payload([("shipment-a", "TRACK-A", 1)])
+        payload["items"][0]["name"] = "New product"
+        _apply_items_and_shipments(
+            self.session, payload, "amazon", self.order, existing_order=True,
+        )
+        self.session.commit()
+        self.assertEqual(self.session.query(Item).count(), 3)
 
     def test_locked_quantity_can_cover_multiple_slices_on_same_tracking(self) -> None:
         locked, shipment = self._add_item(
