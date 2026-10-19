@@ -22,7 +22,7 @@ from app.models import (
     ShipmentItem,
 )
 from app.models.user import get_default_app_user_id
-from app.schemas.order import OrderRead, OrderCreate, OrderUpdate, OrderPaymentMethodCreate, OrderListPage
+from app.schemas.order import OrderRead, OrderCreate, OrderUpdate, OrderPaymentMethodCreate, OrderListPage, DuplicateAuditReview
 from app.schemas.item import ItemCreateNested
 from app.utils.invoices import invoice_pdf_path
 from app.utils.duplicate_audit import find_duplicate_orders
@@ -430,6 +430,23 @@ def list_orders_paged(
         available_buying_group_ids=available_buying_group_ids,
         audit_findings={order.id: audit_findings[order.id] for order in items} if duplicate_audit else {},
     )
+
+
+@router.post("/{order_id}/duplicate-audit/review", status_code=204)
+def review_duplicate_lines(
+    order_id: int,
+    data: DuplicateAuditReview,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Remember reviewed lines without changing quantities, status, or payments."""
+    ids = set(data.item_ids)
+    items = db.query(Item).filter(Item.order_id == order_id, Item.id.in_(ids)).with_for_update().all()
+    if {item.id for item in items} != ids:
+        raise HTTPException(404, "One or more lines were not found in this order. Refresh the audit.")
+    for item in items:
+        item.duplicate_audit_ignored = data.not_duplicate
+    db.commit()
 
 
 @router.post("", response_model=OrderRead)

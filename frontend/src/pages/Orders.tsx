@@ -260,6 +260,9 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
   const [auditFindings, setAuditFindings] = useState<OrderListPage['audit_findings']>({})
   const [loadError, setLoadError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
+  const [reviewSaving, setReviewSaving] = useState(false)
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const [lastReview, setLastReview] = useState<{ orderId: number; itemIds: number[] } | null>(null)
   const [groups, setGroups] = useState<BuyingGroup[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedItemIds, setSelectedItemIds] = useState<Set<number>>(new Set())
@@ -1684,17 +1687,39 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
     return { cost, payout, subtotal, shipping, salesTax, totalCost, totalPayout }
   }, [visibleOrders, itemEdits, orderEdits])
 
+  const reviewDuplicateLines = async (orderId: number, itemIds: number[], notDuplicate = true) => {
+    if (reviewSaving) return
+    setReviewSaving(true)
+    setReviewError(null)
+    try {
+      await api.post(`/orders/${orderId}/duplicate-audit/review`, { item_ids: itemIds, not_duplicate: notDuplicate })
+      setLastReview(notDuplicate ? { orderId, itemIds } : null)
+      setRefreshVersion(v => v + 1)
+    } catch (error) {
+      setReviewError(error instanceof Error ? error.message : 'Unable to save duplicate review')
+    } finally {
+      setReviewSaving(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {!duplicateAudit && orderId && <Link to="/" className="inline-block text-sm text-brand-700 dark:text-brand-400 underline">Back to all orders</Link>}
       {duplicateAudit && (
         <div className="text-sm text-ink-muted dark:text-gray-300 space-y-2">
           <p>Review orders with matching tracking numbers and unit costs, or item costs above recorded payments. Signals suggest duplicates; shared packages and incomplete payment records can also explain them.</p>
-          <p>Orders are shown in full for comparison. This audit is read-only; use Review in Orders to make corrections.</p>
+          <p>Mark correct lines as Not duplicates to exclude them from future findings. Orders are shown in full for comparison; use Review in Orders to change order details.</p>
           <button type="button" onClick={() => setRefreshVersion(v => v + 1)} disabled={loading} className="px-3 py-1.5 rounded-lg border border-brand-200 dark:border-gray-600 disabled:opacity-50">Refresh audit</button>
           {!loading && !loadError && <p role="status">{totalOrders} flagged order{totalOrders === 1 ? '' : 's'}</p>}
         </div>
       )}
+      {duplicateAudit && lastReview && (
+        <div role="status" className="rounded-lg border border-brand-200 dark:border-gray-600 p-3 text-sm text-ink dark:text-gray-200">
+          Marked {lastReview.itemIds.length} line{lastReview.itemIds.length === 1 ? '' : 's'} as not {lastReview.itemIds.length === 1 ? 'a duplicate' : 'duplicates'}.
+          <button type="button" disabled={reviewSaving || loading} onClick={() => reviewDuplicateLines(lastReview.orderId, lastReview.itemIds, false)} className="ml-3 underline text-brand-700 dark:text-brand-400 disabled:opacity-50">Undo</button>
+        </div>
+      )}
+      {reviewError && <div role="alert" className="text-red-600 dark:text-red-400">{reviewError}</div>}
       {loadError && <div role="alert" className="text-red-600 dark:text-red-400">{loadError} <button type="button" className="underline" onClick={() => setRefreshVersion(v => v + 1)}>Retry</button></div>}
       <div
         className={`flex items-center justify-between gap-2 sm:gap-4 flex-wrap transition-opacity duration-200 ${
@@ -2360,7 +2385,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
 
             return (
               <div key={o.id} className="space-y-2">
-              {duplicateAudit && <DuplicateAuditDetails order={o} findings={auditFindings?.[o.id] ?? []} />}
+              {duplicateAudit && <DuplicateAuditDetails order={o} findings={auditFindings?.[o.id] ?? []} saving={reviewSaving} onMarkNotDuplicate={ids => reviewDuplicateLines(o.id, ids)} />}
               {/* Keep the shared order layout read-only while reviewing audit signals. */}
               <fieldset
                 disabled={duplicateAudit}

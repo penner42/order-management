@@ -2,6 +2,55 @@ import { test, expect } from './fixtures'
 import type { Order } from '../../src/api/types'
 
 for (const width of [1280, 390]) {
+  test(`Duplicate reviews persist and can be undone at width ${width}`, async ({ app, data }) => {
+    await app.setViewportSize({ width, height: 900 })
+    if (width === 1280) {
+      await app.evaluate(() => localStorage.setItem('theme', 'dark'))
+    }
+    const store = await data.create('/stores', { name: data.name('review-store') })
+    const order = await data.create<Order>('/orders', {
+      store_id: store.id, store_order_number: data.name('review'),
+      items: [
+        { description: 'Laptop', status: 'scanned', quantity: 2, price_paid: 199, price_sold: 199 },
+        { description: 'Laptop', status: 'submitted', quantity: 2, price_paid: 199, price_sold: 0 },
+      ],
+    })
+    await data.create('/shipments', {
+      tracking_number: data.name('review-tracking'), item_ids: order.items.map(item => item.id),
+    })
+    await app.goto(`/duplicate-audit?order_id=${order.id}`)
+    const region = app.getByRole('region', { name: `Order ${order.id}`, exact: true })
+    await expect(region).toBeVisible()
+    const markPair = app.getByRole('button', { name: `Mark lines ${order.items.map(item => `#${item.id}`).join(', ')} as not duplicates`, exact: true })
+    const endpoint = `**/api/orders/${order.id}/duplicate-audit/review`
+    await app.route(endpoint, route => route.fulfill({ status: 500, json: { detail: 'Review could not be saved' } }))
+    await markPair.click()
+    await expect(app.getByRole('alert')).toHaveText('Review could not be saved')
+    await expect(region).toBeVisible()
+    await app.unroute(endpoint)
+    await markPair.click()
+    await expect(region).toHaveCount(0)
+    await expect(app.getByText('Marked 2 lines as not duplicates.')).toBeVisible()
+    await app.getByRole('button', { name: 'Undo', exact: true }).click()
+    await expect(region).toBeVisible()
+    await app.getByText('Line IDs, receipts, and timestamps', { exact: true }).click()
+    await app.getByRole('button', { name: `Mark line #${order.items[0].id} as not a duplicate`, exact: true }).click()
+    await expect(app.getByText('Marked 1 line as not a duplicate.')).toBeVisible()
+    await expect(app.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled()
+    await app.reload()
+    await expect(region).toBeVisible()
+    await app.getByText('Line IDs, receipts, and timestamps', { exact: true }).click()
+    await expect(app.getByRole('cell', { name: `#${order.items[0].id}`, exact: true })).toHaveCount(0)
+    await expect(app.getByRole('cell', { name: `#${order.items[1].id}`, exact: true })).toBeVisible()
+    await app.getByRole('button', { name: `Mark lines #${order.items[1].id} as not duplicates`, exact: true }).click()
+    await expect(region).toHaveCount(0)
+    await app.reload()
+    await expect(app.getByText('No potentially duplicate orders match these filters.')).toBeVisible()
+    const after = await data.get<Order>(`/orders/${order.id}`)
+    expect(after.items.map(item => [item.quantity, item.status, item.price_paid, item.price_sold]))
+      .toEqual(order.items.map(item => [item.quantity, item.status, item.price_paid, item.price_sold]))
+  })
+
   test(`Duplicate audit shows full orders and evidence without editing at width ${width}`, async ({ app, data }, testInfo) => {
     await app.setViewportSize({ width, height: 900 })
     const store = await data.create('/stores', { name: data.name('store') })

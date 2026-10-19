@@ -31,8 +31,11 @@ def audit_order(order: Order) -> list[dict]:
         ItemStatus.CANCELED, ItemStatus.RETURN_REFUNDED,
     }]
     findings = []
+    unreviewed = [item for item in items if not item.duplicate_audit_ignored]
     tracking = {item.id: _tracking(item) for item in items}
     for left, right in combinations(items, 2):
+        if left.duplicate_audit_ignored and right.duplicate_audit_ignored:
+            continue
         shared = tracking[left.id] & tracking[right.id]
         if not shared or left.price_paid is None or right.price_paid is None:
             continue
@@ -56,20 +59,23 @@ def audit_order(order: Order) -> list[dict]:
         )
         if zero_payout_sibling:
             reasons.append("Scanned or receipt-linked line alongside a zero-payout line")
+        reviewed = [item for item in (left, right) if item.duplicate_audit_ignored]
+        if reviewed:
+            reasons.append(f"Matches reviewed line #{reviewed[0].id}")
         findings.append({
-            "item_ids": [left.id, right.id], "tracking_numbers": sorted(shared),
+            "item_ids": [item.id for item in (left, right) if not item.duplicate_audit_ignored], "tracking_numbers": sorted(shared),
             "confidence": "likely" if same_quantity and similar else "possible",
             "reasons": reasons,
         })
 
     payments = order.order_payments
-    if len(items) > 1 and payments and all(p.amount is not None for p in payments):
+    if unreviewed and len(items) > 1 and payments and all(p.amount is not None for p in payments):
         paid = sum((_money(p.amount) for p in payments), Decimal(0))
         cost = sum(((_money(i.price_paid) + _money(i.shipping) + _money(i.sales_tax)) * i.quantity
                     for i in items), Decimal(0)) - _money(order.order_discount)
         if paid > 0 and cost > paid + Decimal("0.01"):
             findings.append({
-                "item_ids": [i.id for i in items], "tracking_numbers": [],
+                "item_ids": [i.id for i in unreviewed], "tracking_numbers": [],
                 "confidence": "possible",
                 "reasons": [f"Item costs ({cost:.2f}) exceed recorded order payments ({paid:.2f}) by {cost - paid:.2f}"],
             })

@@ -4,11 +4,13 @@ import unittest
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from fastapi import HTTPException
 
 from app.database import Base
 from app.models import Item, Order, OrderPaymentMethod, Shipment, ShipmentItem, Store
 from app.models.item import ItemStatus
-from app.routers.orders import list_orders_paged
+from app.routers.orders import list_orders_paged, review_duplicate_lines
+from app.schemas.order import DuplicateAuditReview
 from app.utils.duplicate_audit import audit_order
 
 
@@ -126,6 +128,64 @@ class DuplicateAuditTests(unittest.TestCase):
         self.assertEqual(self.page(date_from="2099-01-01").total, 0)
         self.assertEqual(self.page(order_id=order.id).total, 1)
         self.assertEqual(self.page(order_id=order.id + 1).total, 0)
+
+    def review(self, order, ids=None, not_duplicate=True):
+        review_duplicate_lines(order.id, DuplicateAuditReview(
+            item_ids=ids if ids is not None else [item.id for item in order.items],
+            not_duplicate=not_duplicate,
+        ), db=self.db, _=None)
+
+    def test_review_persists_and_undo_restores_findings_without_changing_lines(self):
+        order = self.order()
+        before = [(i.id, i.quantity, i.status, i.price_paid, i.price_sold) for i in order.items]
+        self.review(order)
+        self.db.expire_all()
+        self.assertEqual(self.page().total, 0)
+        self.assertEqual([(i.id, i.quantity, i.status, i.price_paid, i.price_sold) for i in order.items], before)
+        self.review(order)  # Repeated submissions are harmless.
+        self.review(order, not_duplicate=False)
+        self.assertEqual(self.page().total, 1)
+
+    def test_individual_review_excludes_only_reviewed_line_from_findings(self):
+        order = self.order()
+        first, other = order.items
+        self.review(order, [first.id])
+        finding, = audit_order(order)
+        self.assertEqual(finding["item_ids"], [other.id])
+        self.review(order, [other.id])
+        self.assertEqual(self.page().total, 0)
+
+    def test_review_does_not_mask_new_matching_lines_or_unrelated_orders(self):
+        order = self.order()
+        self.review(order)
+        new = Item(order=order, description="HP 14 inch Windows Laptop Intel N150",
+                   quantity=2, price_paid=199, price_sold=0, status=ItemStatus.SHIPPED)
+        self.db.add(new)
+        self.db.flush()
+        self.db.add(ShipmentItem(item_id=new.id, shipment_id=order.items[0].shipment_items[0].shipment_id))
+        self.db.commit()
+        self.db.expire_all()
+        self.assertTrue(audit_order(order))
+        self.assertTrue(all(finding["item_ids"] == [new.id] for finding in audit_order(order)))
+        self.order("UNRELATED")
+        self.assertEqual(self.page().total, 2)
+
+    def test_review_rejects_foreign_or_missing_lines_atomically(self):
+        order = self.order()
+        other = self.order("OTHER")
+        for invalid in (other.items[0].id, 999999):
+            with self.assertRaises(HTTPException) as error:
+                self.review(order, [order.items[0].id, invalid])
+            self.assertEqual(error.exception.status_code, 404)
+            self.assertFalse(order.items[0].duplicate_audit_ignored)
+
+    def test_all_reviewed_lines_are_excluded_from_payment_excess_finding(self):
+        order = self.order()
+        self.db.add(OrderPaymentMethod(order=order, payment_method_id=1, amount=398))
+        self.db.commit()
+        self.assertEqual(len(audit_order(order)), 2)
+        self.review(order)
+        self.assertEqual(self.page().total, 0)
 
 
 if __name__ == "__main__":

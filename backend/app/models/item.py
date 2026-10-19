@@ -1,5 +1,5 @@
 """Item model - line items on orders with status and resale info."""
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Numeric, Enum as SQLEnum
+from sqlalchemy import Boolean, Column, Integer, String, Text, ForeignKey, DateTime, Numeric, Enum as SQLEnum, false
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -87,6 +87,7 @@ class Item(Base):
     # May hold comma-joined warehouse receipt / transaction IDs (D&R multi-unit).
     receipt_id = Column(Text, nullable=True)
     receipt_tracking_number = Column(Text, nullable=True)
+    duplicate_audit_ignored = Column(Boolean, nullable=False, default=False, server_default=false())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

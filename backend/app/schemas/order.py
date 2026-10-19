@@ -79,6 +79,11 @@ class OrderRead(OrderBase, TimestampsMixin):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DuplicateAuditReview(BaseModel):
+    item_ids: list[int] = Field(min_length=1, max_length=500)
+    not_duplicate: bool = True
+
+
 class DuplicateAuditFinding(BaseModel):
     item_ids: list[int]
     tracking_numbers: list[str]
