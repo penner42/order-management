@@ -84,6 +84,7 @@ function AppShell() {
     }
     return [
       { to: '/', label: 'Orders' },
+      { to: '/duplicate-audit', label: 'Duplicate audit' },
       { to: '/receiving-review', label: 'Receiving' },
       { to: '/payments', label: 'Payments' },
       { to: '/browser-import-log', label: 'Log' },
@@ -228,7 +229,8 @@ function AppShell() {
       )}
       <main className="flex-1 w-full mx-auto px-3 sm:px-4 md:px-12 lg:px-12 py-4 md:py-8">
         <Routes>
-          <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders />} />
+          <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders key="orders" />} />
+          <Route path="/duplicate-audit" element={<Orders key="duplicate-audit" duplicateAudit />} />
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />

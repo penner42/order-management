@@ -25,6 +25,7 @@ from app.models.user import get_default_app_user_id
 from app.schemas.order import OrderRead, OrderCreate, OrderUpdate, OrderPaymentMethodCreate, OrderListPage
 from app.schemas.item import ItemCreateNested
 from app.utils.invoices import invoice_pdf_path
+from app.utils.duplicate_audit import find_duplicate_orders
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -349,6 +350,8 @@ def list_orders_paged(
     search: str | None = Query(default=None, alias="q"),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=50),
+    duplicate_audit: bool = False,
+    order_id: int | None = None,
 ):
     allowed = {0, 25, 50, 100}
     if per_page not in allowed:
@@ -395,6 +398,14 @@ def list_orders_paged(
         if bg_id is not None
     ]
 
+    if order_id is not None:
+        q = q.filter(Order.id == order_id)
+
+    audit_findings = {}
+    if duplicate_audit:
+        audit_findings = find_duplicate_orders(db, q)
+        q = q.filter(Order.id.in_(audit_findings))
+
     total = int(q.order_by(None).with_entities(func.count(func.distinct(Order.id))).scalar() or 0)
     if per_page == 0:
         pages = 1
@@ -406,8 +417,8 @@ def list_orders_paged(
 
     items = _materialize_orders(
         q=q,
-        status=status,
-        search_order_level_ids=search_order_level_ids,
+        status=[] if duplicate_audit else status,
+        search_order_level_ids=None if duplicate_audit else search_order_level_ids,
         search_item_match_pairs=search_item_match_pairs,
     )
     return OrderListPage(
@@ -417,6 +428,7 @@ def list_orders_paged(
         total=total,
         pages=pages,
         available_buying_group_ids=available_buying_group_ids,
+        audit_findings={order.id: audit_findings[order.id] for order in items} if duplicate_audit else {},
     )
 
 

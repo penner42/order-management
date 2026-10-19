@@ -175,6 +175,14 @@ export interface OrderListPage {
   pages: number
   /** Buying groups with matches for current filters (excluding BG filter). */
   available_buying_group_ids?: number[]
+  audit_findings?: Record<number, DuplicateAuditFinding[]>
+}
+
+export interface DuplicateAuditFinding {
+  item_ids: number[]
+  tracking_numbers: string[]
+  confidence: 'likely' | 'possible'
+  reasons: string[]
 }
 
 export interface ShipmentItem {

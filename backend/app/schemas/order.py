@@ -79,6 +79,13 @@ class OrderRead(OrderBase, TimestampsMixin):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DuplicateAuditFinding(BaseModel):
+    item_ids: list[int]
+    tracking_numbers: list[str]
+    confidence: str
+    reasons: list[str]
+
+
 class OrderListPage(BaseModel):
     items: list[OrderRead]
     page: int
@@ -88,6 +95,7 @@ class OrderListPage(BaseModel):
     # Distinct buying groups present in the current result set ignoring buying_group_id filter
     # (used by the UI to gray out BGs that have no matches for the other active filters).
     available_buying_group_ids: list[int] = []
+    audit_findings: dict[int, list[DuplicateAuditFinding]] = {}
 
 
 from app.schemas.item import ItemCreateNested  # noqa: E402

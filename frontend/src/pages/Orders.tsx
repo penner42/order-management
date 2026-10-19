@@ -4,12 +4,13 @@
  * Right: full line-items table (one row per item).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { api, getStoredToken } from '../api/client'
 import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { AlertDialog } from '../components/AlertDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
+import { DuplicateAuditDetails } from '../components/DuplicateAuditDetails'
 import type {
   Order,
   OrderListPage,
@@ -219,15 +220,19 @@ function buildOrdersPath(opts: {
   searchText: string
   page: number
   perPage: number
+  duplicateAudit?: boolean
+  orderId?: string | null
 }): string {
   const params = new URLSearchParams()
   // When searching, include canceled so matches aren't hidden by the default status set.
   const statuses =
     opts.filterStatuses.size > 0
       ? [...opts.filterStatuses]
-      : opts.searchText.trim()
+      : opts.searchText.trim() && !opts.duplicateAudit && !opts.orderId
         ? [...DEFAULT_STATUSES, 'canceled']
-        : DEFAULT_STATUSES
+        : opts.duplicateAudit || opts.orderId ? [] : DEFAULT_STATUSES
+  if (opts.duplicateAudit) params.set('duplicate_audit', 'true')
+  if (opts.orderId) params.set('order_id', opts.orderId)
   statuses.forEach((s) => params.append('status', s))
   opts.filterBuyingGroups.forEach((id) => params.append('buying_group_id', String(id)))
   opts.filterStores.forEach((id) => params.append('store_id', String(id)))
@@ -249,9 +254,12 @@ function buildOrdersPath(opts: {
   return `/orders/paged?${params.toString()}`
 }
 
-export default function Orders() {
+export default function Orders({ duplicateAudit = false }: { duplicateAudit?: boolean }) {
   const groupSubmissionsEnabled = useGroupSubmissionsEnabled()
   const [orders, setOrders] = useState<Order[]>([])
+  const [auditFindings, setAuditFindings] = useState<OrderListPage['audit_findings']>({})
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [refreshVersion, setRefreshVersion] = useState(0)
   const [groups, setGroups] = useState<BuyingGroup[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedItemIds, setSelectedItemIds] = useState<Set<number>>(new Set())
@@ -311,6 +319,7 @@ export default function Orders() {
   const [availableBuyingGroupIds, setAvailableBuyingGroupIds] = useState<Set<number> | null>(null)
   const location = useLocation()
   const navigate = useNavigate()
+  const orderId = new URLSearchParams(location.search).get('order_id')
   const [page, setPage] = useState(() => {
     const v = new URLSearchParams(location.search).get('page')
     const n = v ? parseInt(v, 10) : 1
@@ -380,12 +389,15 @@ export default function Orders() {
         searchText: searchDebounced,
         page,
         perPage,
+        duplicateAudit,
+        orderId,
       }),
-    [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced, page, perPage]
+    [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced, page, perPage, duplicateAudit, orderId]
   )
 
   const applyOrdersPage = (data: OrderListPage) => {
     setOrders(data.items)
+    setAuditFindings(data.audit_findings ?? {})
     setTotalOrders(data.total)
     setTotalPages(data.pages)
     if (data.page !== page) setPage(data.page)
@@ -828,12 +840,15 @@ export default function Orders() {
       restoreSearchFocusRef.current = { start, end }
     }
     setLoading(true)
+    setLoadError(null)
+    let active = true
     api
       .get<OrderListPage>(ordersPath)
-      .then(applyOrdersPage)
-      .catch(console.error)
-      .finally(() => setLoading(false))
-  }, [ordersPath])
+      .then(data => { if (active) applyOrdersPage(data) })
+      .catch(error => { if (active) setLoadError(error instanceof Error ? error.message : 'Unable to load orders') })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [ordersPath, refreshVersion])
 
   useEffect(() => {
     if (!loading && restoreSearchFocusRef.current) {
@@ -1671,13 +1686,23 @@ export default function Orders() {
 
   return (
     <div className="space-y-6">
+      {!duplicateAudit && orderId && <Link to="/" className="inline-block text-sm text-brand-700 dark:text-brand-400 underline">Back to all orders</Link>}
+      {duplicateAudit && (
+        <div className="text-sm text-ink-muted dark:text-gray-300 space-y-2">
+          <p>Review orders with matching tracking numbers and unit costs, or item costs above recorded payments. Signals suggest duplicates; shared packages and incomplete payment records can also explain them.</p>
+          <p>Orders are shown in full for comparison. This audit is read-only; use Review in Orders to make corrections.</p>
+          <button type="button" onClick={() => setRefreshVersion(v => v + 1)} disabled={loading} className="px-3 py-1.5 rounded-lg border border-brand-200 dark:border-gray-600 disabled:opacity-50">Refresh audit</button>
+          {!loading && !loadError && <p role="status">{totalOrders} flagged order{totalOrders === 1 ? '' : 's'}</p>}
+        </div>
+      )}
+      {loadError && <div role="alert" className="text-red-600 dark:text-red-400">{loadError} <button type="button" className="underline" onClick={() => setRefreshVersion(v => v + 1)}>Retry</button></div>}
       <div
         className={`flex items-center justify-between gap-2 sm:gap-4 flex-wrap transition-opacity duration-200 ${
           loading ? 'opacity-50 pointer-events-none' : ''
         }`}
       >
         <div className="flex items-center gap-2 shrink-0">
-          <h1 className="text-xl font-semibold text-ink dark:text-gray-100">Orders</h1>
+          <h1 className="text-xl font-semibold text-ink dark:text-gray-100">{duplicateAudit ? 'Duplicate audit' : 'Orders'}</h1>
           <span className="inline-flex w-4 h-4 items-center justify-center" aria-hidden={!loading}>
             {loading && (
               <span
@@ -2221,7 +2246,7 @@ export default function Orders() {
             </button>
           </div>
         </div>
-        <button
+        {!duplicateAudit && <button
           onClick={handleCreateNewOrder}
           disabled={creatingOrder}
           aria-label="New order"
@@ -2244,7 +2269,7 @@ export default function Orders() {
           <span className="hidden sm:inline">
             {creatingOrder ? 'Creating…' : 'New order'}
           </span>
-        </button>
+        </button>}
       </div>
 
       <div
@@ -2317,7 +2342,7 @@ export default function Orders() {
         </div>
         {visibleOrders.length === 0 ? (
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 py-12 text-center text-ink-muted">
-            No orders yet. Create one to get started.
+            {loading ? 'Loading orders…' : loadError ? 'Orders could not be loaded.' : duplicateAudit ? 'No potentially duplicate orders match these filters.' : 'No orders yet. Create one to get started.'}
           </div>
         ) : (
           visibleOrders.map((o) => {
@@ -2334,11 +2359,14 @@ export default function Orders() {
             const itemCount = o.items?.length ?? 0
 
             return (
-              <div
-                key={o.id}
+              <div key={o.id} className="space-y-2">
+              {duplicateAudit && <DuplicateAuditDetails order={o} findings={auditFindings?.[o.id] ?? []} />}
+              {/* Keep the shared order layout read-only while reviewing audit signals. */}
+              <fieldset
+                disabled={duplicateAudit}
                 role="region"
                 aria-label={`Order ${o.id}`}
-                className="flex flex-col lg:flex-row gap-0 border-2 border-brand-400 dark:border-gray-400 rounded-xl overflow-hidden bg-brand-50/50 dark:bg-gray-600/80"
+                className="min-w-0 flex flex-col lg:flex-row gap-0 border-2 border-brand-400 dark:border-gray-400 rounded-xl overflow-hidden bg-brand-50/50 dark:bg-gray-600/80"
               >
                 {/* Left: vertical order box */}
                 <div
@@ -3439,6 +3467,7 @@ export default function Orders() {
                     </div>
                   )}
                 </div>
+              </fieldset>
               </div>
             )
           })
