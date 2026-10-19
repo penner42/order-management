@@ -20,7 +20,7 @@ const BUYINGGROUP_DEFAULT_BASE_URL = 'https://api.prod.buyinggroup.com'
 const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH = '/v1/order/add_trackings'
 const DEALANDRUNNER_DEFAULT_BASE_URL = 'https://api.dealandrunner.com'
 const BFMR_DEFAULT_BASE_URL = 'https://api.bfmr.com'
-const DEFAULT_TRACKING_SUBMIT_CRON = '0 */6 * * *'
+const DEFAULT_INTERVAL_MINUTES = 360
 
 function usesUsernamePassword(framework: string | null | undefined): boolean {
   return (
@@ -215,7 +215,8 @@ type EditDraft = {
   api_username: string
   api_password: string
   tracking_submit_enabled: boolean
-  tracking_submit_cron: string
+  schedule_interval_minutes: number
+  received_check_enabled: boolean
 }
 
 function emptyDraft(): EditDraft {
@@ -230,7 +231,8 @@ function emptyDraft(): EditDraft {
     api_username: '',
     api_password: '',
     tracking_submit_enabled: false,
-    tracking_submit_cron: DEFAULT_TRACKING_SUBMIT_CRON,
+    schedule_interval_minutes: DEFAULT_INTERVAL_MINUTES,
+    received_check_enabled: false,
   }
 }
 
@@ -246,7 +248,8 @@ function draftFromGroup(g: BuyingGroup): EditDraft {
     api_username: g.api_username ?? '',
     api_password: g.api_password ?? '',
     tracking_submit_enabled: !!g.tracking_submit_enabled,
-    tracking_submit_cron: g.tracking_submit_cron?.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
+    schedule_interval_minutes: g.schedule_interval_minutes ?? DEFAULT_INTERVAL_MINUTES,
+    received_check_enabled: !!g.received_check_enabled,
   }
 }
 
@@ -289,6 +292,11 @@ export default function BuyingGroups() {
   const saveEdit = async () => {
     if (editing == null) return
     if (!draft.name.trim()) return
+    if (![draft.schedule_interval_minutes]
+      .every((n) => Number.isInteger(n) && n >= 1 && n <= 525600)) {
+      setSubmitAlert('Schedule intervals must be whole numbers from 1 to 525600 minutes.')
+      return
+    }
     const userIdRaw = draft.api_user_id.trim()
     let apiUserId: number | null = null
     if (userIdRaw) {
@@ -298,7 +306,7 @@ export default function BuyingGroups() {
     }
     setSaving(true)
     try {
-      const updated = await api.patch<BuyingGroup>(`/buying-groups/${editing}`, {
+      await api.patch<BuyingGroup>(`/buying-groups/${editing}`, {
         name: draft.name.trim(),
         api_framework: draft.api_framework || null,
         base_url: draft.base_url.trim() || null,
@@ -323,12 +331,14 @@ export default function BuyingGroups() {
         tracking_submit_enabled: supportsTrackingSubmit(draft.api_framework)
           ? draft.tracking_submit_enabled
           : false,
-        tracking_submit_cron: draft.tracking_submit_cron.trim() || DEFAULT_TRACKING_SUBMIT_CRON,
+        schedule_interval_minutes: draft.schedule_interval_minutes,
+        received_check_enabled: supportsCheckReceiving(draft.api_framework) && draft.received_check_enabled,
       })
-      setGroups((prev) => sortGroupsByName(prev.map((p) => (p.id === updated.id ? updated : p))))
+      setGroups(sortGroupsByName(await api.get<BuyingGroup[]>('/buying-groups')))
       setEditing(null)
     } catch (e) {
       console.error(e)
+      setSubmitAlert(e instanceof Error ? e.message : 'Could not save buying group.')
     } finally {
       setSaving(false)
     }
@@ -388,8 +398,8 @@ export default function BuyingGroups() {
     e.preventDefault()
     if (!createName.trim()) return
     try {
-      const created = await api.post<BuyingGroup>('/buying-groups', { name: createName.trim() })
-      setGroups((prev) => sortGroupsByName([created, ...prev]))
+      await api.post<BuyingGroup>('/buying-groups', { name: createName.trim() })
+      setGroups(sortGroupsByName(await api.get<BuyingGroup[]>('/buying-groups')))
       setCreateName('')
     } catch (e) {
       console.error(e)
@@ -399,7 +409,7 @@ export default function BuyingGroups() {
   const remove = async (id: number) => {
     try {
       await api.delete(`/buying-groups/${id}`)
-      setGroups((prev) => prev.filter((p) => p.id !== id))
+      setGroups(sortGroupsByName(await api.get<BuyingGroup[]>('/buying-groups')))
     } catch (e) {
       console.error(e)
     } finally {
@@ -422,8 +432,9 @@ export default function BuyingGroups() {
       </div>
       <p className="text-sm text-ink-muted mb-8">
         Add aliases to match shipping names and address lines on store imports. Configure API
-        credentials and an optional schedule to batch-submit tracking numbers; warehouse receiving
-        is checked automatically right after each scheduled submit. Manual submit and check buttons
+        credentials and one interval per group, with separate submit and receiving toggles. When both
+        are enabled, submissions run first, then receiving checks. Groups are automatically staggered
+        whenever schedules change. Manual submit and check buttons
         stay separate. For Parsefile, BuyingGroup.com, BFMR, and USABG groups, received checks land
         on the Receiving page for review and apply.
       </p>
@@ -707,32 +718,41 @@ export default function BuyingGroups() {
                           </label>
                           <label className="block">
                             <span className="text-xs text-ink-muted">
-                              Cron (local time; min hour day month weekday)
+                              Run every (minutes)
                             </span>
                             <input
-                              type="text"
+                              type="number"
+                              min={1}
+                              max={525600}
+                              step={1}
                               className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm font-mono"
-                              placeholder={DEFAULT_TRACKING_SUBMIT_CRON}
-                              value={draft.tracking_submit_cron}
+                              value={draft.schedule_interval_minutes}
                               onChange={(e) =>
-                                setDraft((d) => ({ ...d, tracking_submit_cron: e.target.value }))
+                                setDraft((d) => ({ ...d, schedule_interval_minutes: Number(e.target.value) }))
                               }
                               disabled={saving}
-                              spellCheck={false}
                             />
                           </label>
                           <p className="text-[11px] text-ink-muted">
                             Last submit: {formatLastRun(g.tracking_submit_last_run_at)}
-                            {supportsCheckReceiving(draft.api_framework) && (
-                              <>
-                                {' '}
-                                · Receiving is checked automatically after each scheduled submit
-                                (last: {formatLastRun(g.received_check_last_run_at)})
-                              </>
-                            )}
+                            {' '}· Next: {draft.tracking_submit_enabled ? formatLastRun(g.schedule_next_run_at) : 'off'}
                           </p>
                         </div>
                       )}
+                      {supportsCheckReceiving(draft.api_framework) && (
+                        <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
+                          <label className="inline-flex items-center gap-2 text-sm text-ink">
+                            <input type="checkbox" checked={draft.received_check_enabled}
+                              onChange={(e) => setDraft((d) => ({ ...d, received_check_enabled: e.target.checked }))}
+                              disabled={saving} className="rounded border-brand-300" />
+                            <span>Auto-check receiving</span>
+                          </label>
+                          <p className="text-[11px] text-ink-muted">
+                            Last check: {formatLastRun(g.received_check_last_run_at)}
+                          </p>
+                        </div>
+                      )}
+                      <p className="text-xs text-ink-muted">Each run submits first, then checks receiving, when enabled. Saving schedule changes rebuilds the staggered run times for all groups.</p>
                     </div>
                   </div>
                 ) : (
@@ -791,14 +811,14 @@ export default function BuyingGroups() {
                         <span>
                           Auto-submit:{' '}
                           {!groupSubmissionsEnabled ? 'disabled in this environment' : g.tracking_submit_enabled
-                            ? `on (${g.tracking_submit_cron?.trim() || DEFAULT_TRACKING_SUBMIT_CRON})`
+                            ? `every ${g.schedule_interval_minutes ?? DEFAULT_INTERVAL_MINUTES} minutes`
                             : 'off'}
                         </span>
                         <span>Last submit: {formatLastRun(g.tracking_submit_last_run_at)}</span>
+                        {(g.tracking_submit_enabled || g.received_check_enabled) && <span>Every {g.schedule_interval_minutes ?? DEFAULT_INTERVAL_MINUTES} minutes · Next run: {formatLastRun(g.schedule_next_run_at)}</span>}
                         {supportsCheckReceiving(g.api_framework) && (
                           <span>
-                            Receiving after submit
-                            {g.tracking_submit_enabled ? '' : ' (when auto-submit is on)'}: last{' '}
+                            Receiving: {g.received_check_enabled ? 'on' : 'off'} · Last check:{' '}
                             {formatLastRun(g.received_check_last_run_at)}
                           </span>
                         )}

@@ -44,9 +44,6 @@ class SubmissionPolicyTests(unittest.TestCase):
 
     @patch("app.config.settings.group_submissions_enabled", False)
     def test_restored_enabled_schedules_are_ignored(self):
-        db = Mock()
-        self.assertEqual(buying_groups.list_due_tracking_submit_group_ids(db), [])
-        self.assertEqual(db.mock_calls, [])
         with patch.object(buying_groups, "SessionLocal") as sessions:
             self.assertFalse(buying_groups.run_scheduled_tracking_submit(123))
             sessions.assert_not_called()

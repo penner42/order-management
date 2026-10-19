@@ -44,10 +44,10 @@ export interface BuyingGroup {
   api_username?: string | null
   api_password?: string | null
   tracking_submit_enabled?: boolean
-  tracking_submit_cron?: string
+  schedule_interval_minutes?: number
+  schedule_next_run_at?: string | null
   tracking_submit_last_run_at?: string | null
   received_check_enabled?: boolean
-  received_check_cron?: string
   received_check_last_run_at?: string | null
 }
 

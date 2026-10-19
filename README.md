@@ -319,6 +319,23 @@ tracking and submission notes. Group lookups, authentication, receiving checks,
 and store imports remain available. Restoring a production database cannot
 change this environment setting. Existing submission schedules are ignored.
 
+Buying groups have separate **Auto-submit tracking** and **Auto-check receiving**
+settings and one shared whole-number interval in minutes per group (default: 360).
+Each scheduled run submits first, then checks receiving, when each is enabled.
+Receiving checks also run when submissions are disabled. Creating or
+deleting a group, or changing an enabled setting or interval, rebuilds the run
+times for all groups. Active groups start at evenly spaced times across the
+shortest configured interval, then repeat at their own interval. Different
+intervals can occasionally coincide in later cycles; group jobs run serially.
+Next run times persist across restarts, and overdue jobs run once without replaying
+missed intervals. Manual actions leave the automatic schedule unchanged.
+
+Migration 073 converts the old submit cron to a minute interval using the gap
+between its next two runs. It enables receiving for groups whose automatic
+submission was enabled, preserving the previous receiving-after-submit behavior.
+Review intervals after migration for irregular cron
+expressions such as specific weekdays or month days.
+
 The production Compose override sets `GROUP_SUBMISSIONS_ENABLED=true`. Deployments
 that do not use that override must explicitly set this variable on the backend
 to allow submissions. No database migration is needed.

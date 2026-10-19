@@ -2,7 +2,6 @@
 from datetime import datetime
 from typing import Literal
 
-from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -10,8 +9,7 @@ ApiFramework = Literal["parsefile", "usabg", "buyinggroup", "dealandrunner", "bf
 
 ALLOWED_API_FRAMEWORKS = frozenset({"parsefile", "usabg", "buyinggroup", "dealandrunner", "bfmr"})
 
-DEFAULT_TRACKING_SUBMIT_CRON = "0 */6 * * *"
-DEFAULT_RECEIVED_CHECK_CRON = "0 */6 * * *"
+DEFAULT_INTERVAL_MINUTES = 360
 
 
 def _normalize_optional_str(value: object) -> str | None:
@@ -33,17 +31,6 @@ def _normalize_api_framework(value: object) -> str | None:
     return key
 
 
-def _normalize_cron(value: str) -> str:
-    expr = (value or "").strip()
-    if not expr:
-        raise ValueError("Cron expression is required")
-    if len(expr) > 64:
-        raise ValueError("Cron expression must be at most 64 characters")
-    if not croniter.is_valid(expr):
-        raise ValueError("Invalid cron expression (expected 5 fields: min hour day month weekday)")
-    return expr
-
-
 class BuyingGroupBase(BaseModel):
     name: str
     aliases: list[str] = []
@@ -56,9 +43,8 @@ class BuyingGroupBase(BaseModel):
     api_username: str | None = None
     api_password: str | None = None
     tracking_submit_enabled: bool = False
-    tracking_submit_cron: str = DEFAULT_TRACKING_SUBMIT_CRON
+    schedule_interval_minutes: int = Field(default=DEFAULT_INTERVAL_MINUTES, ge=1, le=525600, strict=True)
     received_check_enabled: bool = False
-    received_check_cron: str = DEFAULT_RECEIVED_CHECK_CRON
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -100,10 +86,6 @@ class BuyingGroupBase(BaseModel):
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
 
-    @field_validator("tracking_submit_cron", "received_check_cron")
-    @classmethod
-    def validate_cron(cls, value: str) -> str:
-        return _normalize_cron(value)
 
 
 class BuyingGroupCreate(BuyingGroupBase):
@@ -121,10 +103,9 @@ class BuyingGroupUpdate(BaseModel):
     api_email: str | None = None
     api_username: str | None = None
     api_password: str | None = None
-    tracking_submit_enabled: bool | None = None
-    tracking_submit_cron: str | None = Field(default=None, max_length=64)
-    received_check_enabled: bool | None = None
-    received_check_cron: str | None = Field(default=None, max_length=64)
+    tracking_submit_enabled: bool = False
+    schedule_interval_minutes: int = Field(default=DEFAULT_INTERVAL_MINUTES, ge=1, le=525600, strict=True)
+    received_check_enabled: bool = False
 
     @field_validator("aliases", mode="before")
     @classmethod
@@ -151,17 +132,12 @@ class BuyingGroupUpdate(BaseModel):
     def normalize_optional_str(cls, value: object) -> str | None:
         return _normalize_optional_str(value)
 
-    @field_validator("tracking_submit_cron", "received_check_cron")
-    @classmethod
-    def validate_cron(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return _normalize_cron(value)
 
 
 class BuyingGroupRead(BuyingGroupBase):
     id: int
     user_id: int | None = None
+    schedule_next_run_at: datetime | None = None
     tracking_submit_last_run_at: datetime | None = None
     received_check_last_run_at: datetime | None = None
 

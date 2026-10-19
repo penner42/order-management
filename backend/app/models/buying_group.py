@@ -22,13 +22,15 @@ class BuyingGroup(Base):
     api_email = Column(String(255), nullable=True)  # Parsefile account email
     api_username = Column(String(255), nullable=True)  # USABG / BuyingGroup.com login / BFMR API-KEY
     api_password = Column(String(500), nullable=True)  # login password / BFMR API-SECRET
-    # Batch-submit shipped tracking numbers to the buying-group API on a cron (local time).
+    # Interval schedules use persisted UTC run times, staggered across groups.
     tracking_submit_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    schedule_interval_minutes = Column(Integer, nullable=False, default=360, server_default="360")
+    schedule_next_run_at = Column(DateTime(timezone=True), nullable=True)
     tracking_submit_cron = Column(
         String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *"
     )
     tracking_submit_last_run_at = Column(DateTime(timezone=True), nullable=True)
-    # Legacy schedule columns (unused): receiving now runs as a follow-up after tracking submit.
+    # Cron columns are retained only for migration rollback compatibility.
     received_check_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
     received_check_cron = Column(
         String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *"

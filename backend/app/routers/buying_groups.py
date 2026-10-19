@@ -10,13 +10,13 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.buying_group_schedules import SCHEDULE_FIELDS, rebuild_schedules, claim_group_job
 from app.submission_policy import require_group_submissions_enabled
 from app.auth import get_current_user
 from app.database import SessionLocal, get_db
 from app.models import BrowserImportLog, BuyingGroup, ReceivingReviewPending, User
 from app.models.user import get_default_app_user_id
 from app.schemas.buying_group import (
-    DEFAULT_TRACKING_SUBMIT_CRON,
     BuyingGroupCheckReceivingResponse,
     BuyingGroupCreate,
     BuyingGroupRead,
@@ -59,6 +59,8 @@ def create_buying_group(data: BuyingGroupCreate, db: Session = Depends(get_db), 
     user_id = (current_user.id if current_user.role != "admin" else None) or get_default_app_user_id(db)
     group = BuyingGroup(**data.model_dump(exclude={"user_id"}), user_id=user_id)
     db.add(group)
+    db.flush()
+    rebuild_schedules(db)
     db.commit()
     db.refresh(group)
     return group
@@ -130,8 +132,13 @@ def update_buying_group(group_id: int, data: BuyingGroupUpdate, db: Session = De
     group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    updates = data.model_dump(exclude_unset=True)
+    changed = any(k in SCHEDULE_FIELDS and getattr(group, k) != v for k, v in updates.items())
+    for k, v in updates.items():
         setattr(group, k, v)
+    if changed:
+        db.flush()
+        rebuild_schedules(db)
     db.commit()
     db.refresh(group)
     return group
@@ -143,6 +150,8 @@ def delete_buying_group(group_id: int, db: Session = Depends(get_db), _: User = 
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
     db.delete(group)
+    db.flush()
+    rebuild_schedules(db)
     db.commit()
     return None
 
@@ -369,50 +378,6 @@ def check_buying_group_receiving(
     )
 
 
-def list_due_tracking_submit_group_ids(db: Session) -> list[int]:
-    """Return buying group ids whose tracking-submit schedule is due.
-
-    Groups that are due but not API-ready are logged and stamped so we do not
-    silently no-op every scheduler tick.
-    """
-    if not settings.group_submissions_enabled:
-        return []
-    from app.browser_automation.scheduler import schedule_due
-
-    now = datetime.now(timezone.utc)
-    rows = (
-        db.query(BuyingGroup)
-        .filter(BuyingGroup.tracking_submit_enabled.is_(True))
-        .order_by(BuyingGroup.id)
-        .all()
-    )
-    out: list[int] = []
-    for group in rows:
-        if not schedule_due(
-            enabled=True,
-            cron_expr=str(group.tracking_submit_cron or DEFAULT_TRACKING_SUBMIT_CRON),
-            last_run_at=group.tracking_submit_last_run_at,
-            now=now,
-        ):
-            continue
-        ready, reason = group_ready(group)
-        if not ready:
-            group_name = (group.name or "").strip() or f"group {group.id}"
-            write_group_tracking_log(
-                group=group,
-                group_name=group_name,
-                scheduled=True,
-                level="error",
-                event_type="tracking_submit_error",
-                message=reason or "Buying group API is not configured",
-            )
-            group.tracking_submit_last_run_at = now
-            db.commit()
-            continue
-        out.append(group.id)
-    return out
-
-
 def run_scheduled_tracking_submit(group_id: int) -> bool:
     """Run a scheduled tracking submit for one buying group. Returns True if started."""
     if not settings.group_submissions_enabled:
@@ -465,11 +430,6 @@ def run_scheduled_tracking_submit(group_id: int) -> bool:
                 group_id,
                 result.submitted_count,
             )
-        # Always follow scheduled submit with a receiving check when the group
-        # supports it — including when there were no trackings to submit.
-        group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
-        if group:
-            _run_followup_received_check(db, group, scheduled=True)
         return True
     except Exception as exc:
         logger.exception("Scheduled tracking submit failed for buying group %s", group_id)
@@ -540,7 +500,7 @@ def _execute_received_check(
     """
     group_id = group.id
     group_name = (group.name or "").strip() or f"group {group_id}"
-    source = "scheduled follow-up" if scheduled else "manual"
+    source = "scheduled" if scheduled else "manual"
 
     write_group_tracking_log(
         group=group,
@@ -628,29 +588,43 @@ def _execute_received_check(
         raise
 
 
-def _run_followup_received_check(
-    db: Session,
-    group: BuyingGroup,
-    *,
-    scheduled: bool,
-) -> bool:
-    """Run warehouse received check after tracking submit when the group supports it.
-
-    Returns True when a check was attempted. Skips (False) when the framework/credentials
-    are not ready for receiving — no separate cron schedule.
-    """
-    group_id = group.id
-    ready, reason = receiving_check_group_ready(group)
-    if not ready:
-        logger.info(
-            "Skipping received check after tracking submit for buying group %s: %s",
-            group_id,
-            reason or "not configured for receiving",
-        )
-        return False
-
+def run_scheduled_received_check(group_id: int) -> bool:
+    db = SessionLocal()
     try:
-        _execute_received_check(db, group, scheduled=scheduled)
+        group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
+        if not group or not group.received_check_enabled:
+            return False
+        ready, reason = receiving_check_group_ready(group)
+        if not ready:
+            write_group_tracking_log(
+                group=group, scheduled=True, level="error",
+                event_type="received_check_error", mode="received_check",
+                message=reason or "Buying group API is not configured",
+            )
+            _stamp_received_check_last_run(db, group_id)
+            return False
+        _execute_received_check(db, group, scheduled=True)
         return True
     except Exception:
+        logger.exception("Scheduled receiving check failed for buying group %s", group_id)
         return False
+    finally:
+        db.close()
+
+
+def run_scheduled_group(group_id: int) -> bool:
+    """One interval per group: submit first, then receive, when each is enabled."""
+    db = SessionLocal()
+    try:
+        group = claim_group_job(db, group_id)
+        if not group:
+            return False
+        submit = group.tracking_submit_enabled and settings.group_submissions_enabled
+        receive = group.received_check_enabled
+    finally:
+        db.close()
+    if submit:
+        run_scheduled_tracking_submit(group_id)
+    if receive:
+        run_scheduled_received_check(group_id)
+    return True

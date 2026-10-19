@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from croniter import croniter
@@ -18,10 +19,11 @@ from app.schemas.browser_profile import (
 logger = logging.getLogger(__name__)
 
 # How often the loop wakes to look for due schedules.
-TICK_SECONDS = 60
+TICK_SECONDS = 1
 
 _task: asyncio.Task | None = None
 _lock = asyncio.Lock()
+_last_profile_tick = 0.0
 
 
 def _local_tz():
@@ -114,17 +116,21 @@ def list_due_profile_jobs(db: Session) -> list[tuple[int, str, int]]:
 
 
 async def _tick() -> None:
+    global _last_profile_tick
     # Import here to avoid circular imports at module load.
     from app.routers.browser_profiles import start_scheduled_import
-    from app.routers.buying_groups import (
-        list_due_tracking_submit_group_ids,
-        run_scheduled_tracking_submit,
-    )
+    from app.buying_group_schedules import list_due_group_ids
+    from app.routers.buying_groups import run_scheduled_group
 
     db = SessionLocal()
     try:
-        due = list_due_profile_jobs(db)
-        due_groups = list_due_tracking_submit_group_ids(db)
+        # Group jobs need second precision for short intervals; browser imports
+        # keep their original once-per-minute polling cadence.
+        due = []
+        if time.monotonic() - _last_profile_tick >= 60:
+            due = list_due_profile_jobs(db)
+            _last_profile_tick = time.monotonic()
+        due_groups = list_due_group_ids(db)
     finally:
         db.close()
 
@@ -145,18 +151,17 @@ async def _tick() -> None:
                 profile_id,
             )
 
-    # Tracking submit runs receiving check as a follow-up for each group.
     for group_id in due_groups:
         try:
-            started = await asyncio.to_thread(run_scheduled_tracking_submit, group_id)
+            started = await asyncio.to_thread(run_scheduled_group, group_id)
             if started:
                 logger.info(
-                    "Ran scheduled tracking submit for buying group %s",
+                    "Ran scheduled jobs for buying group %s",
                     group_id,
                 )
         except Exception:
             logger.exception(
-                "Failed scheduled tracking submit for buying group %s",
+                "Failed scheduled jobs for buying group %s",
                 group_id,
             )
 
