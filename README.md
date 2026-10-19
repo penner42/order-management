@@ -126,7 +126,7 @@ tracking link generation works without them.
 - **Users** – Admin and app users; auth via JWT. `user_id` is set on orders, stores, buying groups, payment methods, etc.
 - **Stores & store accounts** – Orders belong to a store and optionally a store account (e.g. per Amazon account).
 - **Orders** – Notes, purchase date, store order number (e.g. from retailer), **status**: `active` (default) or `imported` (excluded from main list). Multiple **items** and multiple **payment methods** (with optional amount per method).
-- **Items** – Purchase/sell price, **buying group**, **status**: `purchased` → `shipped` → `submitted` → `scanned`; plus `canceled`, `needs_return`, `return_started`, `return_sent`, `return_received`, `return_refunded`. Optional `submission_id`, `receipt_id`, and status timestamps. Payment state (`payment_requested` → `payment_sent` → `payment_received`) is on **Payments** via `payment_requested_at`, `payment_sent_at`, `payment_received_at`.
+- **Items** – Purchase/sell price, **buying group**, **status**: `purchased` → `shipped` → `submitted` → `scanned`; plus `canceled`, `needs_return`, `return_started`, `return_sent`, `return_received`, `return_refunded`. Optional `submission_id`, `receipt_id`, `receipt_tracking_number`, and status timestamps. Payment state (`payment_requested` → `payment_sent` → `payment_received`) is on **Payments** via `payment_requested_at`, `payment_sent_at`, `payment_received_at`.
 - **Payment methods** – Type: `credit_card`, `paypal` (optional PayPal card reference), or `other`; label (e.g. "Visa ****1234").
 - **Payments** – Track payments with **line items** linking to items (e.g. mark items as payment requested / received).
 - **Rewards** – User-defined rewards (e.g. store reward programs).
@@ -159,6 +159,16 @@ The **browser-extension** folder contains a Chrome/Firefox extension that can re
 ## Browser automation (Walmart / Amazon)
 
 The main navigation contains **Orders**, **Receiving**, **Payments**, **Log**, and **Settings**.
+
+In **Receiving**, use **Link to order item** on an unknown receipt to search lines
+in its buying group. If quantities differ, **Split and add to review** explicitly
+splits a larger line; payment-linked lines cannot be split. Review the scan date
+and optional payout correction, then apply. **Unlink** returns a staged receipt to
+unknown receipts; an explicitly completed split remains. Existing receipt IDs
+must be corrected on Orders or assigned to separate lines before another receipt
+can be linked. Receipt tracking is saved on the individual line, independently of
+the original shipment tracking, and both receipt fields can be edited on Orders.
+
 Configuration lives in Settings: account/password and CSV export, buying groups,
 stores/accounts, ignored zip codes, payment methods, rewards, portals, and browser extension setup.
 Settings has a sidebar on desktop and a section picker on phones. Old configuration URLs redirect to their new Settings locations.

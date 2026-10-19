@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
+import ReceiptLinkDialog from '../components/ReceiptLinkDialog'
 
 interface ReceivingMatch {
+  receipt_tracking_number?: string | null
+  manual_receipt_key?: string | null
   item_id: number
   order_id: number
   store_order_number: string | null
@@ -41,6 +44,7 @@ interface ReceivingUnmatched {
 }
 
 interface ReceivingUnknownReceipt {
+  receipt_key?: string | null
   receipt_id: string | null
   tracking_number: string
   tracking_numbers?: string[]
@@ -139,14 +143,17 @@ function ReceivingGroupSection({
   setEdits,
   appliedIds,
   setAppliedIds,
+  onSessionChange,
 }: {
   session: ReceivingSession
+  onSessionChange: (session: ReceivingSession) => void
   highlighted: boolean
   edits: Record<string, RowEdit>
   setEdits: React.Dispatch<React.SetStateAction<Record<string, RowEdit>>>
   appliedIds: Set<string>
   setAppliedIds: React.Dispatch<React.SetStateAction<Set<string>>>
 }) {
+  const [linkReceipt, setLinkReceipt] = useState<ReceivingUnknownReceipt | null>(null)
   const [applying, setApplying] = useState(false)
   const [applyError, setApplyError] = useState<string | null>(null)
   const [showExtra, setShowExtra] = useState(false)
@@ -209,7 +216,9 @@ function ReceivingGroupSection({
       receipt_id: string | null
       scanned_at?: string
       price_sold?: string | null
-      warehouse_tracking?: string | null
+      receipt_tracking_number?: string | null
+      receiving_group_id?: number
+      receiving_row_id?: string
     }> = []
     const appliedKeys: string[] = []
     const appliedItemIds: number[] = []
@@ -257,10 +266,14 @@ function ReceivingGroupSection({
             entry.price_sold = (total / m.quantity).toFixed(2)
           }
         }
-        // Persist D&R-scanned LPN / alternate TN on shipment notes when new.
+        // Warehouse tracking belongs to this line, independently of the shipment.
         const scannedTn = (m.tracking_number || '').trim()
         if (scannedTn) {
-          entry.warehouse_tracking = scannedTn
+          entry.receipt_tracking_number = m.receipt_tracking_number || scannedTn
+        }
+        if (m.manual_receipt_key) {
+          entry.receiving_group_id = session.buying_group_id
+          entry.receiving_row_id = m.row_id || undefined
         }
         updates.push(entry)
         appliedKeys.push(key)
@@ -345,6 +358,10 @@ function ReceivingGroupSection({
         </button>
       </div>
 
+      {linkReceipt && <ReceiptLinkDialog<ReceivingSession>
+        receipt={linkReceipt} groupId={session.buying_group_id}
+        onLinked={onSessionChange} onClose={() => setLinkReceipt(null)}
+      />}
       {!collapsed && (
         <div className="p-4">
           {applyError && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{applyError}</p>}
@@ -448,9 +465,23 @@ function ReceivingGroupSection({
                               <>
                                 {m.update_receipt_only && (
                                   <div className="text-xs text-ink-muted mt-0.5">
-                                    Already scanned — update receipt ID only
+                                    Preserve current status — update receipt details
                                   </div>
                                 )}
+                                {m.manual_receipt_key && !applied && <div className="mt-1 text-xs">
+                                  <span>Manually linked · </span>
+                                  <button type="button" disabled={applying} className="text-brand-600 hover:underline" onClick={async () => {
+                                    setApplying(true)
+                                    setApplyError(null)
+                                    try {
+                                      const next = await api.post<ReceivingSession>('/buying-groups/receiving-review/unlink', {
+                                        buying_group_id: session.buying_group_id, receipt_key: m.manual_receipt_key,
+                                      })
+                                      onSessionChange(next)
+                                    } catch (e) { setApplyError(e instanceof Error ? e.message : 'Could not unlink receipt') }
+                                    finally { setApplying(false) }
+                                  }}>Unlink</button>
+                                </div>}
                                 {applied && (
                                   <div className="text-xs text-emerald-700 dark:text-emerald-400 mt-0.5">
                                     Applied
@@ -473,7 +504,7 @@ function ReceivingGroupSection({
                               <input
                                 type="text"
                                 value={edit?.receipt_id ?? ''}
-                                disabled={applied}
+                                disabled={applied || !!m.manual_receipt_key}
                                 onChange={(e) => setRow(key, { receipt_id: e.target.value })}
                                 className="w-full min-w-[7rem] h-8 rounded border border-brand-200 dark:border-gray-600 px-2 py-1 text-sm bg-white dark:bg-gray-700 disabled:opacity-60"
                                 aria-label="Receipt ID"
@@ -524,13 +555,13 @@ function ReceivingGroupSection({
                 Unknown tracking numbers ({unknownReceipts.length} {unknownReceipts.length === 1 ? 'receipt' : 'receipts'})
               </h2>
               <p className="text-sm text-ink-muted dark:text-gray-400 mb-3">
-                Warehouse receipts with tracking numbers missing from Order Manager. Saved for separate review.
+                Warehouse receipts with tracking numbers missing from Order Manager. Link a receipt to an order item to review and apply it.
               </p>
               <div className="overflow-x-auto rounded-xl border border-brand-200/80 dark:border-gray-700">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-left border-b border-brand-200 dark:border-gray-600 bg-brand-50/40 dark:bg-gray-800/60">
-                      {['Tracking', 'Item', 'Quantity', 'Unit price', 'Total', 'Receipt / group order', 'Status', 'Dates', 'Delivery / notes', 'Details'].map((label) => (
+                      {['Tracking', 'Item', 'Quantity', 'Unit price', 'Total', 'Receipt / group order', 'Status', 'Dates', 'Delivery / notes', 'Details', 'Link'].map((label) => (
                         <th key={label} className="py-2 px-3 font-medium text-ink-muted whitespace-nowrap">{label}</th>
                       ))}
                     </tr>
@@ -565,6 +596,9 @@ function ReceivingGroupSection({
                               <pre className="mt-2 text-xs whitespace-pre-wrap break-all min-w-[16rem] max-h-80 overflow-auto">{JSON.stringify(receipt.source_data, null, 2)}</pre>
                             </details>
                           ) : '—'}
+                        </td>
+                        <td className="py-2 px-3 align-top">
+                          <button type="button" disabled={applying || !receipt.receipt_key} onClick={() => setLinkReceipt(receipt)} className="text-brand-600 hover:underline text-sm whitespace-nowrap disabled:opacity-50">Link to order item</button>
                         </td>
                       </tr>
                     ))}
@@ -715,6 +749,16 @@ export default function ReceivingReview() {
           >
             <ReceivingGroupSection
               session={session}
+              onSessionChange={(next) => {
+                setAppliedByGroup(prev => ({ ...prev, [next.buying_group_id]: new Set() }))
+                setSessions(prev => prev.map(s => s.buying_group_id === next.buying_group_id ? next : s))
+                setEditsByGroup(prev => {
+                  const fresh = buildEdits(next.matches)
+                  const old = prev[next.buying_group_id] ?? {}
+                  for (const key of Object.keys(fresh)) if (old[key]) fresh[key] = old[key]
+                  return { ...prev, [next.buying_group_id]: fresh }
+                })
+              }}
               highlighted={flashGroupId === session.buying_group_id}
               edits={editsByGroup[session.buying_group_id] ?? {}}
               setEdits={(updater) => {

@@ -24,6 +24,7 @@ class ItemBase(BaseModel):
     submission_id: str | None = None
     submission_api_id: str | None = None
     receipt_id: str | None = None
+    receipt_tracking_number: str | None = None
     # Datetime when each status was (last) set (shipped_at/delivered_at on Shipment; payment dates on Payment)
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
@@ -63,6 +64,7 @@ class ItemUpdate(BaseModel):
     submission_id: str | None = None
     submission_api_id: str | None = None
     receipt_id: str | None = None
+    receipt_tracking_number: str | None = None
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
     scanned_at: datetime | None = None
@@ -118,6 +120,7 @@ class ItemBulkUpdateEntry(BaseModel):
     submission_id: str | None = None
     submission_api_id: str | None = None
     receipt_id: str | None = None
+    receipt_tracking_number: str | None = None
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
     delivered_at: datetime | None = None  # applied to shipment
@@ -130,8 +133,10 @@ class ItemBulkUpdateEntry(BaseModel):
     return_received_at: datetime | None = None
     return_refunded_at: datetime | None = None
     lost_package_at: datetime | None = None
-    # When set (e.g. D&R soft-match LPN), append to shipment notes if not already known.
+    # Legacy receiving-client alias for receipt_tracking_number.
     warehouse_tracking: str | None = None
+    receiving_group_id: int | None = None
+    receiving_row_id: str | None = None
 
     @field_validator("price_sold", mode="before")
     @classmethod

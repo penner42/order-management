@@ -29,12 +29,14 @@ class UnknownReceivingReviewTests(unittest.TestCase):
         self.engine.dispose()
 
     def receipt(self, **changes):
-        return {
+        receipt = {
             "receipt_id": "receipt-1", "tracking_number": "UNKNOWN",
             "tracking_numbers": ["UNKNOWN", "ALTERNATE"],
             "description": "Headphones", "quantity": 1,
             "received_ext_total": "20.00", **changes,
         }
+
+        return {**receipt, "receipt_key": receiving.receipt_key(receipt)}
 
     def payload(self, *, receipts=None, matches=None):
         return {

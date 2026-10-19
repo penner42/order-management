@@ -21,7 +21,8 @@ from app.schemas.item import (
     ItemSubmitTrackingResponse,
     ItemUpdate,
 )
-from app.utils.buying_group_apis.check_receiving import append_warehouse_tracking_note
+from app.utils.item_split import split_item_record
+from app.utils.receiving_links import apply_manual_link
 from app.utils.buying_group_apis.submit_tracking import (
     find_shipped_items_sharing_tracking,
     group_ready,
@@ -96,8 +97,13 @@ def bulk_update_items(
         prev_status = item.status
         payload = entry.model_dump(
             exclude_unset=True,
-            exclude={"item_id", "delivered_at", "warehouse_tracking"},
+            exclude={"item_id", "delivered_at", "warehouse_tracking", "receiving_group_id", "receiving_row_id"},
         )
+        if entry.receiving_row_id or entry.receiving_group_id is not None:
+            payload = apply_manual_link(db, item, entry, payload)
+        elif entry.warehouse_tracking and "receipt_tracking_number" not in payload:
+            # Compatibility for older receiving clients; never write shared notes.
+            payload["receipt_tracking_number"] = entry.warehouse_tracking.strip() or None
         for k, v in payload.items():
             if k in _ITEM_DATE_FIELDS:
                 setattr(item, k, to_date_only(v) if v is not None else None)
@@ -109,8 +115,6 @@ def bulk_update_items(
                 shipment = db.query(Shipment).filter(Shipment.id == si.shipment_id).first()
                 if shipment:
                     shipment.delivered_at = to_date_only(entry.delivered_at)
-        if getattr(entry, "warehouse_tracking", None):
-            append_warehouse_tracking_note(item, entry.warehouse_tracking)
         if (
             "status" in payload
             and item.status == ItemStatus.SUBMITTED
@@ -218,51 +222,7 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
     )
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
-    if item.payment_line_items:
-        raise HTTPException(status_code=409, detail="Cannot split a line linked to a payment. Update the payment on the Payments page first.")
-    qty = getattr(item, "quantity", 1)
-    keep = data.keep_quantity
-    if keep < 1 or keep >= qty:
-        raise HTTPException(
-            status_code=400,
-            detail=f"keep_quantity must be between 1 and {qty - 1} (inclusive) for quantity {qty}",
-        )
-    split_off_qty = qty - keep
-    item.quantity = keep
-    split_off_status = data.split_off_status if data.split_off_status is not None else item.status
-    now = datetime.now(timezone.utc)
-    new_item = Item(
-        order_id=item.order_id,
-        price_paid=item.price_paid,
-        price_sold=item.price_sold,
-        status=split_off_status,
-        quantity=split_off_qty,
-        description=item.description,
-        shipping=item.shipping,
-        sales_tax=item.sales_tax,
-        submission_id=item.submission_id,
-        submission_api_id=item.submission_api_id,
-        # Remainder is not received — do not carry receipt onto the new line.
-        receipt_id=None if data.split_off_status is not None else item.receipt_id,
-        purchased_at=item.purchased_at,
-        submitted_at=item.submitted_at,
-        scanned_at=None if data.split_off_status is not None else item.scanned_at,
-        needs_review_at=to_date_only(now) if split_off_status == ItemStatus.NEEDS_REVIEW else None,
-    )
-    db.add(new_item)
-    db.flush()
-    if data.copy_tracking:
-        shipment_id = None
-        for si in item.shipment_items or []:
-            if si.shipment_id:
-                shipment_id = si.shipment_id
-                break
-        if shipment_id is None:
-            existing = db.query(ShipmentItem).filter(ShipmentItem.item_id == item.id).first()
-            if existing:
-                shipment_id = existing.shipment_id
-        if shipment_id is not None:
-            db.add(ShipmentItem(shipment_id=shipment_id, item_id=new_item.id))
+    new_item = split_item_record(db, item, data)
     db.commit()
     db.refresh(item)
     db.refresh(new_item)

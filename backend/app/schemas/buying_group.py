@@ -202,6 +202,8 @@ class BuyingGroupCheckReceivingResponse(BaseModel):
 
 
 class ReceivingReviewMatch(BaseModel):
+    receipt_tracking_number: str | None = None
+    manual_receipt_key: str | None = None
     item_id: int
     order_id: int
     store_order_number: str | None = None
@@ -243,6 +245,7 @@ class ReceivingReviewUnknownReceipt(BaseModel):
     """BG receipt whose tracking is not present on any OM shipment."""
 
     receipt_id: str | None = None
+    receipt_key: str | None = None
     tracking_number: str
     tracking_numbers: list[str] = Field(default_factory=list)
     source_data: dict = Field(default_factory=dict)
@@ -281,3 +284,18 @@ class ReceivingReviewPruneResponse(BaseModel):
     buying_group_id: int
     remaining_matched_count: int = 0
     deleted: bool = False
+
+
+class ReceivingReceiptLinkRequest(BaseModel):
+    buying_group_id: int
+    receipt_key: str
+    item_id: int
+    receipt_tracking_number: str
+    confirm_full_quantity: bool = False
+    split_quantity: int | None = Field(default=None, gt=0)
+    split_target: Literal["kept", "split_off"] = "kept"
+
+
+class ReceivingReceiptUnlinkRequest(BaseModel):
+    buying_group_id: int
+    receipt_key: str

@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,8 @@ from app.schemas.buying_group import (
     ReceivingReviewPruneRequest,
     ReceivingReviewPruneResponse,
     ReceivingReviewSession,
+    ReceivingReceiptLinkRequest,
+    ReceivingReceiptUnlinkRequest,
 )
 from app.utils.buying_group_apis.check_receiving import (
     CheckReceivingResult,
@@ -39,6 +41,8 @@ from app.utils.buying_group_apis.submit_tracking import (
     batch_submit_pending_trackings,
     group_ready,
 )
+
+from app.utils.receiving_links import candidate_lines, link_receipt, unlink_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +91,30 @@ def prune_receiving_review(
         remaining_matched_count=remaining,
         deleted=deleted,
     )
+
+
+@router.get("/receiving-review/candidates")
+def receiving_candidates(
+    buying_group_id: int, q: str = "", page: int = Query(default=1, ge=1),
+    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    return candidate_lines(db, buying_group_id, q, page)
+
+
+@router.post("/receiving-review/link", response_model=ReceivingReviewSession)
+def link_unknown_receipt(
+    body: ReceivingReceiptLinkRequest, db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return link_receipt(db, body)
+
+
+@router.post("/receiving-review/unlink", response_model=ReceivingReviewSession)
+def unlink_unknown_receipt(
+    body: ReceivingReceiptUnlinkRequest, db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return unlink_receipt(db, body.buying_group_id, body.receipt_key)
 
 
 @router.get("/{group_id}", response_model=BuyingGroupRead)

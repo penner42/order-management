@@ -2849,6 +2849,7 @@ export default function Orders() {
                                         disabled={savingItemId === item.id}
                                         className={`w-full h-9 rounded border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       />
+                                      <ReceiptFields item={item} disabled={savingItemId === item.id} onSave={(changes) => updateItem(item.id, changes)} />
                                     </div>
 
                                     <div className="mt-2 flex items-center gap-2 min-w-0">
@@ -3122,6 +3123,7 @@ export default function Orders() {
                                         disabled={savingItemId === item.id}
                                         className={`w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       />
+                                      <ReceiptFields item={item} disabled={savingItemId === item.id} onSave={(changes) => updateItem(item.id, changes)} />
                                     </td>
                                     <td className="py-1 px-2">
                                       <div className="flex items-center gap-1.5 min-w-0">
@@ -4271,4 +4273,31 @@ function SplitItemModal({
       </div>
     </div>
   )
+}
+
+
+function ReceiptFields({ item, disabled, onSave }: {
+  item: Item
+  disabled: boolean
+  onSave: (changes: Partial<Item>) => Promise<void>
+}) {
+  const [error, setError] = useState<string | null>(null)
+  return <div role="group" aria-label={`Receipt details for item ${item.id}`} className="mt-2 grid gap-1 text-xs">
+    {(['receipt_id', 'receipt_tracking_number'] as const).map(field => (
+      <label key={field} className="block text-ink-muted">
+        {field === 'receipt_id' ? 'Receipt ID' : 'Receipt tracking number'}
+        <input key={`${item.id}:${field}:${item[field] ?? ''}`} type="text" defaultValue={item[field] ?? ''} disabled={disabled}
+          aria-label={field === 'receipt_id' ? 'Receipt ID' : 'Receipt tracking number'}
+          className="w-full rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-xs text-ink dark:text-gray-100 disabled:opacity-50"
+          onBlur={async e => {
+            const value = e.target.value.trim() || null
+            if (value === (item[field] || null)) return
+            setError(null)
+            try { await onSave({ [field]: value }) }
+            catch (e) { setError(e instanceof Error ? e.message : 'Could not save receipt') }
+          }} />
+      </label>
+    ))}
+    {error && <span className="text-red-600">{error}</span>}
+  </div>
 }

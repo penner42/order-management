@@ -119,6 +119,7 @@ export interface Item {
   sales_tax: string | null
   submission_id: string | null
   submission_api_id: string | null
+  receipt_tracking_number: string | null
   receipt_id: string | null
   created_at: string
   updated_at?: string

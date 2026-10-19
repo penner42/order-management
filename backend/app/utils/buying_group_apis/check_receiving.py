@@ -34,6 +34,9 @@ from app.utils.buying_group_apis.submit_tracking import (
     usabg_group_ready,
 )
 from app.utils.dates import to_date_only
+from app.utils.receiving_links import (
+    applied_receipt_pairs, match_includes_receipt, receipt_is_applied, receipt_key, with_receipt_keys,
+)
 
 # Items that may already be at the warehouse but not marked scanned locally.
 # needs_review (under-received split-offs) is intentionally excluded so a later
@@ -286,27 +289,34 @@ def _receipt_details(row: Any) -> dict[str, Any]:
 def save_receiving_review_pending(db: Session, payload: dict[str, Any]) -> int:
     """Upsert or clear pending review for one buying group. Returns actionable match count."""
     buying_group_id = int(payload["buying_group_id"])
-    count = actionable_count_from_payload(payload)
     existing = (
         db.query(ReceivingReviewPending)
         .filter(ReceivingReviewPending.buying_group_id == buying_group_id)
+        .with_for_update()
         .first()
     )
     # Unknown receipts are a separate review queue. Keep them when a later check
     # no longer returns them (for example, outside a provider's date window).
     previous = existing.payload if existing and isinstance(existing.payload, dict) else {}
+    manual = [m for m in previous.get("matches", []) if m.get("manual_receipt")]
+    manual_keys = {m["manual_receipt_key"] for m in manual}
+    manual_items = {m["item_id"] for m in manual}
+    payload = {**payload, "matches": [
+        m for m in payload.get("matches", [])
+        if m.get("item_id") not in manual_items
+        and not any(match_includes_receipt(m, staged["manual_receipt"]) for staged in manual)
+    ] + manual}
+    count = actionable_count_from_payload(payload)
+    applied_pairs = applied_receipt_pairs(db, buying_group_id)
     known_trackings = _known_shipment_trackings(db)
     unknown_by_key = {}
     for receipt in [*(previous.get("unknown_receipts") or []), *(payload.get("unknown_receipts") or [])]:
+        if receipt_key(receipt) in manual_keys or receipt_is_applied(receipt, applied_pairs):
+            continue
         trackings = receipt.get("tracking_numbers") or [receipt["tracking_number"]]
         if any(tn.strip().casefold() in known_trackings for tn in trackings):
             continue
-        key = (
-            (receipt.get("receipt_id") or "").casefold(),
-            receipt["tracking_number"].strip().casefold(),
-            receipt.get("description"),
-        )
-        unknown_by_key[key] = receipt
+        unknown_by_key[receipt_key(receipt)] = receipt
     payload = {**payload, "unknown_receipts": list(unknown_by_key.values())}
     if count <= 0 and not payload["unknown_receipts"]:
         if existing is not None:
@@ -346,7 +356,7 @@ def list_receiving_review_pending_payloads(db: Session) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
             continue
         if actionable_count_from_payload(payload) > 0 or payload.get("unknown_receipts"):
-            out.append(payload)
+            out.append(with_receipt_keys(payload))
     return out
 
 
@@ -420,6 +430,7 @@ def prune_receiving_review_pending(
     existing = (
         db.query(ReceivingReviewPending)
         .filter(ReceivingReviewPending.buying_group_id == buying_group_id)
+        .with_for_update()
         .first()
     )
     if existing is None:
@@ -436,7 +447,7 @@ def prune_receiving_review_pending(
     new_matches = [
         m
         for m in matches
-        if isinstance(m, dict) and int(m.get("item_id") or 0) not in id_set
+        if isinstance(m, dict) and (m.get("manual_receipt") or int(m.get("item_id") or 0) not in id_set)
     ]
     payload = {**payload, "matches": new_matches}
     count = actionable_count_from_payload(payload)

@@ -86,6 +86,7 @@ class Item(Base):
     submission_api_id = Column(String(255), nullable=True)
     # May hold comma-joined warehouse receipt / transaction IDs (D&R multi-unit).
     receipt_id = Column(Text, nullable=True)
+    receipt_tracking_number = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
