@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
+import type { Payment } from '../api/types'
+import { parseDecimal } from '../utils/decimal'
 
 export interface PaymentCapability { buying_group_id: number; name: string; supported: boolean; ready: boolean; reason: string | null; provider: string | null }
 interface Allocation { receipt_source_id: number; item_id: number; quantity: number; amount: string }
@@ -22,7 +24,7 @@ function localInput(v: string | null) {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
 }
 
-function ReviewCard({ review, group, update, busy, run }: { review: Review; group: GroupReview; update: (g: GroupReview) => void; busy: boolean; run: (fn: () => Promise<void>) => Promise<void> }) {
+function ReviewCard({ review, group, payments, update, busy, run }: { review: Review; group: GroupReview; payments: Payment[]; update: (g: GroupReview) => void; busy: boolean; run: (fn: () => Promise<void>) => Promise<void> }) {
   const [content, setContent] = useState<Content>(structuredClone(review.content))
   const [dirty, setDirty] = useState(false)
   const [showAll, setShowAll] = useState(false)
@@ -113,7 +115,17 @@ function ReviewCard({ review, group, update, busy, run }: { review: Review; grou
     {!confirmed && <>
       <label className="block text-sm text-ink">Explicit bonus or fee (explanation required)<input className={`${field} block w-40`} type="number" step="0.01" value={content.payment_bonus ?? '0.00'} onChange={e => edit({ ...content, payment_bonus: e.target.value })} /></label>
       <label className="block text-sm text-ink">Review explanation<textarea className={`${field} block w-full`} disabled={busy} value={content.note} onChange={e => edit({ ...content, note: e.target.value })} /></label>
-      <label className="block text-sm text-ink">Link an existing local payment (optional ID)<input type="number" min="1" className={`${field} block w-40`} value={content.existing_payment_id ?? ''} onChange={e => edit({ ...content, existing_payment_id: e.target.value ? Number(e.target.value) : null })} /></label>
+      <label className="block text-sm text-ink">Link an existing local payment
+        <select className={`${field} block w-full max-w-xl`} disabled={busy} value={content.existing_payment_id ?? ''} onChange={e => edit({ ...content, existing_payment_id: e.target.value ? Number(e.target.value) : null })}>
+          <option value="">Create a new payment</option>
+          {content.existing_payment_id && !payments.some(p => p.id === content.existing_payment_id) && <option value={content.existing_payment_id} disabled>Previously selected payment is unavailable — choose another payment</option>}
+          {payments.map(payment => {
+            const amount = payment.total_amount ?? payment.line_items.reduce((sum, li) => sum + parseDecimal(li.amount), 0) + parseDecimal(payment.payment_bonus) + (payment.corrections ?? []).reduce((sum, c) => sum + c.amount, 0)
+            const unavailable = payment.source_details || group.reviews.some(r => r.payment_id === payment.id) ? 'Already linked' : payment.monarch_receipt ? 'Monarch confirmed' : null
+            return <option key={payment.id} value={payment.id} disabled={!!unavailable}>{payment.payment_id?.trim() || 'No payment ID'} · {money(amount)} · {date(payment.payment_requested_at)}{unavailable ? ` · ${unavailable}` : ''}</option>
+          })}
+        </select>
+      </label>
       <div className="flex flex-wrap items-center gap-3 text-ink"><strong>Allocated {money(total)} · Difference {money(Number(review.source.amount) - total)}</strong>
         <button className={button} disabled={busy || !dirty} onClick={() => save()}>Save review</button>
         <button className={`${button} bg-brand-100 dark:bg-gray-700`} disabled={busy || dirty || review.issues.length > 0} onClick={() => run(async () => update(await api.post<GroupReview>(`/payment-review/drafts/${review.id}/confirm`, { version: review.version, fingerprint: review.fingerprint })))}>Confirm payment</button>
@@ -128,6 +140,7 @@ export default function PaymentReviewPage() {
   const groupId = Number(params.get('group')) || null
   const [capabilities, setCapabilities] = useState<PaymentCapability[]>([])
   const [group, setGroup] = useState<GroupReview | null>(null)
+  const [payments, setPayments] = useState<Payment[]>([])
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -135,10 +148,19 @@ export default function PaymentReviewPage() {
   useEffect(() => {
     let active = true
     setGroup(null); setError(null)
+    setPayments([])
     setLoading(Boolean(groupId))
     if (groupId) {
       setLoading(true)
-      api.get<GroupReview>(`/payment-review/groups/${groupId}`).then(g => { if (active) setGroup(g) }).catch(e => { if (active) setError(String(e)) }).finally(() => { if (active) setLoading(false) })
+      Promise.all([
+        api.get<GroupReview>(`/payment-review/groups/${groupId}`),
+        api.get<Payment[]>(`/payments?buying_group_id=${groupId}`),
+      ]).then(([g, localPayments]) => {
+        if (active) {
+          setGroup(g)
+          setPayments(localPayments.filter(p => p.buying_group_id === groupId))
+        }
+      }).catch(e => { if (active) setError(String(e)) }).finally(() => { if (active) setLoading(false) })
     }
     return () => { active = false }
   }, [groupId])
@@ -163,7 +185,7 @@ export default function PaymentReviewPage() {
       <p className="text-sm text-ink-muted">{group.reviews.filter(r => !r.payment_id).length} pending payments · {group.reviews.filter(r => r.payment_id).length} confirmed · {group.receipts.length} receipts</p>
       {[...group.reviews].reverse().map((review, index) => <details key={`${groupId}:${review.id}:${review.version}`} open={index === 0}>
         <summary className="cursor-pointer p-3 text-ink font-medium">Payment {review.external_id} · {money(review.source.amount)} · {review.payment_id ? 'Confirmed' : `${review.issues.length} review issues`}</summary>
-        <ReviewCard review={review} group={group} update={setGroup} busy={busy} run={run} />
+        <ReviewCard review={review} group={group} payments={payments} update={setGroup} busy={busy} run={run} />
       </details>)}
       {group.receipts.some(r => !r.covered && !group.reviews.some(d => d.content.receipt_ids.includes(r.id))) && <section className="rounded border border-brand-200 dark:border-gray-700 p-4 text-ink"><h2 className="font-medium">Receipts outside payment windows</h2>{group.receipts.filter(r => !r.covered && !group.reviews.some(d => d.content.receipt_ids.includes(r.id))).map(r => <p className="text-sm" key={r.id}>Receipt {r.external_id} · {money(r.payload.amount)} · {r.payload.description}</p>)}</section>}
     </>}

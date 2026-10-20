@@ -64,3 +64,44 @@ test('Payment review preserves its snapshot when refresh fails', async ({ app })
   await expect(app.getByRole('alert')).toContainText('Existing review data was preserved')
   await expect(app.getByRole('heading', { name: 'Payment payment-1 · $100.00' })).toBeVisible()
 })
+
+test('Existing payments can be selected by payment ID and amount and the link persists', async ({ app }) => {
+  const group = fixture()
+  const localPayment = {
+    id: 42, buying_group_id: 170001, payment_id: 'existing-reference', total_amount: 100,
+    payment_requested_at: '2026-05-02T12:00:00Z', line_items: [],
+  }
+  await app.route('**/api/payment-review/capabilities', route => route.fulfill({ json: [group.capability] }))
+  await app.route('**/api/payment-review/groups/170001', route => route.fulfill({ json: group }))
+  await app.route('**/api/payments?buying_group_id=170001', route => route.fulfill({ json: [
+    localPayment,
+    { ...localPayment, id: 43, payment_id: 'linked-reference', source_details: { provider: 'parsefile', review_id: 2 } },
+    { ...localPayment, id: 44, payment_id: 'confirmed-reference', monarch_receipt: { confirmation_id: 3 } },
+    { ...localPayment, id: 45, buying_group_id: 170002, payment_id: 'different-group-reference' },
+    { ...localPayment, id: 46, payment_id: null },
+  ] }))
+  const selections: Array<number | null> = []
+  await app.route('**/api/payment-review/drafts/1', async route => {
+    const body = route.request().postDataJSON()
+    selections.push(body.content.existing_payment_id)
+    group.reviews[0].content = body.content
+    group.reviews[0].version += 1
+    await route.fulfill({ json: group })
+  })
+  await app.goto('/payments/review?group=170001')
+  const selector = app.getByRole('combobox', { name: 'Link an existing local payment', exact: true })
+  await expect(selector.locator('option[value="42"]')).toHaveText(/existing-reference · \$100\.00/)
+  await expect(selector.locator('option[value="43"]')).toHaveJSProperty('disabled', true)
+  await expect(selector.locator('option[value="44"]')).toHaveJSProperty('disabled', true)
+  await expect(selector.locator('option').filter({ hasText: 'different-group-reference' })).toHaveCount(0)
+  await expect(selector.locator('option[value="46"]')).toHaveText(/No payment ID · \$100\.00/)
+  await selector.selectOption({ label: await selector.locator('option[value="42"]').innerText() })
+  await app.getByRole('button', { name: 'Save review', exact: true }).click()
+  await expect(selector).toHaveValue('42')
+  await app.reload()
+  await expect(selector).toHaveValue('42')
+  await selector.selectOption({ label: 'Create a new payment' })
+  await app.getByRole('button', { name: 'Save review', exact: true }).click()
+  await expect(selector).toHaveValue('')
+  expect(selections).toEqual([42, null])
+})
