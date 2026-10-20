@@ -3,18 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from datetime import datetime, timezone
-
-from croniter import croniter
-from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import BrowserProfile
-from app.schemas.browser_profile import (
-    DEFAULT_FULL_CHECK_CRON,
-    DEFAULT_UNSHIPPED_CHECK_CRON,
-)
+from app.browser_automation.schedules import list_due_profile_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -23,100 +14,9 @@ TICK_SECONDS = 1
 
 _task: asyncio.Task | None = None
 _lock = asyncio.Lock()
-_last_profile_tick = 0.0
-
-
-def _local_tz():
-    """Server local timezone (from the host clock)."""
-    return datetime.now().astimezone().tzinfo or timezone.utc
-
-
-def _as_aware(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        # Naive timestamps are treated as local wall time.
-        return dt.replace(tzinfo=_local_tz())
-    return dt
-
-
-def schedule_due(
-    *,
-    enabled: bool,
-    cron_expr: str,
-    last_run_at: datetime | None,
-    now: datetime,
-) -> bool:
-    """Return True when a cron schedule should fire.
-
-    Schedules are evaluated in the server's local timezone. A run is due when
-    the most recent cron fire time is after the last successful run (or when
-    never run).
-    """
-    if not enabled:
-        return False
-    expr = (cron_expr or "").strip()
-    if not expr or not croniter.is_valid(expr):
-        return False
-    last = _as_aware(last_run_at)
-    if last is None:
-        return True
-    try:
-        local_tz = _local_tz()
-        # croniter returns naive datetimes when given a naive base; use local wall time.
-        now_local = now.astimezone(local_tz) if now.tzinfo else now.replace(tzinfo=local_tz)
-        base = now_local.replace(tzinfo=None)
-        prev_fire = croniter(expr, base).get_prev(datetime).replace(tzinfo=local_tz)
-    except (ValueError, KeyError, TypeError):
-        logger.warning("Invalid cron expression %r — skipping schedule", expr)
-        return False
-    return prev_fire > last.astimezone(prev_fire.tzinfo)
-
-
-def due_modes_for_profile(profile: BrowserProfile, now: datetime | None = None) -> list[str]:
-    """Return import modes that are due for this profile (at most one job at a time)."""
-    now = now or datetime.now(timezone.utc)
-    # Prefer full check when both are due — it covers recent history; unshipped can wait.
-    if schedule_due(
-        enabled=bool(profile.full_check_enabled),
-        cron_expr=str(profile.full_check_cron or DEFAULT_FULL_CHECK_CRON),
-        last_run_at=profile.full_check_last_run_at,
-        now=now,
-    ):
-        return ["full"]
-    if schedule_due(
-        enabled=bool(profile.unshipped_check_enabled),
-        cron_expr=str(profile.unshipped_check_cron or DEFAULT_UNSHIPPED_CHECK_CRON),
-        last_run_at=profile.unshipped_check_last_run_at,
-        now=now,
-    ):
-        return ["unshipped"]
-    return []
-
-
-def list_due_profile_jobs(db: Session) -> list[tuple[int, str, int]]:
-    """Return (profile_id, mode, max_pages) for profiles that should run now."""
-    now = datetime.now(timezone.utc)
-    # Only ready profiles — avoid spinning browsers every minute when login is needed.
-    rows = (
-        db.query(BrowserProfile)
-        .filter(BrowserProfile.status == "ready", BrowserProfile.integration.is_(None))
-        .order_by(BrowserProfile.id)
-        .all()
-    )
-    out: list[tuple[int, str, int]] = []
-    for profile in rows:
-        modes = due_modes_for_profile(profile, now)
-        if not modes:
-            continue
-        mode = modes[0]
-        max_pages = int(profile.full_check_max_pages or 3) if mode == "full" else 3
-        out.append((profile.id, mode, max_pages))
-    return out
 
 
 async def _tick() -> None:
-    global _last_profile_tick
     # Import here to avoid circular imports at module load.
     from app.routers.browser_profiles import start_scheduled_import
     from app.buying_group_schedules import list_due_group_ids
@@ -127,12 +27,7 @@ async def _tick() -> None:
 
     db = SessionLocal()
     try:
-        # Group jobs need second precision for short intervals; browser imports
-        # keep their original once-per-minute polling cadence.
-        due = []
-        if time.monotonic() - _last_profile_tick >= 60:
-            due = list_due_profile_jobs(db)
-            _last_profile_tick = time.monotonic()
+        due = list_due_profile_jobs(db)
         due_groups = list_due_group_ids(db)
     finally:
         db.close()

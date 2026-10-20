@@ -272,9 +272,12 @@ export interface BrowserProfile {
   full_check_cron: string
   full_check_max_pages: number
   full_check_last_run_at: string | null
+  full_check_next_run_at: string | null
   unshipped_check_enabled: boolean
   unshipped_check_cron: string
   unshipped_check_last_run_at: string | null
+  unshipped_check_interval_minutes: number
+  unshipped_check_next_run_at: string | null
   created_at?: string | null
   updated_at?: string | null
   store_id: number | null
@@ -286,10 +289,9 @@ export interface BrowserProfileScheduleUpdate {
   store_id?: number
   store_account_id?: number | null
   full_check_enabled?: boolean
-  full_check_cron?: string
   full_check_max_pages?: number
   unshipped_check_enabled?: boolean
-  unshipped_check_cron?: string
+  unshipped_check_interval_minutes?: number
 }
 
 export interface BrowserJob {

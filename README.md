@@ -431,6 +431,15 @@ intervals can occasionally coincide in later cycles; group jobs run serially.
 Next run times persist across restarts, and overdue jobs run once without replaying
 missed intervals. Manual actions leave the automatic schedule unchanged.
 
+Store browser profiles have independent **Full check** and **Check unshipped**
+toggles. Full checks run once daily; unshipped checks run every configured number
+of minutes (1–525600). Both check types are staggered across profiles, with their
+next run times persisted across restarts. Saving schedule changes rebuilds the
+stagger across store profiles. Busy profiles wait until ready; missed runs are
+skipped when a check starts, and failures wait until the next scheduled run.
+Migration 076 preserves the enabled checks and converts each store's old
+unshipped cron cadence to minutes (falling back to 360 for invalid cron).
+
 Migration 073 converts the old submit cron to a minute interval using the gap
 between its next two runs. It enables receiving for groups whose automatic
 submission was enabled, preserving the previous receiving-after-submit behavior.

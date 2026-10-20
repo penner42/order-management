@@ -2,8 +2,7 @@
 from datetime import datetime
 from typing import Literal
 
-from croniter import croniter
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 Retailer = Literal["amazon", "walmart", "costco"]
@@ -21,17 +20,6 @@ DEFAULT_FULL_CHECK_CRON = "0 0 * * *"
 DEFAULT_UNSHIPPED_CHECK_CRON = "0 */6 * * *"
 
 
-def _normalize_cron(value: str) -> str:
-    expr = (value or "").strip()
-    if not expr:
-        raise ValueError("Cron expression is required")
-    if len(expr) > 64:
-        raise ValueError("Cron expression must be at most 64 characters")
-    if not croniter.is_valid(expr):
-        raise ValueError("Invalid cron expression (expected 5 fields: min hour day month weekday)")
-    return expr
-
-
 class BrowserProfileCreate(BaseModel):
     store_id: int | None = None
     store_account_id: int | None = None
@@ -44,17 +32,9 @@ class BrowserProfileScheduleUpdate(BaseModel):
     store_account_id: int | None = None
     store_id: int | None = None
     full_check_enabled: bool | None = None
-    full_check_cron: str | None = Field(default=None, max_length=64)
     full_check_max_pages: int | None = Field(default=None, ge=1, le=50)
     unshipped_check_enabled: bool | None = None
-    unshipped_check_cron: str | None = Field(default=None, max_length=64)
-
-    @field_validator("full_check_cron", "unshipped_check_cron")
-    @classmethod
-    def validate_cron(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return _normalize_cron(value)
+    unshipped_check_interval_minutes: int | None = Field(default=None, ge=1, le=525600)
 
 
 class BrowserProfileRead(BaseModel):
@@ -69,9 +49,12 @@ class BrowserProfileRead(BaseModel):
     full_check_cron: str = DEFAULT_FULL_CHECK_CRON
     full_check_max_pages: int = 3
     full_check_last_run_at: datetime | None = None
+    full_check_next_run_at: datetime | None = None
     unshipped_check_enabled: bool = False
     unshipped_check_cron: str = DEFAULT_UNSHIPPED_CHECK_CRON
     unshipped_check_last_run_at: datetime | None = None
+    unshipped_check_interval_minutes: int = 360
+    unshipped_check_next_run_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     # Nested display helpers (populated by router)

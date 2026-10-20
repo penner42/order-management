@@ -114,9 +114,12 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
         full_check_cron=str(profile.full_check_cron or DEFAULT_FULL_CHECK_CRON),
         full_check_max_pages=int(profile.full_check_max_pages or 3),
         full_check_last_run_at=profile.full_check_last_run_at,
+        full_check_next_run_at=profile.full_check_next_run_at,
         unshipped_check_enabled=bool(profile.unshipped_check_enabled),
         unshipped_check_cron=str(profile.unshipped_check_cron or DEFAULT_UNSHIPPED_CHECK_CRON),
         unshipped_check_last_run_at=profile.unshipped_check_last_run_at,
+        unshipped_check_interval_minutes=profile.unshipped_check_interval_minutes,
+        unshipped_check_next_run_at=profile.unshipped_check_next_run_at,
         created_at=profile.created_at,
         updated_at=profile.updated_at,
         store_id=store.id if store else None,
@@ -576,14 +579,16 @@ def update_browser_profile_schedule(
             db.expire(profile, ["store", "store_account"])
     if data.full_check_enabled is not None:
         profile.full_check_enabled = data.full_check_enabled
-    if data.full_check_cron is not None:
-        profile.full_check_cron = data.full_check_cron
     if data.full_check_max_pages is not None:
         profile.full_check_max_pages = data.full_check_max_pages
     if data.unshipped_check_enabled is not None:
         profile.unshipped_check_enabled = data.unshipped_check_enabled
-    if data.unshipped_check_cron is not None:
-        profile.unshipped_check_cron = data.unshipped_check_cron
+    if data.unshipped_check_interval_minutes is not None:
+        profile.unshipped_check_interval_minutes = data.unshipped_check_interval_minutes
+    from app.browser_automation.schedules import SCHEDULE_FIELDS, rebuild_schedules
+    if SCHEDULE_FIELDS & data.model_fields_set:
+        db.flush()
+        rebuild_schedules(db)
     _commit_profile(db)
     return _profile_read(_get_profile_or_404(db, profile_id))
 
@@ -969,7 +974,8 @@ async def start_scheduled_import(profile_id: int, *, mode: str, max_pages: int) 
     """Start a due scheduled job. Returns False if the profile is busy / missing."""
     db = SessionLocal()
     try:
-        profile = db.query(BrowserProfile).filter(BrowserProfile.id == profile_id).first()
+        from app.browser_automation.schedules import claim_profile_job
+        profile = claim_profile_job(db, profile_id, mode)
         if not profile:
             return False
         if profile.status == "importing" or profile.status == "login_in_progress":
@@ -979,7 +985,7 @@ async def start_scheduled_import(profile_id: int, *, mode: str, max_pages: int) 
                 db,
                 profile,
                 mode=mode,
-                max_pages=max_pages,
+                max_pages=profile.full_check_max_pages if mode == "full" else 3,
                 auto_apply=True,
                 scheduled=True,
             )

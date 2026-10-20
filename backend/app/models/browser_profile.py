@@ -13,6 +13,7 @@ class BrowserProfile(Base):
     __table_args__ = (
         CheckConstraint("(integration IS NOT NULL AND integration = 'monarch' AND retailer = 'monarch' AND store_id IS NULL AND store_account_id IS NULL) OR (integration IS NULL AND store_id IS NOT NULL AND retailer <> 'monarch')", name="ck_browser_profile_owner"),
         UniqueConstraint("store_account_id", name="uq_browser_profiles_store_account_id"),
+        CheckConstraint("unshipped_check_interval_minutes BETWEEN 1 AND 525600", name="ck_store_unshipped_interval"),
         Index("uq_browser_profiles_direct_store", "store_id", unique=True,
               postgresql_where=text("store_account_id IS NULL"),
               sqlite_where=text("store_account_id IS NULL")),
@@ -34,16 +35,20 @@ class BrowserProfile(Base):
     last_error = Column(Text, nullable=True)
     last_import_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Full check: scan first N order-history pages on a cron schedule (local time).
+    # Full check: scan first N order-history pages once daily.
     full_check_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    # Legacy cron values retained for compatibility; scheduling uses next_run_at.
     full_check_cron = Column(String(64), nullable=False, default="0 0 * * *", server_default="0 0 * * *")
     full_check_max_pages = Column(Integer, nullable=False, default=3, server_default="3")
     full_check_last_run_at = Column(DateTime(timezone=True), nullable=True)
+    full_check_next_run_at = Column(DateTime(timezone=True), nullable=True)
 
     # Unshipped check: re-fetch detail for all account orders with unshipped items.
     unshipped_check_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
     unshipped_check_cron = Column(String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *")
     unshipped_check_last_run_at = Column(DateTime(timezone=True), nullable=True)
+    unshipped_check_interval_minutes = Column(Integer, nullable=False, default=360, server_default="360")
+    unshipped_check_next_run_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

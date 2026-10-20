@@ -9,24 +9,19 @@ import type {
   StoreAccount,
 } from '../api/types'
 
-const DEFAULT_FULL_CHECK_CRON = '0 0 * * *'
-const DEFAULT_UNSHIPPED_CHECK_CRON = '0 */6 * * *'
-
 type ScheduleDraft = {
   full_check_enabled: boolean
-  full_check_cron: string
   full_check_max_pages: number
   unshipped_check_enabled: boolean
-  unshipped_check_cron: string
+  unshipped_check_interval_minutes: number
 }
 
 function scheduleDraftFromProfile(p: BrowserProfile): ScheduleDraft {
   return {
     full_check_enabled: !!p.full_check_enabled,
-    full_check_cron: p.full_check_cron?.trim() || DEFAULT_FULL_CHECK_CRON,
     full_check_max_pages: p.full_check_max_pages ?? 3,
     unshipped_check_enabled: !!p.unshipped_check_enabled,
-    unshipped_check_cron: p.unshipped_check_cron?.trim() || DEFAULT_UNSHIPPED_CHECK_CRON,
+    unshipped_check_interval_minutes: p.unshipped_check_interval_minutes ?? 360,
   }
 }
 
@@ -720,10 +715,9 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
             profiles.find((p) => p.id === profileId) ??
               ({
                 full_check_enabled: false,
-                full_check_cron: DEFAULT_FULL_CHECK_CRON,
                 full_check_max_pages: 3,
                 unshipped_check_enabled: false,
-                unshipped_check_cron: DEFAULT_UNSHIPPED_CHECK_CRON,
+                unshipped_check_interval_minutes: 360,
               } as BrowserProfile)
           )),
         ...patch,
@@ -738,10 +732,9 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
     setError(null)
     const body: BrowserProfileScheduleUpdate = {
       full_check_enabled: draft.full_check_enabled,
-      full_check_cron: draft.full_check_cron.trim() || DEFAULT_FULL_CHECK_CRON,
       full_check_max_pages: Math.min(50, Math.max(1, draft.full_check_max_pages || 1)),
       unshipped_check_enabled: draft.unshipped_check_enabled,
-      unshipped_check_cron: draft.unshipped_check_cron.trim() || DEFAULT_UNSHIPPED_CHECK_CRON,
+      unshipped_check_interval_minutes: draft.unshipped_check_interval_minutes,
     }
     try {
       const updated = await api.patch<BrowserProfile>(`/browser-profiles/${profileId}`, body)
@@ -852,11 +845,9 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
               const busy = p.status === 'importing' || p.status === 'login_in_progress'
               const scheduleDirty =
                 schedule.full_check_enabled !== !!p.full_check_enabled ||
-                schedule.full_check_cron !== (p.full_check_cron?.trim() || DEFAULT_FULL_CHECK_CRON) ||
                 schedule.full_check_max_pages !== (p.full_check_max_pages ?? 3) ||
                 schedule.unshipped_check_enabled !== !!p.unshipped_check_enabled ||
-                schedule.unshipped_check_cron !==
-                  (p.unshipped_check_cron?.trim() || DEFAULT_UNSHIPPED_CHECK_CRON)
+                schedule.unshipped_check_interval_minutes !== (p.unshipped_check_interval_minutes ?? 360)
               return (
                 <li
                   key={p.id}
@@ -1034,19 +1025,7 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
                         />
                         <span>Full check</span>
                       </label>
-                      <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
-                        cron
-                        <input
-                          type="text"
-                          value={schedule.full_check_cron}
-                          onChange={(e) =>
-                            updateScheduleDraft(p.id, { full_check_cron: e.target.value })
-                          }
-                          placeholder={DEFAULT_FULL_CHECK_CRON}
-                          spellCheck={false}
-                          className="w-36 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 font-mono text-sm text-ink dark:text-gray-100"
-                        />
-                      </label>
+                      <span className="text-xs text-ink-muted">Once daily</span>
                       <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
                         pages
                         <input
@@ -1066,7 +1045,7 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
                         />
                       </label>
                       <span className="text-xs text-ink-muted dark:text-gray-500">
-                        Last: {formatLastRun(p.full_check_last_run_at)}
+                        Last: {formatLastRun(p.full_check_last_run_at)} · Next: {p.full_check_next_run_at ? formatLastRun(p.full_check_next_run_at) : "Off"}
                       </span>
                       <button
                         type="button"
@@ -1099,20 +1078,20 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
                         <span>Check unshipped</span>
                       </label>
                       <label className="inline-flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
-                        cron
+                        Every (minutes)
                         <input
-                          type="text"
-                          value={schedule.unshipped_check_cron}
-                          onChange={(e) =>
-                            updateScheduleDraft(p.id, { unshipped_check_cron: e.target.value })
-                          }
-                          placeholder={DEFAULT_UNSHIPPED_CHECK_CRON}
-                          spellCheck={false}
-                          className="w-36 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 font-mono text-sm text-ink dark:text-gray-100"
+                          type="number"
+                          min={1}
+                          max={525600}
+                          value={schedule.unshipped_check_interval_minutes}
+                          onChange={(e) => updateScheduleDraft(p.id, {
+                            unshipped_check_interval_minutes: Math.min(525600, Math.max(1, Number(e.target.value) || 1)),
+                          })}
+                          className="w-24 rounded border border-brand-200 dark:border-gray-600 dark:bg-gray-800 px-1.5 py-1 text-sm text-ink dark:text-gray-100"
                         />
                       </label>
                       <span className="text-xs text-ink-muted dark:text-gray-500">
-                        Last: {formatLastRun(p.unshipped_check_last_run_at)}
+                        Last: {formatLastRun(p.unshipped_check_last_run_at)} · Next: {p.unshipped_check_next_run_at ? formatLastRun(p.unshipped_check_next_run_at) : "Off"}
                       </span>
                       <button
                         type="button"
@@ -1124,10 +1103,9 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
                       </button>
                     </div>
                     <p className="text-[11px] text-ink-muted dark:text-gray-500">
-                      Cron is local server time (min hour day month weekday). Examples:{' '}
-                      <span className="font-mono">0 0 * * *</span> daily midnight,{' '}
-                      <span className="font-mono">0 */6 * * *</span> every 6 hours. Scheduled runs
-                      and Run buttons apply updates directly. Import now still opens Import Review
+                      Checks are automatically staggered across store profiles. Saving schedule changes rebuilds
+                      the next run times for all profiles. Full checks repeat daily; unshipped checks repeat at
+                      their selected interval. Scheduled runs and Run buttons apply updates directly. Import now still opens Import Review
                       for manual review.
                     </p>
                   </div>
