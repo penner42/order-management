@@ -112,7 +112,6 @@ class BuyinggroupReceipt:
     tracking_note: str | None
     delivery: str | None
     raw: dict[str, Any] = field(default_factory=dict)
-    reward: Decimal | None = None
 
 
 @dataclass
@@ -943,7 +942,6 @@ def _parse_receipt_row(row: dict[str, Any]) -> BuyinggroupReceipt:
         alt_tracking_id=alt_tracking_id,
         quantity=_parse_int_field(row.get("quantity") if row.get("quantity") is not None else row.get("qty")),
         total=_parse_money_field(row.get("total")),
-        reward=_parse_money_field(row.get("reward")),
         status=str(status).strip() if status is not None and str(status).strip() else None,
         void=void,
         created_dt=str(created_dt).strip() if created_dt is not None and str(created_dt).strip() else None,
@@ -1025,6 +1023,65 @@ def _fetch_receipts_page(
             raise RuntimeError(f"BuyingGroup get_receipts failed: {_error_detail(raw, text)}")
     receipts, pages = _receipts_from_payload(raw)
     return receipts, pages, raw
+
+
+def tracking_reward_key(tracking: str) -> str:
+    return "".join(tracking.casefold().split()).replace("-", "")
+
+
+def list_tracking_rewards(
+    *,
+    base_url: str | None,
+    username: str,
+    password: str,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Decimal]:
+    """Read rewards from Tracking Management's get_orders, not get_receipts.
+
+    A reward belongs to a tracking, including its alternate tracking alias.
+    Keep absent values distinct from explicit zero rewards.
+    """
+    base = resolve_base_url(base_url)
+    tokens = _ensure_tokens(base_url=base, username=username, password=password,
+                            timeout_seconds=timeout_seconds)
+    rewards: dict[str, Decimal] = {}
+    page = 1
+    while page <= _MAX_LIST_PAGES:
+        def _call(toks: _AuthTokens) -> Any:
+            url = f"{base}{GET_ORDERS_PATH}"
+            fields = [("page", str(page)), ("page_size", str(page_size))]
+            status, text, raw = _multipart_request(
+                url=url, fields=fields, headers=_auth_headers(toks.access),
+                timeout_seconds=timeout_seconds,
+            )
+            if _is_auth_failure(status, raw, text):
+                raise _SessionExpired("BuyingGroup tracking rewards session expired")
+            _raise_if_fail_status(raw, url=url, raw_text=text)
+            return raw
+
+        raw, tokens = _with_reauth(
+            base_url=base, username=username, password=password, tokens=tokens,
+            timeout_seconds=timeout_seconds, call=_call,
+        )
+        rows = _orders_from_payload(raw)
+        for row in rows:
+            reward = _parse_money_field(row.get("reward"))
+            if reward is None or not reward.is_finite():
+                continue
+            for field_name in ("tracking_id", "alt_tracking_id"):
+                tracking = _nested_tracking_id(row.get(field_name))
+                if tracking:
+                    rewards[tracking_reward_key(tracking)] = reward
+        payload = raw.get("payload", {}) if isinstance(raw, dict) else {}
+        pages = _parse_int_field(payload.get("pages")) if isinstance(payload, dict) else None
+        count = _parse_int_field(payload.get("count")) if isinstance(payload, dict) else None
+        if not rows or (pages is not None and page >= pages) or (
+            count is not None and page * page_size >= count
+        ) or (pages is None and count is None and len(rows) < page_size):
+            return rewards
+        page += 1
+    raise RuntimeError("BuyingGroup tracking rewards exceeded the pagination limit")
 
 
 def list_receipts(

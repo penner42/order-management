@@ -37,16 +37,36 @@ class BuyingGroupRewardTests(unittest.TestCase):
         self.db.add(ShipmentItem(item_id=self.item.id, shipment_id=shipment.id))
         self.db.commit()
 
-    def check(self, **changes):
+    def check(self, *, rewards=None, reward_error=None, extra_receipts=(), **changes):
         receipt = api._parse_receipt_row({"receipt_id": "R1", "tracking_id": "TRACK", "quantity": 2,
-                                          "total": "40.00", "reward": "$6.00", **changes})
-        with patch.object(api, "list_receipts", return_value=[receipt]), patch.object(api, "list_receipt_analytics", return_value=[]):
+                                          "total": "40.00", **changes})
+        if rewards is None:
+            rewards = {api.tracking_reward_key(receipt.tracking_id): Decimal("6.00")}
+        with (patch.object(api, "list_receipts", return_value=[receipt, *extra_receipts]),
+              patch.object(api, "list_tracking_rewards", return_value=rewards, side_effect=reward_error),
+              patch.object(api, "list_receipt_analytics", return_value=[])):
             return receiving.check_receiving_for_group(self.db, buying_group_id=self.group.id)
 
-    def test_reward_parses_without_conflating_missing_and_zero(self):
-        for raw, expected in [(None, None), ("", None), ("bad", None), (0, Decimal(0)), ("$1,234.50", Decimal("1234.50"))]:
-            with self.subTest(raw=raw):
-                self.assertEqual(api._parse_receipt_row({"reward": raw}).reward, expected)
+    def test_reward_comes_from_tracking_even_when_receipt_has_no_reward(self):
+        self.assertEqual(self.check().matches[0].reward, Decimal("6.00"))
+        self.assertIsNone(self.check(rewards={}).matches[0].reward)
+        self.assertEqual(self.check(rewards={"track": Decimal(0)}).matches[0].reward, Decimal("0.00"))
+
+    def test_reward_failure_keeps_receiving_available_without_overwriting_saved_reward(self):
+        self.item.reward = Decimal("5.00")
+        self.db.commit()
+        result = self.check(reward_error=RuntimeError("tracking service unavailable"))
+        self.assertIsNone(result.error)
+        self.assertIsNone(result.matches[0].reward)
+        self.assertIn("Tracking rewards unavailable", result.message)
+        self.assertEqual(self.item.reward, Decimal("5.00"))
+
+    def test_alt_tracking_can_supply_reward(self):
+        self.assertEqual(self.check(alt_tracking="ALT", rewards={"alt": Decimal("7.00")}).matches[0].reward, Decimal("7.00"))
+
+    def test_multiple_receipts_do_not_duplicate_tracking_reward(self):
+        extra = api._parse_receipt_row({"receipt_id": "R2", "tracking_id": "TRACK", "quantity": 1, "total": "20.00"})
+        self.assertEqual(self.check(extra_receipts=[extra]).matches[0].reward, Decimal("6.00"))
 
     def test_under_received_reward_only_belongs_to_received_line(self):
         result = self.check()
@@ -91,3 +111,45 @@ class BuyingGroupRewardTests(unittest.TestCase):
             receipt_id="R1", receiving_group_id=self.group.id, receiving_row_id=match["row_id"])]), db=self.db, _=None)
         self.assertEqual(self.item.reward, Decimal("6.00"))
         self.assertEqual(self.item.price_sold, Decimal("20.00"))
+
+
+class TrackingRewardApiTests(unittest.TestCase):
+    def fetch(self, responses, page_size=2):
+        def response(**kwargs):
+            self.assertTrue(kwargs["url"].endswith("/v1/order/get_orders"))
+            page = int(dict(kwargs["fields"])["page"])
+            raw = responses[page - 1]
+            return 200, "", raw
+
+        with (patch.object(api, "_ensure_tokens", return_value=api._AuthTokens("access", "refresh")),
+              patch.object(api, "_multipart_request", side_effect=response)):
+            return api.list_tracking_rewards(base_url="https://example.test", username="user", password="pass", page_size=page_size)
+
+    def test_tracking_api_paginates_by_count_and_maps_primary_and_alternate(self):
+        rewards = self.fetch([
+            {"status": "SUCCESS", "payload": {"count": 3, "orders": [
+                {"tracking_id": "Tr- ack", "alt_tracking_id": "ALT", "reward": "$6.50"},
+                {"tracking_id": "ZERO", "reward": 0}]}},
+            {"status": "SUCCESS", "payload": {"count": 3, "orders": [
+                {"tracking_id": "LAST", "reward": "1,234.50"}]}},
+        ])
+        self.assertEqual(rewards, {"track": Decimal("6.50"), "alt": Decimal("6.50"), "zero": Decimal(0), "last": Decimal("1234.50")})
+
+    def test_missing_invalid_and_nonfinite_rewards_are_not_zero(self):
+        rows = [{"tracking_id": str(i), "reward": value} for i, value in enumerate([None, "", "bad", "NaN", "Infinity"])]
+        self.assertEqual(self.fetch([{"payload": {"pages": 1, "orders": rows}}]), {})
+
+    def test_expired_session_refreshes_and_retries_same_page(self):
+        with (patch.object(api, "_ensure_tokens", return_value=api._AuthTokens("old")),
+              patch.object(api, "_reauth_tokens", return_value=api._AuthTokens("new")) as refresh,
+              patch.object(api, "_multipart_request", side_effect=[
+                  api._SessionExpired("expired"),
+                  (200, "", {"payload": {"count": 1, "orders": [{"tracking_id": "TRACK", "reward": "2.00"}]}}),
+              ]) as request):
+            self.assertEqual(api.list_tracking_rewards(base_url="https://example.test", username="user", password="pass"), {"track": Decimal("2.00")})
+        refresh.assert_called_once()
+        self.assertEqual(dict(request.call_args.kwargs["fields"])["page"], "1")
+
+    def test_failed_tracking_response_is_reported(self):
+        with self.assertRaisesRegex(RuntimeError, "tracking unavailable"):
+            self.fetch([{"status": "FAIL", "message": "tracking unavailable"}])

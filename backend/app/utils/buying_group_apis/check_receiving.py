@@ -122,7 +122,7 @@ class ReceivingMatch:
     original_quantity: int | None = None
     # When set on a received line, apply should split the item keeping this qty.
     split_keep_quantity: int | None = None
-    # Item is already scanned+; apply should update receipt_id only (not status).
+    # Item is already scanned+; update receipt details/reward without changing status.
     update_receipt_only: bool = False
     reward: Decimal | None = None
 
@@ -883,8 +883,13 @@ def _receipt_needs_update(item: Item, receipt_id: str | None) -> bool:
 
 
 def _reward_needs_update(item: Item, meta: dict[str, Any], qty: int) -> bool:
-    reward = meta.get("unit_reward")
-    return reward is not None and item.reward != (reward * qty).quantize(Decimal("0.01"))
+    reward = _reward_from_meta(meta, qty)
+    return reward is not None and item.reward != reward
+
+
+def _reward_from_meta(meta: dict[str, Any], qty: int) -> Decimal | None:
+    unit_reward = meta.get("unit_reward")
+    return (unit_reward * qty).quantize(Decimal("0.01")) if unit_reward is not None else None
 
 
 def _tn_display(trackings: list[str], tn_key: str) -> str:
@@ -978,8 +983,7 @@ def _matches_for_tn_allocations(
                 received_qty=qty,
                 received_price=unit_payout,
                 received_ext_total=received_ext,
-                reward=(meta["unit_reward"] * qty).quantize(Decimal("0.01"))
-                if meta.get("unit_reward") is not None else None,
+                reward=_reward_from_meta(meta, qty),
                 received_status=_join_unique_strs(statuses),
                 amount_discrepancy=discrepancy,
                 selected=True,
@@ -2490,6 +2494,16 @@ def _check_receiving_buyinggroup(
         )
 
     receipts = _receipts_since_first_order(db, receipts, date_field="created_dt")
+    tracking_rewards: dict[str, Decimal] = {}
+    reward_error = None
+    if receipts:
+        try:
+            tracking_rewards = buyinggroup_api.list_tracking_rewards(
+                base_url=base_url, username=username, password=password,
+            )
+        except Exception as exc:
+            # Receiving can still be reviewed; never replace a saved reward with zero.
+            reward_error = str(exc).strip() or exc.__class__.__name__
     by_tracking = _index_bg_receipts_by_tracking(receipts)
     supply_by_tn: dict[str, int] = {}
     meta_by_tn: dict[str, dict[str, Any]] = {}
@@ -2520,10 +2534,15 @@ def _check_receiving_buyinggroup(
             meta["statuses"].append(str(row.status))
         if row.total is not None and qty > 0:
             meta["unit_prices"].append((row.total / Decimal(qty)).quantize(Decimal("0.01")))
-        # Receipt rewards are line totals. Allocate across local lines by quantity.
+        # Tracking Management owns the reward, once per tracking rather than receipt.
         meta["reward_quantity"] = meta.get("reward_quantity", 0) + qty
-        if row.reward is not None:
-            meta["reward_total"] = meta.get("reward_total", Decimal("0")) + row.reward
+        for reward_tracking in (row.tracking_id, row.alt_tracking_id):
+            if not reward_tracking:
+                continue
+            reward = tracking_rewards.get(buyinggroup_api.tracking_reward_key(reward_tracking))
+            if reward is not None:
+                meta["reward_total"] = reward
+                break
         if "reward_total" in meta:
             meta["unit_reward"] = meta["reward_total"] / Decimal(meta["reward_quantity"])
         row_scanned = _parse_created_date(row.created_dt)
@@ -2652,6 +2671,7 @@ def _check_receiving_buyinggroup(
         elif total is not None and qty and qty > 0:
             price = (total / Decimal(qty)).quantize(Decimal("0.01"))
         scanned_dt = _parse_created_date(row.created_dt)
+        reward = _reward_from_meta(meta_by_tn.get(tn.casefold(), {}), row.quantity or 1)
         unknown_receipts.append(
             {
                 "receipt_id": row.receipt_id,
@@ -2669,7 +2689,7 @@ def _check_receiving_buyinggroup(
                 "received_price": str(price) if price is not None else None,
                 "received_ext_total": str(total) if total is not None else None,
                 "received_status": row.status,
-                "reward": str(row.reward) if row.reward is not None else None,
+                "reward": str(reward) if reward is not None else None,
                 "note": note,
                 "created_dt": row.created_dt,
                 "scanned_at": _iso_date(scanned_dt),
@@ -2709,6 +2729,8 @@ def _check_receiving_buyinggroup(
         message = " ".join(bits) + " Nothing to review."
     else:
         message = ". ".join(parts) + f". {checked_summary}"
+    if reward_error:
+        message += f" Tracking rewards unavailable: {reward_error}."
 
     # Even with no pending locals, still open review when there are unknown receipts.
     if not pending and not unknown_receipts and not matches:
@@ -2719,6 +2741,8 @@ def _check_receiving_buyinggroup(
             else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
             "and no unknown BG receipts."
         )
+        if reward_error:
+            message += f" Tracking rewards unavailable: {reward_error}."
         payload = {
             "buying_group_id": buying_group_id,
             "buying_group_name": group_name,
