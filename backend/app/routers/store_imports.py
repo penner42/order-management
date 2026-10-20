@@ -357,6 +357,7 @@ def _normalize_tracking_for_store(
     external_order_id: str | None,
     tracking_raw: Any,
     fulfillment_type: Any = None,
+    shipment_status: dict[str, Any] | None = None,
 ) -> tuple[str | None, str | None]:
     """Return a canonical tracking key and optional Walmart-original tracking.
 
@@ -377,6 +378,8 @@ def _normalize_tracking_for_store(
         is_555 = bool(compact) and _is_walmart_555_tracking(tracking_trimmed)
         is_store_delivery = _is_walmart_store_delivery_fulfillment(fulfillment_type)
         if is_555 or is_store_delivery:
+            if not _walmart_delivery_has_shipped(shipment_status):
+                return None, None
             if is_555:
                 original = compact
             elif tracking_trimmed and tracking_trimmed != order_id:
@@ -388,6 +391,19 @@ def _normalize_tracking_for_store(
     if not tracking_trimmed:
         return None, None
     return tracking_trimmed, None
+
+
+def _walmart_delivery_has_shipped(status: dict[str, Any] | None) -> bool:
+    """Require shipment progress before saving Walmart store-delivery tracking."""
+    status = status or {}
+    # Prefer the retailer's code over its customer-facing message.
+    value = next((status.get(key) for key in (
+        "rawStatusType", "statusType", "normalizedStatus", "message"
+    ) if status.get(key)), "")
+    token = _normalize_fulfillment_token(value)
+    return token in {
+        "shipped", "on_the_way", "in_transit", "out_for_delivery", "delivered",
+    }
 
 
 def _walmart_tracking_from_notes(notes: str | None) -> str | None:
@@ -407,6 +423,7 @@ def _db_shipment_lookup_key(
     external_order_id: str | None,
     tracking_raw: Any,
     fulfillment_type: Any = None,
+    shipment_status: dict[str, Any] | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Return canonical tracking, optional Walmart original, and a DB match key.
 
@@ -414,7 +431,8 @@ def _db_shipment_lookup_key(
     ephemeral shipmentId — so re-imports match existing FedEx/UPS/etc. shipments.
     """
     tracking_key, walmart_original = _normalize_tracking_for_store(
-        store_name, external_order_id, tracking_raw, fulfillment_type=fulfillment_type
+        store_name, external_order_id, tracking_raw, fulfillment_type=fulfillment_type,
+        shipment_status=shipment_status,
     )
     db_key = walmart_original or tracking_key
     return tracking_key, walmart_original, db_key
@@ -426,10 +444,12 @@ def _item_slice_key(
     tracking_raw: Any,
     shipment_id: str | None = None,
     fulfillment_type: Any = None,
+    shipment_status: dict[str, Any] | None = None,
 ) -> tuple[str | None, str | None, str]:
     """Return tracking fields plus a dedup key for item/shipment slices within one import."""
     tracking_key, walmart_original, db_key = _db_shipment_lookup_key(
-        store_name, external_order_id, tracking_raw, fulfillment_type=fulfillment_type
+        store_name, external_order_id, tracking_raw, fulfillment_type=fulfillment_type,
+        shipment_status=shipment_status,
     )
     if walmart_original:
         return tracking_key, walmart_original, walmart_original
@@ -1037,11 +1057,12 @@ def _build_order_diff(
             external_order_id,
             tracking_raw,
             fulfillment_type=fulfillment_type,
+            shipment_status=inc_ship.get("status"),
         )
 
         tracking_display = (
             tracking_raw
-            if isinstance(tracking_raw, str) and tracking_raw.strip()
+            if tracking_key and isinstance(tracking_raw, str) and tracking_raw.strip()
             else tracking_key
         )
         delivery = inc_ship.get("deliveryDate")
@@ -1382,6 +1403,7 @@ def _apply_items_and_shipments(
                 incoming_src.get("trackingNumber"),
                 incoming_sid,
                 fulfillment_type=_shipment_fulfillment_type(incoming_src),
+                shipment_status=incoming_src.get("status"),
             )
             incoming_keys = {
                 key for key in (incoming_original, incoming_tracking) if key
@@ -1627,6 +1649,7 @@ def _apply_items_and_shipments(
             external_order_id,
             tracking_raw,
             fulfillment_type=_shipment_fulfillment_type(src),
+            shipment_status=src.get("status"),
         )
 
         # Parse delivery date (if any) and shipment-level status from the
@@ -1730,6 +1753,7 @@ def _apply_items_and_shipments(
                     external_order_id,
                     src.get("trackingNumber"),
                     fulfillment_type=_shipment_fulfillment_type(src),
+                    shipment_status=src.get("status"),
                 )
                 if tracking_key:
                     has_tracking = True
@@ -1769,6 +1793,7 @@ def _apply_items_and_shipments(
                 tracking_for_slice,
                 sid,
                 fulfillment_type=_shipment_fulfillment_type(src),
+                shipment_status=src.get("status"),
             )
             db_key = walmart_original or tracking_key
 
@@ -1925,6 +1950,7 @@ def _apply_items_and_shipments(
             external_order_id,
             tracking_raw,
             fulfillment_type=_shipment_fulfillment_type(src),
+            shipment_status=src.get("status"),
         )
         existing_shipment = _find_existing_shipment(
             existing_shipments_by_lookup_key,

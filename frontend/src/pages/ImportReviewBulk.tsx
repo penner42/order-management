@@ -1220,7 +1220,8 @@ export default function ImportReviewBulk() {
                                 storeName,
                                 orderId,
                                 trackingNumberRaw,
-                                firstShipment?.fulfillmentType ?? firstShipment?.detailedGroupType
+                                firstShipment?.fulfillmentType ?? firstShipment?.detailedGroupType,
+                                firstShipment?.status
                               )
                               const trackingUrl = firstShipment?.trackingUrl ?? null
                               const diffInfo = isExisting
@@ -1503,7 +1504,8 @@ export default function ImportReviewBulk() {
                               storeName,
                               orderId,
                               s.trackingNumber ?? null,
-                              s.fulfillmentType ?? s.detailedGroupType
+                              s.fulfillmentType ?? s.detailedGroupType,
+                              s.status
                             )
                             const shipDiff =
                               s.trackingNumber && isExisting

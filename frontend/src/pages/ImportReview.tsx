@@ -766,7 +766,8 @@ export default function ImportReview() {
                     storeName,
                     externalOrderId,
                     trackingNumberRaw,
-                    firstShipment?.fulfillmentType ?? firstShipment?.detailedGroupType
+                    firstShipment?.fulfillmentType ?? firstShipment?.detailedGroupType,
+                    firstShipment?.status
                   )
                   const trackingUrl = firstShipment?.trackingUrl ?? null
                   const shipmentStatus = firstShipment?.status?.message ?? firstShipment?.status?.rawStatusType ?? null
@@ -973,7 +974,8 @@ export default function ImportReview() {
                 storeName,
                 externalOrderId,
                 s.trackingNumber ?? null,
-                s.fulfillmentType ?? s.detailedGroupType
+                s.fulfillmentType ?? s.detailedGroupType,
+                s.status
               )
               const shipDiff = s.trackingNumber ? shipmentDiffMap.get(s.trackingNumber) : undefined
               return (

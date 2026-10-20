@@ -346,6 +346,7 @@ class StoreReimportShipmentAllocationTests(unittest.TestCase):
         payload = self._payload(
             [("shipment-a", "55512345678901234567", 1)]
         )
+        payload["shipments"][0]["status"] = {"rawStatusType": "SHIPPED"}
 
         _apply_items_and_shipments(
             self.session,
@@ -365,6 +366,45 @@ class StoreReimportShipmentAllocationTests(unittest.TestCase):
         self.assertEqual(locked.shipment_items[0].shipment.tracking_number, "ORDER-1")
         self.assertEqual(self.session.query(Item).count(), 1)
         self.assertEqual(self.session.query(Shipment).count(), 1)
+
+    def test_walmart_store_delivery_waits_for_shipped_then_upgrades(self) -> None:
+        self.session.commit()
+        order_id = self.order.id
+        for tracking in (None, "55512345678901234567", "WM123456"):
+            for progress in (None, "PLACED", "PREPARING", "SHIPPED", "ON_THE_WAY", "DELIVERED"):
+                with self.subTest(tracking=tracking, progress=progress):
+                    payload = self._payload([("delivery", tracking, 1)])
+                    payload.update(store="walmart", externalOrder={"id": "ORDER-1"})
+                    shipment = payload["shipments"][0]
+                    shipment["fulfillmentType"] = "SC_DELIVERY"
+                    shipment["status"] = {"rawStatusType": progress}
+                    _apply_items_and_shipments(
+                        self.session, payload, "walmart", self.order,
+                        external_order_id="ORDER-1",
+                    )
+                    self.session.flush()
+                    shipped = progress in {"SHIPPED", "ON_THE_WAY", "DELIVERED"}
+                    item = self.session.query(Item).one()
+                    saved = self.session.query(Shipment).one()
+                    self.assertEqual(saved.tracking_number, "ORDER-1" if shipped else None)
+                    self.assertEqual(item.status, ItemStatus.SHIPPED if shipped else ItemStatus.PURCHASED)
+                    if not shipped:
+                        self.assertNotIn("Walmart tracking:", saved.notes or "")
+                        diff = _build_order_diff(self.session, self.order, payload)
+                        self.assertFalse(any(row.get("tracking_number") for row in diff["shipments"]["added"]))
+                    shipment["status"] = {"rawStatusType": "SHIPPED"}
+                    _apply_items_and_shipments(
+                        self.session, payload, "walmart", self.order,
+                        external_order_id="ORDER-1", existing_order=True,
+                    )
+                    self.session.flush()
+                    self.assertEqual(self.session.query(Item).count(), 1)
+                    self.assertEqual(self.session.query(Shipment).count(), 1)
+                    self.assertEqual(saved.tracking_number, "ORDER-1")
+                    self.assertEqual(item.status, ItemStatus.SHIPPED)
+                    self.session.rollback()
+                    self.session.expunge_all()
+                    self.order = self.session.get(Order, order_id)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,8 @@ export function normalizeTrackingForDisplay(
   storeName: string,
   externalOrderId: string | undefined | null,
   trackingNumber: string | undefined | null,
-  fulfillmentType?: string | null
+  fulfillmentType?: string | null,
+  status?: { rawStatusType?: string | null; normalizedStatus?: string | null; message?: string | null }
 ): string | null {
   const storeLower = (storeName || '').trim().toLowerCase()
   const orderId = externalOrderId?.trim() || ''
@@ -42,6 +43,10 @@ export function normalizeTrackingForDisplay(
   const is555 = isWalmart555Tracking(trackingNumber)
 
   if (storeLower === 'walmart' && orderId && (is555 || isStoreDelivery)) {
+    const progress = normalizeFulfillmentToken(status?.rawStatusType || status?.normalizedStatus || status?.message)
+    if (!['shipped', 'on_the_way', 'in_transit', 'out_for_delivery', 'delivered'].includes(progress)) {
+      return null
+    }
     return orderId
   }
   if (!trackingNumber) return null
