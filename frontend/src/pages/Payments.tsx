@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { Payment, BuyingGroup, Order, Item, Shipment } from '../api/types'
 import { parseDecimal } from '../utils/decimal'
@@ -16,6 +16,9 @@ function toYyyyMmDd(d: Date): string {
 }
 
 export default function Payments() {
+  const [searchParams] = useSearchParams()
+  const editPaymentIdParam = searchParams.get('edit')
+  const [paymentLinkError, setPaymentLinkError] = useState<string | null>(null)
   const [payments, setPayments] = useState<Payment[]>([])
   const [buyingGroups, setBuyingGroups] = useState<BuyingGroup[]>([])
   const [loading, setLoading] = useState(true)
@@ -182,6 +185,24 @@ export default function Payments() {
   useEffect(() => {
     api.get<BuyingGroup[]>('/buying-groups').then(setBuyingGroups).catch(console.error)
   }, [])
+
+  useEffect(() => {
+    let active = true
+    setPaymentLinkError(null)
+    if (editPaymentIdParam) {
+      const id = Number(editPaymentIdParam)
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        setPaymentLinkError('Invalid payment link.')
+        return
+      }
+      api.get<Payment>(`/payments/${id}`).then(payment => {
+        if (!active) return
+        if (payment.monarch_receipt) setPaymentLinkError('Undo the Monarch receipt confirmation before editing this payment.')
+        else setEditPayment(payment)
+      }).catch(error => { if (active) setPaymentLinkError(error instanceof Error ? error.message : 'Unable to open this payment.') })
+    }
+    return () => { active = false }
+  }, [editPaymentIdParam])
 
   useEffect(() => {
     if (!addPaymentOpen) return
@@ -508,6 +529,7 @@ export default function Payments() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-ink mb-8">Payments</h1>
+      {paymentLinkError && <p role="alert" className="text-sm text-red-700 dark:text-red-400 mb-4">{paymentLinkError}</p>}
       <Link className="inline-block underline mb-4 text-brand-700 dark:text-brand-300" to="/payments/monarch">Monarch review</Link>
       <Link className="inline-block underline mb-4 ml-5 text-brand-700 dark:text-brand-300" to={`/payments/review${filterGroupId === '' ? '' : `?group=${filterGroupId}`}`}>Payment review</Link>
       <div className="mb-4 flex items-center gap-4">

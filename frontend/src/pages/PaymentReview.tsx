@@ -8,16 +8,17 @@ export interface PaymentCapability { buying_group_id: number; name: string; supp
 interface Allocation { receipt_source_id: number; item_id: number; quantity: number; amount: string }
 interface Correction { receipt_source_id: number; item_id: number; amount: string; explanation: string }
 interface Content { receipt_ids: number[]; allocations: Allocation[]; corrections: Correction[]; window_start: string | null; window_end: string | null; existing_payment_id?: number | null; payment_bonus?: string; note: string; manual: boolean }
-interface Review { id: number; version: number; fingerprint: string; payment_id: number | null; external_id: string; source: { amount: string; status: string; created_at: string | null; sent_at: string | null; memo: string; warnings: string[] }; content: Content; allocated_total: string; difference: string; issues: string[] }
+interface Review { id: number; version: number; fingerprint: string; payment_id: number | null; external_id: string; source: { amount: string; status: string; created_at: string | null; sent_at: string | null; memo: string; warnings: string[] }; content: Content; allocated_total: string; difference: string; issues: string[]; issue_links?: Record<string, { label: string; order_id: number }> }
 interface Receipt { id: number; external_id: string; covered: boolean; present: boolean; payload: { amount: string; quantity: number | null; description: string; created_at: string | null; void: boolean; tracking_numbers: string[] } }
-interface LocalItem { id: number; description: string; quantity: number; price_sold: string; receipt_id: string | null; remaining: string; status: string; order_id: number }
-interface Outstanding { receipt_source_id: number; external_id: string; original_amount: string; covered_amount: string; current_amount: string; amount: string; present: boolean; origin_payment_id: number; items: { item_id: number; amount: string }[] }
+interface LocalItem { id: number; label?: string; description: string; quantity: number; price_sold: string; receipt_id: string | null; remaining: string; status: string; order_id: number; store_order_number?: string | null }
+interface Outstanding { receipt_source_id: number; external_id: string; original_amount: string; covered_amount: string; current_amount: string; amount: string; present: boolean; origin_payment_id: number; origin_payment_reference?: string | null; items: { item_id: number; amount: string }[] }
 interface GroupReview { capability: PaymentCapability; reviews: Review[]; receipts: Receipt[]; items: LocalItem[]; corrections: Outstanding[] }
 
 const field = 'rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1 text-sm text-ink'
 const button = 'rounded border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm text-ink disabled:opacity-50 hover:bg-brand-50 dark:hover:bg-gray-700'
 const money = (v: string | number) => Number(v).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 const date = (v: string | null) => v ? new Date(v).toLocaleString() : '—'
+const itemLabel = (item: LocalItem) => item.label || [item.store_order_number ? `Order ${item.store_order_number}` : null, item.description || 'Unnamed item', item.receipt_id ? `Receipt ${item.receipt_id}` : null].filter(Boolean).join(' · ')
 function localInput(v: string | null) {
   if (!v) return ''
   const d = new Date(v)
@@ -56,14 +57,14 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
     edit({ ...content, allocations: content.allocations.map((a, n) => n === index ? { ...a, ...patch } : a) })
   }
   const selected = group.receipts.filter(r => content.receipt_ids.includes(r.id))
-  const available = group.items.filter(i => `${i.id} ${i.description} ${i.receipt_id ?? ''}`.toLowerCase().includes(itemSearch.toLowerCase()))
+  const available = group.items.filter(i => itemLabel(i).toLowerCase().includes(itemSearch.toLowerCase()))
   const total = content.allocations.reduce((sum, a) => sum + Number(a.amount), 0) + content.corrections.reduce((sum, c) => sum + Number(c.amount), 0) + Number(content.payment_bonus ?? 0)
   return <section aria-label={`Payment ${review.external_id}`} className="rounded-xl border border-brand-200 dark:border-gray-700 bg-white dark:bg-gray-900 p-4 space-y-4">
     <div className="flex flex-wrap justify-between gap-2">
       <div><h2 className="font-semibold text-lg text-ink">Payment {review.external_id} · {money(review.source.amount)}</h2>
         <p className="text-sm text-ink-muted">{review.source.status} · Created {date(review.source.created_at)} · Sent {date(review.source.sent_at)}</p>
         {review.source.memo && <p className="text-sm text-ink-muted">{review.source.memo}</p>}</div>
-      {confirmed && <Link className="underline" to="/payments">Confirmed as payment #{review.payment_id}</Link>}
+      {confirmed && <Link className="underline" to={`/payments?edit=${review.payment_id}`}>View confirmed payment {review.external_id}</Link>}
     </div>
     {review.source.warnings?.map(w => <p className="text-amber-700 dark:text-amber-300 text-sm" key={w}>{w}</p>)}
     {!confirmed && <div className="flex flex-wrap items-end gap-3">
@@ -76,7 +77,7 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
       <h3 className="font-medium text-ink">Receipt coverage</h3>
       {!confirmed && <><p className="text-sm text-ink-muted">Link received order items below. Split larger lines on Orders when needed.</p>
         <label className="block text-sm text-ink my-2"><input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} /> Show other receipts to include</label>
-        <input className={`${field} w-full max-w-sm mb-2`} aria-label="Search local items" placeholder="Search local items by name, ID, or receipt" value={itemSearch} onChange={e => setItemSearch(e.target.value)} /></>}
+        <input className={`${field} w-full max-w-sm mb-2`} aria-label="Search local items" placeholder="Search by item name, order number, or receipt" value={itemSearch} onChange={e => setItemSearch(e.target.value)} /></>}
       <div className="space-y-3">
         {(showAll ? group.receipts.filter(r => !r.covered || content.receipt_ids.includes(r.id)) : selected).map(receipt => {
           const included = content.receipt_ids.includes(receipt.id)
@@ -86,8 +87,9 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
             {included && <div className="mt-2 space-y-2">
               {content.allocations.map((a, index) => a.receipt_source_id === receipt.id && <div key={index} className="flex flex-wrap gap-2 items-center">
                 <select className={`${field} max-w-full`} aria-label={`Receipt ${receipt.external_id} item ${index + 1}`} disabled={confirmed || busy} value={a.item_id} onChange={e => changeAllocation(index, { item_id: Number(e.target.value) })}>
-                  {group.items.filter(i => i.id === a.item_id || available.includes(i)).map(i => <option key={i.id} value={i.id}>#{i.id} {i.description} · {i.status} · {money(i.remaining)} remaining</option>)}
+                  {group.items.filter(i => i.id === a.item_id || available.includes(i)).map(i => <option key={i.id} value={i.id}>{itemLabel(i)} · {i.status} · {money(i.remaining)} remaining</option>)}
                 </select>
+                {group.items.find(i => i.id === a.item_id) && <Link className="text-sm underline text-brand-700 dark:text-brand-300" to={`/?order_id=${group.items.find(i => i.id === a.item_id)!.order_id}`}>View order</Link>}
                 <label className="text-sm text-ink">Qty <input className={`${field} w-20`} aria-label={`Allocation ${index + 1} quantity`} type="number" min="1" value={a.quantity} disabled={confirmed || busy} onChange={e => changeAllocation(index, { quantity: Number(e.target.value) })} /></label>
                 <label className="text-sm text-ink">Amount <input className={`${field} w-28`} aria-label={`Allocation ${index + 1} amount`} type="number" step="0.01" min="0.01" value={a.amount} disabled={confirmed || busy} onChange={e => changeAllocation(index, { amount: e.target.value })} /></label>
                 {!confirmed && <button className={button} disabled={busy} onClick={() => edit({ ...content, allocations: content.allocations.filter((_, n) => n !== index) })}>Remove item</button>}
@@ -105,7 +107,7 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
     <div className="space-y-2">
       <h3 className="font-medium text-ink">Carried receipt corrections</h3>
       {content.corrections.map((c, index) => <div key={index} className="flex flex-wrap gap-2 items-center text-sm text-ink">
-        <span>Receipt {group.receipts.find(r => r.id === c.receipt_source_id)?.external_id} · Item #{c.item_id}</span>
+        <span>Receipt {group.receipts.find(r => r.id === c.receipt_source_id)?.external_id} · {group.items.find(i => i.id === c.item_id) ? <Link className="underline" to={`/?order_id=${group.items.find(i => i.id === c.item_id)!.order_id}`}>{itemLabel(group.items.find(i => i.id === c.item_id)!)}</Link> : 'Missing local item'}</span>
         <input className={`${field} w-28`} type="number" step="0.01" aria-label={`Correction ${index + 1} amount`} value={c.amount} disabled={confirmed || busy} onChange={e => edit({ ...content, corrections: content.corrections.map((x, n) => n === index ? { ...x, amount: e.target.value } : x) })} />
         <input className={`${field} flex-1 min-w-48`} aria-label={`Correction ${index + 1} explanation`} value={c.explanation} disabled={confirmed || busy} onChange={e => edit({ ...content, corrections: content.corrections.map((x, n) => n === index ? { ...x, explanation: e.target.value } : x) })} />
         {!confirmed && <button className={button} disabled={busy} onClick={() => edit({ ...content, corrections: content.corrections.filter((_, n) => n !== index) })}>Remove correction</button>}
@@ -121,7 +123,7 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
           return { receipt_source_id: c.receipt_source_id, item_id: i.item_id, amount: value.toFixed(2), explanation: 'Receipt correction carried to this payment' }
         }).filter(c => Number(c.amount) !== 0)
         edit({ ...content, corrections: [...content.corrections, ...corrections] })
-      }}><option value="">Add an outstanding correction…</option>{group.corrections.filter(c => c.present && Number(c.amount) !== 0 && !content.corrections.some(x => x.receipt_source_id === c.receipt_source_id)).map(c => <option key={c.receipt_source_id} value={c.receipt_source_id}>Receipt {c.external_id}: {money(c.amount)} from payment #{c.origin_payment_id}</option>)}</select>}
+      }}><option value="">Add an outstanding correction…</option>{group.corrections.filter(c => c.present && Number(c.amount) !== 0 && !content.corrections.some(x => x.receipt_source_id === c.receipt_source_id)).map(c => <option key={c.receipt_source_id} value={c.receipt_source_id}>Receipt {c.external_id}: {money(c.amount)} from payment {c.origin_payment_reference || 'without a reference'}</option>)}</select>}
     </div>
     {!confirmed && <>
       <label className="block text-sm text-ink">Explicit bonus or fee (explanation required)<input className={`${field} block w-40`} type="number" step="0.01" value={content.payment_bonus ?? '0.00'} onChange={e => edit({ ...content, payment_bonus: e.target.value })} /></label>
@@ -137,13 +139,17 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
           })}
         </select>
       </label>
+      {content.existing_payment_id && <p className="text-sm text-ink-muted"><Link className="underline text-brand-700 dark:text-brand-300" to={`/payments?edit=${content.existing_payment_id}`}>Edit selected payment</Link> to add or correct its items, then return here and save this review again. Adding an item changes the payment total.</p>}
       <div className="flex flex-wrap items-center gap-3 text-ink"><strong>Allocated {money(total)} · Difference {money(Number(review.source.amount) - total)}</strong>
         <button className={button} disabled={busy || !dirty} onClick={() => save()}>Save review</button>
         <button className={`${button} bg-brand-100 dark:bg-gray-700`} disabled={busy || dirty || review.issues.length > 0} onClick={() => run(async () => update(await api.post<GroupReview>(`/payment-review/drafts/${review.id}/confirm`, { version: review.version, fingerprint: review.fingerprint })), setActionError)}>Confirm payment</button>
         {dirty && <span className="text-sm text-ink-muted">Save changes to validate before confirming.</span>}
       </div>
     </>}
-    {review.issues.length > 0 && <ul aria-label="Payment review issues" className="list-disc pl-5 text-sm text-amber-800 dark:text-amber-300">{review.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
+    {review.issues.length > 0 && <ul aria-label="Payment review issues" className="list-disc pl-5 text-sm text-amber-800 dark:text-amber-300">{review.issues.map(issue => {
+      const target = review.issue_links?.[issue]
+      return <li key={issue}>{target ? <><Link className="underline" to={`/?order_id=${target.order_id}`}>{target.label}</Link>{issue.slice(target.label.length)}</> : issue}</li>
+    })}</ul>}
     {actionError && <p role="alert" className="text-sm text-red-700 dark:text-red-400 whitespace-pre-wrap">{actionError}</p>}
   </section>
 }

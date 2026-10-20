@@ -18,7 +18,30 @@ from app.monarch import lock_editable_payment
 ZERO = Decimal("0.00")
 
 
-def existing_payment_issues(db, review, content):
+def item_label(item):
+    if item is None:
+        return "Missing local item"
+    order = item.order
+    parts = []
+    if order and order.store_order_number:
+        parts.append(f"Order {order.store_order_number}")
+    elif order and order.store:
+        parts.append(order.store.name)
+    parts.append(item.description or "Unnamed item")
+    if item.receipt_id:
+        parts.append(f"Receipt {item.receipt_id}")
+    return " · ".join(parts)
+
+
+def item_issue(item, detail, issue_links=None):
+    label = item_label(item)
+    message = f"{label} {detail}"
+    if issue_links is not None and item and item.order:
+        issue_links[message] = {"label": label, "order_id": item.order_id}
+    return message
+
+
+def existing_payment_issues(db, review, content, issue_links=None):
     """Compare the selected payment during review as well as at confirmation."""
     payment_id = content.get("existing_payment_id")
     if not payment_id:
@@ -41,12 +64,13 @@ def existing_payment_issues(db, review, content):
         expected[allocation["item_id"]] += money(allocation["amount"])
     actual = {line.item_id: money(line.amount) for line in payment.line_items}
     for item_id in sorted(set(expected) | set(actual)):
+        item = db.get(Item, item_id)
         if item_id not in actual:
-            issues.append(f"Item #{item_id} has ${expected[item_id]:,.2f} in this review but is not on the selected local payment.")
+            issues.append(item_issue(item, f"has ${expected[item_id]:,.2f} in this review but is not on the selected local payment.", issue_links))
         elif item_id not in expected:
-            issues.append(f"Item #{item_id} has ${actual[item_id]:,.2f} on the selected local payment but is not allocated in this review.")
+            issues.append(item_issue(item, f"has ${actual[item_id]:,.2f} on the selected local payment but is not allocated in this review.", issue_links))
         elif actual[item_id] != expected[item_id]:
-            issues.append(f"Item #{item_id} amount differs: local payment ${actual[item_id]:,.2f}; review ${expected[item_id]:,.2f}.")
+            issues.append(item_issue(item, f"amount differs: local payment ${actual[item_id]:,.2f}; review ${expected[item_id]:,.2f}.", issue_links))
     actual_bonus, expected_bonus = money(payment.payment_bonus), money(content.get("payment_bonus", 0))
     if actual_bonus != expected_bonus:
         issues.append(f"Bonus differs: local payment ${actual_bonus:,.2f}; review ${expected_bonus:,.2f}.")
@@ -219,6 +243,7 @@ def outstanding_corrections(db, group_id):
         result.append({"receipt_source_id": receipt.id, "external_id": receipt.external_id,
             "provider": receipt.provider,
             "origin_payment_id": origin.id, "origin_requested_at": origin_created or origin.payment_requested_at.isoformat(),
+            "origin_payment_reference": origin.payment_id,
             "original_amount": str(sum((c.amount for c in coverage), ZERO)), "covered_amount": str(covered),
             "current_amount": str(current), "amount": str(delta), "present": receipt.present,
             "revision": receipt.revision, "items": [{"item_id": c.item_id, "amount": str(c.amount)} for c in coverage]})
@@ -261,7 +286,7 @@ def effective_content(db, review, outstanding):
     return content
 
 
-def validate_content(db, review, content, outstanding, *, confirming=False):
+def validate_content(db, review, content, outstanding, *, confirming=False, issue_links=None):
     issues = []
     source = review.source
     p = source.payload
@@ -313,7 +338,9 @@ def validate_content(db, review, content, outstanding, *, confirming=False):
             issues.append(f"Receipt {receipt.external_id} currency differs from the payment.")
         covered = db.query(PaymentCoverage).filter_by(receipt_source_id=rid).first()
         if covered:
-            issues.append(f"Receipt {receipt.external_id} is already covered by payment #{covered.payment_id}.")
+            covered_payment = db.get(Payment, covered.payment_id)
+            reference = f"payment {covered_payment.payment_id}" if covered_payment and covered_payment.payment_id else "another local payment"
+            issues.append(f"Receipt {receipt.external_id} is already covered by {reference}.")
         lines = [a for a in allocations if a["receipt_source_id"] == rid]
         quantity = receipt.payload.get("quantity")
         if not lines or (quantity is None and not content.get("note", "").strip()) or (quantity is not None and sum(a["quantity"] for a in lines) != quantity):
@@ -334,7 +361,7 @@ def validate_content(db, review, content, outstanding, *, confirming=False):
             if money(a["amount"]) <= 0 or a["quantity"] <= 0:
                 issues.append("Receipt allocations require positive amounts and quantities.")
             if item.status.value in {"canceled", "purchased", "shipped", "submitted", "needs_review"}:
-                issues.append(f"Item #{item.id} must be received before payment confirmation.")
+                issues.append(item_issue(item, "must be received before payment confirmation.", issue_links))
             used_quantities[item.id] += a["quantity"]
             item_amounts[item.id] += money(a["amount"])
     corrections = content.get("corrections", [])
@@ -375,22 +402,23 @@ def validate_content(db, review, content, outstanding, *, confirming=False):
         item = db.get(Item, item_id)
         prior_quantity = sum(c.quantity for c in db.query(PaymentCoverage).filter_by(item_id=item_id).all())
         if qty + prior_quantity > item.quantity:
-            issues.append(f"Item #{item_id} quantity was allocated more than once.")
+            issues.append(item_issue(item, "quantity was allocated more than once.", issue_links))
         remaining = money(item.price_sold or 0) * item.quantity - item_allocated(db, item_id, content.get("existing_payment_id"))
         if item_amounts[item_id] > remaining:
-            issues.append(f"Item #{item_id} allocations exceed its remaining local payout; review its received value.")
+            issues.append(item_issue(item, "allocations exceed its remaining local payout; review its received value.", issue_links))
     bonus = money(content.get("payment_bonus", 0))
     if bonus and not content.get("note", "").strip():
         issues.append("An explicit bonus or fee requires a review explanation.")
     total = sum((money(a["amount"]) for a in allocations), ZERO) + sum((money(c["amount"]) for c in corrections), ZERO) + bonus
     if total != money(p["amount"]):
         issues.append("Allocated total plus corrections must equal the portal payment amount.")
-    issues.extend(existing_payment_issues(db, review, content))
+    issues.extend(existing_payment_issues(db, review, content, issue_links))
     return list(dict.fromkeys(issues)), total
 
 
 def review_view(db, review, outstanding):
     content = effective_content(db, review, outstanding)
+    issue_links = {}
     if review.payment_id:
         issues = []
         if not review.source.present:
@@ -399,11 +427,11 @@ def review_view(db, review, outstanding):
             issues.append("Source payment changed after confirmation; local payment was preserved.")
         total = payment_amount(db.get(Payment, review.payment_id))
     else:
-        issues, total = validate_content(db, review, content, outstanding)
+        issues, total = validate_content(db, review, content, outstanding, issue_links=issue_links)
     return {"id": review.id, "version": review.version, "payment_id": review.payment_id,
         "fingerprint": review_token(db, review, content),
         "source_id": review.source_id, "external_id": review.source.external_id,
-        "source": review.source.payload, "content": content, "issues": issues,
+        "source": review.source.payload, "content": content, "issues": issues, "issue_links": issue_links,
         "allocated_total": str(total), "difference": str(money(review.source.payload["amount"]) - total)}
 
 
@@ -435,6 +463,7 @@ def group_view(db, group_id):
         "receipts": [{"id": s.id, "external_id": s.external_id, "payload": s.payload, "present": s.present,
             "covered": db.query(PaymentCoverage).filter_by(receipt_source_id=s.id).first() is not None} for s in receipts],
         "corrections": outstanding, "items": [{"id": i.id, "description": i.description, "quantity": i.quantity,
+            "label": item_label(i), "store_order_number": i.order.store_order_number,
             "receipt_id": i.receipt_id, "status": i.status.value, "price_sold": str(i.price_sold),
             "remaining": str(max(money(i.price_sold or 0) * i.quantity - item_allocated(db, i.id), ZERO)),
             "order_id": i.order_id} for i in items]}

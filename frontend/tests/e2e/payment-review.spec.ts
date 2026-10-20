@@ -1,17 +1,18 @@
 import { test, expect } from './fixtures'
+import type { Order, Payment } from '../../src/api/types'
 
 function fixture() {
   return {
     capability: { buying_group_id: 170001, name: 'Example Parsefile', provider: 'parsefile', supported: true, ready: true, reason: null },
     receipts: [{ id: 2, external_id: 'receipt-1', covered: false, present: true,
       payload: { amount: '100.00', quantity: 1, description: 'Example received item', created_at: '2026-05-01T12:00:00Z', void: false, tracking_numbers: ['tracking-1'] } }],
-    items: [{ id: 3, description: 'Example local item', quantity: 1, price_sold: '100.00', receipt_id: 'receipt-1', remaining: '100.00', status: 'scanned', order_id: 4 }],
+    items: [{ id: 3, description: 'Example local item', quantity: 1, price_sold: '100.00', receipt_id: 'receipt-1', remaining: '100.00', status: 'scanned', order_id: 4, store_order_number: 'EXAMPLE-ORDER-1' }],
     corrections: [],
     reviews: [{ id: 1, version: 1, fingerprint: 'shown-evidence', payment_id: null as number | null, external_id: 'payment-1',
       source: { amount: '100.00', status: 'PAID', created_at: '2026-05-02T12:00:00Z', sent_at: '2026-05-05T12:00:00Z', memo: 'Example payment', warnings: [] },
       content: { receipt_ids: [2], allocations: [{ receipt_source_id: 2, item_id: 3, quantity: 1, amount: '100.00' }], corrections: [],
-        window_start: null, window_end: '2026-05-02T12:00:00Z', note: '', manual: false },
-      allocated_total: '100.00', difference: '0.00', issues: [] as string[] }],
+        window_start: null, window_end: '2026-05-02T12:00:00Z', note: '', manual: false, existing_payment_id: null as number | null },
+      allocated_total: '100.00', difference: '0.00', issues: [] as string[], issue_links: {} as Record<string, { label: string; order_id: number }> }],
   }
 }
 
@@ -49,7 +50,7 @@ for (const width of [1280, 390]) {
     await section.getByRole('button', { name: 'Save review', exact: true }).click()
     await expect(section.getByRole('button', { name: 'Confirm payment', exact: true })).toBeEnabled()
     await section.getByRole('button', { name: 'Confirm payment', exact: true }).click()
-    await expect(section.getByRole('link', { name: 'Confirmed as payment #99' })).toBeVisible()
+    await expect(section.getByRole('link', { name: 'View confirmed payment payment-1' })).toBeVisible()
     expect(confirmed).toBeTruthy()
   })
 }
@@ -140,7 +141,7 @@ test('Saving and confirming preserve open payments and other unsaved review edit
   await expect(older.getByLabel('Show other receipts to include', { exact: true })).toBeChecked()
   await newer.locator('summary').click()
   await older.getByRole('button', { name: 'Confirm payment', exact: true }).click()
-  await expect(older.getByRole('link', { name: 'Confirmed as payment #99' })).toBeVisible()
+  await expect(older.getByRole('link', { name: 'View confirmed payment payment-1' })).toBeVisible()
   await expect(older).toHaveJSProperty('open', true)
   await expect(newer).toHaveJSProperty('open', false)
   await newer.locator('summary').click()
@@ -176,4 +177,53 @@ test('Save and confirmation failures appear beside the payment action buttons', 
   const error = await section.getByRole('alert').boundingBox()
   expect(error!.y).toBeGreaterThanOrEqual(action!.y + action!.height)
   await expect(section.getByRole('textbox', { name: 'Review explanation', exact: true })).toHaveValue('Keep this draft after an error')
+})
+
+test('Recognizable item issues Ctrl-click to the order and selected payment editor', async ({ app, data }) => {
+  const store = await data.create('/stores', { name: data.name('store') })
+  const buyingGroup = await data.create('/buying-groups', { name: data.name('group') })
+  const orderNumber = data.name('store-order')
+  const description = data.name('received-item')
+  const order = await data.create<Order>('/orders', {
+    store_id: store.id, buying_group_id: buyingGroup.id, store_order_number: orderNumber,
+    items: [{ description, status: 'scanned', quantity: 1, price_sold: 100, receipt_id: 'warehouse-receipt' }],
+  })
+  const payment = await data.create<Payment>('/payments', { buying_group_id: buyingGroup.id, payment_id: 'portal-payment' })
+  const item = order.items[0]
+  const label = `Order ${orderNumber} · ${description} · Receipt warehouse-receipt`
+  const issue = `${label} has $100.00 in this review but is not on the selected local payment.`
+  const group = fixture()
+  group.capability.buying_group_id = buyingGroup.id
+  group.items[0] = { id: item.id, description, quantity: 1, price_sold: '100.00', receipt_id: 'warehouse-receipt',
+    remaining: '100.00', status: 'scanned', order_id: order.id, store_order_number: orderNumber }
+  group.reviews[0].content.existing_payment_id = payment.id
+  group.reviews[0].content.allocations[0].item_id = item.id
+  group.reviews[0].issues = [issue]
+  group.reviews[0].issue_links = { [issue]: { label, order_id: order.id } }
+  await app.route('**/api/payment-review/capabilities', route => route.fulfill({ json: [group.capability] }))
+  await app.route(`**/api/payment-review/groups/${buyingGroup.id}`, route => route.fulfill({ json: group }))
+  await app.goto(`/payments/review?group=${buyingGroup.id}`)
+  const section = app.getByRole('region', { name: 'Payment payment-1', exact: true })
+  await expect(section).not.toContainText(`Item #${item.id}`)
+  const orderLink = section.getByRole('link', { name: label, exact: true })
+  await expect(orderLink).toHaveAttribute('href', `/?order_id=${order.id}`)
+  const orderPopupPromise = app.context().waitForEvent('page')
+  await orderLink.click({ modifiers: ['Control'] })
+  const orderPopup = await orderPopupPromise
+  await expect(orderPopup.getByRole('region', { name: `Order ${order.id}`, exact: true })).toBeVisible()
+  await orderPopup.close()
+  const paymentPopupPromise = app.context().waitForEvent('page')
+  await section.getByRole('link', { name: 'Edit selected payment', exact: true }).click({ modifiers: ['Control'] })
+  const editor = await paymentPopupPromise
+  const dialog = editor.getByRole('dialog', { name: 'Edit payment', exact: true })
+  await expect(dialog.getByRole('textbox', { name: 'Payment ID', exact: true })).toHaveValue('portal-payment')
+  await dialog.getByRole('row').filter({ hasText: description }).getByRole('checkbox').check()
+  const saved = editor.waitForResponse(response => new URL(response.url()).pathname === `/api/payments/${payment.id}/line-items` && response.request().method() === 'POST')
+  await dialog.getByRole('button', { name: 'Add selected (1)', exact: true }).click()
+  expect((await saved).ok()).toBeTruthy()
+  const updated = await data.get<Payment>(`/payments/${payment.id}`)
+  expect(updated.line_items.map(line => line.item_id)).toEqual([item.id])
+  expect(updated.total_amount).toBe(100)
+  await editor.close()
+  await expect(section).toBeVisible()
 })

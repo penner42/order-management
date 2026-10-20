@@ -265,7 +265,7 @@ class PaymentReviewTests(unittest.TestCase):
         self.db.add(line); self.db.commit()
         view = self.edit(view, existing_payment_id=p.id)["reviews"][0]
         self.assertEqual(payment_amount(p), Decimal("100"))
-        self.assertIn(f"Item #{self.item.id} amount differs: local payment $90.00; review $100.00.", view["issues"])
+        self.assertIn(f"{service.item_label(self.item)} amount differs: local payment $90.00; review $100.00.", view["issues"])
         self.assertIn("Bonus differs: local payment $10.00; review $0.00.", view["issues"])
         with self.assertRaises(HTTPException) as caught:
             self.confirm(view)
@@ -283,8 +283,25 @@ class PaymentReviewTests(unittest.TestCase):
         self.db.add(p); self.db.flush()
         self.db.add(PaymentLineItem(payment_id=p.id, item_id=other.id, amount=100)); self.db.commit()
         view = self.edit(view, existing_payment_id=p.id)["reviews"][0]
-        self.assertIn(f"Item #{self.item.id} has $100.00 in this review but is not on the selected local payment.", view["issues"])
-        self.assertIn(f"Item #{other.id} has $100.00 on the selected local payment but is not allocated in this review.", view["issues"])
+        self.assertIn(f"{service.item_label(self.item)} has $100.00 in this review but is not on the selected local payment.", view["issues"])
+        self.assertIn(f"{service.item_label(other)} has $100.00 on the selected local payment but is not allocated in this review.", view["issues"])
+
+    def test_item_issues_expose_store_order_and_receipt_labels_and_order_targets(self):
+        self.order.store_order_number = "STORE-ORDER-123"
+        self.item.description = "Coffee grinder"
+        self.item.price_sold = 50
+        self.db.commit()
+        view = self.load()["reviews"][0]
+        view = self.edit(view, allocations=[{"receipt_source_id": view["content"]["receipt_ids"][0],
+            "item_id": self.item.id, "quantity": 1, "amount": "100.00"}])["reviews"][0]
+        label = "Order STORE-ORDER-123 · Coffee grinder · Receipt r1"
+        message = f"{label} allocations exceed its remaining local payout; review its received value."
+        self.assertIn(message, view["issues"])
+        self.assertEqual(view["issue_links"][message], {"label": label, "order_id": self.order.id})
+        item = service.group_view(self.db, self.group.id)["items"][0]
+        self.assertEqual(item["label"], label)
+        self.assertEqual(item["store_order_number"], "STORE-ORDER-123")
+        self.assertFalse(any("Item #" in issue for issue in view["issues"]))
 
     def test_boundary_timezone_and_equal_timestamp_sequence(self):
         r = receipt(); p = payment(day=1)
