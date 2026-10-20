@@ -13,7 +13,8 @@ from app.auth import get_current_user
 from app.database import SessionLocal, get_db
 from app.models import BrowserProfile, BuyingGroup, Payment, User, MonarchConnection, MonarchDeposit, MonarchConfirmation, MonarchPaymentReceipt
 from app.monarch import (PACIFIC, confirm_receipt, deposit_evidence, next_daily_check, payment_choice,
-                        require_connection, suggest_matches, undo_receipt, upsert_deposits, receiving_accounts)
+                        require_connection, suggest_matches, undo_receipt, upsert_deposits, receiving_accounts,
+                        matching_sender_groups)
 from app.schemas.monarch import MonarchSettingsUpdate, MonarchCheckRequest, MonarchConfirmRequest, MonarchDismissRequest
 from app.browser_automation.common import LoginRequiredError
 from app.browser_automation.jobs import create_job, get_job, update_job
@@ -186,13 +187,15 @@ async def stop_checks():
 
 
 @router.get("/review")
-def review(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def review(show_all: bool = False, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     connection = require_connection(db)
     payments = db.query(Payment).options(selectinload(Payment.line_items), selectinload(Payment.corrections), selectinload(Payment.buying_group)).filter(
         ~Payment.id.in_(db.query(MonarchPaymentReceipt.payment_id))).all()
     active = {row.active_deposit_id: row for row in db.query(MonarchConfirmation).filter(MonarchConfirmation.active_deposit_id.isnot(None))}
     deposits = []
     for deposit in db.query(MonarchDeposit).filter(MonarchDeposit.amount > 0).order_by(MonarchDeposit.posted_date.desc(), MonarchDeposit.id.desc()).all():
+        if not show_all and not matching_sender_groups(deposit, connection.sender_rules):
+            continue
         confirmation = active.get(deposit.id)
         eligible = not deposit.pending and not deposit.dismissed and deposit.account_id in connection.selected_account_ids and not confirmation
         suggestions = suggest_matches(deposit, payments, connection.sender_rules) if eligible else {"suggestions": [], "search_truncated": False}

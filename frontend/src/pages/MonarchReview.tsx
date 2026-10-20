@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { MONARCH, cents, dollars, type MonarchDeposit, type MonarchPaymentChoice, type MonarchReviewData } from '../api/monarch'
@@ -66,8 +66,11 @@ export default function MonarchReview() {
   const [data, setData] = useState<MonarchReviewData | null>(null)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('review')
-  async function refresh() { setData(await api.get<MonarchReviewData>(`${MONARCH}/review`)) }
-  useEffect(() => { refresh().catch(e => setError(e.message)) }, [])
+  const [showAll, setShowAll] = useState(false)
+  const refresh = useCallback(async () => {
+    setData(await api.get<MonarchReviewData>(`${MONARCH}/review${showAll ? '?show_all=true' : ''}`))
+  }, [showAll])
+  useEffect(() => { refresh().catch(e => setError(e.message)) }, [refresh])
   const deposits = data?.deposits.filter(d => filter === 'all' || (filter === 'confirmed' ? !!d.confirmation_id : !d.confirmation_id && !d.dismissed)) ?? []
   return <div className="space-y-4 text-ink dark:text-gray-100">
     <h1 className="text-2xl font-semibold">Monarch review</h1>
@@ -78,6 +81,10 @@ export default function MonarchReview() {
       <option value="review">Awaiting review</option><option value="confirmed">Confirmed</option><option value="all">All deposits</option>
     </select></label>
     <button className={`${buttonClass} ml-3`} onClick={() => { setError(''); void refresh().catch(e => setError(e.message)) }}>Refresh</button>
+    <label className="flex items-center gap-2">
+      <input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} />
+      Show all deposits (including those without a buying-group sender keyword match)
+    </label>
     {data && !deposits.length && <p>No deposits in this view.</p>}
     {deposits.map(deposit => <DepositReview key={`${deposit.id}:${deposit.revision}:${deposit.confirmation_id ?? ''}`} deposit={deposit} payments={data?.payments ?? []} refresh={refresh} />)}
   </div>

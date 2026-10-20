@@ -72,6 +72,27 @@ test('Monarch settings saves accounts and keywords, logs in, and checks a backfi
   expect(checked).toEqual({ start_date: '2026-01-01', end_date: '2026-10-19' })
 })
 
+test('Monarch review shows keyword matches by default and can include all deposits', async ({ app }) => {
+  await app.route('**/api/integrations/monarch/review*', route => {
+    const showAll = new URL(route.request().url()).searchParams.get('show_all') === 'true'
+    return route.fulfill({ json: { payments: [], deposits: showAll ? [{
+      id: 3, transaction_id: 'unrelated', account_name: 'Bank', posted_date: '2026-10-10',
+      amount: '25.00', merchant: 'Personal transfer', description: 'No keyword match', revision: 1,
+      pending: false, dismissed: false, eligible: true, confirmation_id: null, confirmation: null,
+      evidence_changed: false, suggestions: [], search_truncated: false,
+    }] : [] } })
+  })
+  await app.goto('/payments/monarch')
+  const checkbox = app.getByRole('checkbox', { name: /Show all deposits/ })
+  await expect(checkbox).not.toBeChecked()
+  await expect(app.getByText('No deposits in this view.')).toBeVisible()
+  await checkbox.check()
+  await expect(app.getByRole('article', { name: 'Personal transfer 2026-10-10' })).toBeVisible()
+  await checkbox.uncheck()
+  await expect(app.getByText('No deposits in this view.')).toBeVisible()
+  await expect(app.getByRole('article')).toHaveCount(0)
+})
+
 test('Monarch review requires exact whole payments, confirms combined deposits, and undoes', async ({ app }) => {
   const choices = [
     { id: 1, reference: 'P1', buying_group_id: 42, buying_group_name: 'Example group', amount: '10.01', fingerprint: 'first', date: '2026-10-01' },

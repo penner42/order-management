@@ -224,6 +224,26 @@ class MonarchTests(unittest.TestCase):
         self.assertEqual(next_daily_check(datetime(2026, 11, 1, 14, tzinfo=timezone.utc)).hour, 16)  # DST ended
         self.assertEqual(next_daily_check(datetime(2026, 10, 1, 14, tzinfo=timezone.utc)).hour, 15)
 
+    def test_review_defaults_to_keyword_matches_with_show_all_override(self):
+        # Matching is independent of payment availability or exact amount matches.
+        self.deposit.merchant = "Unrelated merchant"
+        self.deposit.description = "ACH sEnDeR transfer"
+        unrelated = MonarchDeposit(transaction_id="unrelated", account_id="bank", account_name="Bank",
+            amount=Decimal("25"), posted_date=self.deposit.posted_date, pending=False,
+            merchant="Other deposit", description="Personal transfer", revision=1)
+        self.connection.sender_rules = {str(self.group.id): ["", "   ", " sender "]}
+        self.db.add(unrelated)
+        self.db.commit()
+        result = monarch.review(db=self.db, _=self.user)
+        self.assertEqual([row["id"] for row in result["deposits"]], [self.deposit.id])
+        self.assertEqual(result["deposits"][0]["suggestions"], [])
+        self.assertEqual({row["id"] for row in monarch.review(show_all=True, db=self.db, _=self.user)["deposits"]},
+                         {self.deposit.id, unrelated.id})
+        self.connection.sender_rules = {str(self.group.id): ["", "   "]}
+        self.db.commit()
+        self.assertEqual(monarch.review(db=self.db, _=self.user)["deposits"], [])
+        self.assertEqual(len(monarch.review(show_all=True, db=self.db, _=self.user)["deposits"]), 2)
+
     def test_owner_constraints_and_singleton(self):
         for attrs in ({"retailer": "amazon"}, {"retailer": "monarch", "integration": "monarch", "store_id": self.order.store_id}, {"retailer": "monarch", "store_id": self.order.store_id}):
             self.db.add(BrowserProfile(**attrs))

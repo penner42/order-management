@@ -54,15 +54,20 @@ def payment_choice(payment):
             "date": (payment.payment_sent_at or payment.payment_requested_at).date().isoformat()}
 
 
+def matching_sender_groups(deposit, rules):
+    text = f"{deposit.merchant} {deposit.description}".casefold()
+    return {group_id for group_id, keywords in rules.items()
+            if any(word.strip().casefold() in text for word in keywords if word.strip())}
+
+
 def suggest_matches(deposit, payments, rules, *, search_limit=SEARCH_LIMIT):
     """Bounded iterative subset search per group; never imply a unique result when truncated."""
     if deposit.pending or deposit.amount <= 0:
         return {"suggestions": [], "search_truncated": False}
-    text = f"{deposit.merchant} {deposit.description}".casefold()
+    matching_groups = matching_sender_groups(deposit, rules)
     groups = {}
     for payment in payments:
-        keywords = rules.get(str(payment.buying_group_id), [])
-        if not any(word.strip().casefold() in text for word in keywords if word.strip()):
+        if str(payment.buying_group_id) not in matching_groups:
             continue
         start = (payment.payment_sent_at or payment.payment_requested_at).date()
         amount = payment_amount(payment)
