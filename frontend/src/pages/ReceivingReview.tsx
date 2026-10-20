@@ -45,6 +45,7 @@ interface ReceivingUnmatched {
 }
 
 interface ReceivingUnknownReceipt {
+  reward?: string | null
   receipt_key?: string | null
   receipt_id: string | null
   tracking_number: string
@@ -419,6 +420,7 @@ function ReceivingGroupSection({
                       <th className="py-2 px-2 font-medium text-ink-muted">Tracking</th>
                       <th className="py-2 px-2 font-medium text-ink-muted text-right">Expected</th>
                       <th className="py-2 px-2 font-medium text-ink-muted text-right">Received</th>
+                      <th className="py-2 px-2 font-medium text-ink-muted text-right">Reward</th>
                       <th className="py-2 px-2 font-medium text-ink-muted min-w-[8rem]">Receipt</th>
                       <th className="py-2 px-2 font-medium text-ink-muted">Scan date</th>
                       <th className="py-2 px-2 font-medium text-ink-muted">Fix payout</th>
@@ -507,6 +509,9 @@ function ReceivingGroupSection({
                           <td className="py-2 px-2 align-top text-right tabular-nums text-ink">
                             {isNotReceived ? '—' : fmtMoney(m.received_ext_total)}
                           </td>
+                          <td className="py-2 px-2 align-top text-right tabular-nums text-ink">
+                            {isNotReceived ? '—' : fmtMoney(m.reward)}
+                          </td>
                           <td className="py-2 px-2 align-top">
                             {isNotReceived ? (
                               <span className="text-ink-muted">—</span>
@@ -571,7 +576,7 @@ function ReceivingGroupSection({
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-left border-b border-brand-200 dark:border-gray-600 bg-brand-50/40 dark:bg-gray-800/60">
-                      {['Tracking', 'Item', 'Quantity', 'Unit price', 'Total', 'Receipt / group order', 'Status', 'Dates', 'Delivery / notes', 'Details', 'Link'].map((label) => (
+                      {['Tracking', 'Item', 'Quantity', 'Unit price', 'Total', 'Reward', 'Receipt / group order', 'Status', 'Dates', 'Delivery / notes', 'Details', 'Link'].map((label) => (
                         <th key={label} className="py-2 px-3 font-medium text-ink-muted whitespace-nowrap">{label}</th>
                       ))}
                     </tr>
@@ -586,6 +591,7 @@ function ReceivingGroupSection({
                         <td className="py-2 px-3 align-top tabular-nums">{receipt.quantity ?? '—'}</td>
                         <td className="py-2 px-3 align-top tabular-nums whitespace-nowrap">{fmtMoney(receipt.received_price)}</td>
                         <td className="py-2 px-3 align-top tabular-nums whitespace-nowrap">{fmtMoney(receipt.received_ext_total)}</td>
+                        <td className="py-2 px-3 align-top tabular-nums whitespace-nowrap">{fmtMoney(receipt.reward)}</td>
                         <td className="py-2 px-3 align-top text-xs">
                           <div>Receipt: {receipt.receipt_id || '—'}</div>
                           <div>Group order: {receipt.bg_order_id || '—'}</div>

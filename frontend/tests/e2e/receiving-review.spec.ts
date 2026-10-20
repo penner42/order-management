@@ -19,6 +19,8 @@ test('received reward is saved separately and shown beside payout on Orders', as
   }] }))
   await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
   await app.goto('/receiving-review')
+  await expect(app.getByRole('columnheader', { name: 'Reward', exact: true })).toBeVisible()
+  await expect(app.getByRole('cell', { name: '$6.50', exact: true })).toBeVisible()
   await app.getByRole('button', { name: 'Apply 1 selected' }).click()
   await expect(app.getByText('All listed rows were applied.')).toBeVisible()
   expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ reward: '6.50', price_sold: '20.00', status: 'scanned' })
@@ -144,7 +146,7 @@ test('unknown receipts are visible within each buying group, including groups wi
           receipt_id: 'receipt-alpha', tracking_number: 'UNKNOWN-ALPHA',
           tracking_numbers: ['UNKNOWN-ALPHA', 'ALTERNATE-ALPHA'],
           bg_order_id: 'group-order-alpha', description: 'Wireless headphones', quantity: 2,
-          received_price: '25.00', received_ext_total: '50.00', received_status: 'Received',
+          received_price: '25.00', received_ext_total: '50.00', reward: '7.25', received_status: 'Received',
           created_dt: '2026-10-15', scanned_at: '2026-10-15T12:00:00Z',
           delivery: 'Main warehouse', note: 'Box needs review',
           source_data: { sku: 'HEADPHONE-SKU', warehouse_item_id: 'warehouse-123' },
@@ -161,7 +163,7 @@ test('unknown receipts are visible within each buying group, including groups wi
   const beta = app.locator('section').filter({ hasText: 'Warehouse Beta' })
   await alpha.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
   await beta.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
-  for (const text of ['UNKNOWN-ALPHA', 'ALTERNATE-ALPHA', 'Wireless headphones', '$25.00', '$50.00',
+  for (const text of ['UNKNOWN-ALPHA', 'ALTERNATE-ALPHA', 'Wireless headphones', '$25.00', '$50.00', '$7.25',
     'receipt-alpha', 'group-order-alpha', 'Received', '2026-10-15T12:00:00Z', 'Main warehouse', 'Box needs review']) {
     await expect(alpha.getByText(text, { exact: false }).first()).toBeVisible()
   }
