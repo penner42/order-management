@@ -24,16 +24,27 @@ function localInput(v: string | null) {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
 }
 
-function ReviewCard({ review, group, payments, update, busy, run }: { review: Review; group: GroupReview; payments: Payment[]; update: (g: GroupReview) => void; busy: boolean; run: (fn: () => Promise<void>) => Promise<void> }) {
+type ErrorHandler = (message: string | null) => void
+interface ReviewCardProps { review: Review; group: GroupReview; payments: Payment[]; update: (g: GroupReview) => void; busy: boolean; run: (fn: () => Promise<void>, onError?: ErrorHandler) => Promise<void> }
+
+function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardProps) {
   const [content, setContent] = useState<Content>(structuredClone(review.content))
   const [dirty, setDirty] = useState(false)
   const [showAll, setShowAll] = useState(false)
   const [itemSearch, setItemSearch] = useState('')
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [windowError, setWindowError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!dirty) setContent(structuredClone(review.content))
+  }, [review.content, dirty])
   const confirmed = review.payment_id !== null
   function edit(next: Content) { setContent(next); setDirty(true) }
   const save = (rebuild = false) => run(async () => {
-    update(await api.patch<GroupReview>(`/payment-review/drafts/${review.id}`, { version: review.version, content, rebuild_window: rebuild }))
-  })
+    const updated = await api.patch<GroupReview>(`/payment-review/drafts/${review.id}`, { version: review.version, content, rebuild_window: rebuild })
+    setContent(structuredClone(updated.reviews.find(r => r.id === review.id)!.content))
+    setDirty(false)
+    update(updated)
+  }, rebuild ? setWindowError : setActionError)
   function toggleReceipt(receipt: Receipt) {
     const included = content.receipt_ids.includes(receipt.id)
     const matches = group.items.filter(i => i.receipt_id?.trim() === receipt.external_id)
@@ -55,12 +66,12 @@ function ReviewCard({ review, group, payments, update, busy, run }: { review: Re
       {confirmed && <Link className="underline" to="/payments">Confirmed as payment #{review.payment_id}</Link>}
     </div>
     {review.source.warnings?.map(w => <p className="text-amber-700 dark:text-amber-300 text-sm" key={w}>{w}</p>)}
-    {review.issues.length > 0 && <ul className="list-disc pl-5 text-sm text-amber-800 dark:text-amber-300">{review.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
     {!confirmed && <div className="flex flex-wrap items-end gap-3">
       <label className="text-sm text-ink">After <input type="datetime-local" className={`${field} block`} aria-label="Receipt window start" value={localInput(content.window_start)} onChange={e => edit({ ...content, window_start: e.target.value ? new Date(e.target.value).toISOString() : null })} /></label>
       <label className="text-sm text-ink">Through <input type="datetime-local" className={`${field} block`} aria-label="Receipt window end" value={localInput(content.window_end)} onChange={e => edit({ ...content, window_end: e.target.value ? new Date(e.target.value).toISOString() : null })} /></label>
       <button className={button} disabled={busy} onClick={() => save(true)}>Rebuild receipt selection</button>
     </div>}
+    {windowError && <p role="alert" className="text-sm text-red-700 dark:text-red-400">{windowError}</p>}
     <div>
       <h3 className="font-medium text-ink">Receipt coverage</h3>
       {!confirmed && <><p className="text-sm text-ink-muted">Link received order items below. Split larger lines on Orders when needed.</p>
@@ -128,11 +139,21 @@ function ReviewCard({ review, group, payments, update, busy, run }: { review: Re
       </label>
       <div className="flex flex-wrap items-center gap-3 text-ink"><strong>Allocated {money(total)} · Difference {money(Number(review.source.amount) - total)}</strong>
         <button className={button} disabled={busy || !dirty} onClick={() => save()}>Save review</button>
-        <button className={`${button} bg-brand-100 dark:bg-gray-700`} disabled={busy || dirty || review.issues.length > 0} onClick={() => run(async () => update(await api.post<GroupReview>(`/payment-review/drafts/${review.id}/confirm`, { version: review.version, fingerprint: review.fingerprint })))}>Confirm payment</button>
+        <button className={`${button} bg-brand-100 dark:bg-gray-700`} disabled={busy || dirty || review.issues.length > 0} onClick={() => run(async () => update(await api.post<GroupReview>(`/payment-review/drafts/${review.id}/confirm`, { version: review.version, fingerprint: review.fingerprint })), setActionError)}>Confirm payment</button>
         {dirty && <span className="text-sm text-ink-muted">Save changes to validate before confirming.</span>}
       </div>
     </>}
+    {review.issues.length > 0 && <ul aria-label="Payment review issues" className="list-disc pl-5 text-sm text-amber-800 dark:text-amber-300">{review.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
+    {actionError && <p role="alert" className="text-sm text-red-700 dark:text-red-400 whitespace-pre-wrap">{actionError}</p>}
   </section>
+}
+
+function PaymentReviewSection({ initiallyOpen, ...props }: ReviewCardProps & { initiallyOpen: boolean }) {
+  const [open, setOpen] = useState(initiallyOpen)
+  return <details open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary className="cursor-pointer p-3 text-ink font-medium">Payment {props.review.external_id} · {money(props.review.source.amount)} · {props.review.payment_id ? 'Confirmed' : `${props.review.issues.length} review issues`}</summary>
+    <ReviewCard {...props} />
+  </details>
 }
 
 export default function PaymentReviewPage() {
@@ -164,9 +185,9 @@ export default function PaymentReviewPage() {
     }
     return () => { active = false }
   }, [groupId])
-  async function run(fn: () => Promise<void>) {
-    setBusy(true); setError(null)
-    try { await fn() } catch (e) { setError(e instanceof Error ? e.message : String(e)) } finally { setBusy(false) }
+  async function run(fn: () => Promise<void>, onError: ErrorHandler = setError) {
+    setBusy(true); onError(null)
+    try { await fn() } catch (e) { onError(e instanceof Error ? e.message : String(e)) } finally { setBusy(false) }
   }
   return <div className="space-y-5">
     <Link to="/payments" className="underline text-brand-700 dark:text-brand-300">Payments</Link>
@@ -183,10 +204,7 @@ export default function PaymentReviewPage() {
       {group.corrections.length > 0 && <section className="rounded border border-amber-300 p-3 text-sm text-ink"><h2 className="font-medium">Outstanding receipt corrections</h2>{group.corrections.map(c => <p key={c.receipt_source_id}>Receipt {c.external_id}: originally {money(c.original_amount)}, covered {money(c.covered_amount)}, now {money(c.current_amount)} · Carry {money(c.amount)}{!c.present ? ' · Missing source: review required' : ''}</p>)}<p>Corrections stay queued until assigned and confirmed on a later payment. To move a saved correction, remove and save it on its current draft first.</p></section>}
       {!group.reviews.length && <p className="text-ink-muted">No imported payments yet. Check payments to load the group’s history.</p>}
       <p className="text-sm text-ink-muted">{group.reviews.filter(r => !r.payment_id).length} pending payments · {group.reviews.filter(r => r.payment_id).length} confirmed · {group.receipts.length} receipts</p>
-      {[...group.reviews].reverse().map((review, index) => <details key={`${groupId}:${review.id}:${review.version}`} open={index === 0}>
-        <summary className="cursor-pointer p-3 text-ink font-medium">Payment {review.external_id} · {money(review.source.amount)} · {review.payment_id ? 'Confirmed' : `${review.issues.length} review issues`}</summary>
-        <ReviewCard review={review} group={group} payments={payments} update={setGroup} busy={busy} run={run} />
-      </details>)}
+      {[...group.reviews].reverse().map((review, index) => <PaymentReviewSection key={`${groupId}:${review.id}`} initiallyOpen={index === 0} review={review} group={group} payments={payments} update={setGroup} busy={busy} run={run} />)}
       {group.receipts.some(r => !r.covered && !group.reviews.some(d => d.content.receipt_ids.includes(r.id))) && <section className="rounded border border-brand-200 dark:border-gray-700 p-4 text-ink"><h2 className="font-medium">Receipts outside payment windows</h2>{group.receipts.filter(r => !r.covered && !group.reviews.some(d => d.content.receipt_ids.includes(r.id))).map(r => <p className="text-sm" key={r.id}>Receipt {r.external_id} · {money(r.payload.amount)} · {r.payload.description}</p>)}</section>}
     </>}
   </div>

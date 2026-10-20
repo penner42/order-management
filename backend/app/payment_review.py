@@ -18,6 +18,41 @@ from app.monarch import lock_editable_payment
 ZERO = Decimal("0.00")
 
 
+def existing_payment_issues(db, review, content):
+    """Compare the selected payment during review as well as at confirmation."""
+    payment_id = content.get("existing_payment_id")
+    if not payment_id:
+        return []
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        return ["Selected local payment no longer exists. Choose another payment."]
+    if payment.buying_group_id != review.source.buying_group_id:
+        return ["Selected local payment belongs to a different buying group. Choose another payment."]
+    issues = []
+    if db.query(PaymentReview).filter_by(payment_id=payment_id).first():
+        issues.append("Selected local payment is already linked to an import. Choose another payment.")
+    from app.models import MonarchPaymentReceipt
+    if db.get(MonarchPaymentReceipt, payment_id):
+        issues.append("Undo the selected payment's Monarch receipt confirmation before linking it.")
+    if payment.corrections:
+        issues.append("Selected local payment already has carried corrections and cannot be linked to another import.")
+    expected = defaultdict(lambda: ZERO)
+    for allocation in content.get("allocations", []):
+        expected[allocation["item_id"]] += money(allocation["amount"])
+    actual = {line.item_id: money(line.amount) for line in payment.line_items}
+    for item_id in sorted(set(expected) | set(actual)):
+        if item_id not in actual:
+            issues.append(f"Item #{item_id} has ${expected[item_id]:,.2f} in this review but is not on the selected local payment.")
+        elif item_id not in expected:
+            issues.append(f"Item #{item_id} has ${actual[item_id]:,.2f} on the selected local payment but is not allocated in this review.")
+        elif actual[item_id] != expected[item_id]:
+            issues.append(f"Item #{item_id} amount differs: local payment ${actual[item_id]:,.2f}; review ${expected[item_id]:,.2f}.")
+    actual_bonus, expected_bonus = money(payment.payment_bonus), money(content.get("payment_bonus", 0))
+    if actual_bonus != expected_bonus:
+        issues.append(f"Bonus differs: local payment ${actual_bonus:,.2f}; review ${expected_bonus:,.2f}.")
+    return issues
+
+
 def money(value):
     try:
         number = Decimal(str(value))
@@ -350,6 +385,7 @@ def validate_content(db, review, content, outstanding, *, confirming=False):
     total = sum((money(a["amount"]) for a in allocations), ZERO) + sum((money(c["amount"]) for c in corrections), ZERO) + bonus
     if total != money(p["amount"]):
         issues.append("Allocated total plus corrections must equal the portal payment amount.")
+    issues.extend(existing_payment_issues(db, review, content))
     return list(dict.fromkeys(issues)), total
 
 
@@ -456,14 +492,6 @@ def confirm_review(db, review_id, version, fingerprint):
     existing_id = content.get("existing_payment_id")
     if existing_id:
         payment = lock_editable_payment(db, existing_id)
-        expected = defaultdict(lambda: ZERO)
-        for a in content.get("allocations", []):
-            expected[a["item_id"]] += money(a["amount"])
-        actual = {li.item_id: money(li.amount) for li in payment.line_items}
-        if payment.buying_group_id != source.buying_group_id or actual != dict(expected) or money(payment.payment_bonus) != money(content.get("payment_bonus", 0)) or payment.corrections:
-            raise HTTPException(409, "Existing payment must have exactly these item allocations and bonus, with no existing corrections.")
-        if db.query(PaymentReview).filter_by(payment_id=existing_id).first():
-            raise HTTPException(409, "Existing payment is already linked to an import.")
     else:
         payment = Payment(buying_group_id=source.buying_group_id, payment_id=source.external_id,
             payment_requested_at=review_created(review, content), payment_sent_at=when(p.get("sent_at")), payment_bonus=money(content.get("payment_bonus", 0)))

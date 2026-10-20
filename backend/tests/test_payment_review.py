@@ -257,6 +257,35 @@ class PaymentReviewTests(unittest.TestCase):
         self.assertEqual(self.db.query(Payment).count(), 1)
         self.assertEqual(self.db.query(PaymentReview).one().payment_id, p.id)
 
+    def test_matching_total_reports_item_and_bonus_differences_before_confirmation(self):
+        view = self.load()["reviews"][0]
+        p = Payment(buying_group_id=self.group.id, payment_id="p1", payment_requested_at=T, payment_bonus=10)
+        self.db.add(p); self.db.flush()
+        line = PaymentLineItem(payment_id=p.id, item_id=self.item.id, amount=90)
+        self.db.add(line); self.db.commit()
+        view = self.edit(view, existing_payment_id=p.id)["reviews"][0]
+        self.assertEqual(payment_amount(p), Decimal("100"))
+        self.assertIn(f"Item #{self.item.id} amount differs: local payment $90.00; review $100.00.", view["issues"])
+        self.assertIn("Bonus differs: local payment $10.00; review $0.00.", view["issues"])
+        with self.assertRaises(HTTPException) as caught:
+            self.confirm(view)
+        self.assertIn("Bonus differs", str(caught.exception.detail))
+        self.db.rollback()
+        self.assertEqual(self.db.query(Payment).count(), 1)
+        self.assertEqual(self.db.get(PaymentLineItem, line.id).amount, Decimal("90"))
+        self.assertEqual(self.db.get(Payment, p.id).payment_bonus, Decimal("10"))
+        self.assertEqual(self.db.query(PaymentCoverage).count(), 0)
+
+    def test_same_total_with_different_items_reports_both_item_sets(self):
+        view = self.load()["reviews"][0]
+        other = self.local("other-receipt", "100")
+        p = Payment(buying_group_id=self.group.id, payment_id="p1", payment_requested_at=T, payment_bonus=0)
+        self.db.add(p); self.db.flush()
+        self.db.add(PaymentLineItem(payment_id=p.id, item_id=other.id, amount=100)); self.db.commit()
+        view = self.edit(view, existing_payment_id=p.id)["reviews"][0]
+        self.assertIn(f"Item #{self.item.id} has $100.00 in this review but is not on the selected local payment.", view["issues"])
+        self.assertIn(f"Item #{other.id} has $100.00 on the selected local payment but is not allocated in this review.", view["issues"])
+
     def test_boundary_timezone_and_equal_timestamp_sequence(self):
         r = receipt(); p = payment(day=1)
         r.created_at = datetime(2026, 5, 2, 8, tzinfo=timezone(timedelta(hours=-4)))

@@ -105,3 +105,75 @@ test('Existing payments can be selected by payment ID and amount and the link pe
   await expect(selector).toHaveValue('')
   expect(selections).toEqual([42, null])
 })
+
+test('Saving and confirming preserve open payments and other unsaved review edits', async ({ app }) => {
+  const group = fixture()
+  group.reviews.push({ ...structuredClone(group.reviews[0]), id: 2, external_id: 'payment-2' })
+  await app.route('**/api/payment-review/capabilities', route => route.fulfill({ json: [group.capability] }))
+  await app.route('**/api/payment-review/groups/170001', route => route.fulfill({ json: group }))
+  await app.route('**/api/payment-review/drafts/1', async route => {
+    group.reviews[0].content = route.request().postDataJSON().content
+    for (const review of group.reviews) review.version += 1
+    await route.fulfill({ json: group })
+  })
+  await app.route('**/api/payment-review/drafts/1/confirm', async route => {
+    group.reviews[0].payment_id = 99
+    for (const review of group.reviews) review.version += 1
+    await route.fulfill({ json: group })
+  })
+  await app.goto('/payments/review?group=170001')
+  const older = app.locator('details').filter({ hasText: 'Payment payment-1' })
+  const newer = app.locator('details').filter({ hasText: 'Payment payment-2' })
+  await expect(older).toHaveJSProperty('open', false)
+  await expect(newer).toHaveJSProperty('open', true)
+  await older.locator('summary').click()
+  await newer.getByRole('textbox', { name: 'Review explanation', exact: true }).fill('Unsaved edits in another payment')
+  await older.getByRole('textbox', { name: 'Review explanation', exact: true }).fill('Save this explanation')
+  await older.getByLabel('Search local items', { exact: true }).fill('Example')
+  await older.getByLabel('Show other receipts to include', { exact: true }).check()
+  await older.getByRole('button', { name: 'Save review', exact: true }).click()
+  await expect(older.getByRole('button', { name: 'Save review', exact: true })).toBeDisabled()
+  await expect(older).toHaveJSProperty('open', true)
+  await expect(newer).toHaveJSProperty('open', true)
+  await expect(newer.getByRole('textbox', { name: 'Review explanation', exact: true })).toHaveValue('Unsaved edits in another payment')
+  await expect(older.getByLabel('Search local items', { exact: true })).toHaveValue('Example')
+  await expect(older.getByLabel('Show other receipts to include', { exact: true })).toBeChecked()
+  await newer.locator('summary').click()
+  await older.getByRole('button', { name: 'Confirm payment', exact: true }).click()
+  await expect(older.getByRole('link', { name: 'Confirmed as payment #99' })).toBeVisible()
+  await expect(older).toHaveJSProperty('open', true)
+  await expect(newer).toHaveJSProperty('open', false)
+  await newer.locator('summary').click()
+  await expect(newer.getByRole('textbox', { name: 'Review explanation', exact: true })).toHaveValue('Unsaved edits in another payment')
+})
+
+test('Save and confirmation failures appear beside the payment action buttons', async ({ app }) => {
+  const group = fixture()
+  let failSave = true
+  await app.route('**/api/payment-review/capabilities', route => route.fulfill({ json: [group.capability] }))
+  await app.route('**/api/payment-review/groups/170001', route => route.fulfill({ json: group }))
+  await app.route('**/api/payment-review/drafts/1', async route => {
+    if (failSave) {
+      await route.fulfill({ status: 409, json: { detail: 'Could not save this review.' } })
+    } else {
+      group.reviews[0].content = route.request().postDataJSON().content
+      group.reviews[0].version += 1
+      await route.fulfill({ json: group })
+    }
+  })
+  await app.route('**/api/payment-review/drafts/1/confirm', route => route.fulfill({ status: 409, json: { detail: 'Selected payment allocations changed.' } }))
+  await app.goto('/payments/review?group=170001')
+  const section = app.getByRole('region', { name: 'Payment payment-1', exact: true })
+  await section.getByRole('textbox', { name: 'Review explanation', exact: true }).fill('Keep this draft after an error')
+  await section.getByRole('button', { name: 'Save review', exact: true }).click()
+  await expect(section.getByRole('alert')).toHaveText('Could not save this review.')
+  failSave = false
+  await section.getByRole('button', { name: 'Save review', exact: true }).click()
+  await expect(section.getByRole('alert')).toHaveCount(0)
+  await section.getByRole('button', { name: 'Confirm payment', exact: true }).click()
+  await expect(section.getByRole('alert')).toHaveText('Selected payment allocations changed.')
+  const action = await section.getByRole('button', { name: 'Confirm payment', exact: true }).boundingBox()
+  const error = await section.getByRole('alert').boundingBox()
+  expect(error!.y).toBeGreaterThanOrEqual(action!.y + action!.height)
+  await expect(section.getByRole('textbox', { name: 'Review explanation', exact: true })).toHaveValue('Keep this draft after an error')
+})
