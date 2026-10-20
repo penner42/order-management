@@ -6,6 +6,7 @@ import BuyingGroups from './pages/BuyingGroups'
 import Rewards from './pages/Rewards'
 import PaymentMethods from './pages/PaymentMethods'
 import Payments from './pages/Payments'
+import PaymentReview from './pages/PaymentReview'
 import Stores from './pages/Stores'
 import Login from './pages/Login'
 import Admin from './pages/Admin'
@@ -241,6 +242,7 @@ function AppShell() {
           <Route path="/rewards" element={<LegacyRedirect to="/settings/rewards" />} />
           <Route path="/payment-methods" element={<LegacyRedirect to="/settings/payment-methods" />} />
           <Route path="/payments" element={<Payments />} />
+          <Route path="/payments/review" element={<PaymentReview />} />
           <Route path="/payments/monarch" element={<MonarchReview />} />
           <Route path="/stores" element={<LegacyRedirect to="/settings/stores" />} />
           <Route path="/portals" element={<LegacyRedirect to="/settings/portals" />} />

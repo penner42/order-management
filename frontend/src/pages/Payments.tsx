@@ -74,6 +74,7 @@ export default function Payments() {
         const prev = acc.get(li.item_id) ?? 0
         acc.set(li.item_id, prev + parseDecimal(li.amount))
       }
+      for (const c of p.corrections ?? []) acc.set(c.item_id, (acc.get(c.item_id) ?? 0) + c.amount)
     }
     return acc
   }, [payments])
@@ -113,32 +114,36 @@ export default function Payments() {
 
   const editItemIdToPaid = useMemo(() => {
     const acc = new Map<number, number>()
-    for (const li of editPayment?.line_items ?? []) {
-      const prev = acc.get(li.item_id) ?? 0
-      acc.set(li.item_id, prev + parseDecimal(li.amount))
+    for (const payment of payments) {
+      const current = payment.id === editPayment?.id ? editPayment : payment
+      for (const li of current?.line_items ?? []) {
+        acc.set(li.item_id, (acc.get(li.item_id) ?? 0) + parseDecimal(li.amount))
+      }
+      for (const c of current?.corrections ?? []) acc.set(c.item_id, (acc.get(c.item_id) ?? 0) + c.amount)
     }
     return acc
-  }, [editPayment])
+  }, [editPayment, payments])
   const editAvailableToAdd = useMemo(
     () =>
       editScannedItems.filter((i) => {
+        if (editPayment?.line_items.some(li => li.item_id === i.id)) return false
         const qty = i.quantity || 1
         const total = parseDecimal(i.price_sold) * qty
         const paid = editItemIdToPaid.get(i.id) ?? 0
         return paid < total - 1e-6
       }),
-    [editScannedItems, editItemIdToPaid]
+    [editScannedItems, editItemIdToPaid, editPayment]
   )
   const editPaymentTotal = useMemo(() => {
     if (!editPayment) return 0
-    return (
+    return editPayment.total_amount ?? (
       (editPayment.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0) +
-      parseDecimal((editPayment as Payment).payment_bonus)
+      parseDecimal((editPayment as Payment).payment_bonus) + (editPayment.corrections ?? []).reduce((sum, c) => sum + c.amount, 0)
     )
   }, [editPayment])
 
   const paymentAmount = (p: Payment) =>
-    (p.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0) + parseDecimal(p.payment_bonus)
+    p.total_amount ?? ((p.line_items ?? []).reduce((sum, li) => sum + parseDecimal(li.amount), 0) + parseDecimal(p.payment_bonus) + (p.corrections ?? []).reduce((sum, c) => sum + c.amount, 0))
 
   const totals = useMemo(() => {
     let amount = 0
@@ -504,6 +509,7 @@ export default function Payments() {
     <div>
       <h1 className="text-2xl font-semibold text-ink mb-8">Payments</h1>
       <Link className="inline-block underline mb-4 text-brand-700 dark:text-brand-300" to="/payments/monarch">Monarch review</Link>
+      <Link className="inline-block underline mb-4 ml-5 text-brand-700 dark:text-brand-300" to={`/payments/review${filterGroupId === '' ? '' : `?group=${filterGroupId}`}`}>Payment review</Link>
       <div className="mb-4 flex items-center gap-4">
         <div className="flex items-center gap-2">
           <label htmlFor="filter-group" className="text-sm text-ink-muted">
@@ -633,7 +639,7 @@ export default function Payments() {
                       <button
                         type="button"
                         onClick={() => setDeleteConfirmPayment(p)}
-                        disabled={!!p.monarch_receipt}
+                        disabled={!!p.monarch_receipt || !!p.source_details}
                         className="p-1.5 rounded text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
                         title={p.monarch_receipt ? 'Undo the Monarch receipt confirmation before deleting' : 'Delete payment'}
                         aria-label="Delete payment"
@@ -946,6 +952,12 @@ export default function Payments() {
               </h2>
             </div>
             <div className="p-4 flex flex-col gap-6 overflow-auto min-h-0">
+              {editPayment.source_details && <section className="text-sm text-ink">
+                <p>Imported from {editPayment.source_details.provider} · {editPayment.source_details.external_id}. Receipt coverage is fixed; later changes carry to subsequent payments.</p>
+                <Link className="underline" to={`/payments/review?group=${editPayment.buying_group_id}`}>Review receipt coverage and corrections</Link>
+                {editPayment.source_details.receipts.map(r => <p key={`${r.source_id}:${r.item_id}`}>Receipt {r.snapshot.external_id} · Item #{r.item_id} · Qty {r.quantity} · ${formatMoney(Number(r.amount))}</p>)}
+              </section>}
+              {(editPayment.corrections ?? []).length > 0 && <section className="text-sm text-ink"><h3 className="font-medium">Carried corrections</h3>{editPayment.corrections?.map(c => <p key={c.id}>Item #{c.item_id} · ${formatMoney(c.amount)} from payment #{c.origin_payment_id} · {c.explanation}</p>)}</section>}
               <section>
                 <label htmlFor="edit-payment-id" className="block text-sm font-medium text-ink mb-1">
                   Payment ID
@@ -1022,7 +1034,7 @@ export default function Payments() {
                                         className="p-1 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20"
                                         title="Edit allocated amount"
                                         aria-label="Edit allocated amount"
-                                        disabled={editSaving}
+                                        disabled={editSaving || !!editPayment.source_details}
                                       >
                                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                                           <path
@@ -1042,7 +1054,7 @@ export default function Payments() {
                                   <button
                                     type="button"
                                     onClick={() => removePaymentLineItem(editPayment.id, li.id)}
-                                    disabled={editSaving}
+                                    disabled={editSaving || !!editPayment.source_details}
                                     className="text-sm text-red-600 hover:underline disabled:opacity-50"
                                   >
                                     Remove
@@ -1122,7 +1134,7 @@ export default function Payments() {
                       <button
                         type="button"
                         onClick={addSelectedToEditPayment}
-                        disabled={editSaving || editSelectedToAdd.size === 0}
+                        disabled={editSaving || !!editPayment.source_details || editSelectedToAdd.size === 0}
                         className="rounded-lg bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium"
                       >
                         {editSaving ? 'Adding…' : `Add selected (${editSelectedToAdd.size})`}
@@ -1203,11 +1215,7 @@ export default function Payments() {
             </p>
             <p className="text-sm text-ink-muted mb-4">
               {markSentModal.payment_id ?? '—'} · {formatMoney(
-                (markSentModal.line_items ?? []).reduce(
-                  (sum, li) =>
-                    sum + parseDecimal(li.item?.price_sold) * (li.item?.quantity ?? 1),
-                  0
-                )
+                paymentAmount(markSentModal)
               )}
             </p>
             <label htmlFor="mark-sent-date" className="block text-sm font-medium text-ink mb-1">
@@ -1261,11 +1269,7 @@ export default function Payments() {
             </p>
             <p className="text-sm text-ink-muted mb-4">
               {markReceivedModal.payment_id ?? '—'} · {formatMoney(
-                (markReceivedModal.line_items ?? []).reduce(
-                  (sum, li) =>
-                    sum + parseDecimal(li.item?.price_sold) * (li.item?.quantity ?? 1),
-                  0
-                )
+                paymentAmount(markReceivedModal)
               )}
             </p>
             <label htmlFor="mark-received-date" className="block text-sm font-medium text-ink mb-1">

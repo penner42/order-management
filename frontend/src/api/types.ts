@@ -214,6 +214,9 @@ export interface PaymentLineItem {
 }
 
 export interface Payment {
+  total_amount?: number
+  source_details?: { provider: string; external_id: string; review_id: number; receipts: { source_id: number; item_id: number; amount: string; quantity: number; snapshot: { external_id: string; description: string } }[] } | null
+  corrections?: { id: number; receipt_source_id: number; origin_payment_id: number; item_id: number; amount: number; explanation: string }[]
   monarch_receipt?: { confirmation_id: number; transaction_id: string; posted_date: string; amount: string; account_name: string; merchant: string } | null
   id: number
   buying_group_id: number

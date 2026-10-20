@@ -6,6 +6,7 @@ submission ids after tracking submit.
 from __future__ import annotations
 
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -14,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -23,6 +25,29 @@ from app.submission_policy import require_group_submissions_enabled
 from app.utils.buying_group_apis import parsefile_crypto
 
 logger = logging.getLogger(__name__)
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urlsplit(req.full_url), urlsplit(newurl)
+        host = (old.hostname or "").removeprefix("www.")
+        # Some Parsefile installations advertise an HTTP canonical URL even though
+        # HTTPS is available. Upgrade that hop before following it, including login.
+        if old.scheme == "https" and new.scheme == "http":
+            new = new._replace(scheme="https")
+            newurl = new.geturl()
+        if (new.scheme != old.scheme or new.username or new.password
+                or new.port != old.port or (new.hostname or "").removeprefix("www.") != host):
+            raise RuntimeError("Portal redirected to an untrusted host")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_urlopen(req, *, timeout):
+    return urllib.request.build_opener(_SafeRedirect()).open(req, timeout=timeout)
+
+
+def _response_bytes(body):
+    return gzip.decompress(body) if body.startswith(b"\x1f\x8b") else body
 
 
 ADD_TRACKING_CMD = "/cmd/addtracking"
@@ -162,8 +187,8 @@ def submit_trackings(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            raw_text = resp.read().decode("utf-8", errors="replace")
+        with _safe_urlopen(req, timeout=timeout_seconds) as resp:
+            raw_text = _response_bytes(resp.read()).decode("utf-8", errors="replace")
             status = getattr(resp, "status", 200)
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
@@ -451,8 +476,8 @@ def search_received_items(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            raw_text = resp.read().decode("utf-8", errors="replace")
+        with _safe_urlopen(req, timeout=timeout_seconds) as resp:
+            raw_text = _response_bytes(resp.read()).decode("utf-8", errors="replace")
             status = getattr(resp, "status", 200)
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
@@ -589,7 +614,7 @@ def _bootstrap_session(base_url: str, timeout_seconds: float) -> str:
         headers={"User-Agent": _BROWSER_UA, "Accept": "text/html,application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+        with _safe_urlopen(req, timeout=timeout_seconds) as resp:
             resp.read()
             sess = _extract_sessid(resp.headers)
     except urllib.error.HTTPError as e:
@@ -609,6 +634,7 @@ def _decode_portal_response(
     body: bytes,
 ) -> dict[str, Any]:
     """Decrypt portal envelope, trying each session id (old then new) as passphrase."""
+    body = _response_bytes(body)
     try:
         wire = json.loads(body.decode("utf-8", errors="replace") if body else "{}")
     except json.JSONDecodeError as e:
@@ -676,7 +702,7 @@ def _portal_post(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+        with _safe_urlopen(req, timeout=timeout_seconds) as resp:
             raw = resp.read()
             new_sess = _extract_sessid(resp.headers) or session_id
             status = getattr(resp, "status", 200)

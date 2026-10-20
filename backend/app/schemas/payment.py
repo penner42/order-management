@@ -59,8 +59,24 @@ class PaymentLineItemUpdate(BaseModel):
 
 class PaymentRead(PaymentBase, TimestampsMixin):
     id: int
+    total_amount: float = 0
+    source_details: dict | None = None
+    corrections: list["PaymentCorrectionRead"] = []
     monarch_receipt: dict | None = None
     buying_group: BuyingGroupSummary | None = None
     line_items: list[PaymentLineItemRead] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentCorrectionRead(BaseModel):
+    id: int
+    receipt_source_id: int
+    origin_payment_id: int
+    item_id: int
+    amount: float
+    explanation: str
+    model_config = ConfigDict(from_attributes=True)
+
+
+PaymentRead.model_rebuild()

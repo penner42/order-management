@@ -188,7 +188,7 @@ async def stop_checks():
 @router.get("/review")
 def review(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     connection = require_connection(db)
-    payments = db.query(Payment).options(selectinload(Payment.line_items), selectinload(Payment.buying_group)).filter(
+    payments = db.query(Payment).options(selectinload(Payment.line_items), selectinload(Payment.corrections), selectinload(Payment.buying_group)).filter(
         Payment.payment_received_at.is_(None), ~Payment.id.in_(db.query(MonarchPaymentReceipt.payment_id))).all()
     active = {row.active_deposit_id: row for row in db.query(MonarchConfirmation).filter(MonarchConfirmation.active_deposit_id.isnot(None))}
     deposits = []

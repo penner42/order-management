@@ -31,8 +31,7 @@ def next_daily_check(now=None):
     return run.astimezone(timezone.utc)
 
 
-def payment_amount(payment):
-    return sum((Decimal(li.amount) for li in payment.line_items), Decimal(0)) + Decimal(payment.payment_bonus or 0)
+from app.payment_totals import payment_amount
 
 
 def payment_fingerprint(payment):
@@ -42,6 +41,7 @@ def payment_fingerprint(payment):
         "requested": str(payment.payment_requested_at), "sent": str(payment.payment_sent_at),
         "received": str(payment.payment_received_at),
         "lines": sorted((li.id, li.item_id, str(li.amount)) for li in payment.line_items),
+        "corrections": sorted((c.id, c.receipt_source_id, c.origin_payment_id, c.item_id, str(c.amount)) for c in payment.corrections),
     }
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -138,7 +138,7 @@ def confirm_receipt(db, deposit_id, data, reviewer_id):
     if len(payments) != len(ids):
         raise HTTPException(409, "A selected payment was deleted. Refresh the review.")
     for payment in payments:
-        db.expire(payment, ["line_items"])
+        db.expire(payment, ["line_items", "corrections"])
         if (payment.payment_received_at is not None or db.get(MonarchPaymentReceipt, payment.id)
                 or payment_fingerprint(payment) != expected[payment.id] or payment_amount(payment) <= 0):
             raise HTTPException(409, "A payment changed or was already received. Refresh the review.")

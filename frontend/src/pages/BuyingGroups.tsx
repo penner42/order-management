@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { BuyingGroup, BuyingGroupApiFramework } from '../api/types'
+import type { PaymentCapability } from './PaymentReview'
 
 const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: string }[] = [
   { value: '', label: 'None' },
@@ -276,6 +277,23 @@ export default function BuyingGroups() {
   const [submittingGroupId, setSubmittingGroupId] = useState<number | null>(null)
   const [checkingReceivingGroupId, setCheckingReceivingGroupId] = useState<number | null>(null)
   const [submitAlert, setSubmitAlert] = useState<string | null>(null)
+  const [paymentCapabilities, setPaymentCapabilities] = useState<PaymentCapability[]>([])
+  const [checkingPayments, setCheckingPayments] = useState<number | null>(null)
+
+  useEffect(() => {
+    api.get<PaymentCapability[]>('/payment-review/capabilities').then(setPaymentCapabilities).catch(console.error)
+  }, [groups])
+
+  async function checkPayments(groupId: number) {
+    setCheckingPayments(groupId)
+    setSubmitAlert(null)
+    try {
+      await api.post(`/payment-review/groups/${groupId}/refresh`, {})
+      navigate(`/payments/review?group=${groupId}`)
+    } catch (e) {
+      setSubmitAlert(e instanceof Error ? e.message : 'Failed to check payments')
+    } finally { setCheckingPayments(null) }
+  }
 
   useEffect(() => {
     api
@@ -806,6 +824,17 @@ export default function BuyingGroups() {
                         </button>
                       </div>
                     </div>
+                    {paymentCapabilities.find(c => c.buying_group_id === g.id)?.supported && (
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
+                        <button type="button" onClick={() => checkPayments(g.id)}
+                          title={paymentCapabilities.find(c => c.buying_group_id === g.id)?.reason ?? undefined}
+                          disabled={checkingPayments !== null || !paymentCapabilities.find(c => c.buying_group_id === g.id)?.ready}
+                          className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs text-ink disabled:opacity-50">
+                          {checkingPayments === g.id ? 'Checking payments…' : 'Check payments'}
+                        </button>
+                        <Link className="underline" to={`/payments/review?group=${g.id}`}>Payment review</Link>
+                      </div>
+                    )}
                     {supportsTrackingSubmit(g.api_framework) && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
                         <span>

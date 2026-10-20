@@ -2,12 +2,14 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, object_session
 from sqlalchemy.exc import IntegrityError
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import User, Payment, PaymentLineItem, Item
 from app.monarch import lock_editable_payment
+from app.payment_totals import item_allocated
+from app.models import PaymentReview
 from app.schemas.payment import (
     PaymentRead,
     PaymentCreate,
@@ -20,9 +22,14 @@ from app.schemas.payment import (
 router = APIRouter(prefix="/payments", tags=["payments"])
 
 
+def _ensure_manual_payment(db, payment_id):
+    if db.query(PaymentReview).filter_by(payment_id=payment_id).first():
+        raise HTTPException(409, "Imported payment coverage is frozen. Review receipt corrections on Payment review.")
+
+
 def _ensure_item_from_buying_group(item_id: int, buying_group_id: int, db: Session) -> Item:
     """Load item and ensure its order belongs to the given buying group. Returns item or raises 400/404."""
-    item = db.query(Item).filter(Item.id == item_id).first()
+    item = db.query(Item).filter(Item.id == item_id).with_for_update().populate_existing().first()
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     if not item.order:
@@ -40,7 +47,7 @@ def _get_item_totals(item: Item) -> tuple[float, float, float]:
     price = float(item.price_sold or 0)
     qty = item.quantity or 1
     item_total = price * qty
-    already_allocated = sum(float(li.amount or 0) for li in item.payment_line_items)
+    already_allocated = float(item_allocated(object_session(item), item.id))
     remaining = max(item_total - already_allocated, 0.0)
     return item_total, already_allocated, remaining
 
@@ -55,6 +62,7 @@ def list_payments(
         db.query(Payment)
         .options(
             joinedload(Payment.line_items).joinedload(PaymentLineItem.item),
+            joinedload(Payment.corrections),
         )
     )
     if buying_group_id is not None:
@@ -94,6 +102,8 @@ def update_payment(
         raise HTTPException(status_code=404, detail="Payment not found")
     if {"payment_bonus", "payment_received_at"} & data.model_fields_set:
         lock_editable_payment(db, payment_id)
+    if {"payment_bonus", "payment_requested_at"} & data.model_fields_set:
+        _ensure_manual_payment(db, payment_id)
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(payment, k, v)
     db.commit()
@@ -104,6 +114,7 @@ def update_payment(
 @router.delete("/{payment_id}", status_code=204)
 def delete_payment(payment_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     payment = lock_editable_payment(db, payment_id)
+    _ensure_manual_payment(db, payment_id)
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     db.delete(payment)
@@ -119,6 +130,7 @@ def add_payment_line_item(
     _: User = Depends(get_current_user),
 ):
     payment = lock_editable_payment(db, payment_id)
+    _ensure_manual_payment(db, payment_id)
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     item = _ensure_item_from_buying_group(data.item_id, payment.buying_group_id, db)
@@ -176,6 +188,7 @@ def remove_payment_line_item(
     _: User = Depends(get_current_user),
 ):
     lock_editable_payment(db, payment_id)
+    _ensure_manual_payment(db, payment_id)
     line_item = (
         db.query(PaymentLineItem)
         .filter(PaymentLineItem.id == line_item_id, PaymentLineItem.payment_id == payment_id)
@@ -197,6 +210,7 @@ def update_payment_line_item(
     _: User = Depends(get_current_user),
 ):
     lock_editable_payment(db, payment_id)
+    _ensure_manual_payment(db, payment_id)
     line_item = (
         db.query(PaymentLineItem)
         .options(joinedload(PaymentLineItem.item).joinedload(Item.order))
@@ -212,22 +226,14 @@ def update_payment_line_item(
         if not item:
             # Defensive: should not happen with current schema
             raise HTTPException(status_code=400, detail="Line item has no item")
+        db.query(Item).filter_by(id=item.id).with_for_update().populate_existing().first()
 
         price = float(item.price_sold or 0)
         qty = item.quantity or 1
         item_total = price * qty
 
-        # Sum allocations from other line items for this item (all payments)
-        other_allocated = (
-            db.query(PaymentLineItem)
-            .filter(
-                PaymentLineItem.item_id == item.id,
-                PaymentLineItem.id != line_item.id,
-            )
-            .with_entities(PaymentLineItem.amount)
-            .all()
-        )
-        already_allocated = sum(float(row[0] or 0) for row in other_allocated)
+        # Signed corrections also contribute to the item's covered payout.
+        already_allocated = float(item_allocated(db, item.id)) - float(line_item.amount)
         remaining_max = max(item_total - already_allocated, 0.0)
 
         new_amount = float(update_data)

@@ -23,6 +23,28 @@ class Payment(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     buying_group = relationship("BuyingGroup", back_populates="payments")
+    corrections = relationship("PaymentCorrection", foreign_keys="PaymentCorrection.payment_id", back_populates="payment")
+
+    @property
+    def total_amount(self):
+        from app.payment_totals import payment_amount
+        return payment_amount(self)
+
+    @property
+    def source_details(self):
+        from sqlalchemy.orm import object_session
+        from app.models.payment_import import PaymentReview, PaymentCoverage
+        db = object_session(self)
+        if not db:
+            return None
+        review = db.query(PaymentReview).filter_by(payment_id=self.id).first()
+        if not review:
+            return None
+        coverage = db.query(PaymentCoverage).filter_by(payment_id=self.id).all()
+        return {"provider": review.source.provider, "external_id": review.source.external_id,
+                "review_id": review.id, "receipts": [{"source_id": c.receipt_source_id,
+                "item_id": c.item_id, "amount": str(c.amount), "quantity": c.quantity,
+                "snapshot": c.snapshot} for c in coverage]}
     monarch_receipt_link = relationship("MonarchPaymentReceipt", uselist=False)
 
     @property

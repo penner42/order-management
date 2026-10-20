@@ -187,6 +187,54 @@ OpenAPI docs: http://localhost:8000/docs (available on host loopback in the deve
 
 The **browser-extension** folder contains a Chrome/Firefox extension that can read order numbers from store order pages (e.g. Walmart). Use it to paste order numbers into the app for import/preview. See `browser-extension/README.md` for installation and usage.
 
+## Buying group payment imports
+
+Open **Payments → Payment review**, select a buying group, and choose **Check
+payments**. Buying Groups also has a Check payments action for supported groups.
+The first provider supports every Parsefile group using its configured HTTPS
+website, API token, user ID, email, and portal password. Imports only read the
+remote portal; all confirmation happens locally. No recurring import is enabled.
+
+Payment history and receipt evidence remain in a persisted review queue. Default
+coverage includes receipts after the previous payment's creation through the
+current payment's creation. Explicit receipt links from a provider take precedence.
+Review the receipt selection, match all received local items and quantities, and
+save edits before confirming. Older receipts remain visible even when no local
+order exists yet. Use Receiving or Orders to prepare missing items; payment review
+does not create orders. Window edits, allocations, explanations, and correction
+destinations survive refreshes. You can explicitly link an existing local payment
+whose allocations and bonus match the review.
+
+Parsefile PAID maps to **Sent**, using its explicit sent/paid date. **Received**
+still requires manual or Monarch confirmation. Imported coverage is fixed after
+confirmation. Later receipt amount changes become signed corrections on a later
+payment, or remain queued until one exists. Partial carries leave the balance
+queued. To move a saved correction, remove/save it on its current draft before
+adding it elsewhere. Bonuses or fees require an explicit amount and explanation;
+unexplained differences block confirmation. Missing evidence and source payment
+changes are flagged without rewriting local payments. Historical values start
+with the first imported snapshot; earlier receipt revisions cannot be recovered.
+
+Authenticated endpoints are under `/api/payment-review`: `GET /capabilities`,
+`GET /groups/{id}`, `POST /groups/{id}/refresh`, `PATCH /drafts/{id}`, and
+`POST /drafts/{id}/confirm`. Confirmation requires the displayed draft version and
+fingerprint, and commits payment metadata, allocations, and corrections together.
+Payment responses expose `total_amount`, `source_details`, and signed `corrections`;
+Monarch uses the same total and includes corrections in its confirmation fingerprint.
+
+To add an API or website provider, implement `PaymentProvider` in
+`backend/app/payment_providers.py`, register it in `PROVIDERS` using the group's
+framework key, and provide readiness checks plus a read-only `fetch(group)`.
+Return normalized `PaymentEvidence`, `ReceiptEvidence`, and `PaymentFetch` rather
+than remote wire fields. Supply stable identities, timezone-aware dates, source
+statuses, and explicit receipt links when available. Set `complete=False` for a
+partial fetch and `history_complete=False` for truncated history; incomplete
+fetches never replace evidence. Keep pagination, sessions, credential handling,
+and sanitized evidence inside the adapter. New framework keys also need adding
+to the buying-group schema and framework selector. Shared matching, corrections,
+review APIs, and UI require no provider-specific changes. The fake provider tests
+demonstrate explicit receipt links and the shared confirmation contract.
+
 ## Monarch payment receipts
 
 Open **Settings → Monarch**, choose **Set up Monarch**, and log in using the

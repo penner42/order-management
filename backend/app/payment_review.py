@@ -1,0 +1,496 @@
+"""Shared payment reconciliation, independent of provider wire formats."""
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+import hashlib
+import json
+
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+from app.models import (BuyingGroup, Item, Order, Payment, PaymentLineItem,
+    PaymentSource, PaymentReview, PaymentCoverage, PaymentCorrection)
+from app.payment_providers import PaymentFetch, provider_for
+from app.payment_totals import item_allocated, payment_amount
+from app.monarch import lock_editable_payment
+
+ZERO = Decimal("0.00")
+
+
+def money(value):
+    try:
+        number = Decimal(str(value))
+        if not number.is_finite() or number != number.quantize(Decimal("0.01")) or abs(number) >= Decimal("10000000000"):
+            raise ValueError()
+        return number
+    except (InvalidOperation, ValueError, TypeError):
+        raise HTTPException(400, "Amounts must be finite values with at most two decimal places.")
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def when(value):
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value)
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def lock_group(db, group_id):
+    group = db.query(BuyingGroup).filter_by(id=group_id).with_for_update().populate_existing().first()
+    if not group:
+        raise HTTPException(404, "Buying group not found")
+    return group
+
+
+def capability(group):
+    provider = provider_for(group)
+    ready, reason = provider.ready(group) if provider else (False, "Payment import is not supported for this framework yet.")
+    return {"buying_group_id": group.id, "name": group.name, "supported": bool(provider),
+            "provider": provider.key if provider else None, "ready": ready, "reason": reason}
+
+
+def order_key(source):
+    p = source.payload
+    return (when(p.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc), p.get("sequence") or 0, source.external_id)
+
+
+def review_created(review, content):
+    """A missing provider date needs an explicit, explained manual boundary."""
+    return when(review.source.payload.get("created_at") or (
+        content.get("window_end") if content.get("note", "").strip() else None))
+
+
+def in_window(receipt, start, end):
+    date = when(receipt.payload.get("created_at"))
+    if not date or not when(end.payload.get("created_at")):
+        return False
+    # Ledger sequence resolves equal timestamps when both sides supply it.
+    def boundary(other, upper):
+        other_date = when(other.payload.get("created_at"))
+        if date != other_date:
+            return date < other_date if upper else date > other_date
+        a, b = receipt.payload.get("sequence"), other.payload.get("sequence")
+        return (a <= b if upper else a > b) if a is not None and b is not None else False
+    return boundary(end, True) and (start is None or boundary(start, False))
+
+
+def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str):
+    """A failed/partial fetch never replaces the last complete snapshot."""
+    if not result.complete:
+        raise HTTPException(409, "Payment fetch was incomplete. Existing review data was preserved.")
+    group = lock_group(db, group_id)
+    provider = provider_for(group)
+    if not provider or provider.key != provider_key:
+        raise HTTPException(409, "Group provider changed during refresh. Try again.")
+    sources = db.query(PaymentSource).filter_by(buying_group_id=group_id, provider=provider_key).all()
+    index = {(s.kind, s.external_id): s for s in sources}
+    seen = set()
+    for kind, records in (("payment", result.payments), ("receipt", result.receipts)):
+        for evidence in records:
+            key = (kind, evidence.external_id)
+            if not evidence.external_id or key in seen:
+                raise HTTPException(409, "Provider returned duplicate or missing source identities.")
+            money(evidence.amount)
+            if evidence.amount < 0:
+                raise HTTPException(409, "Provider returned an invalid negative source amount.")
+            seen.add(key)
+            payload = evidence.model_dump(mode="json")
+            if kind == "payment":
+                payload["warnings"] = result.warnings
+                payload["history_complete"] = result.history_complete
+            row = index.get(key)
+            if row is None:
+                row = PaymentSource(buying_group_id=group_id, provider=provider_key, kind=kind, external_id=key[1])
+                db.add(row)
+                index[key] = row
+            row.payload, row.revision, row.present = payload, digest(payload), True
+    for key, row in index.items():
+        if key not in seen:
+            row.present = False
+    db.flush()
+    payments = sorted([s for s in index.values() if s.kind == "payment" and s.present], key=order_key)
+    receipts = [s for s in index.values() if s.kind == "receipt" and s.present]
+    previous = None
+    for source in payments:
+        review = db.query(PaymentReview).filter_by(source_id=source.id).first()
+        explicit = source.payload.get("receipt_ids")
+        ids = [r.id for r in receipts if (r.external_id in explicit if explicit is not None else in_window(r, previous, source))
+               and not r.payload.get("void")]
+        if review is None:
+            review = PaymentReview(source_id=source.id, content={})
+            db.add(review)
+        else:
+            review.version += 1
+        content = dict(review.content or {})
+        if not content.get("manual") and review.payment_id is None:
+            content.update(receipt_ids=ids, window_start=previous.payload.get("created_at") if previous else None,
+                window_end=source.payload.get("created_at"), allocations=[], corrections=[], note="", manual=False)
+        review.content = content
+        if not source.payload.get("void"):
+            previous = source
+    # Missing sources also invalidate open clients' versions.
+    missing_ids = [s.id for s in index.values() if s.kind == "payment" and not s.present]
+    for review in db.query(PaymentReview).filter(PaymentReview.source_id.in_(missing_ids)).all():
+        review.version += 1
+    db.commit()
+    return group_view(db, group_id)
+
+
+def group_sources(db, group_id):
+    return db.query(PaymentSource).filter_by(buying_group_id=group_id).all()
+
+
+def receipt_matches(db, source):
+    items = db.query(Item).join(Order).filter(Order.buying_group_id == source.buying_group_id).all()
+    out = []
+    for item in items:
+        tokens = {(s or "").strip().casefold() for s in (item.receipt_id or "").replace(";", ",").split(",")}
+        if source.external_id.casefold() not in tokens:
+            continue
+        # Multiple receipt IDs on one local line are ambiguous: let the user split coverage.
+        if len(tokens - {""}) != 1:
+            continue
+        trackings = source.payload.get("tracking_numbers") or []
+        if trackings and item.receipt_tracking_number and item.receipt_tracking_number.casefold() not in {t.casefold() for t in trackings}:
+            continue
+        out.append({"receipt_source_id": source.id, "item_id": item.id,
+            "quantity": item.quantity, "amount": str(money(item.price_sold or 0) * item.quantity)})
+    return out
+
+
+def outstanding_corrections(db, group_id):
+    result = []
+    receipts = [s for s in group_sources(db, group_id) if s.kind == "receipt"]
+    for receipt in receipts:
+        coverage = db.query(PaymentCoverage).filter_by(receipt_source_id=receipt.id).order_by(PaymentCoverage.id).all()
+        if not coverage:
+            continue
+        applied = db.query(PaymentCorrection).filter_by(receipt_source_id=receipt.id).all()
+        covered = sum((c.amount for c in coverage), ZERO) + sum((c.amount for c in applied), ZERO)
+        current = ZERO if receipt.payload.get("void") else money(receipt.payload["amount"])
+        delta = current - covered
+        baseline = coverage[0].snapshot
+        details_changed = any(receipt.payload.get(k) != baseline.get(k) for k in ("quantity", "description", "tracking_numbers", "created_at"))
+        if not delta and receipt.present and not details_changed:
+            continue
+        origin = db.get(Payment, coverage[0].payment_id)
+        origin_review = db.query(PaymentReview).filter_by(payment_id=origin.id).first()
+        origin_snapshot = origin_review.content.get("confirmed_source", {}) if origin_review else {}
+        origin_created = origin_snapshot.get("reviewed_created_at") or origin_snapshot.get("created_at")
+        result.append({"receipt_source_id": receipt.id, "external_id": receipt.external_id,
+            "provider": receipt.provider,
+            "origin_payment_id": origin.id, "origin_requested_at": origin_created or origin.payment_requested_at.isoformat(),
+            "original_amount": str(sum((c.amount for c in coverage), ZERO)), "covered_amount": str(covered),
+            "current_amount": str(current), "amount": str(delta), "present": receipt.present,
+            "revision": receipt.revision, "items": [{"item_id": c.item_id, "amount": str(c.amount)} for c in coverage]})
+        result[-1]["details_changed"] = details_changed
+    return result
+
+
+def correction_suggestions(db, review, outstanding):
+    drafts = db.query(PaymentReview).join(PaymentSource).filter(PaymentSource.buying_group_id == review.source.buying_group_id,
+        PaymentReview.payment_id.is_(None), PaymentSource.present.is_(True)).all()
+    results = []
+    for correction in outstanding:
+        # A saved manual destination takes precedence over the automatic destination.
+        manual_targets = [d for d in drafts if d.source.provider == correction["provider"] and d.content.get("manual") and any(
+            x["receipt_source_id"] == correction["receipt_source_id"] for x in d.content.get("corrections", []))]
+        eligible = [d for d in drafts if d.source.provider == correction["provider"] and not d.source.payload.get("void") and review_created(d, d.content)
+                    and review_created(d, d.content) > when(correction["origin_requested_at"])]
+        target = min(manual_targets or eligible, key=lambda d: (review_created(d, d.content) or datetime.max.replace(tzinfo=timezone.utc), order_key(d.source)), default=None)
+        if target is None or target.id != review.id or not correction["present"] or money(correction["amount"]) == 0:
+            continue
+        delta = money(correction["amount"])
+        items = correction["items"]
+        total = sum((money(i["amount"]) for i in items), ZERO)
+        allocated = ZERO
+        for n, item in enumerate(items):
+            amount = delta - allocated if n == len(items) - 1 else (delta * money(item["amount"]) / total).quantize(Decimal("0.01"))
+            allocated += amount
+            if amount:
+                results.append({"receipt_source_id": correction["receipt_source_id"], "item_id": item["item_id"],
+                    "amount": str(amount), "explanation": "Receipt value changed after payment confirmation"})
+    return results
+
+
+def effective_content(db, review, outstanding):
+    content = dict(review.content)
+    if not content.get("manual") and review.payment_id is None:
+        content["allocations"] = [a for rid in content.get("receipt_ids", [])
+            if (receipt := db.get(PaymentSource, rid)) for a in receipt_matches(db, receipt)]
+        content["corrections"] = correction_suggestions(db, review, outstanding)
+    return content
+
+
+def validate_content(db, review, content, outstanding, *, confirming=False):
+    issues = []
+    source = review.source
+    p = source.payload
+    provider = provider_for(db.get(BuyingGroup, source.buying_group_id))
+    if provider is None or provider.key != source.provider:
+        issues.append("Group payment provider changed; review its configuration before confirming.")
+    if not source.present:
+        issues.append("Payment is missing from the latest complete source snapshot.")
+    if p.get("void"):
+        issues.append("Source payment is void.")
+    if not p.get("status_known", True):
+        issues.append("Unknown source payment status; verify the provider mapping before confirming.")
+    if not review_created(review, content):
+        issues.append("Payment creation date is missing; set the Through boundary and explain the chosen request time.")
+    if p.get("currency") != "USD":
+        issues.append("Only USD payments are supported by local payment accounting.")
+    if money(p["amount"]) <= 0:
+        issues.append("Source payment amount must be greater than zero.")
+    if not p.get("history_complete", True) and not content.get("note", "").strip():
+        issues.append("History is incomplete; verify coverage and record an explanation.")
+    if p.get("warnings") and not content.get("note", "").strip():
+        issues.append("Review provider warnings and record an explanation.")
+    allocations = content.get("allocations", [])
+    receipts = {s.id: s for s in group_sources(db, source.buying_group_id) if s.kind == "receipt"}
+    ids = content.get("receipt_ids", [])
+    if not ids and not content.get("corrections"):
+        issues.append("A payment requires matched receipt coverage or a correction to previously matched items.")
+    explicit = p.get("receipt_ids")
+    if explicit and any(not any(r.external_id == rid and r.present for r in receipts.values()) for rid in explicit):
+        issues.append("The provider references a receipt missing from the source snapshot.")
+    if len(ids) != len(set(ids)):
+        issues.append("A receipt was selected more than once.")
+    if any(a["receipt_source_id"] not in ids for a in allocations):
+        issues.append("An allocation references an excluded receipt.")
+    if len({(a["receipt_source_id"], a["item_id"]) for a in allocations}) != len(allocations):
+        issues.append("Each receipt/item allocation must be unique.")
+    used_quantities = defaultdict(int)
+    item_amounts = defaultdict(lambda: ZERO)
+    for rid in ids:
+        receipt = receipts.get(rid)
+        if not receipt:
+            issues.append("Selected receipt does not belong to this buying group.")
+            continue
+        if receipt.provider != source.provider or not receipt.present or receipt.payload.get("void"):
+            issues.append(f"Receipt {receipt.external_id} is missing, void, or from another provider.")
+        if not receipt.payload.get("verified", True) and not content.get("note", "").strip():
+            issues.append(f"Receipt {receipt.external_id} is unverified; check it and record an explanation.")
+        if receipt.payload.get("currency") != p.get("currency"):
+            issues.append(f"Receipt {receipt.external_id} currency differs from the payment.")
+        covered = db.query(PaymentCoverage).filter_by(receipt_source_id=rid).first()
+        if covered:
+            issues.append(f"Receipt {receipt.external_id} is already covered by payment #{covered.payment_id}.")
+        lines = [a for a in allocations if a["receipt_source_id"] == rid]
+        quantity = receipt.payload.get("quantity")
+        if not lines or (quantity is None and not content.get("note", "").strip()) or (quantity is not None and sum(a["quantity"] for a in lines) != quantity):
+            issues.append(f"Receipt {receipt.external_id} requires complete local item/quantity matches.")
+        if sum((money(a["amount"]) for a in lines), ZERO) != money(receipt.payload["amount"]):
+            issues.append(f"Receipt {receipt.external_id} allocations do not equal its source amount.")
+        # Equal receipt/payment timestamps without sequence are never inferred silently.
+        if (receipt.payload.get("created_at") and p.get("created_at")
+            and when(receipt.payload["created_at"]) == when(p["created_at"])
+            and (receipt.payload.get("sequence") is None or p.get("sequence") is None)
+            and not content.get("note", "").strip()):
+            issues.append("Equal-time receipt ordering requires a review explanation.")
+        for a in lines:
+            item = db.get(Item, a["item_id"])
+            if not item or item.order.buying_group_id != source.buying_group_id:
+                issues.append("An allocated item does not belong to this buying group.")
+                continue
+            if money(a["amount"]) <= 0 or a["quantity"] <= 0:
+                issues.append("Receipt allocations require positive amounts and quantities.")
+            if item.status.value in {"canceled", "purchased", "shipped", "submitted", "needs_review"}:
+                issues.append(f"Item #{item.id} must be received before payment confirmation.")
+            used_quantities[item.id] += a["quantity"]
+            item_amounts[item.id] += money(a["amount"])
+    corrections = content.get("corrections", [])
+    by_receipt = defaultdict(list)
+    correction_index = {c["receipt_source_id"]: c for c in outstanding}
+    if len({(c["receipt_source_id"], c["item_id"]) for c in corrections}) != len(corrections):
+        issues.append("Each correction/item allocation must be unique.")
+    for c in corrections:
+        by_receipt[c["receipt_source_id"]].append(c)
+        original = correction_index.get(c["receipt_source_id"])
+        item = db.get(Item, c["item_id"])
+        if not original or not original["present"]:
+            issues.append("Correction receipt is missing or no longer has an outstanding difference.")
+            continue
+        if original["provider"] != source.provider:
+            issues.append("Corrections must use receipts from the same payment provider.")
+        if not item or item.order.buying_group_id != source.buying_group_id or c["item_id"] not in {i["item_id"] for i in original["items"]}:
+            issues.append("Corrections must reference the original covered local items.")
+        if not c.get("explanation", "").strip():
+            issues.append("Every correction needs an explanation.")
+        if review_created(review, content) is None or review_created(review, content) <= when(original["origin_requested_at"]):
+            issues.append("A correction must be carried to a later payment.")
+        if not money(c["amount"]):
+            issues.append("Correction amounts must be nonzero.")
+        conflicts = db.query(PaymentReview).join(PaymentSource).filter(PaymentSource.buying_group_id == source.buying_group_id,
+            PaymentReview.payment_id.is_(None), PaymentReview.id != review.id).all()
+        if any(d.content.get("manual") and any(x["receipt_source_id"] == c["receipt_source_id"] for x in d.content.get("corrections", [])) for d in conflicts):
+            issues.append("Correction is assigned to another pending payment; remove it there first.")
+    for rid, lines in by_receipt.items():
+        original = correction_index.get(rid)
+        if original and sum((money(c["amount"]) for c in lines), ZERO) != money(original["amount"]):
+            # Explicit partial carries are allowed with an explanation; the rest stays queued.
+            proposed = sum((money(c["amount"]) for c in lines), ZERO)
+            delta = money(original["amount"])
+            if proposed * delta <= 0 or abs(proposed) > abs(delta):
+                issues.append("Correction exceeds or reverses the outstanding receipt difference.")
+    for item_id, qty in used_quantities.items():
+        item = db.get(Item, item_id)
+        prior_quantity = sum(c.quantity for c in db.query(PaymentCoverage).filter_by(item_id=item_id).all())
+        if qty + prior_quantity > item.quantity:
+            issues.append(f"Item #{item_id} quantity was allocated more than once.")
+        remaining = money(item.price_sold or 0) * item.quantity - item_allocated(db, item_id, content.get("existing_payment_id"))
+        if item_amounts[item_id] > remaining:
+            issues.append(f"Item #{item_id} allocations exceed its remaining local payout; review its received value.")
+    bonus = money(content.get("payment_bonus", 0))
+    if bonus and not content.get("note", "").strip():
+        issues.append("An explicit bonus or fee requires a review explanation.")
+    total = sum((money(a["amount"]) for a in allocations), ZERO) + sum((money(c["amount"]) for c in corrections), ZERO) + bonus
+    if total != money(p["amount"]):
+        issues.append("Allocated total plus corrections must equal the portal payment amount.")
+    return list(dict.fromkeys(issues)), total
+
+
+def review_view(db, review, outstanding):
+    content = effective_content(db, review, outstanding)
+    if review.payment_id:
+        issues = []
+        if not review.source.present:
+            issues.append("Confirmed payment is missing from the source; local payment was preserved.")
+        if review.source.revision != review.confirmed_revision:
+            issues.append("Source payment changed after confirmation; local payment was preserved.")
+        total = payment_amount(db.get(Payment, review.payment_id))
+    else:
+        issues, total = validate_content(db, review, content, outstanding)
+    return {"id": review.id, "version": review.version, "payment_id": review.payment_id,
+        "fingerprint": review_token(db, review, content),
+        "source_id": review.source_id, "external_id": review.source.external_id,
+        "source": review.source.payload, "content": content, "issues": issues,
+        "allocated_total": str(total), "difference": str(money(review.source.payload["amount"]) - total)}
+
+
+def review_token(db, review, content):
+    """Bind confirmation to the displayed matches as well as the source version."""
+    item_ids = sorted({a["item_id"] for a in content.get("allocations", []) + content.get("corrections", [])})
+    items = []
+    for item_id in item_ids:
+        item = db.get(Item, item_id)
+        items.append(None if not item else {"id": item.id, "order_id": item.order_id,
+            "group_id": item.order.buying_group_id, "quantity": item.quantity, "price": str(item.price_sold),
+            "status": item.status.value, "receipt_id": item.receipt_id,
+            "allocated": str(item_allocated(db, item.id))})
+    receipt_ids = sorted(set(content.get("receipt_ids", [])) | {c["receipt_source_id"] for c in content.get("corrections", [])})
+    receipts = [(s.id, s.revision, s.present) for rid in receipt_ids if (s := db.get(PaymentSource, rid))]
+    return digest({"version": review.version, "source": review.source.revision, "present": review.source.present,
+        "content": content, "items": items, "receipts": receipts})
+
+
+def group_view(db, group_id):
+    group = db.get(BuyingGroup, group_id)
+    if not group:
+        raise HTTPException(404, "Buying group not found")
+    outstanding = outstanding_corrections(db, group_id)
+    reviews = db.query(PaymentReview).join(PaymentSource).filter(PaymentSource.buying_group_id == group_id).all()
+    items = db.query(Item).join(Order).filter(Order.buying_group_id == group_id).order_by(Item.id).all()
+    receipts = [s for s in group_sources(db, group_id) if s.kind == "receipt"]
+    return {"capability": capability(group), "reviews": [review_view(db, r, outstanding) for r in sorted(reviews, key=lambda r: order_key(r.source))],
+        "receipts": [{"id": s.id, "external_id": s.external_id, "payload": s.payload, "present": s.present,
+            "covered": db.query(PaymentCoverage).filter_by(receipt_source_id=s.id).first() is not None} for s in receipts],
+        "corrections": outstanding, "items": [{"id": i.id, "description": i.description, "quantity": i.quantity,
+            "receipt_id": i.receipt_id, "status": i.status.value, "price_sold": str(i.price_sold),
+            "remaining": str(max(money(i.price_sold or 0) * i.quantity - item_allocated(db, i.id), ZERO)),
+            "order_id": i.order_id} for i in items]}
+
+
+def locked_review(db, review_id, version):
+    review = db.get(PaymentReview, review_id)
+    if not review:
+        raise HTTPException(404, "Payment review not found")
+    lock_group(db, review.source.buying_group_id)
+    db.refresh(review)
+    db.refresh(review.source)
+    if review.payment_id or review.version != version:
+        raise HTTPException(409, "Payment review changed or was confirmed. Refresh before saving.")
+    return review
+
+
+def save_review(db, review_id, body):
+    review = locked_review(db, review_id, body.version)
+    content = body.content.model_dump(mode="json")
+    content["manual"] = True
+    if body.rebuild_window:
+        start, end = when(content.get("window_start")), when(content.get("window_end"))
+        if not end or (start and start >= end):
+            raise HTTPException(400, "Choose a valid receipt window.")
+        content["receipt_ids"] = [s.id for s in group_sources(db, review.source.buying_group_id)
+            if s.kind == "receipt" and s.present and not s.payload.get("void") and when(s.payload.get("created_at"))
+            and (start is None or when(s.payload["created_at"]) > start) and when(s.payload["created_at"]) <= end
+            and not db.query(PaymentCoverage).filter_by(receipt_source_id=s.id).first()]
+        content["allocations"] = [a for rid in content["receipt_ids"] for a in receipt_matches(db, db.get(PaymentSource, rid))]
+    review.content = content
+    review.version += 1
+    for other in db.query(PaymentReview).join(PaymentSource).filter(PaymentSource.buying_group_id == review.source.buying_group_id,
+            PaymentReview.id != review.id, PaymentReview.payment_id.is_(None)).all():
+        other.version += 1
+    db.commit()
+    return group_view(db, review.source.buying_group_id)
+
+
+def confirm_review(db, review_id, version, fingerprint):
+    review = locked_review(db, review_id, version)
+    outstanding = outstanding_corrections(db, review.source.buying_group_id)
+    content = effective_content(db, review, outstanding)
+    if content.get("existing_payment_id"):
+        lock_editable_payment(db, content["existing_payment_id"])
+    item_ids = sorted({a["item_id"] for a in content.get("allocations", []) + content.get("corrections", [])})
+    db.query(Item).filter(Item.id.in_(item_ids)).order_by(Item.id).with_for_update().populate_existing().all()
+    if fingerprint != review_token(db, review, content):
+        raise HTTPException(409, "Payment evidence or local items changed. Refresh and review before confirming.")
+    issues, total = validate_content(db, review, content, outstanding, confirming=True)
+    if issues:
+        raise HTTPException(409, {"message": "Resolve review issues before confirming.", "issues": issues})
+    source = review.source
+    p = source.payload
+    existing_id = content.get("existing_payment_id")
+    if existing_id:
+        payment = lock_editable_payment(db, existing_id)
+        expected = defaultdict(lambda: ZERO)
+        for a in content.get("allocations", []):
+            expected[a["item_id"]] += money(a["amount"])
+        actual = {li.item_id: money(li.amount) for li in payment.line_items}
+        if payment.buying_group_id != source.buying_group_id or actual != dict(expected) or money(payment.payment_bonus) != money(content.get("payment_bonus", 0)) or payment.corrections:
+            raise HTTPException(409, "Existing payment must have exactly these item allocations and bonus, with no existing corrections.")
+        if db.query(PaymentReview).filter_by(payment_id=existing_id).first():
+            raise HTTPException(409, "Existing payment is already linked to an import.")
+    else:
+        payment = Payment(buying_group_id=source.buying_group_id, payment_id=source.external_id,
+            payment_requested_at=review_created(review, content), payment_sent_at=when(p.get("sent_at")), payment_bonus=money(content.get("payment_bonus", 0)))
+        db.add(payment)
+        db.flush()
+        grouped = defaultdict(lambda: ZERO)
+        for a in content.get("allocations", []):
+            grouped[a["item_id"]] += money(a["amount"])
+        for item_id, amount in grouped.items():
+            db.add(PaymentLineItem(payment_id=payment.id, item_id=item_id, amount=amount))
+    for a in content.get("allocations", []):
+        receipt = db.get(PaymentSource, a["receipt_source_id"])
+        db.add(PaymentCoverage(receipt_source_id=receipt.id, payment_id=payment.id, item_id=a["item_id"],
+            amount=money(a["amount"]), quantity=a["quantity"], snapshot=receipt.payload))
+    correction_index = {c["receipt_source_id"]: c for c in outstanding}
+    for c in content.get("corrections", []):
+        original = correction_index[c["receipt_source_id"]]
+        db.add(PaymentCorrection(receipt_source_id=c["receipt_source_id"], payment_id=payment.id,
+            origin_payment_id=original["origin_payment_id"], item_id=c["item_id"], amount=money(c["amount"]),
+            explanation=c["explanation"], source_revision=original["revision"]))
+    review.content = {**content, "confirmed_source": {**p, "reviewed_created_at": review_created(review, content).isoformat()}}
+    review.payment_id = payment.id
+    review.confirmed_revision = source.revision
+    review.version += 1
+    # Receipt coverage and correction destinations changed: invalidate all other open drafts.
+    for other in db.query(PaymentReview).join(PaymentSource).filter(PaymentSource.buying_group_id == source.buying_group_id,
+            PaymentReview.id != review.id, PaymentReview.payment_id.is_(None)).all():
+        other.version += 1
+    db.commit()
+    return group_view(db, source.buying_group_id)

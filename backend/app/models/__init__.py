@@ -16,6 +16,7 @@ from app.models.ignored_zip_code import IgnoredZipCode
 from app.models.receiving_review_pending import ReceivingReviewPending
 from app.models.usabg_po_cache import UsabgPoCache
 from app.models.monarch import MonarchConnection, MonarchDeposit, MonarchConfirmation, MonarchPaymentReceipt
+from app.models.payment_import import PaymentSource, PaymentReview, PaymentCoverage, PaymentCorrection
 
 __all__ = [
     "User",
@@ -38,4 +39,8 @@ __all__ = [
     "IgnoredZipCode",
     "ReceivingReviewPending",
     "UsabgPoCache",
+    "PaymentSource",
+    "PaymentReview",
+    "PaymentCoverage",
+    "PaymentCorrection",
 ]
