@@ -194,6 +194,7 @@ class ReceivingReviewMatch(BaseModel):
     received_qty: int | None = None
     received_price: str | None = None
     received_ext_total: str | None = None
+    reward: str | None = None
     received_status: str | None = None
     amount_discrepancy: bool = False
     selected: bool = True
@@ -230,6 +231,7 @@ class ReceivingReviewUnknownReceipt(BaseModel):
     quantity: int | None = None
     received_price: str | None = None
     received_ext_total: str | None = None
+    reward: str | None = None
     received_status: str | None = None
     note: str | None = None
     created_dt: str | None = None

@@ -112,6 +112,7 @@ class BuyinggroupReceipt:
     tracking_note: str | None
     delivery: str | None
     raw: dict[str, Any] = field(default_factory=dict)
+    reward: Decimal | None = None
 
 
 @dataclass
@@ -942,6 +943,7 @@ def _parse_receipt_row(row: dict[str, Any]) -> BuyinggroupReceipt:
         alt_tracking_id=alt_tracking_id,
         quantity=_parse_int_field(row.get("quantity") if row.get("quantity") is not None else row.get("qty")),
         total=_parse_money_field(row.get("total")),
+        reward=_parse_money_field(row.get("reward")),
         status=str(status).strip() if status is not None and str(status).strip() else None,
         void=void,
         created_dt=str(created_dt).strip() if created_dt is not None and str(created_dt).strip() else None,

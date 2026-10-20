@@ -20,6 +20,7 @@ interface ReceivingMatch {
   received_qty: number | null
   received_price: string | null
   received_ext_total: string | null
+  reward?: string | null
   received_status: string | null
   amount_discrepancy: boolean
   selected: boolean
@@ -223,6 +224,7 @@ function ReceivingGroupSection({
       receipt_id: string | null
       scanned_at?: string
       price_sold?: string | null
+      reward?: string | null
       receipt_tracking_number?: string | null
       receiving_group_id?: number
       receiving_row_id?: string
@@ -273,6 +275,7 @@ function ReceivingGroupSection({
             entry.price_sold = (total / m.quantity).toFixed(2)
           }
         }
+        if (m.reward != null) entry.reward = m.reward
         // Warehouse tracking belongs to this line, independently of the shipment.
         const scannedTn = (m.tracking_number || '').trim()
         if (scannedTn) {

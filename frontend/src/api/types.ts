@@ -112,6 +112,7 @@ export interface Item {
   order_id: number
   price_paid: string | null
   price_sold: string
+  reward?: string | null
   status: ItemStatus
   quantity: number
   description: string | null

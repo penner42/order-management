@@ -14,6 +14,7 @@ def _coerce_price_sold(v: object) -> object:
 
 
 class ItemBase(BaseModel):
+    reward: Decimal | None = None
     price_paid: Decimal | None = None
     price_sold: Decimal = Decimal("0")
     status: ItemStatus = ItemStatus.PURCHASED
@@ -54,6 +55,7 @@ class ItemCreateNested(ItemBase):
 
 
 class ItemUpdate(BaseModel):
+    reward: Decimal | None = None
     price_paid: Decimal | None = None
     price_sold: Decimal | None = None
     status: ItemStatus | None = None
@@ -110,6 +112,7 @@ class ItemSplitRequest(BaseModel):
 class ItemBulkUpdateEntry(BaseModel):
     """Single item update in a bulk request. delivered_at applies to the item's shipment."""
     item_id: int
+    reward: Decimal | None = None
     price_paid: Decimal | None = None
     price_sold: Decimal | None = None
     status: ItemStatus | None = None

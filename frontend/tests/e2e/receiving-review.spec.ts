@@ -1,6 +1,35 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('received reward is saved separately and shown beside payout on Orders', async ({ app, data }) => {
+  const store = await data.create('/stores', { name: data.name('reward-store') })
+  const group = await data.create('/buying-groups', { name: data.name('reward-group') })
+  const orderNumber = data.name('reward-order')
+  const order = await data.create<{ id: number; items: Item[] }>('/orders', {
+    store_id: store.id, buying_group_id: group.id, store_order_number: orderNumber,
+    items: [{ description: 'Reward headphones', quantity: 2, status: 'submitted', price_sold: '20.00' }],
+  })
+  const item = order.items[0]
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
+    buying_group_id: group.id, buying_group_name: data.name('reward-group'), unknown_receipts: [],
+    matches: [{ item_id: item.id, order_id: order.id, description: item.description, quantity: 2,
+      tracking_number: 'REWARD-TRACK', price_sold: '20.00', expected_amount: '40.00',
+      received_ext_total: '40.00', reward: '6.50', receipt_id: 'REWARD-RECEIPT',
+      scanned_at: '2026-10-15T12:00:00Z', selected: true, amount_discrepancy: false }],
+  }] }))
+  await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
+  await app.goto('/receiving-review')
+  await app.getByRole('button', { name: 'Apply 1 selected' }).click()
+  await expect(app.getByText('All listed rows were applied.')).toBeVisible()
+  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ reward: '6.50', price_sold: '20.00', status: 'scanned' })
+  await app.goto(`/?q=${encodeURIComponent(orderNumber)}`)
+  await expect(app.getByRole('columnheader', { name: 'Reward', exact: true })).toBeVisible()
+  await expect(app.locator('td[title="Total warehouse reward for this line"]')).toHaveText('$6.50')
+  await expect(app.getByLabel('Payout price')).toHaveValue('20.00')
+  await app.reload()
+  await expect(app.locator('td[title="Total warehouse reward for this line"]')).toHaveText('$6.50')
+})
+
 test('receipt candidates only hide lines with receipts and show dates and expected payouts', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('matching-store') })
   const group = await data.create('/buying-groups', { name: data.name('matching-group') })

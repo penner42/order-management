@@ -124,6 +124,7 @@ class ReceivingMatch:
     split_keep_quantity: int | None = None
     # Item is already scanned+; apply should update receipt_id only (not status).
     update_receipt_only: bool = False
+    reward: Decimal | None = None
 
 
 @dataclass
@@ -491,6 +492,7 @@ def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
         "quantity": m.quantity,
         "tracking_number": m.tracking_number,
         "price_sold": str(m.price_sold if m.price_sold is not None else 0),
+        "reward": str(m.reward) if m.reward is not None else None,
         "expected_amount": str(m.expected_amount) if m.expected_amount is not None else None,
         "receipt_id": m.receipt_id,
         "scanned_at": m.scanned_at,
@@ -880,6 +882,11 @@ def _receipt_needs_update(item: Item, receipt_id: str | None) -> bool:
     return not new_ids.issubset(_receipt_ids_on_item(item))
 
 
+def _reward_needs_update(item: Item, meta: dict[str, Any], qty: int) -> bool:
+    reward = meta.get("unit_reward")
+    return reward is not None and item.reward != (reward * qty).quantize(Decimal("0.01"))
+
+
 def _tn_display(trackings: list[str], tn_key: str) -> str:
     for tn in trackings:
         if tn.casefold() == tn_key:
@@ -921,7 +928,7 @@ def _matches_for_tn_allocations(
             continue
         meta = meta_by_tn.get(tn_key) or {}
         receipt_id = _meta_receipt_id(meta)
-        if update_receipt_only and not _receipt_needs_update(item, receipt_id):
+        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty)):
             continue
         display = (meta.get("display_tn") or "").strip() or _tn_display(trackings, tn_key)
         lines.append((display, qty, meta))
@@ -929,7 +936,7 @@ def _matches_for_tn_allocations(
         if qty <= 0:
             continue
         receipt_id = _meta_receipt_id(meta)
-        if update_receipt_only and not _receipt_needs_update(item, receipt_id):
+        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty)):
             continue
         lines.append((display_tn, qty, meta))
 
@@ -971,6 +978,8 @@ def _matches_for_tn_allocations(
                 received_qty=qty,
                 received_price=unit_payout,
                 received_ext_total=received_ext,
+                reward=(meta["unit_reward"] * qty).quantize(Decimal("0.01"))
+                if meta.get("unit_reward") is not None else None,
                 received_status=_join_unique_strs(statuses),
                 amount_discrepancy=discrepancy,
                 selected=True,
@@ -1039,7 +1048,7 @@ def _receipt_update_matches_for_item(
         if not meta:
             continue
         receipt_id = _meta_receipt_id(meta)
-        if not _receipt_needs_update(item, receipt_id):
+        if not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, demand)):
             continue
         supply = int(supply_by_tn.get(key, 0) or 0)
         qty = min(remaining, supply if supply > 0 else 1)
@@ -2511,6 +2520,12 @@ def _check_receiving_buyinggroup(
             meta["statuses"].append(str(row.status))
         if row.total is not None and qty > 0:
             meta["unit_prices"].append((row.total / Decimal(qty)).quantize(Decimal("0.01")))
+        # Receipt rewards are line totals. Allocate across local lines by quantity.
+        meta["reward_quantity"] = meta.get("reward_quantity", 0) + qty
+        if row.reward is not None:
+            meta["reward_total"] = meta.get("reward_total", Decimal("0")) + row.reward
+        if "reward_total" in meta:
+            meta["unit_reward"] = meta["reward_total"] / Decimal(meta["reward_quantity"])
         row_scanned = _parse_created_date(row.created_dt)
         if row_scanned is not None and (
             meta["scanned_at"] is None or row_scanned > meta["scanned_at"]
@@ -2654,6 +2669,7 @@ def _check_receiving_buyinggroup(
                 "received_price": str(price) if price is not None else None,
                 "received_ext_total": str(total) if total is not None else None,
                 "received_status": row.status,
+                "reward": str(row.reward) if row.reward is not None else None,
                 "note": note,
                 "created_dt": row.created_dt,
                 "scanned_at": _iso_date(scanned_dt),

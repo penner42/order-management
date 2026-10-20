@@ -154,6 +154,8 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
         total = None
     allocations = []
     allocated = Decimal(0)
+    reward = Decimal(receipt["reward"]) if receipt.get("reward") is not None else None
+    allocated_reward = Decimal(0)
     for index, item in enumerate(items):
         expected = Decimal(item.price_sold or 0) * item.quantity
         amount = None if total is None else (
@@ -161,6 +163,11 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
             else (total * item.quantity / qty).quantize(Decimal("0.01")))
         if amount is not None:
             allocated += amount
+        line_reward = None if reward is None else (
+            reward - allocated_reward if index == len(items) - 1
+            else (reward * item.quantity / qty).quantize(Decimal("0.01")))
+        if line_reward is not None:
+            allocated_reward += line_reward
         allocations.append({
             "item_id": item.id, "order_id": item.order_id,
             "store_order_number": item.order.store_order_number, "description": item.description,
@@ -170,6 +177,7 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
             "received_item": receipt.get("description"), "received_qty": item.quantity,
             "received_price": receipt.get("received_price"), "received_ext_total": str(amount) if amount is not None else None,
             "received_status": receipt.get("received_status"),
+            "reward": str(line_reward) if line_reward is not None else None,
             "amount_discrepancy": amount is not None and abs(amount - expected) > Decimal("0.01"),
             "selected": True, "row_id": f"manual:{body.receipt_key}:{item.id}", "manual_receipt_key": body.receipt_key,
             "manual_receipt": receipt, "match_kind": "received",
@@ -218,7 +226,7 @@ def validate_manual_link_batch(db: Session, entries: list[ItemBulkUpdateEntry]) 
 def apply_manual_link(db: Session, item: Item, entry: ItemBulkUpdateEntry, changes: dict) -> dict:
     if entry.receiving_group_id is None or not entry.receiving_row_id:
         raise HTTPException(400, "Both receiving group and row are required.")
-    if set(changes) - {"receipt_id", "receipt_tracking_number", "status", "scanned_at", "price_sold"}:
+    if set(changes) - {"receipt_id", "receipt_tracking_number", "status", "scanned_at", "price_sold", "reward"}:
         raise HTTPException(400, "Apply receipt details separately from other line edits.")
     row = pending_row(db, entry.receiving_group_id)
     # Refresh retains the caller's joined eager loads; lock only the item so
@@ -235,6 +243,8 @@ def apply_manual_link(db: Session, item: Item, entry: ItemBulkUpdateEntry, chang
     if (changes.get("receipt_id") or "").strip() != (match.get("receipt_id") or "").strip():
         raise HTTPException(400, "Unlink to change the receipt assigned to this line.")
     changes["receipt_tracking_number"] = match["receipt_tracking_number"]
+    if match.get("reward") is not None:
+        changes["reward"] = Decimal(match["reward"])
     if item.payment_line_items or item.status not in OPEN_STATUSES:
         changes.pop("status", None)
     else:

@@ -3058,6 +3058,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                               <th className="py-1 px-2 font-medium text-ink-muted">Tracking</th>
                               <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Cost</th>
                               <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Payout</th>
+                              <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Reward</th>
                               <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Subtotal</th>
                               <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Shipping</th>
                               <th className="py-1 px-2 font-medium text-ink-muted w-0 whitespace-nowrap">Sales Tax</th>
@@ -3263,6 +3264,9 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                         disabled={savingItemId === item.id}
                                         className={`w-20 h-5 rounded border border-brand-200 dark:border-gray-600 px-1.5 py-0 text-sm font-mono focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       />
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-mono text-sm tabular-nums" title="Total warehouse reward for this line">
+                                      {item.reward != null ? `$${parseDecimal(item.reward).toFixed(2)}` : "—"}
                                     </td>
                                     <td className="py-1 px-2 text-right font-mono text-sm tabular-nums">
                                       ${((parseDecimal(itemEdits[item.id]?.price_paid ?? item.price_paid) * (itemEdits[item.id]?.quantity ?? item.quantity ?? 1))).toFixed(2)}
