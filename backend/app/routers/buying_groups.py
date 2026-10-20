@@ -42,7 +42,9 @@ from app.utils.buying_group_apis.submit_tracking import (
     group_ready,
 )
 
-from app.utils.receiving_links import candidate_lines, link_receipt, unlink_receipt
+from app.utils.receiving_links import (
+    applied_receipt_pairs, candidate_lines, link_receipt, receipt_is_applied, unlink_receipt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -552,11 +554,35 @@ def _execute_received_check(
             if actionable
             else "No received items to apply."
         )
+        pending = db.get(ReceivingReviewPending, group_id)
+        saved_payload = pending.payload if pending is not None else {}
+        unknown_count = len(saved_payload.get("unknown_receipts") or [])
+        reported_unknowns = (result.session_payload or {}).get("unknown_receipts") or []
+        if reported_unknowns:
+            applied_pairs = applied_receipt_pairs(db, group_id)
+            already_applied = [r for r in reported_unknowns if receipt_is_applied(r, applied_pairs)]
+            # Provider summaries describe shipment-tracking detection, before
+            # persistence excludes receipts already applied using warehouse TNs.
+            summary = f"Warehouse search: {summary}"
+            if already_applied:
+                details = "; ".join(
+                    f"receipt {r.get('receipt_id') or '(no ID)'} / tracking {r['tracking_number']}"
+                    for r in already_applied
+                )
+                summary += (
+                    f" {len(already_applied)} reported receipt(s) already applied in Order Manager"
+                    f" and excluded from unknown review: {details}."
+                )
+        summary += (
+            f" Receiving review: {actionable} matched item(s) ready to apply;"
+            f" {unknown_count} unknown receipt(s) to review."
+        )
+        result.message = summary
         write_group_tracking_log(
             group=group,
             group_name=group_name,
             scheduled=scheduled,
-            level="updates" if actionable else "info",
+            level="updates" if actionable or unknown_count else "info",
             event_type="received_check_finished",
             tracking_numbers=trackings,
             message=summary,

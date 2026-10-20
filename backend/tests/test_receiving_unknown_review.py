@@ -8,8 +8,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import BuyingGroup, ReceivingReviewPending, Shipment
-from app.routers.buying_groups import check_buying_group_receiving
+from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, Store
+from app.routers.buying_groups import _execute_received_check, check_buying_group_receiving
 from app.schemas.buying_group import ReceivingReviewSession
 from app.utils.buying_group_apis import check_receiving as receiving
 from app.utils.buying_group_apis.dealandrunner import DealandrunnerReceivedRow, DealandrunnerRunnerTransactionsResult
@@ -57,6 +57,56 @@ class UnknownReceivingReviewTests(unittest.TestCase):
             response = check_buying_group_receiving(self.group.id, db=self.db, _=None)
         self.assertEqual(response.matched_count, 0)
         self.assertEqual(response.review_path, f"/receiving-review?highlight={self.group.id}")
+
+    def execute_check(self, payload, *, scheduled=False):
+        result = receiving.CheckReceivingResult(
+            self.group.id, self.group.name, session_payload=payload,
+            message=f"{len(payload['unknown_receipts'])} receipt(s) with tracking not in Order Manager.",
+        )
+        with (
+            patch("app.routers.buying_groups.check_receiving_for_group", return_value=result),
+            patch("app.routers.buying_groups._stamp_received_check_last_run"),
+            patch("app.routers.buying_groups.write_group_tracking_log") as log,
+        ):
+            _execute_received_check(self.db, self.group, scheduled=scheduled)
+        completion = log.call_args.kwargs
+        self.assertEqual(completion["event_type"], "received_check_finished")
+        self.assertEqual(result.message, completion["message"])
+        return completion
+
+    def test_unknown_only_completion_reports_saved_review_as_updates(self):
+        completion = self.execute_check(self.payload())
+        self.assertEqual(completion["level"], "updates")
+        self.assertIn("0 matched item(s) ready to apply; 1 unknown receipt(s) to review", completion["message"])
+        self.assertNotIn("already applied", completion["message"])
+
+    def test_completion_identifies_already_applied_receipts_and_actual_queue(self):
+        store = Store(name="Test store")
+        self.db.add(store)
+        self.db.flush()
+        order = Order(store_id=store.id, buying_group_id=self.group.id)
+        self.db.add(order)
+        self.db.flush()
+        self.db.add(Item(
+            order_id=order.id, quantity=1, receipt_id="receipt-1",
+            receipt_tracking_number="UNKNOWN",
+        ))
+        self.db.commit()
+        for scheduled in (False, True):
+            with self.subTest(scheduled=scheduled):
+                completion = self.execute_check(self.payload(), scheduled=scheduled)
+                self.assertEqual(completion["level"], "info")
+                self.assertIn("1 reported receipt(s) already applied", completion["message"])
+                self.assertIn("receipt receipt-1 / tracking UNKNOWN", completion["message"])
+                self.assertIn("0 matched item(s) ready to apply; 0 unknown receipt(s) to review", completion["message"])
+                self.assertEqual(receiving.list_receiving_review_pending_payloads(self.db), [])
+        second = self.receipt(receipt_id="receipt-2", tracking_number="SECOND", tracking_numbers=["SECOND"])
+        completion = self.execute_check(self.payload(receipts=[self.receipt(), second]))
+        self.assertEqual(completion["level"], "updates")
+        self.assertIn("1 reported receipt(s) already applied", completion["message"])
+        self.assertIn("1 unknown receipt(s) to review", completion["message"])
+        saved = receiving.list_receiving_review_pending_payloads(self.db)[0]
+        self.assertEqual(saved["unknown_receipts"], [second])
 
     def test_applying_last_match_keeps_unknown_review(self):
         receiving.save_receiving_review_pending(
