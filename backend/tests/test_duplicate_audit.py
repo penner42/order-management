@@ -155,6 +155,37 @@ class DuplicateAuditTests(unittest.TestCase):
         self.review(order, [other.id])
         self.assertEqual(self.page().total, 0)
 
+    def test_show_cleared_survives_reload_and_can_restore_individual_lines(self):
+        order = self.order()
+        first, other = order.items
+        self.review(order)
+        self.db.expire_all()
+        self.assertEqual(self.page().total, 0)
+        result = self.page(include_cleared=True)
+        self.assertEqual(result.total, 1)
+        cleared, = result.audit_findings[order.id]
+        self.assertTrue(cleared.cleared)
+        self.assertEqual(set(cleared.item_ids), {first.id, other.id})
+        self.assertEqual(self.page(include_cleared=True, search="absent").total, 0)
+        self.review(order, [first.id], not_duplicate=False)
+        self.db.expire_all()
+        result = self.page(include_cleared=True)
+        active, cleared = result.audit_findings[order.id]
+        self.assertFalse(active.cleared)
+        self.assertEqual(active.item_ids, [first.id])
+        self.assertEqual(cleared.item_ids, [other.id])
+        self.assertEqual(self.page().total, 1)
+
+    def test_show_cleared_includes_lines_even_if_signals_no_longer_match(self):
+        order = self.order()
+        self.review(order)
+        order.items[0].status = ItemStatus.CANCELED
+        order.items[1].price_paid = 999
+        self.db.commit()
+        result = self.page(include_cleared=True)
+        self.assertEqual(result.total, 1)
+        self.assertTrue(result.audit_findings[order.id][0].cleared)
+
     def test_review_does_not_mask_new_matching_lines_or_unrelated_orders(self):
         order = self.order()
         self.review(order)

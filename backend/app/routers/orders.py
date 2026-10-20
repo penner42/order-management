@@ -351,6 +351,7 @@ def list_orders_paged(
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=50),
     duplicate_audit: bool = False,
+    include_cleared: bool = False,
     order_id: int | None = None,
 ):
     allowed = {0, 25, 50, 100}
@@ -403,7 +404,7 @@ def list_orders_paged(
 
     audit_findings = {}
     if duplicate_audit:
-        audit_findings = find_duplicate_orders(db, q)
+        audit_findings = find_duplicate_orders(db, q, include_cleared=include_cleared)
         q = q.filter(Order.id.in_(audit_findings))
 
     total = int(q.order_by(None).with_entities(func.count(func.distinct(Order.id))).scalar() or 0)

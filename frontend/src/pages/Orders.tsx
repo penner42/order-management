@@ -221,6 +221,7 @@ function buildOrdersPath(opts: {
   page: number
   perPage: number
   duplicateAudit?: boolean
+  showCleared?: boolean
   orderId?: string | null
 }): string {
   const params = new URLSearchParams()
@@ -232,6 +233,7 @@ function buildOrdersPath(opts: {
         ? [...DEFAULT_STATUSES, 'canceled']
         : opts.duplicateAudit || opts.orderId ? [] : DEFAULT_STATUSES
   if (opts.duplicateAudit) params.set('duplicate_audit', 'true')
+  if (opts.duplicateAudit && opts.showCleared) params.set('include_cleared', 'true')
   if (opts.orderId) params.set('order_id', opts.orderId)
   statuses.forEach((s) => params.append('status', s))
   opts.filterBuyingGroups.forEach((id) => params.append('buying_group_id', String(id)))
@@ -257,6 +259,7 @@ function buildOrdersPath(opts: {
 export default function Orders({ duplicateAudit = false }: { duplicateAudit?: boolean }) {
   const groupSubmissionsEnabled = useGroupSubmissionsEnabled()
   const [orders, setOrders] = useState<Order[]>([])
+  const [showCleared, setShowCleared] = useState(false)
   const [auditFindings, setAuditFindings] = useState<OrderListPage['audit_findings']>({})
   const [loadError, setLoadError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
@@ -393,9 +396,10 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
         page,
         perPage,
         duplicateAudit,
+        showCleared,
         orderId,
       }),
-    [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced, page, perPage, duplicateAudit, orderId]
+    [filterStatuses, filterBuyingGroups, filterStores, filterStoreAccounts, filterDateFrom, filterDateTo, searchDebounced, page, perPage, duplicateAudit, showCleared, orderId]
   )
 
   const applyOrdersPage = (data: OrderListPage) => {
@@ -1710,7 +1714,11 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
           <p>Review orders with matching tracking numbers and unit costs, or item costs above recorded payments. Signals suggest duplicates; shared packages and incomplete payment records can also explain them.</p>
           <p>Mark correct lines as Not duplicates to exclude them from future findings. Orders are shown in full for comparison; use Review in Orders to change order details.</p>
           <button type="button" onClick={() => setRefreshVersion(v => v + 1)} disabled={loading} className="px-3 py-1.5 rounded-lg border border-brand-200 dark:border-gray-600 disabled:opacity-50">Refresh audit</button>
-          {!loading && !loadError && <p role="status">{totalOrders} flagged order{totalOrders === 1 ? '' : 's'}</p>}
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={showCleared} onChange={event => { setShowCleared(event.target.checked); setPage(1) }} />
+            Show cleared
+          </label>
+          {!loading && !loadError && <p role="status">{totalOrders} {showCleared ? 'matching' : 'flagged'} order{totalOrders === 1 ? '' : 's'}</p>}
         </div>
       )}
       {duplicateAudit && lastReview && (
@@ -2367,7 +2375,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
         </div>
         {visibleOrders.length === 0 ? (
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-brand-200/80 dark:border-gray-700 py-12 text-center text-ink-muted">
-            {loading ? 'Loading orders…' : loadError ? 'Orders could not be loaded.' : duplicateAudit ? 'No potentially duplicate orders match these filters.' : 'No orders yet. Create one to get started.'}
+            {loading ? 'Loading orders…' : loadError ? 'Orders could not be loaded.' : duplicateAudit ? (showCleared ? 'No duplicate audit orders match these filters.' : 'No potentially duplicate orders match these filters.') : 'No orders yet. Create one to get started.'}
           </div>
         ) : (
           visibleOrders.map((o) => {
@@ -2385,7 +2393,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
 
             return (
               <div key={o.id} className="space-y-2">
-              {duplicateAudit && <DuplicateAuditDetails order={o} findings={auditFindings?.[o.id] ?? []} saving={reviewSaving} onMarkNotDuplicate={ids => reviewDuplicateLines(o.id, ids)} />}
+              {duplicateAudit && <DuplicateAuditDetails order={o} findings={auditFindings?.[o.id] ?? []} saving={reviewSaving} onMarkNotDuplicate={(ids, notDuplicate) => reviewDuplicateLines(o.id, ids, notDuplicate)} />}
               {/* Keep the shared order layout read-only while reviewing audit signals. */}
               <fieldset
                 disabled={duplicateAudit}

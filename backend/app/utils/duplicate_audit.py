@@ -25,7 +25,7 @@ def _tracking(item: Item) -> set[str]:
     return numbers - {""}
 
 
-def audit_order(order: Order) -> list[dict]:
+def audit_order(order: Order, include_cleared: bool = False) -> list[dict]:
     # Canceled/refunded units can legitimately coexist with replacements.
     items = [item for item in order.items if item.status not in {
         ItemStatus.CANCELED, ItemStatus.RETURN_REFUNDED,
@@ -79,20 +79,31 @@ def audit_order(order: Order) -> list[dict]:
                 "confidence": "possible",
                 "reasons": [f"Item costs ({cost:.2f}) exceed recorded order payments ({paid:.2f}) by {cost - paid:.2f}"],
             })
+    if include_cleared:
+        cleared_ids = [item.id for item in order.items if item.duplicate_audit_ignored]
+        if cleared_ids:
+            findings.append({
+                "item_ids": cleared_ids, "tracking_numbers": [],
+                "confidence": "possible", "cleared": True,
+                "reasons": ["Previously marked as not duplicates"],
+            })
     return findings
 
 
-def find_duplicate_orders(db, query) -> dict[int, list[dict]]:
+def find_duplicate_orders(db, query, include_cleared: bool = False) -> dict[int, list[dict]]:
     """Audit all matching orders before pagination, loading relationships in batches."""
     multiple_lines = db.query(Item.order_id).group_by(Item.order_id).having(func.count(Item.id) > 1)
-    query = query.filter(Order.id.in_(multiple_lines)).options(
+    candidates = Order.id.in_(multiple_lines)
+    if include_cleared:
+        candidates = candidates | Order.items.any(Item.duplicate_audit_ignored.is_(True))
+    query = query.filter(candidates).options(
         selectinload(Order.items).selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
         selectinload(Order.items).selectinload(Item.payment_line_items),
         selectinload(Order.order_payments),
     )
     findings = {}
     for order in query.yield_per(250):
-        signals = audit_order(order)
+        signals = audit_order(order, include_cleared=include_cleared)
         if signals:
             findings[order.id] = signals
     return findings

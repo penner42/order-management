@@ -85,6 +85,7 @@ class DuplicateAuditReview(BaseModel):
 
 
 class DuplicateAuditFinding(BaseModel):
+    cleared: bool = False
     item_ids: list[int]
     tracking_numbers: list[str]
     confidence: str

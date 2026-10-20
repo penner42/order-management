@@ -8,14 +8,16 @@ function timestamp(value: string | null | undefined) {
 export function DuplicateAuditDetails({ order, findings, onMarkNotDuplicate, saving }: {
   order: Order
   findings: DuplicateAuditFinding[]
-  onMarkNotDuplicate: (itemIds: number[]) => void
+  onMarkNotDuplicate: (itemIds: number[], notDuplicate?: boolean) => void
   saving: boolean
 }) {
   const itemIds = new Set(findings.flatMap(finding => finding.item_ids))
+  const clearedIds = new Set(findings.filter(finding => finding.cleared).flatMap(finding => finding.item_ids))
+  const hasActive = findings.some(finding => !finding.cleared)
   return (
     <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-gray-800 p-3 text-sm text-ink dark:text-gray-200 space-y-2">
       <div className="flex flex-wrap justify-between gap-2">
-        <strong className="dark:text-amber-200">{findings.some(f => f.confidence === 'likely') ? 'Likely duplicate' : 'Possible duplicate'}</strong>
+        <strong className="dark:text-amber-200">{!hasActive ? 'Cleared' : findings.some(f => f.confidence === 'likely') ? 'Likely duplicate' : 'Possible duplicate'}</strong>
         <Link to={`/?order_id=${order.id}`} className="text-brand-700 dark:text-amber-300 underline hover:text-brand-900 dark:hover:text-amber-200">
           Review in Orders
         </Link>
@@ -23,14 +25,14 @@ export function DuplicateAuditDetails({ order, findings, onMarkNotDuplicate, sav
       <ul className="list-disc pl-5 space-y-1">
         {findings.map((finding, index) => (
           <li key={index}>
-            <span className="font-medium">Lines {finding.item_ids.map(id => `#${id}`).join(', ')}: </span>
+            <span className="font-medium">{finding.cleared ? 'Cleared lines' : 'Lines'} {finding.item_ids.map(id => `#${id}`).join(', ')}: </span>
             {finding.reasons.join(' · ')}
             {finding.tracking_numbers.length > 0 && <span> · Tracking: {finding.tracking_numbers.join(', ')}</span>}
             <button type="button" disabled={saving}
-              onClick={() => onMarkNotDuplicate(finding.item_ids)}
-              aria-label={`Mark lines ${finding.item_ids.map(id => `#${id}`).join(', ')} as not duplicates`}
+              onClick={() => onMarkNotDuplicate(finding.item_ids, !finding.cleared)}
+              aria-label={finding.cleared ? `Restore lines ${finding.item_ids.map(id => `#${id}`).join(', ')} to audit` : `Mark lines ${finding.item_ids.map(id => `#${id}`).join(', ')} as not duplicates`}
               className="ml-2 px-2 py-1 rounded border border-amber-400 dark:border-gray-500 hover:bg-amber-100 dark:hover:bg-gray-700 disabled:opacity-50">
-              Not duplicates
+              {finding.cleared ? 'Restore to audit' : 'Not duplicates'}
             </button>
           </li>
         ))}
@@ -49,10 +51,10 @@ export function DuplicateAuditDetails({ order, findings, onMarkNotDuplicate, sav
                 <td className="px-2 py-1">{timestamp(item.updated_at)}</td>
                 <td className="px-2 py-1">{timestamp(item.scanned_at)}</td>
                 <td className="px-2 py-1">
-                  <button type="button" disabled={saving} onClick={() => onMarkNotDuplicate([item.id])}
-                    aria-label={`Mark line #${item.id} as not a duplicate`}
+                  <button type="button" disabled={saving} onClick={() => onMarkNotDuplicate([item.id], !clearedIds.has(item.id))}
+                    aria-label={clearedIds.has(item.id) ? `Restore line #${item.id} to audit` : `Mark line #${item.id} as not a duplicate`}
                     className="underline text-brand-700 dark:text-amber-300 disabled:opacity-50">
-                    Not a duplicate
+                    {clearedIds.has(item.id) ? 'Restore to audit' : 'Not a duplicate'}
                   </button>
                 </td>
               </tr>

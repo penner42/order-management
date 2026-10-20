@@ -179,6 +179,7 @@ export interface OrderListPage {
 }
 
 export interface DuplicateAuditFinding {
+  cleared?: boolean
   item_ids: number[]
   tracking_numbers: string[]
   confidence: 'likely' | 'possible'
