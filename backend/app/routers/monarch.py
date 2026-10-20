@@ -189,7 +189,7 @@ async def stop_checks():
 def review(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     connection = require_connection(db)
     payments = db.query(Payment).options(selectinload(Payment.line_items), selectinload(Payment.corrections), selectinload(Payment.buying_group)).filter(
-        Payment.payment_received_at.is_(None), ~Payment.id.in_(db.query(MonarchPaymentReceipt.payment_id))).all()
+        ~Payment.id.in_(db.query(MonarchPaymentReceipt.payment_id))).all()
     active = {row.active_deposit_id: row for row in db.query(MonarchConfirmation).filter(MonarchConfirmation.active_deposit_id.isnot(None))}
     deposits = []
     for deposit in db.query(MonarchDeposit).filter(MonarchDeposit.amount > 0).order_by(MonarchDeposit.posted_date.desc(), MonarchDeposit.id.desc()).all():

@@ -121,3 +121,30 @@ test('Monarch review blocks pending deposits', async ({ app }) => {
   await expect(app.getByText(/Pending or no longer present/)).toBeVisible()
   await expect(app.getByRole('button', { name: 'Confirm receipt', exact: true })).toHaveCount(0)
 })
+
+test('Monarch can link payments already marked received without a Monarch receipt', async ({ app }) => {
+  const payment = { id: 7, reference: 'Previously paid', buying_group_id: 42, buying_group_name: 'Example group',
+    amount: '30.00', fingerprint: 'paid-payment', date: '2026-10-01', received_at: '2026-10-08T12:00:00Z' }
+  let state: MonarchReviewData = { payments: [payment], deposits: [{ id: 3, transaction_id: 'transaction',
+    account_name: 'Bank', posted_date: '2026-10-10', amount: '30.00', merchant: 'Sender', description: 'ACH sender', revision: 1,
+    pending: false, dismissed: false, eligible: true, confirmation_id: null, confirmation: null, evidence_changed: false,
+    suggestions: [], search_truncated: false }] }
+  let selection: unknown = null
+  await app.route('**/api/integrations/monarch/**', async route => {
+    if (new URL(route.request().url()).pathname.endsWith('/confirm')) {
+      selection = route.request().postDataJSON()
+      state = { payments: [], deposits: [{ ...state.deposits[0], eligible: false, confirmation_id: 5,
+        confirmation: { deposit: { amount: '30.00', posted_date: '2026-10-10' }, payments: [payment] } }] }
+      await route.fulfill({ json: { confirmation_id: 5 } })
+    } else await route.fulfill({ json: state })
+  })
+  await app.goto('/payments/monarch')
+  await app.getByText('Select payments manually', { exact: true }).click()
+  await expect(app.getByText('Already marked received · 2026-10-08')).toBeVisible()
+  await app.getByRole('checkbox', { name: /Example group · Previously paid/ }).check()
+  await app.getByRole('button', { name: 'Confirm receipt', exact: true }).click()
+  await expect(app.getByText('No deposits in this view.')).toBeVisible()
+  expect(selection).toEqual({ revision: 1, payments: [{ id: 7, fingerprint: 'paid-payment' }] })
+  await app.getByRole('combobox', { name: 'Show', exact: true }).selectOption('confirmed')
+  await expect(app.getByText(/Confirmed payments: Example group Previously paid/)).toBeVisible()
+})

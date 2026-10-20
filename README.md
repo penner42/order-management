@@ -258,7 +258,10 @@ suggestions stay within one buying group; manual selections may cross groups.
 Searches are bounded and disclose when manual matching is needed. Amounts use
 exact cents; this version assumes USD, like the rest of Order Manager.
 
-Confirmation sets received dates to the deposit date and retains a receipt
+Payments already marked received remain available when they have no Monarch link.
+Confirmation sets all selected payments' received dates to the Monarch deposit's
+posted date, replacing any previously saved dates. Undo restores each payment's
+original received date (or clears it if it was previously unset). Confirmation retains a receipt
 snapshot and reviewer. Pending transactions cannot confirm receipt. A deposit and
 payment can each be used once. Undo from the **Confirmed** review view before
 editing amounts, line items, received dates, or deleting a confirmed payment.

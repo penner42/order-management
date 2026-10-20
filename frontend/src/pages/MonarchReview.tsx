@@ -48,6 +48,7 @@ function DepositReview({ deposit, payments, refresh }: { deposit: MonarchDeposit
             {visible.map(p => <label key={p.id} className="flex items-center gap-2">
               <input type="checkbox" disabled={busy} checked={selected.includes(p.id)} onChange={e => setSelected(e.target.checked ? [...selected, p.id] : selected.filter(id => id !== p.id))} />
               {p.buying_group_name} · {p.reference ?? 'No reference'} · {p.date} · {dollars(cents(p.amount))}
+              {p.received_at && <span className="text-sm text-ink-muted">Already marked received · {p.received_at.slice(0, 10)}</span>}
             </label>)}
           </div>
         </details>
@@ -71,7 +72,7 @@ export default function MonarchReview() {
   return <div className="space-y-4 text-ink dark:text-gray-100">
     <h1 className="text-2xl font-semibold">Monarch review</h1>
     <div className="flex gap-4"><Link className="underline" to="/payments">Payments</Link><Link className="underline" to="/settings/monarch">Monarch settings and checks</Link></div>
-    <p>Review posted deposits before marking whole payments received. Selected payments must exactly equal the deposit.</p>
+    <p>Link posted deposits to whole payments, including payments already marked received without a Monarch link. Confirmation sets received dates to the Monarch transaction’s posted date. Selected payments must exactly equal the deposit.</p>
     {error && <p role="alert">{error}</p>}
     <label>Show <select className="rounded border p-2 dark:bg-gray-800 dark:border-gray-600" value={filter} onChange={e => setFilter(e.target.value)}>
       <option value="review">Awaiting review</option><option value="confirmed">Confirmed</option><option value="all">All deposits</option>

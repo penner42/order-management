@@ -123,7 +123,7 @@ class MonarchTests(unittest.TestCase):
         a, b = self.payment("10", days=60), self.payment("20", group_id=other.id)
         self.confirm([a, b])
 
-    def test_rejects_pending_unselected_dismissed_received_and_inexact(self):
+    def test_rejects_pending_unselected_dismissed_and_inexact(self):
         p = self.payment()
         for attr, bad, original in [("pending", True, False), ("dismissed", True, False), ("amount", Decimal("31"), Decimal("30"))]:
             setattr(self.deposit, attr, bad); self.db.commit()
@@ -131,9 +131,62 @@ class MonarchTests(unittest.TestCase):
             setattr(self.deposit, attr, original); self.db.commit()
         self.connection.selected_account_ids = []; self.db.commit()
         with self.assertRaises(HTTPException): self.confirm([p])
-        self.connection.selected_account_ids = ["bank"]
-        p.payment_received_at = datetime.now(timezone.utc); self.db.commit()
+
+    def test_already_received_payment_can_be_reviewed_linked_and_undone(self):
+        p = self.payment()
+        p.payment_received_at = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+        self.db.commit(); self.db.refresh(p)
+        original = p.payment_received_at
+        review = monarch.review(db=self.db, _=self.user)
+        choice = next(row for row in review["payments"] if row["id"] == p.id)
+        self.assertEqual(choice["received_at"], original.isoformat())
+        self.assertIn([p.id], [s["payment_ids"] for s in review["deposits"][0]["suggestions"]])
+        result = self.confirm([p])
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Payment, p.id).payment_received_at.date(), self.deposit.posted_date)
+        self.assertIsNotNone(self.db.get(MonarchPaymentReceipt, p.id))
+        self.assertNotIn(p.id, [row["id"] for row in monarch.review(db=self.db, _=self.user)["payments"]])
         with self.assertRaises(HTTPException): self.confirm([p])
+        undo_receipt(self.db, result["confirmation_id"], self.user.id)
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Payment, p.id).payment_received_at, original)
+        self.assertIn(p.id, [row["id"] for row in monarch.review(db=self.db, _=self.user)["payments"]])
+
+    def test_combined_received_and_unreceived_payments_restore_their_own_dates(self):
+        paid, unpaid = self.payment("10"), self.payment("20")
+        paid.payment_received_at = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+        self.db.commit(); self.db.refresh(paid)
+        original = paid.payment_received_at
+        result = self.confirm([paid, unpaid])
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Payment, paid.id).payment_received_at.date(), self.deposit.posted_date)
+        self.assertEqual(self.db.get(Payment, unpaid.id).payment_received_at.date(), self.deposit.posted_date)
+        undo_receipt(self.db, result["confirmation_id"], self.user.id)
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Payment, paid.id).payment_received_at, original)
+        self.assertIsNone(self.db.get(Payment, unpaid.id).payment_received_at)
+
+    def test_received_date_change_after_preview_is_still_rejected(self):
+        p = self.payment()
+        p.payment_received_at = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+        self.db.commit()
+        selection = self.selection([p])
+        p.payment_received_at = datetime(2026, 10, 9, 12, tzinfo=timezone.utc)
+        self.db.commit()
+        with self.assertRaises(HTTPException):
+            confirm_receipt(self.db, self.deposit.id, selection, self.user.id)
+        self.assertEqual(self.db.query(MonarchPaymentReceipt).count(), 0)
+
+    def test_undo_legacy_confirmation_without_prior_received_dates(self):
+        p = self.payment()
+        result = self.confirm([p])
+        confirmation = self.db.get(MonarchConfirmation, result["confirmation_id"])
+        confirmation.evidence = {**confirmation.evidence, "payments": [
+            {k: v for k, v in row.items() if k != "received_at"} for row in confirmation.evidence["payments"]]}
+        self.db.commit()
+        undo_receipt(self.db, confirmation.id, self.user.id)
+        self.db.expire_all()
+        self.assertIsNone(self.db.get(Payment, p.id).payment_received_at)
 
     def test_stale_review_and_duplicate_use_rejected(self):
         p = self.payment()

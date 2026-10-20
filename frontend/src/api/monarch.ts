@@ -19,6 +19,7 @@ export interface MonarchPaymentChoice {
   amount: string
   fingerprint: string
   date: string
+  received_at?: string | null
 }
 export interface MonarchDeposit {
   id: number

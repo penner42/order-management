@@ -46,9 +46,13 @@ class MonarchConcurrencyTests(unittest.TestCase):
                 db.add_all(deposits); db.commit()
                 user_id, payment_id = user.id, payment.id
                 deposit_ids = [d.id for d in deposits]
-                selection = MonarchConfirmRequest(revision=1, payments=[{"id": payment_id, "fingerprint": payment_fingerprint(payment)}])
-
-            for ids in ([deposit_ids[0], deposit_ids[0]], deposit_ids):
+            for index, ids in enumerate(([deposit_ids[0], deposit_ids[0]], deposit_ids)):
+                original_received = None if index == 0 else datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+                with sessions() as db:
+                    payment = db.get(Payment, payment_id)
+                    payment.payment_received_at = original_received
+                    db.commit()
+                    selection = MonarchConfirmRequest(revision=1, payments=[{"id": payment_id, "fingerprint": payment_fingerprint(payment)}])
                 barrier = Barrier(2)
                 def attempt(deposit_id):
                     with sessions() as db:
@@ -67,7 +71,7 @@ class MonarchConcurrencyTests(unittest.TestCase):
                     self.assertEqual(db.query(MonarchConfirmation).filter(MonarchConfirmation.active_deposit_id.isnot(None)).count(), 1)
                     receipt = db.get(MonarchPaymentReceipt, payment_id)
                     undo_receipt(db, receipt.confirmation_id, user_id)
-                    self.assertIsNone(db.get(Payment, payment_id).payment_received_at)
+                    self.assertEqual(db.get(Payment, payment_id).payment_received_at, original_received)
         finally:
             if engine is not None:
                 engine.dispose()

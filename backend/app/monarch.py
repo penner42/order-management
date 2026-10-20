@@ -50,6 +50,7 @@ def payment_choice(payment):
     return {"id": payment.id, "reference": payment.payment_id, "buying_group_id": payment.buying_group_id,
             "buying_group_name": payment.buying_group.name if payment.buying_group else "Unknown group",
             "amount": str(payment_amount(payment)), "fingerprint": payment_fingerprint(payment),
+            "received_at": payment.payment_received_at.isoformat() if payment.payment_received_at else None,
             "date": (payment.payment_sent_at or payment.payment_requested_at).date().isoformat()}
 
 
@@ -65,7 +66,7 @@ def suggest_matches(deposit, payments, rules, *, search_limit=SEARCH_LIMIT):
             continue
         start = (payment.payment_sent_at or payment.payment_requested_at).date()
         amount = payment_amount(payment)
-        if payment.payment_received_at is None and 0 <= (deposit.posted_date - start).days <= 30 and 0 < amount <= deposit.amount:
+        if 0 <= (deposit.posted_date - start).days <= 30 and 0 < amount <= deposit.amount:
             groups.setdefault(payment.buying_group_id, []).append((payment.id, amount))
     results, steps, truncated = [], 0, False
     for candidates in groups.values():
@@ -139,9 +140,9 @@ def confirm_receipt(db, deposit_id, data, reviewer_id):
         raise HTTPException(409, "A selected payment was deleted. Refresh the review.")
     for payment in payments:
         db.expire(payment, ["line_items", "corrections"])
-        if (payment.payment_received_at is not None or db.get(MonarchPaymentReceipt, payment.id)
+        if (db.get(MonarchPaymentReceipt, payment.id)
                 or payment_fingerprint(payment) != expected[payment.id] or payment_amount(payment) <= 0):
-            raise HTTPException(409, "A payment changed or was already received. Refresh the review.")
+            raise HTTPException(409, "A payment changed or is already linked to Monarch. Refresh the review.")
     if sum((payment_amount(p) for p in payments), Decimal(0)) != deposit.amount:
         raise HTTPException(409, "Selected whole payments must exactly equal the deposit.")
     confirmation = MonarchConfirmation(deposit_id=deposit.id, active_deposit_id=deposit.id,
@@ -166,8 +167,11 @@ def undo_receipt(db, confirmation_id, reviewer_id):
     links = db.query(MonarchPaymentReceipt).filter_by(confirmation_id=confirmation.id).all()
     ids = sorted(link.payment_id for link in links)
     payments = db.query(Payment).filter(Payment.id.in_(ids)).order_by(Payment.id).with_for_update().all()
+    previous_received = {row["id"]: row.get("received_at") for row in confirmation.evidence.get("payments", [])}
     for payment in payments:
-        payment.payment_received_at = None  # confirmations only accept previously unreceived payments
+        previous = previous_received.get(payment.id)
+        # Older confirmations predate support for payments already marked received.
+        payment.payment_received_at = datetime.fromisoformat(previous) if previous else None
     for link in links:
         db.delete(link)
     confirmation.active_deposit_id = None
