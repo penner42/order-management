@@ -561,11 +561,18 @@ def submit_item_tracking_to_group(
             submission_ids_by_tracking=ids_map,
         )
     if framework == "buyinggroup":
-        entry = build_buyinggroup_entry_from_items(pairs, tracking)
-        # Prefer summed amount already computed for siblings.
-        entry.amount = amount
-        result = submit_buyinggroup_trackings(group, [entry])
-        if not result.success:
+        entries = _aggregate_buyinggroup_entries([
+            (it, ord_, tracking) for it, ord_ in pairs
+        ])
+        result = submit_buyinggroup_trackings(group, entries)
+        succeeded = (
+            {tn.strip().casefold() for tn in result.succeeded}
+            if result.succeeded is not None else None
+        )
+        if not result.success or (
+            succeeded is not None
+            and any(entry.tracking.casefold() not in succeeded for entry in entries)
+        ):
             raise RuntimeError(result.message or "BuyingGroup tracking could not be verified")
         ids_map = _buyinggroup_submission_ids(result)
         return SubmitResult(
@@ -796,16 +803,44 @@ def _aggregate_parsefile_entries(
     ]
 
 
+def _buyinggroup_tracking_numbers(order: Order, tracking: str) -> list[str]:
+    """Add Walmart's order number for carrier shipments; store deliveries use it already."""
+    tracking = tracking.strip()
+    numbers = [tracking]
+    order_number = (order.store_order_number or "").strip()
+    store_name = (order.store.name or "").strip().casefold() if order.store else ""
+    compact = tracking.upper().replace(" ", "").replace("-", "")
+    if compact.startswith("WM"):
+        compact = compact[2:]
+    is_internal = len(compact) == 20 and compact.startswith("555") and compact.isdigit()
+    if (
+        store_name == "walmart"
+        and order_number
+        and order_number.casefold() != tracking.casefold()
+        and not is_internal
+    ):
+        numbers.append(order_number)
+    return numbers
+
+
 def _aggregate_buyinggroup_entries(
     pending: Sequence[tuple[Item, Order, str]],
 ) -> list[buyinggroup_api.BuyinggroupTrackingEntry]:
-    """One BuyingGroup.com entry per tracking number."""
+    """Separate entries for tracking and eligible Walmart order numbers, deduplicated by item."""
     groups: OrderedDict[str, list[tuple[Item, Order]]] = OrderedDict()
+    seen: dict[str, set[int]] = {}
+    spelling: dict[str, str] = {}
     for item, order, tracking in pending:
-        groups.setdefault(tracking, []).append((item, order))
+        for number in _buyinggroup_tracking_numbers(order, tracking):
+            key = number.casefold()
+            spelling.setdefault(key, number)
+            if id(item) in seen.setdefault(key, set()):
+                continue
+            seen[key].add(id(item))
+            groups.setdefault(key, []).append((item, order))
     return [
-        build_buyinggroup_entry_from_items(pairs, tracking)
-        for tracking, pairs in groups.items()
+        build_buyinggroup_entry_from_items(pairs, spelling[key])
+        for key, pairs in groups.items()
     ]
 
 
@@ -996,7 +1031,10 @@ def batch_submit_pending_trackings(
                 ok_tns = {tn.casefold() for tn in api_result.succeeded}
                 item_ids = [
                     item.id for item, _order, tracking in pending
-                    if tracking.strip().casefold() in ok_tns
+                    if all(
+                        number.casefold() in ok_tns
+                        for number in _buyinggroup_tracking_numbers(_order, tracking)
+                    )
                 ]
                 if not item_ids:
                     raise RuntimeError(message or "BuyingGroup tracking submit failed")
