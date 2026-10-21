@@ -64,6 +64,17 @@
     return (el.textContent || '').replace(/\s+/g, ' ').trim()
   }
 
+  function parseStatus(root) {
+    // These selectors include shipment headings. Inspect every heading before
+    // using one as the status of a containing order or shipment block.
+    const selectors = getSelectors().ORDER_STATUS || []
+    const headings = new Set(selectors.flatMap(selector => queryAllFirst(root, selector)))
+    const statuses = Array.from(headings).map(textOf).filter(Boolean)
+    const canceled = statuses.filter(s => /canceled|cancelled/i.test(s) && !/partial/i.test(s)).length
+    if (canceled > 0) return canceled === statuses.length ? 'canceled' : 'partially canceled'
+    return statuses[0] || ''
+  }
+
   function extractOrderIdFromText(text) {
     const m = coerceString(text) && ORDER_ID_RE.exec(text)
     return m ? m[0] : null
@@ -122,7 +133,7 @@
 
     if (hasProductLinks(card)) return true
     if (extractPriceFromText(cardText) != null) return true
-    if (textOf(queryFirst(card, sel.ORDER_STATUS)).length > 2) return true
+    if (parseStatus(card).length > 2) return true
     return false
   }
 
@@ -369,7 +380,7 @@
       parseOrderDate(textOf(queryFirst(card, sel.ORDER_DATE))) || parseOrderDate(cardText)
     const totalAmount = extractPriceFromText(textOf(queryFirst(card, sel.ORDER_TOTAL))) ||
       extractPriceFromText(cardText)
-    const status = textOf(queryFirst(card, sel.ORDER_STATUS))
+    const status = parseStatus(card)
 
     const items = []
     const seenAsins = new Set()
@@ -429,7 +440,7 @@
       const totalAmount =
         extractPriceFromText(textOf(queryFirst(container, sel.ORDER_TOTAL))) ||
         extractPriceFromText(cardText)
-      const status = textOf(queryFirst(container, sel.ORDER_STATUS))
+      const status = parseStatus(container)
 
       const items = []
       const seenAsins = new Set()
@@ -1264,8 +1275,8 @@
       trackingUrl: null,
       deliveryDate: null,
       status: {
-        rawStatusType: textOf(queryFirst(block, sel.ORDER_STATUS)),
-        message: textOf(queryFirst(block, sel.ORDER_STATUS)),
+        rawStatusType: parseStatus(block),
+        message: parseStatus(block),
       },
     }
     const shipmentId = buildShipmentId(entry, blockIndex)
@@ -1286,8 +1297,7 @@
   }
 
   function parseShipmentEntries(block) {
-    const sel = getSelectors()
-    const status = textOf(queryFirst(block, sel.ORDER_STATUS))
+    const status = parseStatus(block)
     const tracking = parseTrackingFromBlock(block)
 
     if (tracking.length > 0) {
@@ -1531,7 +1541,7 @@
 
     const orderDate =
       parseOrderDate(textOf(queryFirst(root, sel.ORDER_DATE))) || parseOrderDate(rootText)
-    const status = textOf(queryFirst(root, sel.ORDER_STATUS))
+    const status = parseStatus(root)
     const seenItemKeys = new Set()
     const itemCounter = { n: 0 }
     const shipmentRoots = findShipmentRoots(root)

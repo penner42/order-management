@@ -35,6 +35,18 @@
       throw new Error('Amazon order structure not recognized (missing order id).')
     }
 
+    const rawShipments = Array.isArray(raw.shipments) ? raw.shipments : []
+    const shipmentStatus = (s) => coerceString(s?.status?.message) || coerceString(s?.status?.rawStatusType) || null
+    const isCanceled = (status) => /canceled|cancelled/i.test(status || '') && !/partial/i.test(status || '')
+    const statuses = rawShipments.map(shipmentStatus)
+    const canceledCount = statuses.filter(isCanceled).length
+    let orderStatus = coerceString(raw.status)
+    if (canceledCount > 0) {
+      orderStatus = canceledCount === statuses.length ? 'canceled' : 'partially canceled'
+    } else if (isCanceled(orderStatus) && statuses.some(s => s && !isCanceled(s))) {
+      orderStatus = 'partially canceled'
+    }
+
     const items = []
     const rawItems = Array.isArray(raw.items) ? raw.items : []
     for (let i = 0; i < rawItems.length; i++) {
@@ -49,6 +61,9 @@
             : null
 
       const itemShipmentId = coerceString(it.shipmentId)
+      const itemShipment = itemShipmentId
+        ? rawShipments.find(s => coerceString(s.shipmentId) === itemShipmentId)
+        : null
       const shipmentSlices = itemShipmentId
         ? [{ shipmentId: itemShipmentId, quantity: qty, normalizedStatus: null }]
         : []
@@ -70,7 +85,7 @@
         },
         status: {
           rawStatusCode: null,
-          normalizedStatus: coerceString(raw.status) || null,
+          normalizedStatus: coerceString(it.status) || shipmentStatus(itemShipment),
         },
         shipments: shipmentSlices,
         returnability: {
@@ -81,7 +96,6 @@
     }
 
     const shipments = []
-    const rawShipments = Array.isArray(raw.shipments) ? raw.shipments : []
     for (let si = 0; si < rawShipments.length; si++) {
       const s = rawShipments[si] || {}
       const st = s.status || {}
@@ -164,7 +178,7 @@
         id: orderId,
         orderDate: normalizeOrderDateToIso(raw.orderDate),
         url: externalUrl,
-        statusType: coerceString(raw.status) || null,
+        statusType: orderStatus,
       },
       customer: {
         email,

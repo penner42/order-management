@@ -543,7 +543,7 @@ def _coerce_status_text(value: Any) -> str:
 
 def _status_text_indicates_canceled(value: Any) -> bool:
     s = _coerce_status_text(value).strip().lower()
-    return bool(s) and ("canceled" in s or "cancelled" in s)
+    return bool(s) and "partial" not in s and ("canceled" in s or "cancelled" in s)
 
 
 def _incoming_item_is_canceled(item_data: dict[str, Any]) -> bool:
@@ -571,13 +571,27 @@ def _normalized_order_is_canceled(normalized: dict[str, Any]) -> bool:
     ]
     external = normalized.get("externalOrder") or {}
     if isinstance(external, dict):
+        status_type = external.get("statusType")
+        if str(normalized.get("store") or "").lower() == "walmart":
+            # Older Walmart normalizers promoted any canceled group to this
+            # field. A sibling group with an active status disproves that
+            # synthesized whole-order cancellation.
+            for shipment in normalized.get("shipments") or []:
+                status = shipment.get("status") or {}
+                status_text = _coerce_status_text(status).strip()
+                if status_text and (
+                    "partial" in status_text.lower()
+                    or not _status_text_indicates_canceled(status)
+                ):
+                    status_type = None
+                    break
         candidates.extend(
             [
                 external.get("status"),
                 external.get("orderStatus"),
                 external.get("fulfillmentStatus"),
                 external.get("state"),
-                external.get("statusType"),
+                status_type,
             ]
         )
 

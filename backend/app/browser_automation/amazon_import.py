@@ -173,6 +173,24 @@ def _normalize_order(raw: dict[str, Any], source_url: str, account_email: str | 
     if not order_id:
         raise ValueError("Amazon order missing orderId")
 
+    raw_shipments = [s for s in raw.get("shipments") or [] if isinstance(s, dict)]
+
+    def shipment_status(shipment: dict[str, Any] | None) -> str | None:
+        status = (shipment or {}).get("status") or {}
+        return coerce(status.get("message")) or coerce(status.get("rawStatusType"))
+
+    def is_canceled(status: str | None) -> bool:
+        text = (status or "").lower()
+        return ("canceled" in text or "cancelled" in text) and "partial" not in text
+
+    statuses = [shipment_status(s) for s in raw_shipments]
+    canceled_count = sum(is_canceled(s) for s in statuses)
+    order_status = coerce(raw.get("status"))
+    if canceled_count:
+        order_status = "canceled" if canceled_count == len(statuses) else "partially canceled"
+    elif is_canceled(order_status) and any(s and not is_canceled(s) for s in statuses):
+        order_status = "partially canceled"
+
     items: list[dict[str, Any]] = []
     for it in raw.get("items") or []:
         if not isinstance(it, dict):
@@ -183,6 +201,10 @@ def _normalize_order(raw: dict[str, Any], source_url: str, account_email: str | 
         if line_total is None and unit_price is not None:
             line_total = unit_price * qty
         item_shipment_id = coerce(it.get("shipmentId"))
+        item_shipment = next(
+            (s for s in raw_shipments if coerce(s.get("shipmentId")) == item_shipment_id),
+            None,
+        ) if item_shipment_id else None
         shipment_slices = (
             [{"shipmentId": item_shipment_id, "quantity": qty, "normalizedStatus": None}]
             if item_shipment_id
@@ -206,7 +228,7 @@ def _normalize_order(raw: dict[str, Any], source_url: str, account_email: str | 
                 },
                 "status": {
                     "rawStatusCode": None,
-                    "normalizedStatus": coerce(raw.get("status")),
+                    "normalizedStatus": coerce(it.get("status")) or shipment_status(item_shipment),
                 },
                 "shipments": shipment_slices,
                 "returnability": {"isReturnable": False, "returnEligibilityMessage": None},
@@ -290,7 +312,7 @@ def _normalize_order(raw: dict[str, Any], source_url: str, account_email: str | 
             "id": order_id,
             "orderDate": normalize_date(raw.get("orderDate")),
             "url": source_url or coerce(raw.get("detailUrl")),
-            "statusType": coerce(raw.get("status")),
+            "statusType": order_status,
         },
         "customer": {
             "email": coerce(account_email)

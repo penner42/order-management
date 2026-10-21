@@ -116,23 +116,18 @@
 
     const customer = order.customer || {}
     const groups = Array.isArray(order.groups_2101) ? order.groups_2101 : []
-    let overallStatusType = null
-    try {
-      for (let i = 0; i < groups.length; i++) {
-        const g = groups[i] || {}
-        const status = g.status || {}
-        const statusType = typeof status.statusType === 'string' ? status.statusType.trim() : ''
-        if (!statusType) continue
-        const lower = statusType.toLowerCase()
-        if (overallStatusType == null) overallStatusType = statusType
-        if (lower.includes('canceled') || lower.includes('cancelled')) {
-          overallStatusType = statusType
-          break
-        }
-      }
-    } catch {
-      // ignore
-    }
+    // Group statuses belong to their own items, not the entire order.
+    const groupStatuses = groups.map((g) =>
+      g && g.status && typeof g.status.statusType === 'string' ? g.status.statusType.trim() : '',
+    )
+    const isCanceled = (status) => /canceled|cancelled/i.test(status) && !/partial/i.test(status)
+    const canceledGroups = groupStatuses.filter(isCanceled).length
+    const overallStatusType =
+      canceledGroups === groups.length && groups.length > 0
+        ? 'canceled'
+        : canceledGroups > 0
+          ? 'partially canceled'
+          : groupStatuses.find(Boolean) || null
     const paymentMethodsRaw = Array.isArray(order.paymentMethods) ? order.paymentMethods : []
 
     const shipments = []
@@ -259,7 +254,7 @@
           },
           status: {
             rawStatusCode: item.statusCode || null,
-            normalizedStatus: null,
+            normalizedStatus: isCanceled(groupStatuses[gi]) ? 'canceled' : null,
           },
           shipments:
             shipmentId && item.quantity

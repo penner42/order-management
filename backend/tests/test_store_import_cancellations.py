@@ -7,9 +7,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Item, Order
+from app.models import Item, Order, Shipment, ShipmentItem
 from app.models.item import ItemStatus
-from app.routers.store_imports import _apply_items_and_shipments
+from app.routers.store_imports import _apply_items_and_shipments, _build_order_diff
 
 
 class StoreImportCancellationTests(unittest.TestCase):
@@ -86,7 +86,7 @@ class StoreImportCancellationTests(unittest.TestCase):
         _apply_items_and_shipments(
             self.session,
             payload,
-            "amazon",
+            payload.get("store", "amazon"),
             self.order,
             external_order_id="ORDER-1",
             existing_order=True,
@@ -131,6 +131,55 @@ class StoreImportCancellationTests(unittest.TestCase):
         self.assertEqual(shipped.status, ItemStatus.CANCELED)
         self.assertIsNotNone(canceled.canceled_at)
         self.assertIsNotNone(shipped.canceled_at)
+
+    def _legacy_walmart_payload(self) -> dict:
+        payload = self._payload(canceled_item=True, canceled_shipment=True)
+        payload["store"] = "walmart"
+        payload["externalOrder"]["statusType"] = "CANCELED"
+        payload["shipments"].append({
+            "shipmentId": "shipment-2",
+            "status": {"normalizedStatus": "SHIPPED"},
+        })
+        return payload
+
+    def test_legacy_walmart_group_cancellation_does_not_cancel_sibling(self) -> None:
+        payload = self._legacy_walmart_payload()
+        diff = _build_order_diff(self.session, self.order, payload)
+        shipped_diff = next(i for i in diff["items"]["matched"] if i["name"] == "Shipped product")
+        self.assertNotIn("status", shipped_diff["changes"])
+
+        self._apply(payload)
+        self.assertEqual(self.canceled_item.status, ItemStatus.CANCELED)
+        self.assertEqual(self.shipped_item.status, ItemStatus.SHIPPED)
+
+    def test_legacy_walmart_fully_canceled_order_still_cancels_all_items(self) -> None:
+        payload = self._legacy_walmart_payload()
+        payload["shipments"][1]["status"]["normalizedStatus"] = "CANCELED"
+        self._apply(payload)
+        self.assertEqual(self.canceled_item.status, ItemStatus.CANCELED)
+        self.assertEqual(self.shipped_item.status, ItemStatus.CANCELED)
+
+    def test_legacy_walmart_partial_sibling_does_not_cancel_order(self) -> None:
+        payload = self._legacy_walmart_payload()
+        payload["shipments"][1]["status"]["normalizedStatus"] = "PARTIALLY_CANCELED"
+        self._apply(payload)
+        self.assertEqual(self.canceled_item.status, ItemStatus.CANCELED)
+        self.assertEqual(self.shipped_item.status, ItemStatus.SHIPPED)
+
+    def test_walmart_reimport_restores_incorrectly_canceled_tracked_sibling(self) -> None:
+        self._apply(self._payload(order_status="canceled"))
+        shipment = Shipment(tracking_number="TRACK-1")
+        self.session.add(shipment)
+        self.session.flush()
+        self.session.add(ShipmentItem(
+            shipment_id=shipment.id, item_id=self.shipped_item.id,
+        ))
+        self.session.commit()
+
+        self._apply(self._legacy_walmart_payload())
+        self.assertEqual(self.canceled_item.status, ItemStatus.CANCELED)
+        self.assertEqual(self.shipped_item.status, ItemStatus.SHIPPED)
+        self.assertIsNone(self.shipped_item.canceled_at)
 
 
 if __name__ == "__main__":
