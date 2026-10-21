@@ -45,6 +45,7 @@ from app.utils.buying_group_apis.submit_tracking import (
 from app.utils.receiving_links import (
     applied_receipt_pairs, candidate_lines, link_receipt, receipt_is_applied, unlink_receipt,
 )
+from app.utils.receiving_audit import build_receiving_audit
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,20 @@ def unlink_unknown_receipt(
     _: User = Depends(get_current_user),
 ):
     return unlink_receipt(db, body.buying_group_id, body.receipt_key)
+
+
+@router.get("/receiving-audit")
+def receiving_audit(
+    group_id: int | None = None, db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    if group_id is not None:
+        group = db.get(BuyingGroup, group_id)
+        if group is None:
+            raise HTTPException(404, "Buying group not found")
+        if (group.api_framework or "").strip().casefold() != "buyinggroup":
+            raise HTTPException(400, "This report supports BuyingGroup.com groups.")
+    return build_receiving_audit(db, group_id)
 
 
 @router.get("/{group_id}", response_model=BuyingGroupRead)

@@ -1091,6 +1091,7 @@ def list_receipts(
     password: str,
     page_size: int = _DEFAULT_PAGE_SIZE,
     timeout_seconds: float = 30.0,
+    require_complete: bool = False,
 ) -> list[BuyinggroupReceipt]:
     """Paginate get_receipts with no filters; return all receipt rows."""
     base = resolve_base_url(base_url)
@@ -1123,9 +1124,13 @@ def list_receipts(
             call=_call,
         )
         if page == 1:
+            if require_complete and pages > _MAX_LIST_PAGES:
+                raise RuntimeError("BG receipt history exceeds the retrieval limit")
             total_pages = min(max(pages, 1), _MAX_LIST_PAGES)
         all_rows.extend(rows)
         if not rows:
+            if require_complete and total_pages > 1:
+                raise RuntimeError("BG receipt history ended before the last page")
             break
         page += 1
     return all_rows

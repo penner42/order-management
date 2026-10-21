@@ -148,6 +148,24 @@ environment; `APPLICATION_LOG_FILE` selects the file path. Use a persistent moun
 if changing the path. These files contain order and tracking information.
 The Log screen continues to use the database; no migration is required.
 
+### Receiving audit
+
+Open **Receiving → Receiving audit** and choose **Run report** to compare existing
+local received lines with current BuyingGroup.com receipt history. You can check
+one group or all BuyingGroup.com groups. The report is read-only: it does not
+apply receiving suggestions, modify orders, or update the receiving review queue.
+
+The report shows receipts whose linked local quantities exceed BG's received
+quantity, with line IDs, order links, tracking, scanned dates, rewards, payment
+links, and BG receipt evidence. Receipt-linked lines remain included after status
+changes so returns do not free quantities for reuse. Missing receipt IDs/history,
+unknown BG quantities, and multi-receipt allocations are shown as **Cannot verify**;
+a failed history fetch marks the report incomplete. Quantities for items linked to
+multiple receipts are ranges, not allocations, and must not be summed across
+receipts. Shared receipt IDs alone are not errors. BG receipt totals do not verify
+which physical unit arrived or product allocations within multi-product receipts.
+The report does not automatically correct historical scanned statuses.
+
 The frontend proxies `/api` to `backend:8000` (including WebSockets) and `/tracking`
 to `package-tracking:8080`. UPS status lookups require `UPS_CLIENT` / `UPS_SECRET`;
 tracking link generation works without them.

@@ -736,6 +736,9 @@ export default function ReceivingReview() {
             Warehouse matches and unknown tracking numbers grouped by buying group. Apply matches to mark items scanned with receipt IDs.
           </p>
         </div>
+        <Link to="/receiving-audit" className="text-sm text-brand-600 dark:text-brand-400 hover:underline whitespace-nowrap">
+          Receiving audit
+        </Link>
         <Link
           to="/settings/buying-groups"
           className="text-sm text-brand-600 dark:text-brand-400 hover:underline whitespace-nowrap"
