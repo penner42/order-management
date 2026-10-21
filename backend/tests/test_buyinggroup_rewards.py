@@ -205,6 +205,45 @@ class BuyingGroupRewardTests(unittest.TestCase):
         self.assertTrue(result.matches[0].update_receipt_only)
         self.assertEqual(result.matches[0].reward, Decimal("6.00"))
 
+    def test_walmart_package_and_order_receipts_stay_applied(self):
+        number = self.walmart()
+        self.item.quantity = 1
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = "R1"
+        self.item.receipt_tracking_number = "TRACK"
+        self.item.reward = Decimal(0)
+        other = Item(order=self.item.order, quantity=1, price_sold=20,
+                     status=ItemStatus.SCANNED, receipt_id="R2", receipt_tracking_number=number,
+                     reward=Decimal(0), shipment_items=[ShipmentItem(
+                         shipment=Shipment(tracking_number=number))])
+        self.db.add(other)
+        self.db.commit()
+        extra = api._parse_receipt_row({"receipt_id": "R2", "tracking_id": number,
+                                       "quantity": 1, "total": "20.00"})
+        kwargs = dict(quantity=1, total="20.00", rewards={"track": Decimal(0), number: Decimal(0)},
+                      extra_receipts=[extra])
+        for saved_tracking in (True, False):
+            with self.subTest(saved_tracking=saved_tracking):
+                if not saved_tracking:
+                    self.item.receipt_tracking_number = None
+                    other.receipt_tracking_number = None
+                    self.db.commit()
+                self.assertEqual(self.check(**kwargs).matches, [])
+                self.assertEqual(self.check(**kwargs).matches, [])
+                self.assertEqual(self.item.receipt_id, "R1")
+                self.assertEqual(other.receipt_id, "R2")
+
+        # A real reward change remains actionable on the assigned receipt,
+        # and applying it must not expose the sibling receipt on the next check.
+        kwargs["rewards"] = {"track": Decimal("2.00"), number: Decimal(0)}
+        matches = self.check(**kwargs).matches
+        self.assertEqual([(m.item_id, m.receipt_id) for m in matches], [(self.item.id, "R1")])
+        bulk_update_items(ItemBulkUpdateRequest(updates=[ItemBulkUpdateEntry(
+            item_id=m.item_id, receipt_id=m.receipt_id,
+            receipt_tracking_number=m.tracking_number, reward=m.reward,
+        ) for m in matches]), db=self.db, _=None)
+        self.assertEqual(self.check(**kwargs).matches, [])
+
 
 class TrackingRewardApiTests(unittest.TestCase):
     def fetch(self, responses, page_size=2):

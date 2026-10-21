@@ -2644,12 +2644,16 @@ def _check_receiving_buyinggroup(
         if _is_zero_payout(item):
             continue
         matches.extend(
-            _receipt_update_matches_for_item(
+            _matches_for_tn_allocations(
                 item=item,
                 order=order,
                 trackings=trackings,
+                # Reuse the receipt supply reserved for this received line.
+                # Searching other aliases after skipping its unchanged receipt
+                # can overwrite it with a sibling's order-number receipt.
+                tn_allocations=reserved_by_tn.get(item.id, []),
                 meta_by_tn=meta_by_tn,
-                supply_by_tn=supply_by_tn,
+                update_receipt_only=True,
             )
         )
 
