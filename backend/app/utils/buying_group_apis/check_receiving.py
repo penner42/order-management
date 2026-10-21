@@ -2569,6 +2569,29 @@ def _check_receiving_buyinggroup(
         if meta["received_item"] is None and row.order_id:
             meta["received_item"] = row.order_id
 
+    # BG quantities are cumulative. Already-scanned lines consume receipt
+    # supply even when their receipt/reward details need no further updates.
+    # Preserve original supply for receipt-only backfills below.
+    received_demands = []
+    for item, _order, trackings in scanned_pending:
+        if _is_zero_payout(item):
+            continue
+        saved_tracking = (item.receipt_tracking_number or "").strip().casefold()
+        receipt_trackings = [
+            tn for tn in trackings
+            if _receipt_ids_on_item(item) & set(meta_by_tn.get(tn.casefold(), {}).get("receipt_ids", []))
+        ]
+        reserved_trackings = ([saved_tracking] if saved_tracking in supply_by_tn
+                              else receipt_trackings or trackings)
+        received_demands.append((item.id, item.quantity or 1, reserved_trackings))
+    _reserved, reserved_by_tn = _allocate_received_across_shared_trackings(
+        item_demands=received_demands, supply_by_tn=supply_by_tn,
+    )
+    available_supply = dict(supply_by_tn)
+    for allocations in reserved_by_tn.values():
+        for key, qty in allocations:
+            available_supply[key] -= qty
+
     eligible: list[tuple[Item, Order, list[str]]] = []
     void_matched_ids: set[int] = set()
     void_skipped = 0
@@ -2598,7 +2621,7 @@ def _check_receiving_buyinggroup(
 
     allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
         item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
-        supply_by_tn=supply_by_tn,
+        supply_by_tn=available_supply,
     )
 
     matches: list[ReceivingMatch] = []

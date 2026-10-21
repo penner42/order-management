@@ -158,6 +158,31 @@ class BuyingGroupRewardTests(unittest.TestCase):
         result = self.check(tracking_id="TRACK", alt_tracking=number, quantity=2)
         self.assertEqual(sum(match.received_qty or 0 for match in result.matches), 2)
 
+    def test_repeated_check_does_not_reuse_received_quantity(self):
+        for walmart in (False, True):
+            with self.subTest(walmart=walmart):
+                number = self.walmart() if walmart else "TRACK"
+                self.item.quantity = 1
+                self.item.status = ItemStatus.SCANNED
+                self.item.receipt_id = "R1"
+                self.item.reward = Decimal("6.00")
+                other = Item(order=self.item.order, quantity=2, price_sold=20,
+                             status=ItemStatus.SUBMITTED, shipment_items=[ShipmentItem(
+                                 shipment=Shipment(tracking_number="PACKAGE-2" if walmart else "TRACK"))])
+                self.db.add(other)
+                self.db.commit()
+                result = self.check(tracking_id=number, quantity=1, total="20.00")
+                self.assertEqual(result.matches, [])
+                # When the warehouse receives a second unit, only that new unit
+                # can be allocated; the other unit remains an under-received split.
+                result = self.check(tracking_id=number, quantity=2, total="40.00")
+                received = [m for m in result.matches if not m.update_receipt_only and m.received_qty]
+                self.assertEqual(sum(m.received_qty for m in received), 1)
+                self.assertEqual(received[0].item_id, other.id)
+                self.assertEqual(received[0].split_keep_quantity, 1)
+                self.db.delete(other)
+                self.db.commit()
+
     def test_walmart_order_receipt_does_not_match_another_order(self):
         self.walmart()
         result = self.check(tracking_id="OTHER-ORDER", quantity=3, total="60.00")
