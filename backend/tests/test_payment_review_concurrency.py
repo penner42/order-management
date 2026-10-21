@@ -18,6 +18,12 @@ from tests.test_payment_review import payment, receipt
 @unittest.skipUnless(settings.database_url.startswith("postgresql"), "requires Docker PostgreSQL")
 class PaymentReviewConcurrencyTests(unittest.TestCase):
     def test_same_review_cannot_be_confirmed_twice(self):
+        self.run_race(False)
+
+    def test_concurrent_installments_cannot_overpay_receipt(self):
+        self.run_race(True)
+
+    def run_race(self, installments):
         admin = create_engine(settings.database_url, isolation_level="AUTOCOMMIT")
         name = "test_payment_review_" + uuid4().hex
         engine = None
@@ -33,9 +39,12 @@ class PaymentReviewConcurrencyTests(unittest.TestCase):
                 db.add(order); db.flush()
                 db.add(Item(order_id=order.id, price_sold=100, quantity=1, receipt_id="r1", status=ItemStatus.SCANNED))
                 db.commit()
-                review = refresh(db, group.id, PaymentFetch([payment()], [receipt()]), "parsefile")["reviews"][0]
+                payments = [payment("p1", amount="60", receipt_ids=["r1"], receipt_amounts={"r1":"60"}),
+                            payment("p2", amount="60", receipt_ids=["r1"], receipt_amounts={"r1":"60"})] if installments else [payment()]
+                reviews = refresh(db, group.id, PaymentFetch(payments, [receipt()]), "parsefile")["reviews"]
             barrier = Barrier(2)
-            def attempt(_):
+            def attempt(index):
+                review = reviews[index] if installments else reviews[0]
                 with sessions() as db:
                     barrier.wait(timeout=10)
                     try:

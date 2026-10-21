@@ -191,8 +191,10 @@ The **browser-extension** folder contains a Chrome/Firefox extension that can re
 
 Open **Payments → Payment review**, select a buying group, and choose **Check
 payments**. Buying Groups also has a Check payments action for supported groups.
-The first provider supports every Parsefile group using its configured HTTPS
-website, API token, user ID, email, and portal password. Imports only read the
+Providers support Parsefile, BuyingGroup.com, USABG, and Deal & Runner. Parsefile
+uses its configured HTTPS website, API token, user ID, email, and portal password;
+the other three use their existing group API username/password configuration.
+BFMR payment history is deferred. Imports only read the
 remote portal; all confirmation happens locally. No recurring import is enabled.
 
 Payment history and receipt evidence remain in a persisted review queue. Default
@@ -215,6 +217,27 @@ unexplained differences block confirmation. Missing evidence and source payment
 changes are flagged without rewriting local payments. Historical values start
 with the first imported snapshot; earlier receipt revisions cannot be recovered.
 
+BuyingGroup.com combines payment history with Activity, receiving receipts, and
+tracking rewards. Maximum available payments are assumed. Receipt balances carry
+across requests; ambiguous held-receipt assignments and unexplained opening
+balances require review. Activity processing dates are not request boundaries.
+Cash tracking rewards count once, including alternate tracking aliases; points
+are separate from cash. Received local item rewards should be prepared through
+Receiving before payment confirmation. Referral adjustments require explanation.
+
+USABG supplies explicit PO payment shares and may pay one PO in installments.
+Approved requests are sent only when an issued check provides a date. D&R imports
+only completed batches with completed individual payments and pairs payout debits
+with receiving credits by warehouse-item ID. Its requested date uses the scheduled
+date; sent uses the latest matched debit posting. Late and multi-batch payouts are
+supported. Ambiguous batches retain review warnings and no inferred sent date.
+
+Installments reuse the same physical receipt/item quantities, counted once, while
+allocating only each payment's monetary share. Review shows allocated and remaining
+receipt balances. Unpaid principal is not a correction; source revisions are
+compared with the first confirmed receipt baseline. Migration `078` adds installment
+coverage without changing existing payments; downgrade refuses to discard it.
+
 Authenticated endpoints are under `/api/payment-review`: `GET /capabilities`,
 `GET /groups/{id}`, `POST /groups/{id}/refresh`, `PATCH /drafts/{id}`, and
 `POST /drafts/{id}/confirm`. Confirmation requires the displayed draft version and
@@ -225,7 +248,8 @@ Monarch uses the same total and includes corrections in its confirmation fingerp
 To add an API or website provider, implement `PaymentProvider` in
 `backend/app/payment_providers.py`, register it in `PROVIDERS` using the group's
 framework key, and provide readiness checks plus a read-only `fetch(group)`.
-Return normalized `PaymentEvidence`, `ReceiptEvidence`, and `PaymentFetch` rather
+Return normalized `PaymentEvidence`, `ReceiptEvidence`, and `PaymentFetch` (defined
+in `backend/app/payment_evidence.py` and re-exported by the registry) rather
 than remote wire fields. Supply stable identities, timezone-aware dates, source
 statuses, and explicit receipt links when available. Set `complete=False` for a
 partial fetch and `history_complete=False` for truncated history; incomplete

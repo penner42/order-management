@@ -37,7 +37,7 @@ class PaymentCoverage(Base):
     amount = Column(Numeric(12, 2), nullable=False)
     quantity = Column(Integer, nullable=False)
     snapshot = Column(JSON, nullable=False)
-    __table_args__ = (UniqueConstraint("receipt_source_id", "item_id", name="uq_receipt_coverage_item"),)
+    __table_args__ = (UniqueConstraint("receipt_source_id", "payment_id", "item_id", name="uq_receipt_payment_coverage_item"),)
 
 
 class PaymentCorrection(Base):

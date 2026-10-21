@@ -41,6 +41,20 @@ def item_issue(item, detail, issue_links=None):
     return message
 
 
+def item_payable(item):
+    """BG cash credits include the warehouse reward, once per received unit."""
+    group = item.order.buying_group
+    reward = money(item.reward or 0) if group and group.api_framework == "buyinggroup" else ZERO
+    return (money(item.price_sold or 0) + reward) * item.quantity
+
+
+def receipt_balance(db, receipt):
+    coverage = db.query(PaymentCoverage).filter_by(receipt_source_id=receipt.id).order_by(PaymentCoverage.id).all()
+    baseline = money(coverage[0].snapshot["amount"]) if coverage else money(receipt.payload["amount"])
+    paid = sum((money(c.amount) for c in coverage), ZERO)
+    return baseline, paid, ZERO if receipt.payload.get("void") else max(baseline - paid, ZERO)
+
+
 def existing_payment_issues(db, review, content, issue_links=None):
     """Compare the selected payment during review as well as at confirmation."""
     payment_id = content.get("existing_payment_id")
@@ -159,8 +173,17 @@ def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str)
             seen.add(key)
             payload = evidence.model_dump(mode="json")
             if kind == "payment":
-                payload["warnings"] = result.warnings
+                payload["warnings"] = list(dict.fromkeys(result.warnings + payload.get("warnings", [])))
                 payload["history_complete"] = result.history_complete
+                # Keep pre-upgrade Parsefile fingerprints stable for empty additions.
+                if payload.get("receipt_amounts") is None:
+                    payload.pop("receipt_amounts", None)
+                if not payload.get("evidence"):
+                    payload.pop("evidence", None)
+                shares = payload.get("receipt_amounts")
+                if shares is not None:
+                    if set(shares) != set(payload.get("receipt_ids") or []) or any(money(v) <= 0 for v in shares.values()):
+                        raise HTTPException(409, "Provider returned invalid receipt payment shares.")
             row = index.get(key)
             if row is None:
                 row = PaymentSource(buying_group_id=group_id, provider=provider_key, kind=kind, external_id=key[1])
@@ -217,8 +240,26 @@ def receipt_matches(db, source):
         if trackings and item.receipt_tracking_number and item.receipt_tracking_number.casefold() not in {t.casefold() for t in trackings}:
             continue
         out.append({"receipt_source_id": source.id, "item_id": item.id,
-            "quantity": item.quantity, "amount": str(money(item.price_sold or 0) * item.quantity)})
+            "quantity": item.quantity, "amount": str(item_payable(item))})
     return out
+
+
+def suggested_allocations(db, review, receipt):
+    matches = receipt_matches(db, receipt)
+    shares = review.source.payload.get("receipt_amounts")
+    target = money(shares[receipt.external_id]) if shares is not None and receipt.external_id in shares else receipt_balance(db, receipt)[2]
+    total = sum((money(a["amount"]) for a in matches), ZERO)
+    # Preserve an incomplete local match so quantity validation explains the issue.
+    if not total or (receipt.payload.get("quantity") is not None and sum(a["quantity"] for a in matches) != receipt.payload["quantity"]):
+        return matches
+    used = ZERO
+    result = []
+    for n, a in enumerate(matches):
+        share = target - used if n == len(matches) - 1 else (target * money(a["amount"]) / total).quantize(Decimal("0.01"))
+        used += share
+        if share > 0:
+            result.append({**a, "amount": str(share)})
+    return result
 
 
 def outstanding_corrections(db, group_id):
@@ -231,8 +272,10 @@ def outstanding_corrections(db, group_id):
         applied = db.query(PaymentCorrection).filter_by(receipt_source_id=receipt.id).all()
         covered = sum((c.amount for c in coverage), ZERO) + sum((c.amount for c in applied), ZERO)
         current = ZERO if receipt.payload.get("void") else money(receipt.payload["amount"])
-        delta = current - covered
         baseline = coverage[0].snapshot
+        # An installment's unpaid balance is not a receipt revision.
+        principal = sum((c.amount for c in coverage), ZERO) if receipt.payload.get("void") else money(baseline["amount"])
+        delta = current - principal - sum((c.amount for c in applied), ZERO)
         details_changed = any(receipt.payload.get(k) != baseline.get(k) for k in ("quantity", "description", "tracking_numbers", "created_at"))
         if not delta and receipt.present and not details_changed:
             continue
@@ -244,9 +287,13 @@ def outstanding_corrections(db, group_id):
             "provider": receipt.provider,
             "origin_payment_id": origin.id, "origin_requested_at": origin_created or origin.payment_requested_at.isoformat(),
             "origin_payment_reference": origin.payment_id,
-            "original_amount": str(sum((c.amount for c in coverage), ZERO)), "covered_amount": str(covered),
+            "original_amount": str(money(baseline["amount"])), "covered_amount": str(covered),
             "current_amount": str(current), "amount": str(delta), "present": receipt.present,
-            "revision": receipt.revision, "items": [{"item_id": c.item_id, "amount": str(c.amount)} for c in coverage]})
+            "revision": receipt.revision, "items": []})
+        weights = defaultdict(lambda: ZERO)
+        for c in coverage:
+            weights[c.item_id] += c.amount
+        result[-1]["items"] = [{"item_id": item_id, "amount": str(v)} for item_id, v in sorted(weights.items())]
         result[-1]["details_changed"] = details_changed
     return result
 
@@ -281,7 +328,7 @@ def effective_content(db, review, outstanding):
     content = dict(review.content)
     if not content.get("manual") and review.payment_id is None:
         content["allocations"] = [a for rid in content.get("receipt_ids", [])
-            if (receipt := db.get(PaymentSource, rid)) for a in receipt_matches(db, receipt)]
+            if (receipt := db.get(PaymentSource, rid)) for a in suggested_allocations(db, review, receipt)]
         content["corrections"] = correction_suggestions(db, review, outstanding)
     return content
 
@@ -323,7 +370,7 @@ def validate_content(db, review, content, outstanding, *, confirming=False, issu
         issues.append("An allocation references an excluded receipt.")
     if len({(a["receipt_source_id"], a["item_id"]) for a in allocations}) != len(allocations):
         issues.append("Each receipt/item allocation must be unique.")
-    used_quantities = defaultdict(int)
+    used_quantities = {}
     item_amounts = defaultdict(lambda: ZERO)
     for rid in ids:
         receipt = receipts.get(rid)
@@ -336,17 +383,27 @@ def validate_content(db, review, content, outstanding, *, confirming=False, issu
             issues.append(f"Receipt {receipt.external_id} is unverified; check it and record an explanation.")
         if receipt.payload.get("currency") != p.get("currency"):
             issues.append(f"Receipt {receipt.external_id} currency differs from the payment.")
-        covered = db.query(PaymentCoverage).filter_by(receipt_source_id=rid).first()
-        if covered:
-            covered_payment = db.get(Payment, covered.payment_id)
-            reference = f"payment {covered_payment.payment_id}" if covered_payment and covered_payment.payment_id else "another local payment"
-            issues.append(f"Receipt {receipt.external_id} is already covered by {reference}.")
+        prior = db.query(PaymentCoverage).filter_by(receipt_source_id=rid).order_by(PaymentCoverage.id).all()
+        baseline, paid, remaining_receipt = receipt_balance(db, receipt)
         lines = [a for a in allocations if a["receipt_source_id"] == rid]
         quantity = receipt.payload.get("quantity")
         if not lines or (quantity is None and not content.get("note", "").strip()) or (quantity is not None and sum(a["quantity"] for a in lines) != quantity):
             issues.append(f"Receipt {receipt.external_id} requires complete local item/quantity matches.")
-        if sum((money(a["amount"]) for a in lines), ZERO) != money(receipt.payload["amount"]):
+        allocated = sum((money(a["amount"]) for a in lines), ZERO)
+        shares = p.get("receipt_amounts")
+        expected = money(shares[receipt.external_id]) if shares is not None and receipt.external_id in shares else None
+        if expected is not None and allocated != expected:
+            issues.append(f"Receipt {receipt.external_id} allocations do not equal its provider payment share.")
+        if allocated > remaining_receipt:
+            issues.append(f"Receipt {receipt.external_id} allocations exceed its remaining receipt balance.")
+        if source.provider == "parsefile" and expected is None and allocated != remaining_receipt:
             issues.append(f"Receipt {receipt.external_id} allocations do not equal its source amount.")
+        if expected is None and source.provider != "parsefile" and allocated < remaining_receipt and not content.get("note", "").strip():
+            issues.append(f"Explain the partial payment of receipt {receipt.external_id}.")
+        if prior:
+            original = {c.item_id: c.quantity for c in prior if c.payment_id == prior[0].payment_id}
+            if {a["item_id"]: a["quantity"] for a in lines} != original:
+                issues.append(f"Receipt {receipt.external_id} item/quantity mapping must match its earlier installment.")
         # Equal receipt/payment timestamps without sequence are never inferred silently.
         if (receipt.payload.get("created_at") and p.get("created_at")
             and when(receipt.payload["created_at"]) == when(p["created_at"])
@@ -362,7 +419,7 @@ def validate_content(db, review, content, outstanding, *, confirming=False, issu
                 issues.append("Receipt allocations require positive amounts and quantities.")
             if item.status.value in {"canceled", "purchased", "shipped", "submitted", "needs_review"}:
                 issues.append(item_issue(item, "must be received before payment confirmation.", issue_links))
-            used_quantities[item.id] += a["quantity"]
+            used_quantities[(rid, item.id)] = a["quantity"]
             item_amounts[item.id] += money(a["amount"])
     corrections = content.get("corrections", [])
     by_receipt = defaultdict(list)
@@ -380,6 +437,10 @@ def validate_content(db, review, content, outstanding, *, confirming=False, issu
             issues.append("Corrections must use receipts from the same payment provider.")
         if not item or item.order.buying_group_id != source.buying_group_id or c["item_id"] not in {i["item_id"] for i in original["items"]}:
             issues.append("Corrections must reference the original covered local items.")
+        elif item and item.id in item_amounts:
+            # Negative corrections offset this installment's principal. Positive
+            # revisions remain separately explained earnings, as before installments.
+            item_amounts[item.id] += min(money(c["amount"]), ZERO)
         if not c.get("explanation", "").strip():
             issues.append("Every correction needs an explanation.")
         if review_created(review, content) is None or review_created(review, content) <= when(original["origin_requested_at"]):
@@ -398,12 +459,16 @@ def validate_content(db, review, content, outstanding, *, confirming=False, issu
             delta = money(original["amount"])
             if proposed * delta <= 0 or abs(proposed) > abs(delta):
                 issues.append("Correction exceeds or reverses the outstanding receipt difference.")
-    for item_id, qty in used_quantities.items():
+    mappings = {}
+    for item_id in item_amounts:
+        for c in db.query(PaymentCoverage).filter_by(item_id=item_id).all():
+            mappings[(c.receipt_source_id, c.item_id)] = c.quantity
+    mappings.update(used_quantities)
+    for item_id in item_amounts:
         item = db.get(Item, item_id)
-        prior_quantity = sum(c.quantity for c in db.query(PaymentCoverage).filter_by(item_id=item_id).all())
-        if qty + prior_quantity > item.quantity:
+        if sum(q for (_, iid), q in mappings.items() if iid == item_id) > item.quantity:
             issues.append(item_issue(item, "quantity was allocated more than once.", issue_links))
-        remaining = money(item.price_sold or 0) * item.quantity - item_allocated(db, item_id, content.get("existing_payment_id"))
+        remaining = item_payable(item) - item_allocated(db, item_id, content.get("existing_payment_id"))
         if item_amounts[item_id] > remaining:
             issues.append(item_issue(item, "allocations exceed its remaining local payout; review its received value.", issue_links))
     bonus = money(content.get("payment_bonus", 0))
@@ -443,6 +508,7 @@ def review_token(db, review, content):
         item = db.get(Item, item_id)
         items.append(None if not item else {"id": item.id, "order_id": item.order_id,
             "group_id": item.order.buying_group_id, "quantity": item.quantity, "price": str(item.price_sold),
+            "reward": str(item.reward),
             "status": item.status.value, "receipt_id": item.receipt_id,
             "allocated": str(item_allocated(db, item.id))})
     receipt_ids = sorted(set(content.get("receipt_ids", [])) | {c["receipt_source_id"] for c in content.get("corrections", [])})
@@ -459,13 +525,16 @@ def group_view(db, group_id):
     reviews = db.query(PaymentReview).join(PaymentSource).filter(PaymentSource.buying_group_id == group_id).all()
     items = db.query(Item).join(Order).filter(Order.buying_group_id == group_id).order_by(Item.id).all()
     receipts = [s for s in group_sources(db, group_id) if s.kind == "receipt"]
+    balances = {s.id: receipt_balance(db, s) for s in receipts}
     return {"capability": capability(group), "reviews": [review_view(db, r, outstanding) for r in sorted(reviews, key=lambda r: order_key(r.source))],
         "receipts": [{"id": s.id, "external_id": s.external_id, "payload": s.payload, "present": s.present,
-            "covered": db.query(PaymentCoverage).filter_by(receipt_source_id=s.id).first() is not None} for s in receipts],
+            "covered": balances[s.id][2] == 0 and balances[s.id][1] > 0,
+            "baseline_amount": str(balances[s.id][0]), "paid_amount": str(balances[s.id][1]), "remaining_amount": str(balances[s.id][2])} for s in receipts],
         "corrections": outstanding, "items": [{"id": i.id, "description": i.description, "quantity": i.quantity,
             "label": item_label(i), "store_order_number": i.order.store_order_number,
             "receipt_id": i.receipt_id, "status": i.status.value, "price_sold": str(i.price_sold),
-            "remaining": str(max(money(i.price_sold or 0) * i.quantity - item_allocated(db, i.id), ZERO)),
+            "payable_amount": str(item_payable(i)),
+            "remaining": str(max(item_payable(i) - item_allocated(db, i.id), ZERO)),
             "order_id": i.order_id} for i in items]}
 
 
@@ -492,8 +561,8 @@ def save_review(db, review_id, body):
         content["receipt_ids"] = [s.id for s in group_sources(db, review.source.buying_group_id)
             if s.kind == "receipt" and s.present and not s.payload.get("void") and when(s.payload.get("created_at"))
             and (start is None or when(s.payload["created_at"]) > start) and when(s.payload["created_at"]) <= end
-            and not db.query(PaymentCoverage).filter_by(receipt_source_id=s.id).first()]
-        content["allocations"] = [a for rid in content["receipt_ids"] for a in receipt_matches(db, db.get(PaymentSource, rid))]
+            and receipt_balance(db, s)[2] > 0]
+        content["allocations"] = [a for rid in content["receipt_ids"] for a in suggested_allocations(db, review, db.get(PaymentSource, rid))]
     review.content = content
     review.version += 1
     for other in db.query(PaymentReview).join(PaymentSource).filter(PaymentSource.buying_group_id == review.source.buying_group_id,

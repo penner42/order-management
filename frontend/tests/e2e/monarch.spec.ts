@@ -5,6 +5,7 @@ function settings(): MonarchSettings {
   return {
     profile: { id: 999999, integration: 'monarch', store_id: null, store_account_id: null, retailer: 'monarch', status: 'ready', last_error: null,
       last_import_at: null, full_check_enabled: false, full_check_cron: '0 0 * * *', full_check_max_pages: 3, full_check_last_run_at: null,
+      full_check_next_run_at: null, unshipped_check_interval_minutes: 360, unshipped_check_next_run_at: null,
       unshipped_check_enabled: false, unshipped_check_cron: '0 */6 * * *', unshipped_check_last_run_at: null },
     accounts: [{ id: 'a', name: 'Receiving checking', type: 'depository' }, { id: 'b', name: 'Investment cash', type: 'brokerage' }],
     selected_account_ids: ['a'], sender_rules: { '42': ['Sender'] }, daily_enabled: false, next_check_at: null, last_check_at: null, last_error: null,

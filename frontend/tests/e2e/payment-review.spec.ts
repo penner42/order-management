@@ -66,6 +66,45 @@ test('Payment review preserves its snapshot when refresh fails', async ({ app })
   await expect(app.getByRole('heading', { name: 'Payment payment-1 · $100.00' })).toBeVisible()
 })
 
+test('Installment review shows receipt balance, provider share, and D&R date context', async ({ app }) => {
+  const original = fixture()
+  const group = {
+    ...original,
+    capability: { ...original.capability, name: 'Example D&R', provider: 'dealandrunner' },
+    receipts: original.receipts.map(r => ({ ...r, baseline_amount: '100.00', paid_amount: '40.00', remaining_amount: '60.00' })),
+    reviews: original.reviews.map(r => ({ ...r,
+      source: { ...r.source, amount: '60.00', status: 'COMPLETED',
+        created_at: '2026-05-02T12:00:00Z', sent_at: '2026-05-11T12:01:00Z',
+        receipt_amounts: { 'receipt-1': '60.00' },
+        memo: 'Request date uses the scheduled payout date. Sent date uses the latest matched payout transaction.',
+        evidence: { scheduled_date: '2026-05-02T12:00:00Z', lock_date: '2026-05-03T12:00:00Z', transactions: [
+          { reference: 'payout-a', amount: '30.00', posted_at: '2026-05-11T12:00:00Z' },
+          { reference: 'payout-b', amount: '30.00', posted_at: '2026-05-11T12:01:00Z' },
+        ] } },
+      content: { ...r.content, allocations: [{ receipt_source_id: 2, item_id: 3, quantity: 1, amount: '60.00' }] },
+      allocated_total: '60.00',
+    })),
+  }
+  await app.route('**/api/payment-review/capabilities', route => route.fulfill({ json: [group.capability] }))
+  await app.route('**/api/payment-review/groups/170001', route => route.fulfill({ json: group }))
+  await app.route('**/api/payment-review/drafts/1/confirm', async route => {
+    expect(route.request().postDataJSON()).toEqual({ version: 1, fingerprint: 'shown-evidence' })
+    group.reviews[0].payment_id = 99
+    group.receipts[0].paid_amount = '100.00'
+    group.receipts[0].remaining_amount = '0.00'
+    group.receipts[0].covered = true
+    await route.fulfill({ json: group })
+  })
+  await app.goto('/payments/review?group=170001')
+  const section = app.getByRole('region', { name: 'Payment payment-1', exact: true })
+  await expect(section.getByText('Allocated across payments $40.00 · Remaining $60.00 · This payment $60.00 · Provider share $60.00')).toBeVisible()
+  await expect(section.getByText(/2 matched payout transactions/)).toBeVisible()
+  await expect(section.getByLabel('Allocation 1 quantity', { exact: true })).toHaveValue('1')
+  await section.getByRole('button', { name: 'Confirm payment', exact: true }).click()
+  await expect(section.getByRole('link', { name: 'View confirmed payment payment-1' })).toBeVisible()
+  await expect(section.getByText(/Allocated across payments \$100.00 · Remaining \$0.00/)).toBeVisible()
+})
+
 test('Existing payments can be selected by payment ID and amount and the link persists', async ({ app }) => {
   const group = fixture()
   const localPayment = {

@@ -1,52 +1,14 @@
 """Read-only adapters. Reconciliation never depends on a provider's wire fields."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Protocol
 from urllib.parse import urlsplit
 import urllib.request
 
-from pydantic import BaseModel, Field
 from app.utils.buying_group_apis import parsefile
-
-
-class ReceiptEvidence(BaseModel):
-    external_id: str
-    amount: Decimal
-    currency: str = "USD"
-    created_at: datetime | None = None
-    sequence: int | None = None
-    void: bool = False
-    verified: bool = True
-    quantity: int | None = None
-    tracking_numbers: list[str] = Field(default_factory=list)
-    description: str = ""
-    details: list[dict] = Field(default_factory=list)
-
-
-class PaymentEvidence(BaseModel):
-    external_id: str
-    amount: Decimal
-    currency: str = "USD"
-    created_at: datetime | None = None
-    sent_at: datetime | None = None
-    sequence: int | None = None
-    status: str
-    status_known: bool = True
-    void: bool = False
-    receipt_ids: list[str] | None = None
-    memo: str = ""
-
-
-@dataclass
-class PaymentFetch:
-    payments: list[PaymentEvidence]
-    receipts: list[ReceiptEvidence]
-    complete: bool = True
-    history_complete: bool = True
-    warnings: list[str] = field(default_factory=list)
+from app.payment_evidence import ReceiptEvidence, PaymentEvidence, PaymentFetch
 
 
 class PaymentProvider(Protocol):
@@ -177,7 +139,12 @@ class ParsefilePaymentProvider:
         return PaymentFetch(normalized_payments, receipts, warnings=["Unsupported activity types: " + ", ".join(sorted(unknown))] if unknown else [])
 
 
-PROVIDERS: dict[str, PaymentProvider] = {"parsefile": ParsefilePaymentProvider()}
+from app.group_payment_providers import BuyinggroupPaymentProvider, UsabgPaymentProvider, DealandrunnerPaymentProvider
+
+PROVIDERS: dict[str, PaymentProvider] = {
+    "parsefile": ParsefilePaymentProvider(), "buyinggroup": BuyinggroupPaymentProvider(),
+    "usabg": UsabgPaymentProvider(), "dealandrunner": DealandrunnerPaymentProvider(),
+}
 
 
 def provider_for(group):

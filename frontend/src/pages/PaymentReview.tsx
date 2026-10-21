@@ -8,9 +8,9 @@ export interface PaymentCapability { buying_group_id: number; name: string; supp
 interface Allocation { receipt_source_id: number; item_id: number; quantity: number; amount: string }
 interface Correction { receipt_source_id: number; item_id: number; amount: string; explanation: string }
 interface Content { receipt_ids: number[]; allocations: Allocation[]; corrections: Correction[]; window_start: string | null; window_end: string | null; existing_payment_id?: number | null; payment_bonus?: string; note: string; manual: boolean }
-interface Review { id: number; version: number; fingerprint: string; payment_id: number | null; external_id: string; source: { amount: string; status: string; created_at: string | null; sent_at: string | null; memo: string; warnings: string[] }; content: Content; allocated_total: string; difference: string; issues: string[]; issue_links?: Record<string, { label: string; order_id: number }> }
-interface Receipt { id: number; external_id: string; covered: boolean; present: boolean; payload: { amount: string; quantity: number | null; description: string; created_at: string | null; void: boolean; tracking_numbers: string[] } }
-interface LocalItem { id: number; label?: string; description: string; quantity: number; price_sold: string; receipt_id: string | null; remaining: string; status: string; order_id: number; store_order_number?: string | null }
+interface Review { id: number; version: number; fingerprint: string; payment_id: number | null; external_id: string; source: { amount: string; status: string; created_at: string | null; sent_at: string | null; memo: string; warnings: string[]; receipt_amounts?: Record<string, string> | null; evidence?: { reference?: string; scheduled_date?: string; lock_date?: string; transactions?: { reference: string; amount: string; posted_at?: string }[] } }; content: Content; allocated_total: string; difference: string; issues: string[]; issue_links?: Record<string, { label: string; order_id: number }> }
+interface Receipt { id: number; external_id: string; covered: boolean; present: boolean; baseline_amount?: string; paid_amount?: string; remaining_amount?: string; payload: { amount: string; quantity: number | null; description: string; created_at: string | null; void: boolean; tracking_numbers: string[] } }
+interface LocalItem { id: number; label?: string; description: string; quantity: number; price_sold: string; payable_amount?: string; receipt_id: string | null; remaining: string; status: string; order_id: number; store_order_number?: string | null }
 interface Outstanding { receipt_source_id: number; external_id: string; original_amount: string; covered_amount: string; current_amount: string; amount: string; present: boolean; origin_payment_id: number; origin_payment_reference?: string | null; items: { item_id: number; amount: string }[] }
 interface GroupReview { capability: PaymentCapability; reviews: Review[]; receipts: Receipt[]; items: LocalItem[]; corrections: Outstanding[] }
 
@@ -49,9 +49,17 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
   function toggleReceipt(receipt: Receipt) {
     const included = content.receipt_ids.includes(receipt.id)
     const matches = group.items.filter(i => i.receipt_id?.trim() === receipt.external_id)
+    const target = Number(review.source.receipt_amounts?.[receipt.external_id] ?? receipt.remaining_amount ?? receipt.payload.amount)
+    const weight = matches.reduce((sum, i) => sum + Number(i.payable_amount ?? Number(i.price_sold) * i.quantity), 0)
+    let used = 0
+    const suggestions = matches.map((i, n) => {
+      const share = !weight ? 0 : n === matches.length - 1 ? target - used : Math.round(target * Number(i.payable_amount ?? Number(i.price_sold) * i.quantity) / weight * 100) / 100
+      used += share
+      return { receipt_source_id: receipt.id, item_id: i.id, quantity: i.quantity, amount: share.toFixed(2) }
+    })
     edit({ ...content, receipt_ids: included ? content.receipt_ids.filter(id => id !== receipt.id) : [...content.receipt_ids, receipt.id],
       allocations: included ? content.allocations.filter(a => a.receipt_source_id !== receipt.id) : [...content.allocations,
-        ...matches.map(i => ({ receipt_source_id: receipt.id, item_id: i.id, quantity: i.quantity, amount: (Number(i.price_sold) * i.quantity).toFixed(2) }))] })
+        ...suggestions] })
   }
   function changeAllocation(index: number, patch: Partial<Allocation>) {
     edit({ ...content, allocations: content.allocations.map((a, n) => n === index ? { ...a, ...patch } : a) })
@@ -67,6 +75,7 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
       {confirmed && <Link className="underline" to={`/payments?edit=${review.payment_id}`}>View confirmed payment {review.external_id}</Link>}
     </div>
     {review.source.warnings?.map(w => <p className="text-amber-700 dark:text-amber-300 text-sm" key={w}>{w}</p>)}
+    {review.source.evidence?.scheduled_date && <p className="text-sm text-ink-muted">Scheduled {date(review.source.evidence.scheduled_date)} · Portal lock date {date(review.source.evidence.lock_date ?? null)} · {review.source.evidence.transactions?.length ?? 0} matched payout transactions</p>}
     {!confirmed && <div className="flex flex-wrap items-end gap-3">
       <label className="text-sm text-ink">After <input type="datetime-local" className={`${field} block`} aria-label="Receipt window start" value={localInput(content.window_start)} onChange={e => edit({ ...content, window_start: e.target.value ? new Date(e.target.value).toISOString() : null })} /></label>
       <label className="text-sm text-ink">Through <input type="datetime-local" className={`${field} block`} aria-label="Receipt window end" value={localInput(content.window_end)} onChange={e => edit({ ...content, window_end: e.target.value ? new Date(e.target.value).toISOString() : null })} /></label>
@@ -75,7 +84,7 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
     {windowError && <p role="alert" className="text-sm text-red-700 dark:text-red-400">{windowError}</p>}
     <div>
       <h3 className="font-medium text-ink">Receipt coverage</h3>
-      {!confirmed && <><p className="text-sm text-ink-muted">Link received order items below. Split larger lines on Orders when needed.</p>
+      {!confirmed && <><p className="text-sm text-ink-muted">Link received order items below. Quantities identify the physical units and may repeat across installments; amounts are this payment’s share. Split larger lines on Orders when needed.</p>
         <label className="block text-sm text-ink my-2"><input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} /> Show other receipts to include</label>
         <input className={`${field} w-full max-w-sm mb-2`} aria-label="Search local items" placeholder="Search by item name, order number, or receipt" value={itemSearch} onChange={e => setItemSearch(e.target.value)} /></>}
       <div className="space-y-3">
@@ -84,6 +93,7 @@ function ReviewCard({ review, group, payments, update, busy, run }: ReviewCardPr
           return <div key={receipt.id} className="rounded border border-brand-100 dark:border-gray-700 p-3">
             <label className="flex gap-2 text-sm text-ink"><input type="checkbox" aria-label={`Include receipt ${receipt.external_id}`} checked={included} disabled={confirmed || busy || (!included && (!receipt.present || receipt.payload.void))} onChange={() => toggleReceipt(receipt)} />
               <span>Receipt {receipt.external_id} · {money(receipt.payload.amount)} · Qty {receipt.payload.quantity ?? 'unknown'} · {date(receipt.payload.created_at)}<br />{receipt.payload.description}</span></label>
+            {receipt.remaining_amount !== undefined && <p className="text-sm text-ink-muted mt-1">Allocated across payments {money(receipt.paid_amount ?? '0')} · Remaining {money(receipt.remaining_amount)} · This payment {money(content.allocations.filter(a => a.receipt_source_id === receipt.id).reduce((sum, a) => sum + Number(a.amount), 0))}{review.source.receipt_amounts?.[receipt.external_id] !== undefined && <> · Provider share {money(review.source.receipt_amounts[receipt.external_id])}</>}</p>}
             {included && <div className="mt-2 space-y-2">
               {content.allocations.map((a, index) => a.receipt_source_id === receipt.id && <div key={index} className="flex flex-wrap gap-2 items-center">
                 <select className={`${field} max-w-full`} aria-label={`Receipt ${receipt.external_id} item ${index + 1}`} disabled={confirmed || busy} value={a.item_id} onChange={e => changeAllocation(index, { item_id: Number(e.target.value) })}>
