@@ -112,6 +112,74 @@ class BuyingGroupRewardTests(unittest.TestCase):
         self.assertEqual(self.item.reward, Decimal("6.00"))
         self.assertEqual(self.item.price_sold, Decimal("20.00"))
 
+    def walmart(self):
+        self.item.order.store.name = "Walmart"
+        self.item.order.store_order_number = "200015408984219"
+        self.db.commit()
+        return self.item.order.store_order_number
+
+    def test_walmart_receipt_matches_either_tracking_or_order_number_and_applies(self):
+        order_number = self.walmart()
+        for number in ["TRACK", order_number]:
+            with self.subTest(number=number):
+                result = self.check(tracking_id=number, quantity=3, total="60.00")
+                self.assertIsNone(result.error)
+                self.assertEqual(len(result.matches), 1)
+                self.assertEqual(result.matches[0].item_id, self.item.id)
+                self.assertEqual(result.matches[0].received_qty, 3)
+                self.assertEqual(result.session_payload["unknown_receipts"], [])
+        bulk_update_items(ItemBulkUpdateRequest(updates=[ItemBulkUpdateEntry(
+            item_id=self.item.id, status=ItemStatus.SCANNED, receipt_id="R1",
+        )]), db=self.db, _=None)
+        self.assertEqual(self.item.status, ItemStatus.SCANNED)
+        self.assertEqual(self.item.receipt_id, "R1")
+
+    def test_walmart_order_in_alternate_tracking_matches(self):
+        number = self.walmart()
+        result = self.check(tracking_id="WAREHOUSE", alt_tracking=number, quantity=3, total="60.00")
+        self.assertEqual(len(result.matches), 1)
+        self.assertEqual(result.matches[0].received_qty, 3)
+        self.assertEqual(result.session_payload["unknown_receipts"], [])
+
+    def test_walmart_order_receipt_quantity_is_shared_across_packages(self):
+        number = self.walmart()
+        self.item.quantity = 1
+        other = Item(order=self.item.order, quantity=1, price_sold=20, status=ItemStatus.SUBMITTED,
+                     shipment_items=[ShipmentItem(shipment=Shipment(tracking_number="TRACK-2"))])
+        self.db.add(other)
+        self.db.commit()
+        result = self.check(tracking_id=number, quantity=1, total="20.00")
+        received = [match for match in result.matches if match.received_qty]
+        self.assertEqual(sum(match.received_qty for match in received), 1)
+        self.assertEqual(len(received), 1)
+
+    def test_walmart_receipt_with_both_identifiers_does_not_double_quantity(self):
+        number = self.walmart()
+        result = self.check(tracking_id="TRACK", alt_tracking=number, quantity=2)
+        self.assertEqual(sum(match.received_qty or 0 for match in result.matches), 2)
+
+    def test_walmart_order_receipt_does_not_match_another_order(self):
+        self.walmart()
+        result = self.check(tracking_id="OTHER-ORDER", quantity=3, total="60.00")
+        self.assertEqual(result.matches, [])
+        self.assertEqual(len(result.session_payload["unknown_receipts"]), 1)
+
+    def test_other_store_order_number_is_not_a_receiving_alias(self):
+        self.item.order.store_order_number = "OTHER-ORDER"
+        self.db.commit()
+        self.assertEqual(self.check(tracking_id="OTHER-ORDER").matches, [])
+
+    def test_walmart_scanned_item_can_update_receipt_details_by_order_number(self):
+        number = self.walmart()
+        self.item.quantity = 2
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = "R1"
+        self.db.commit()
+        result = self.check(tracking_id=number)
+        self.assertEqual(len(result.matches), 1)
+        self.assertTrue(result.matches[0].update_receipt_only)
+        self.assertEqual(result.matches[0].reward, Decimal("6.00"))
+
 
 class TrackingRewardApiTests(unittest.TestCase):
     def fetch(self, responses, page_size=2):

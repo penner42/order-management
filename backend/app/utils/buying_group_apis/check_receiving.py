@@ -1390,6 +1390,14 @@ def _collect_items_with_trackings(
         trackings = _tracking_numbers_for_item(db, item)
         if not trackings:
             continue
+        if (
+            order.store and (order.store.name or "").strip().casefold() == "walmart"
+            and order.buying_group
+            and (order.buying_group.api_framework or "").strip().casefold() == "buyinggroup"
+        ):
+            order_number = (order.store_order_number or "").strip()
+            if order_number and order_number.casefold() not in {tn.casefold() for tn in trackings}:
+                trackings.append(order_number)
         pending.append((item, order, trackings))
         for tn in trackings:
             key = tn.casefold()
@@ -2505,12 +2513,20 @@ def _check_receiving_buyinggroup(
             # Receiving can still be reviewed; never replace a saved reward with zero.
             reward_error = str(exc).strip() or exc.__class__.__name__
     by_tracking = _index_bg_receipts_by_tracking(receipts)
+    local_tracking_keys = {tn.casefold() for tn in all_trackings}
+
+    def receipt_tracking(row: buyinggroup_api.BuyinggroupReceipt) -> str:
+        # Keep each receipt's quantity under one key even when both identifiers match.
+        numbers = [tn.strip() for tn in (row.tracking_id, row.alt_tracking_id) if tn and tn.strip()]
+        return next((tn for tn in numbers if tn.casefold() in local_tracking_keys),
+                    numbers[0] if numbers else "")
+
     supply_by_tn: dict[str, int] = {}
     meta_by_tn: dict[str, dict[str, Any]] = {}
     for row in receipts:
         if row.void:
             continue
-        tn = (row.tracking_id or row.alt_tracking_id or "").strip()
+        tn = receipt_tracking(row)
         if not tn:
             continue
         qty = int(row.quantity) if row.quantity is not None else 1
@@ -2615,12 +2631,13 @@ def _check_receiving_buyinggroup(
         )
 
     known_trackings = _known_shipment_trackings(db)
+    known_trackings.update(local_tracking_keys)
     orphan_receipts: list[buyinggroup_api.BuyinggroupReceipt] = []
     orphan_seen: set[int] = set()
     for row in receipts:
         if row.void:
             continue
-        tn = (row.tracking_id or row.alt_tracking_id or "").strip()
+        tn = receipt_tracking(row)
         if not tn:
             continue
         if tn.casefold() in known_trackings:
