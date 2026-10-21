@@ -9,6 +9,7 @@ interface AuditItem {
   store_order_number: string | null
   description: string | null
   quantity: number
+  received_quantity: number
   status: string
   receipt_id: string | null
   receipt_tracking_number: string | null
@@ -19,7 +20,7 @@ interface AuditItem {
 }
 interface Finding {
   receipt_id: string | null
-  status: 'excess' | 'unverified' | 'within_quantity'
+  status: 'excess' | 'stale_details' | 'unverified' | 'within_quantity'
   bg_quantity: number | null
   local_quantity_min: number
   local_quantity_max: number
@@ -50,7 +51,7 @@ interface AuditReport {
   }[]
 }
 
-const labels = { excess: 'Excess local quantity', unverified: 'Cannot verify', within_quantity: 'Within BG quantity' }
+const labels = { excess: 'More units marked received than BG', stale_details: 'Receipt details on unreceived items', unverified: 'Cannot verify', within_quantity: 'Within BG quantity' }
 
 export default function ReceivingAudit() {
   const [groups, setGroups] = useState<BuyingGroup[]>([])
@@ -92,7 +93,8 @@ export default function ReceivingAudit() {
         <Link to="/receiving-review" className="text-sm text-brand-600 dark:text-brand-400 underline">Back to Receiving</Link>
       </div>
       <p className="text-sm text-ink-muted dark:text-gray-400">
-        Excess quantity identifies receipts needing review, not which physical item arrived. Totals within BG quantity do not verify product allocation.
+        Scanned items and receipt-linked return/lost items count as received. Submitted and Shipped items do not count, even if old receipt details remain.
+        Totals within BG quantity do not verify product allocation or which physical item arrived.
         Lines linked to multiple receipts appear under each receipt with a quantity range; do not add those ranges together.
       </p>
       <div className="flex flex-wrap items-end gap-3">
@@ -120,6 +122,7 @@ export default function ReceivingAudit() {
         <div className="rounded-lg border border-brand-200 dark:border-gray-700 p-3 text-sm" role="status">
           Checked {new Date(report.checked_at).toLocaleString()} · {findings.filter(f => f.status === 'excess').length} receipts with excess quantity
           {' · '}{findings.filter(f => f.status === 'unverified').length} comparisons cannot be verified
+          {' · '}{findings.filter(f => f.status === 'stale_details').length} receipts with details on unreceived items
           {report.groups.some(group => group.error) && <strong className="block text-red-600 dark:text-red-400">Report incomplete: some groups could not be checked.</strong>}
         </div>
         {report.groups.map(group => {
@@ -127,24 +130,25 @@ export default function ReceivingAudit() {
           return <section key={group.group_id} className="rounded-xl border border-brand-200 dark:border-gray-700 p-4 space-y-3">
             <h2 className="font-semibold">{group.group_name}</h2>
             {group.error ? <p role="alert" className="text-red-600 dark:text-red-400">{group.error}</p> : <>
-              <p className="text-sm text-ink-muted dark:text-gray-400">{group.local_item_count} local received lines · {group.receipt_row_count} BG receipt rows fetched</p>
+              <p className="text-sm text-ink-muted dark:text-gray-400">{group.local_item_count} local lines checked · {group.receipt_row_count} BG receipt rows fetched</p>
               {!visible.length && <p className="text-sm">{!group.local_item_count ? 'No local received items to check.' : 'No excess quantities or unverifiable receipt links found.'}</p>}
               {visible.map((finding, index) => <div key={`${finding.receipt_id}:${index}`} className="border-t border-brand-100 dark:border-gray-700 pt-3 space-y-2">
                 <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm">
                   <strong>Receipt {finding.receipt_id || 'not recorded'}</strong>
                   <span className={finding.status === 'excess' ? 'text-red-700 dark:text-red-400 font-semibold' : finding.status === 'unverified' ? 'text-amber-700 dark:text-amber-400' : ''}>{labels[finding.status]}</span>
                   <span>BG quantity: {finding.bg_quantity ?? 'Unknown'}</span>
-                  <span>Local quantity: {finding.local_quantity_min === finding.local_quantity_max ? finding.local_quantity_min : `${finding.local_quantity_min}–${finding.local_quantity_max}`}</span>
+                  <span>Marked received locally: {finding.local_quantity_min === finding.local_quantity_max ? finding.local_quantity_min : `${finding.local_quantity_min}–${finding.local_quantity_max}`}</span>
                   {!!finding.excess_quantity && <strong>At least {finding.excess_quantity} excess</strong>}
                 </div>
                 {finding.notes.map(note => <p key={note} className="text-sm text-ink-muted dark:text-gray-400">{note}</p>)}
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm text-left">
-                    <thead><tr>{['Order / line', 'Description', 'Qty', 'Status', 'Shipment tracking', 'Receipt tracking', 'Scanned', 'Reward', 'Payment linked'].map(label => <th key={label} className="px-2 py-2 whitespace-nowrap">{label}</th>)}</tr></thead>
+                    <thead><tr>{['Order / line', 'Description', 'Qty', 'Counted received', 'Status', 'Shipment tracking', 'Receipt tracking', 'Scanned', 'Reward', 'Payment linked'].map(label => <th key={label} className="px-2 py-2 whitespace-nowrap">{label}</th>)}</tr></thead>
                     <tbody>{finding.items.map(item => <tr key={item.item_id} className="border-t border-brand-100 dark:border-gray-700">
                       <td className="px-2 py-2 whitespace-nowrap"><Link className="text-brand-600 dark:text-brand-400 underline" to={`/?order_id=${item.order_id}`}>{item.store_order_number || `Order #${item.order_id}`}</Link><div className="text-xs">Line #{item.item_id} · Receipt {item.receipt_id || '—'}</div></td>
                       <td className="px-2 py-2 min-w-48">{item.description || '—'}</td>
                       <td className="px-2 py-2">{item.quantity}</td>
+                      <td className="px-2 py-2">{item.received_quantity}</td>
                       <td className="px-2 py-2">{item.status}</td>
                       <td className="px-2 py-2">{item.tracking_numbers.join(', ') || '—'}</td>
                       <td className="px-2 py-2">{item.receipt_tracking_number || '—'}</td>

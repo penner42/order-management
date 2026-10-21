@@ -10,7 +10,7 @@ test('receiving audit shows excess quantities, uncertainty, and order links with
   })
   await app.route('**/api/buying-groups', route => route.fulfill({ json: [{ id: 77, name: 'Audit BG', api_framework: 'buyinggroup' }] }))
   const item = { item_id: 901, order_id: 123, store_order_number: 'WALMART-ORDER', description: 'Laptop',
-    quantity: 1, status: 'scanned', receipt_id: 'R1', receipt_tracking_number: 'TRACK', tracking_numbers: ['TRACK'],
+    quantity: 1, received_quantity: 1, status: 'scanned', receipt_id: 'R1', receipt_tracking_number: 'TRACK', tracking_numbers: ['TRACK'],
     scanned_at: '2026-10-20T00:00:00Z', reward: '0.05', payment_linked: false }
   const base = { receipt_id: 'R1', status: 'excess', bg_quantity: 1, local_quantity_min: 2, local_quantity_max: 2,
     excess_quantity: 1, notes: [], items: [item, { ...item, item_id: 902 }],
@@ -25,7 +25,10 @@ test('receiving audit shows excess quantities, uncertainty, and order links with
           items: [{ ...item, item_id: 903, receipt_id: null }], bg_lines: [],
           notes: ['Received locally without a receipt ID; compare tracking and BG history manually.'] },
         { ...base, receipt_id: 'R2', status: 'within_quantity', local_quantity_min: 1, local_quantity_max: 1,
-          excess_quantity: 0, items: [{ ...item, item_id: 904 }] }],
+          excess_quantity: 0, items: [{ ...item, item_id: 904 }] },
+        { ...base, receipt_id: 'R3', status: 'stale_details', local_quantity_min: 1, local_quantity_max: 1,
+          excess_quantity: 0, bg_lines: [], notes: ['Submitted units are excluded; old receipt details may need clearing.'],
+          items: [{ ...item, item_id: 905 }, { ...item, item_id: 906, status: 'submitted', quantity: 2, received_quantity: 0 }] }],
     }] } })
   })
   await app.goto('/receiving-review')
@@ -36,6 +39,10 @@ test('receiving audit shows excess quantities, uncertainty, and order links with
   await expect(app.getByText('1 receipts with excess quantity', { exact: false })).toBeVisible()
   await expect(app.getByText('At least 1 excess', { exact: true })).toBeVisible()
   await expect(app.getByText('Cannot verify', { exact: true })).toBeVisible()
+  await expect(app.getByText('Receipt details on unreceived items', { exact: true })).toBeVisible()
+  const submitted = app.getByRole('row').filter({ has: app.getByRole('cell', { name: 'submitted', exact: true }) })
+  await expect(submitted.getByRole('cell').nth(2)).toHaveText('2')
+  await expect(submitted.getByRole('cell').nth(3)).toHaveText('0')
   await expect(app.getByText('Receipt R2', { exact: true })).not.toBeVisible()
   await app.getByText('BG receipt evidence', { exact: true }).click()
   await expect(app.getByText('Warehouse receipt', { exact: false })).toBeVisible()

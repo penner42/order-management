@@ -1,5 +1,6 @@
 """Reconciliation flags excess units without changing local or remote records."""
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -48,6 +49,45 @@ class ReceivingAuditTests(unittest.TestCase):
         finding, = reconcile_receipts([self.item(), self.item()], [self.receipt(2, alt_tracking="WALMART-ORDER")])
         self.assertEqual(finding["status"], "within_quantity")
         self.assertEqual(finding["bg_quantity"], 2)
+
+    def test_submitted_units_with_old_receipt_details_are_not_counted_received(self):
+        scanned = self.item()
+        submitted = self.item(qty=2, status=ItemStatus.SUBMITTED)
+        submitted.scanned_at = datetime.now(timezone.utc)
+        submitted.receipt_tracking_number = "OLD-TRACKING"
+        self.db.commit()
+        with patch.object(api, "list_receipts", return_value=[self.receipt()]):
+            finding, = build_receiving_audit(self.db)["groups"][0]["findings"]
+        self.assertEqual((finding["status"], finding["local_quantity_min"], finding["bg_quantity"],
+                          finding["excess_quantity"]), ("stale_details", 1, 1, 0))
+        self.assertEqual({row["item_id"]: row["received_quantity"] for row in finding["items"]},
+                         {scanned.id: 1, submitted.id: 0})
+        self.assertTrue(any("excluded" in note for note in finding["notes"]))
+
+    def test_old_receipt_or_scan_date_does_not_count_open_statuses_as_received(self):
+        for status in (ItemStatus.SUBMITTED, ItemStatus.SHIPPED, ItemStatus.PURCHASED,
+                       ItemStatus.NEEDS_REVIEW, ItemStatus.CANCELED):
+            with self.subTest(status=status):
+                item = self.item(qty=2, status=status)
+                item.scanned_at = datetime.now(timezone.utc)
+                finding, = reconcile_receipts([item], [self.receipt()])
+                self.assertEqual(finding["local_quantity_max"], 0)
+                self.assertEqual(finding["status"], "stale_details")
+
+    def test_open_line_without_receipt_id_but_old_scan_date_counts_zero(self):
+        item = self.item(qty=2, receipt=None, status=ItemStatus.SUBMITTED)
+        item.scanned_at = datetime.now(timezone.utc)
+        finding, = reconcile_receipts([item], [self.receipt()])
+        self.assertEqual(finding["local_quantity_max"], 0)
+        self.assertEqual(finding["status"], "unverified")
+
+    def test_receipt_linked_returns_still_count_as_previously_received(self):
+        for status in ItemStatus:
+            if not (status.value.startswith('return_') or status in {ItemStatus.NEEDS_RETURN, ItemStatus.LOST_PACKAGE}):
+                continue
+            with self.subTest(status=status):
+                finding, = reconcile_receipts([self.item(qty=2, status=status)], [self.receipt()])
+                self.assertEqual(finding["excess_quantity"], 1)
 
     def test_distinct_receipt_product_rows_sum_once_and_expose_limit(self):
         finding, = reconcile_receipts([self.item(3)], [self.receipt(1, item="Laptop"), self.receipt(2, item="Watch")])

@@ -7,7 +7,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.models import BuyingGroup, Item, Order, ShipmentItem
-from app.models.item import ItemStatus
+from app.models.item import ItemStatus, RETURN_PROCESS_STATUSES
 from app.utils.buying_group_apis import buyinggroup as api
 from app.utils.buying_group_apis.submit_tracking import buyinggroup_group_ready
 
@@ -26,11 +26,24 @@ def _product(row):
     return None
 
 
+def _received_quantity(item):
+    # Moving an item back to submitted/shipped corrects its received status,
+    # even if old receipt fields or a scanned date have not been cleared yet.
+    if item.status == ItemStatus.SCANNED:
+        return item.quantity
+    if item.status in {
+        *RETURN_PROCESS_STATUSES, ItemStatus.LOST_PACKAGE,
+    } and (item.scanned_at or item.receipt_id or item.receipt_tracking_number):
+        return item.quantity
+    return 0
+
+
 def _line(item):
     return {
         "item_id": item.id, "order_id": item.order_id,
         "store_order_number": item.order.store_order_number,
         "description": item.description, "quantity": item.quantity,
+        "received_quantity": _received_quantity(item),
         "status": item.status.value, "receipt_id": item.receipt_id,
         "receipt_tracking_number": item.receipt_tracking_number,
         "tracking_numbers": sorted({link.shipment.tracking_number for link in item.shipment_items
@@ -66,8 +79,12 @@ def reconcile_receipts(items, receipts):
         notes = []
         # The same local line may refer to several receipts. Its quantity is an
         # upper bound for each, not a known allocation to any particular receipt.
-        certain = sum(item.quantity for item in lines if len(_ids(item.receipt_id)) == 1)
-        possible = sum(item.quantity for item in lines)
+        certain = sum(_received_quantity(item) for item in lines if len(_ids(item.receipt_id)) == 1)
+        possible = sum(_received_quantity(item) for item in lines)
+        unreceived = [item for item in lines if not _received_quantity(item)]
+        if unreceived:
+            notes.append("Lines " + ", ".join(f"#{item.id}" for item in unreceived)
+                         + " are not marked received. Their quantities are excluded; old receipt details may need clearing.")
         ambiguous = certain != possible
         if ambiguous:
             notes.append("Some lines link multiple receipts; their allocation is unknown. Do not add their quantities across receipts.")
@@ -93,6 +110,8 @@ def reconcile_receipts(items, receipts):
             status = "excess"
         elif warehouse_qty is None or ambiguous:
             status = "unverified"
+        elif unreceived:
+            status = "stale_details"
         else:
             status = "within_quantity"
         findings.append({
@@ -110,11 +129,13 @@ def reconcile_receipts(items, receipts):
     for item in unlinked:
         findings.append({
             "receipt_id": None, "status": "unverified", "bg_quantity": None,
-            "local_quantity_min": item.quantity, "local_quantity_max": item.quantity,
+            "local_quantity_min": _received_quantity(item), "local_quantity_max": _received_quantity(item),
             "excess_quantity": None, "bg_lines": [], "items": [_line(item)],
-            "notes": ["Received locally without a receipt ID; compare tracking and BG history manually."],
+            "notes": ["Received locally without a receipt ID; compare tracking and BG history manually."
+                      if _received_quantity(item) else
+                      "This line is not marked received, but still has receiving details. Its quantity is excluded; old receiving details may need clearing."],
         })
-    priority = {"excess": 0, "unverified": 1, "within_quantity": 2}
+    priority = {"excess": 0, "stale_details": 1, "unverified": 2, "within_quantity": 3}
     return sorted(findings, key=lambda finding: priority[finding["status"]])
 
 

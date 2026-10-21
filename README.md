@@ -157,8 +157,9 @@ apply receiving suggestions, modify orders, or update the receiving review queue
 
 The report shows receipts whose linked local quantities exceed BG's received
 quantity, with line IDs, order links, tracking, scanned dates, rewards, payment
-links, and BG receipt evidence. Receipt-linked lines remain included after status
-changes so returns do not free quantities for reuse. Missing receipt IDs/history,
+links, and BG receipt evidence. Scanned lines and receipt-linked return/lost lines
+count as received. Submitted, shipped, and other unreceived lines with old receipt
+details are shown separately and contribute zero received units. Missing receipt IDs/history,
 unknown BG quantities, and multi-receipt allocations are shown as **Cannot verify**;
 a failed history fetch marks the report incomplete. Quantities for items linked to
 multiple receipts are ranges, not allocations, and must not be summed across
