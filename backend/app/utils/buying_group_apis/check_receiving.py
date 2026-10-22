@@ -296,7 +296,7 @@ def _receipt_details(row: Any) -> dict[str, Any]:
 def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commit: bool = True) -> int:
     """Upsert or clear pending review for one buying group. Returns actionable match count."""
     buying_group_id = int(payload["buying_group_id"])
-    db.query(BuyingGroup).filter_by(id=buying_group_id).with_for_update().one()
+    group = db.query(BuyingGroup).filter_by(id=buying_group_id).with_for_update().one()
     existing = (
         db.query(ReceivingReviewPending)
         .filter(ReceivingReviewPending.buying_group_id == buying_group_id)
@@ -324,6 +324,15 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commi
     known_trackings = _known_shipment_trackings(db)
     unknown_by_key = {}
     for receipt in [*(r for r in (previous.get("unknown_receipts") or []) if r.get("linkable") is not False), *(payload.get("unknown_receipts") or []), *released]:
+        # Older BG snapshots used an empty tracking number. Normalize before
+        # merging so the receipt-ID fallback replaces the same saved product.
+        if (group.api_framework or "").strip().casefold() == "buyinggroup":
+            trackings = [tn.strip() for tn in
+                         [receipt.get("tracking_number") or "", *(receipt.get("tracking_numbers") or [])]
+                         if tn and tn.strip()]
+            rid = (receipt.get("receipt_id") or "").strip()
+            if not trackings and rid:
+                receipt = {**receipt, "tracking_number": rid, "tracking_numbers": [rid]}
         if receipt_key(receipt) in manual_keys or receipt_is_applied(receipt, applied_pairs):
             continue
         trackings = receipt.get("tracking_numbers") or [receipt["tracking_number"]]

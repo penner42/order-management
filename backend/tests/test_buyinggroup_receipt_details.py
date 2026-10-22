@@ -3,7 +3,7 @@ from decimal import Decimal
 import unittest
 from unittest.mock import patch
 
-from app.models import Item, ShipmentItem
+from app.models import Item, ReceivingReviewPending, ShipmentItem
 from app.models.item import ItemStatus
 from app.routers.items import bulk_update_items
 from app.schemas.item import ItemBulkUpdateEntry, ItemBulkUpdateRequest, ItemRead, ItemSplitRequest
@@ -49,6 +49,27 @@ class ReceiptDetailsTests(unittest.TestCase):
         receipt, = result.session_payload["unknown_receipts"]
         self.assertEqual(receipt["tracking_number"], "ALT")
         self.assertEqual(receipt["tracking_numbers"], ["ALT"])
+
+    def test_saved_blank_tracking_is_replaced_without_merging_distinct_products(self):
+        result = reward_tests.BuyingGroupRewardTests.check(
+            self, receipt_id="R-123456", tracking_id=None, rewards={})
+        receipt, = result.session_payload["unknown_receipts"]
+        old = {**receipt, "tracking_number": "", "tracking_numbers": []}
+        other = {**old, "description": "Other product", "receipt_upc": "other-upc"}
+        receiving.save_receiving_review_pending(self.db, {
+            **result.session_payload, "unknown_receipts": [old, other]})
+        # Reproduce a persisted snapshot written before receipt-ID fallbacks.
+        row = self.db.get(ReceivingReviewPending, self.group.id)
+        row.payload = {**row.payload, "unknown_receipts": [old, other, receipt]}
+        self.db.commit()
+        for _ in range(2):
+            receiving.save_receiving_review_pending(self.db, result.session_payload)
+            saved, = receiving.list_receiving_review_pending_payloads(self.db)
+            self.assertEqual(len(saved["unknown_receipts"]), 2)
+            self.assertEqual({r["description"] for r in saved["unknown_receipts"]},
+                             {receipt["description"], "Other product"})
+            self.assertTrue(all(r["tracking_number"] == "R-123456"
+                                for r in saved["unknown_receipts"]))
 
     def product(self, *, name="HP laptop", upc="199764359179", qty=1,
                 price="199.00", verified=True):
