@@ -22,25 +22,39 @@ OPEN_STATUSES = {ItemStatus.PURCHASED, ItemStatus.SHIPPED, ItemStatus.SUBMITTED,
 def receipt_key(receipt: dict) -> str:
     identity = [(receipt.get("receipt_id") or "").strip().casefold(),
                 (receipt.get("tracking_number") or "").strip().casefold(), receipt.get("description")]
+    if receipt.get("receipt_upc"):
+        identity.append(receipt["receipt_upc"])
+        identity.append(receipt.get("received_price"))
     return hashlib.sha256(json.dumps(identity, ensure_ascii=True).encode()).hexdigest()
 
 
-def applied_receipt_pairs(db: Session, group_id: int) -> set[tuple[str, str]]:
-    rows = db.query(Item.receipt_id, Item.receipt_tracking_number).join(Order).filter(
+def applied_receipt_pairs(db: Session, group_id: int) -> set[tuple[str, ...]]:
+    rows = db.query(Item.receipt_id, Item.receipt_tracking_number, Item.receipt_upc).join(Order).filter(
         Order.buying_group_id == group_id, Item.receipt_tracking_number.isnot(None),
     ).all()
-    return {((rid or "").strip().casefold(), tracking.strip().casefold())
-            for ids, tracking in rows for rid in (ids or "").replace(";", ",").split(",") if tracking}
+    pairs = set()
+    for ids, tracking, upc in rows:
+        for rid in (ids or "").replace(";", ",").split(","):
+            pair = (rid.strip().casefold(), tracking.strip().casefold())
+            pairs.add(pair)
+            if upc:
+                pairs.add((*pair, upc))
+    return pairs
 
 
-def receipt_is_applied(receipt: dict, pairs: set[tuple[str, str]]) -> bool:
+def receipt_is_applied(receipt: dict, pairs: set[tuple[str, ...]]) -> bool:
+    if receipt.get("linkable") is False:
+        return False
     rid = (receipt.get("receipt_id") or "").strip().casefold()
     trackings = [receipt.get("tracking_number") or "", *(receipt.get("tracking_numbers") or [])]
-    return any((rid, tn.strip().casefold()) in pairs for tn in trackings)
+    upc = receipt.get("receipt_upc")
+    return any(((rid, tn.strip().casefold(), upc) if upc else (rid, tn.strip().casefold())) in pairs for tn in trackings)
 
 
 def match_includes_receipt(match: dict, receipt: dict) -> bool:
     """Keep regenerated automatic suggestions from claiming a staged receipt."""
+    if match.get("receipt_upc") and receipt.get("receipt_upc") and match["receipt_upc"] != receipt["receipt_upc"]:
+        return False
     ids = {(value or "").strip().casefold()
            for value in (match.get("receipt_id") or "").replace(";", ",").split(",")}
     if (receipt.get("receipt_id") or "").strip().casefold() not in ids:
@@ -121,6 +135,8 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
     receipt = next((r for r in receipts if receipt_key(r) == body.receipt_key), None)
     if receipt is None:
         raise HTTPException(409, "Receipt is no longer unknown. Refresh receiving review.")
+    if receipt.get("linkable") is False:
+        raise HTTPException(409, "Receipt product is not confirmed or its details are unavailable.")
     ids = body.item_ids or ([body.item_id] if body.item_id is not None else [])
     if not ids or len(set(ids)) != len(ids) or (body.item_ids and body.item_id is not None):
         raise HTTPException(400, "Select each order line once.")
@@ -174,6 +190,7 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
             "quantity": item.quantity, "tracking_number": tracking, "receipt_tracking_number": tracking,
             "price_sold": str(item.price_sold or 0), "expected_amount": str(expected),
             "receipt_id": receipt.get("receipt_id"), "scanned_at": receipt.get("scanned_at"),
+            "receipt_upc": receipt.get("receipt_upc"),
             "received_item": receipt.get("description"), "received_qty": item.quantity,
             "received_price": receipt.get("received_price"), "received_ext_total": str(amount) if amount is not None else None,
             "received_status": receipt.get("received_status"),
@@ -226,7 +243,7 @@ def validate_manual_link_batch(db: Session, entries: list[ItemBulkUpdateEntry]) 
 def apply_manual_link(db: Session, item: Item, entry: ItemBulkUpdateEntry, changes: dict) -> dict:
     if entry.receiving_group_id is None or not entry.receiving_row_id:
         raise HTTPException(400, "Both receiving group and row are required.")
-    if set(changes) - {"receipt_id", "receipt_tracking_number", "status", "scanned_at", "price_sold", "reward"}:
+    if set(changes) - {"receipt_id", "receipt_tracking_number", "receipt_upc", "status", "scanned_at", "price_sold", "reward"}:
         raise HTTPException(400, "Apply receipt details separately from other line edits.")
     row = pending_row(db, entry.receiving_group_id)
     # Refresh retains the caller's joined eager loads; lock only the item so
@@ -243,6 +260,8 @@ def apply_manual_link(db: Session, item: Item, entry: ItemBulkUpdateEntry, chang
     if (changes.get("receipt_id") or "").strip() != (match.get("receipt_id") or "").strip():
         raise HTTPException(400, "Unlink to change the receipt assigned to this line.")
     changes["receipt_tracking_number"] = match["receipt_tracking_number"]
+    if match.get("receipt_upc"):
+        changes["receipt_upc"] = match["receipt_upc"]
     if match.get("reward") is not None:
         changes["reward"] = Decimal(match["reward"])
     if item.payment_line_items or item.status not in OPEN_STATUSES:

@@ -33,6 +33,7 @@ TOKEN_REFRESH_PATH = "/v2/token/refresh"
 GET_ORDERS_PATH = "/v1/order/get_orders"
 UPDATE_ORDER_PATH = "/v1/order/update_order"
 GET_RECEIPTS_PATH = "/v1/receipt/get_receipts"
+GET_RECEIPT_DETAILS_PATH = "/v1/receipt/get_details"
 GET_ANALYTICS_PATH = "/v1/receipt/get_analytics"
 
 # Browser FormData sends the literal string for empty filters.
@@ -1023,6 +1024,36 @@ def _fetch_receipts_page(
             raise RuntimeError(f"BuyingGroup get_receipts failed: {_error_detail(raw, text)}")
     receipts, pages = _receipts_from_payload(raw)
     return receipts, pages, raw
+
+
+def get_receipt_details(
+    *, base_url: str | None, username: str, password: str, receipt_key: str,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Read product quantities and confirmation flags using the internal receipt key."""
+    if not receipt_key:
+        raise ValueError("BG receipt has no internal key")
+    base = resolve_base_url(base_url)
+    auth = dict(base_url=base, username=username, password=password,
+                timeout_seconds=timeout_seconds)
+    tokens = _ensure_tokens(**auth)
+
+    def load(toks: _AuthTokens) -> dict[str, Any]:
+        url = f"{base}{GET_RECEIPT_DETAILS_PATH}"
+        status, text, raw = _multipart_request(
+            url=url, fields=[("receipt", receipt_key)],
+            headers=_auth_headers(toks.access), timeout_seconds=timeout_seconds,
+        )
+        if _is_auth_failure(status, raw, text):
+            raise _SessionExpired("BG receipt details session expired")
+        _raise_if_fail_status(raw, url=url, raw_text=text)
+        payload = raw.get("payload") if isinstance(raw, dict) else None
+        if status != 200 or not isinstance(payload, dict) or not isinstance(payload.get("received_items"), list):
+            raise RuntimeError("BG receipt details are incomplete")
+        return payload
+
+    payload, _tokens = _with_reauth(**auth, tokens=tokens, call=load)
+    return payload
 
 
 def tracking_reward_key(tracking: str) -> str:

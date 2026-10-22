@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import ReceiptLinkDialog from '../components/ReceiptLinkDialog'
 
 interface ReceivingMatch {
+  receipt_upc?: string | null
   receipt_tracking_number?: string | null
   manual_receipt_key?: string | null
   item_id: number
@@ -45,6 +46,8 @@ interface ReceivingUnmatched {
 }
 
 interface ReceivingUnknownReceipt {
+  receipt_upc?: string | null
+  linkable?: boolean
   reward?: string | null
   receipt_key?: string | null
   receipt_id: string | null
@@ -227,6 +230,7 @@ function ReceivingGroupSection({
       price_sold?: string | null
       reward?: string | null
       receipt_tracking_number?: string | null
+      receipt_upc?: string | null
       receiving_group_id?: number
       receiving_row_id?: string
     }> = []
@@ -277,6 +281,7 @@ function ReceivingGroupSection({
           }
         }
         if (m.reward != null) entry.reward = m.reward
+        if (m.receipt_upc) entry.receipt_upc = m.receipt_upc
         // Warehouse tracking belongs to this line, independently of the shipment.
         const scannedTn = (m.tracking_number || '').trim()
         if (scannedTn) {
@@ -468,6 +473,7 @@ function ReceivingGroupSection({
                           <td className="py-2 px-2 align-top text-ink">
                             <div>
                               {m.quantity}× {m.description || '—'}
+                              {m.receipt_upc && <div className="text-xs text-ink-muted">Receipt UPC: {m.receipt_upc}</div>}
                             </div>
                             {isNotReceived ? (
                               <div className="text-xs text-ink-muted mt-0.5">
@@ -567,10 +573,10 @@ function ReceivingGroupSection({
           {unknownReceipts.length > 0 && (
             <details className="mb-6">
               <summary className="cursor-pointer font-semibold text-ink dark:text-gray-100 mb-1">
-                Unknown tracking numbers ({unknownReceipts.length} {unknownReceipts.length === 1 ? 'receipt' : 'receipts'})
+                {unknownReceipts.some(r => r.linkable === false) ? 'Unresolved receipt items' : 'Unknown tracking numbers'} ({unknownReceipts.length} {unknownReceipts.length === 1 ? 'receipt' : 'receipts'})
               </summary>
               <p className="text-sm text-ink-muted dark:text-gray-400 mb-3">
-                Warehouse receipts with tracking numbers missing from Order Manager. Link a receipt to an order item to review and apply it.
+                Unmatched warehouse receipt items appear here. Confirmed items can be linked to order lines; unconfirmed items and unavailable details remain for review.
               </p>
               <div className="overflow-x-auto rounded-xl border border-brand-200/80 dark:border-gray-700">
                 <table className="w-full text-sm">
@@ -587,7 +593,7 @@ function ReceivingGroupSection({
                         <td className="py-2 px-3 align-top font-mono text-xs">
                           {(receipt.tracking_numbers?.length ? receipt.tracking_numbers : [receipt.tracking_number]).map((tn) => <div key={tn}>{tn}</div>)}
                         </td>
-                        <td className="py-2 px-3 align-top min-w-[12rem]">{receipt.description || '—'}</td>
+                        <td className="py-2 px-3 align-top min-w-[12rem]">{receipt.description || '—'}{receipt.receipt_upc && <div className="text-xs text-ink-muted">UPC: {receipt.receipt_upc}</div>}</td>
                         <td className="py-2 px-3 align-top tabular-nums">{receipt.quantity ?? '—'}</td>
                         <td className="py-2 px-3 align-top tabular-nums whitespace-nowrap">{fmtMoney(receipt.received_price)}</td>
                         <td className="py-2 px-3 align-top tabular-nums whitespace-nowrap">{fmtMoney(receipt.received_ext_total)}</td>
@@ -614,7 +620,7 @@ function ReceivingGroupSection({
                           ) : '—'}
                         </td>
                         <td className="py-2 px-3 align-top">
-                          <button type="button" disabled={applying || !receipt.receipt_key} onClick={() => setLinkReceipt(receipt)} className="text-brand-600 hover:underline text-sm whitespace-nowrap disabled:opacity-50">Link to order item</button>
+                          <button type="button" disabled={applying || !receipt.receipt_key || receipt.linkable === false} onClick={() => setLinkReceipt(receipt)} className="text-brand-600 hover:underline text-sm whitespace-nowrap disabled:opacity-50">Link to order item</button>
                         </td>
                       </tr>
                     ))}

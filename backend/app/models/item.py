@@ -89,6 +89,7 @@ class Item(Base):
     # May hold comma-joined warehouse receipt / transaction IDs (D&R multi-unit).
     receipt_id = Column(Text, nullable=True)
     receipt_tracking_number = Column(Text, nullable=True)
+    receipt_upc = Column(String(64), nullable=True)
     duplicate_audit_ignored = Column(Boolean, nullable=False, default=False, server_default=false())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

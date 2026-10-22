@@ -191,6 +191,7 @@ class ReceivingReviewMatch(BaseModel):
     receipt_id: str | None = None
     scanned_at: str | None = None
     received_item: str | None = None
+    receipt_upc: str | None = None
     received_qty: int | None = None
     received_price: str | None = None
     received_ext_total: str | None = None
@@ -226,6 +227,8 @@ class ReceivingReviewUnknownReceipt(BaseModel):
     tracking_number: str
     tracking_numbers: list[str] = Field(default_factory=list)
     source_data: dict = Field(default_factory=dict)
+    receipt_upc: str | None = None
+    linkable: bool = True
     bg_order_id: str | None = None
     description: str | None = None
     quantity: int | None = None

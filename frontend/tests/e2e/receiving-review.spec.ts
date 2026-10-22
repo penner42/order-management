@@ -1,6 +1,52 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('partial BG receipt stores UPC on received unit and splits missing unit for review', async ({ app, data }) => {
+  const store = await data.create('/stores', { name: data.name('bg-upc-store') })
+  const groupName = data.name('bg-upc-group')
+  const group = await data.create('/buying-groups', { name: groupName })
+  const order = await data.create<{ id: number; items: Item[] }>('/orders', {
+    store_id: store.id, buying_group_id: group.id,
+    items: [{ description: 'HP laptop', quantity: 2, status: 'submitted', price_sold: '199.00' }],
+  })
+  const item = order.items[0]
+  const tracking = data.name('bg-upc-tracking')
+  const shipment = await data.create('/shipments', { tracking_number: tracking, item_ids: [item.id] })
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
+    buying_group_id: group.id, buying_group_name: groupName,
+    matches: [
+      { item_id: item.id, order_id: order.id, description: 'HP laptop', quantity: 1,
+        tracking_number: tracking, price_sold: '199.00', expected_amount: '199.00',
+        received_ext_total: '199.00', reward: '6.00', receipt_id: 'BG-PARTIAL',
+        receipt_upc: '199764359179', split_keep_quantity: 1, original_quantity: 2,
+        match_kind: 'received', row_id: 'received', selected: true, amount_discrepancy: false,
+        scanned_at: '2026-10-21T12:00:00Z' },
+      { item_id: item.id, order_id: order.id, description: 'HP laptop', quantity: 1,
+        tracking_number: tracking, price_sold: '199.00', expected_amount: '199.00',
+        received_qty: 0, match_kind: 'not_received', row_id: 'missing', selected: false },
+    ],
+    unknown_receipts: [{ receipt_key: 'task', receipt_id: 'BG-PARTIAL', tracking_number: tracking,
+      description: 'Task', receipt_upc: '987654321098', quantity: 1, received_status: 'Not confirmed', linkable: false }],
+  }] }))
+  await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
+  await app.goto('/receiving-review')
+  await expect(app.getByText('Receipt UPC: 199764359179')).toBeVisible()
+  await app.getByText('Unresolved receipt items (1 receipt)', { exact: true }).click()
+  await expect(app.getByRole('button', { name: 'Link to order item' })).toBeDisabled()
+  await app.getByRole('button', { name: 'Apply 1 selected' }).click()
+  await expect(app.getByText('All listed rows were applied.')).toBeVisible()
+  const saved = await data.get<{ items: Item[] }>(`/orders/${order.id}`)
+  expect(saved.items).toHaveLength(2)
+  expect(saved.items.find(i => i.id === item.id)).toMatchObject({
+    quantity: 1, status: 'scanned', price_sold: '199.00', receipt_id: 'BG-PARTIAL',
+    receipt_upc: '199764359179', reward: '6.00',
+  })
+  const missing = saved.items.find(i => i.id !== item.id)!
+  expect(missing).toMatchObject({ quantity: 1, status: 'needs_review', receipt_id: null, receipt_upc: null, reward: null })
+  const linked = await data.get<{ shipment_items: Array<{ item_id: number }> }>(`/shipments/${shipment.id}`)
+  expect(linked.shipment_items.map(link => link.item_id).sort()).toEqual(saved.items.map(i => i.id).sort())
+})
+
 test('received reward is saved separately and shown beside payout on Orders', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('reward-store') })
   const group = await data.create('/buying-groups', { name: data.name('reward-group') })

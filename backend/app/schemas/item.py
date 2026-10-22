@@ -2,7 +2,7 @@
 from datetime import datetime
 from decimal import Decimal
 from app.schemas.common import TimestampsMixin
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.item import ItemStatus
 
 
@@ -26,6 +26,7 @@ class ItemBase(BaseModel):
     submission_api_id: str | None = None
     receipt_id: str | None = None
     receipt_tracking_number: str | None = None
+    receipt_upc: str | None = Field(default=None, max_length=64)
     # Datetime when each status was (last) set (shipped_at/delivered_at on Shipment; payment dates on Payment)
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
@@ -67,6 +68,7 @@ class ItemUpdate(BaseModel):
     submission_api_id: str | None = None
     receipt_id: str | None = None
     receipt_tracking_number: str | None = None
+    receipt_upc: str | None = Field(default=None, max_length=64)
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
     scanned_at: datetime | None = None
@@ -124,6 +126,7 @@ class ItemBulkUpdateEntry(BaseModel):
     submission_api_id: str | None = None
     receipt_id: str | None = None
     receipt_tracking_number: str | None = None
+    receipt_upc: str | None = Field(default=None, max_length=64)
     purchased_at: datetime | None = None
     submitted_at: datetime | None = None
     delivered_at: datetime | None = None  # applied to shipment

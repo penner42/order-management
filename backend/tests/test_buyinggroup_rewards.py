@@ -38,11 +38,21 @@ class BuyingGroupRewardTests(unittest.TestCase):
         self.db.commit()
 
     def check(self, *, rewards=None, reward_error=None, extra_receipts=(), **changes):
-        receipt = api._parse_receipt_row({"receipt_id": "R1", "tracking_id": "TRACK", "quantity": 2,
+        receipt = api._parse_receipt_row({"key": "R1", "receipt_id": "R1", "tracking_id": "TRACK", "quantity": 2,
                                           "total": "40.00", **changes})
+        rows = [receipt, *extra_receipts]
+        for row in rows:
+            row.raw.setdefault("key", row.receipt_id)
+        def details(**kwargs):
+            row = next(r for r in rows if r.raw["key"] == kwargs["receipt_key"])
+            return {"receipt_id": row.receipt_id, "received_items": [{
+                "verified": True, "qty": row.quantity, "price": str(row.total / row.quantity),
+                "total": str(row.total), "item_id": "Test product",
+            }]}
         if rewards is None:
             rewards = {api.tracking_reward_key(receipt.tracking_id): Decimal("6.00")}
         with (patch.object(api, "list_receipts", return_value=[receipt, *extra_receipts]),
+              patch.object(api, "get_receipt_details", side_effect=details),
               patch.object(api, "list_tracking_rewards", return_value=rewards, side_effect=reward_error),
               patch.object(api, "list_receipt_analytics", return_value=[])):
             return receiving.check_receiving_for_group(self.db, buying_group_id=self.group.id)
@@ -66,7 +76,7 @@ class BuyingGroupRewardTests(unittest.TestCase):
 
     def test_multiple_receipts_do_not_duplicate_tracking_reward(self):
         extra = api._parse_receipt_row({"receipt_id": "R2", "tracking_id": "TRACK", "quantity": 1, "total": "20.00"})
-        self.assertEqual(self.check(extra_receipts=[extra]).matches[0].reward, Decimal("6.00"))
+        self.assertEqual(sum(m.reward or 0 for m in self.check(extra_receipts=[extra]).matches), Decimal("6.00"))
 
     def test_under_received_reward_only_belongs_to_received_line(self):
         result = self.check()

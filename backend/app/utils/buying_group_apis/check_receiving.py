@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -125,6 +126,7 @@ class ReceivingMatch:
     # Item is already scanned+; update receipt details/reward without changing status.
     update_receipt_only: bool = False
     reward: Decimal | None = None
+    receipt_upc: str | None = None
 
 
 @dataclass
@@ -311,7 +313,7 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any]) -> int:
     applied_pairs = applied_receipt_pairs(db, buying_group_id)
     known_trackings = _known_shipment_trackings(db)
     unknown_by_key = {}
-    for receipt in [*(previous.get("unknown_receipts") or []), *(payload.get("unknown_receipts") or [])]:
+    for receipt in [*(r for r in (previous.get("unknown_receipts") or []) if r.get("linkable") is not False), *(payload.get("unknown_receipts") or [])]:
         if receipt_key(receipt) in manual_keys or receipt_is_applied(receipt, applied_pairs):
             continue
         trackings = receipt.get("tracking_numbers") or [receipt["tracking_number"]]
@@ -497,6 +499,7 @@ def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
         "receipt_id": m.receipt_id,
         "scanned_at": m.scanned_at,
         "received_item": m.received_item,
+        "receipt_upc": m.receipt_upc,
         "received_qty": m.received_qty,
         "received_price": str(m.received_price) if m.received_price is not None else None,
         "received_ext_total": str(m.received_ext_total) if m.received_ext_total is not None else None,
@@ -729,6 +732,8 @@ def _lot_as_match_meta(lot: dict[str, Any]) -> dict[str, Any]:
         "received_item": lot.get("received_item"),
         "display_tn": lot.get("display_tn"),
         "sku": lot.get("sku"),
+        "receipt_upc": lot.get("receipt_upc"),
+        "unit_reward": lot.get("unit_reward"),
     }
 
 
@@ -767,6 +772,12 @@ def _score_item_to_lot(
     item: Item, lot: dict[str, Any]
 ) -> tuple[float, float] | None:
     """Return (price_score, name_score) for ranking; higher is better. None = reject."""
+    local_upc = getattr(item, "receipt_upc", None)
+    lot_upc = lot.get("receipt_upc")
+    if local_upc and lot_upc:
+        if local_upc != lot_upc:
+            return None
+        return (1000.0, 1.0)
     local_price = _money(item.price_sold)
     lot_price = _money(lot.get("unit_price"))
     name_score = _name_similarity(item.description, lot.get("received_item"))
@@ -816,7 +827,7 @@ def _assign_items_to_lots(
                 lots.append(lot)
         if not lots:
             continue
-        if len(lots) == 1:
+        if len(lots) == 1 and not lots[0].get("require_product_match"):
             assignment[item.id] = lots[0]["lot_id"]
             continue
 
@@ -933,7 +944,7 @@ def _matches_for_tn_allocations(
             continue
         meta = meta_by_tn.get(tn_key) or {}
         receipt_id = _meta_receipt_id(meta)
-        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty)):
+        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty) or (meta.get("receipt_upc") and meta["receipt_upc"] != getattr(item, "receipt_upc", None))):
             continue
         display = (meta.get("display_tn") or "").strip() or _tn_display(trackings, tn_key)
         lines.append((display, qty, meta))
@@ -941,7 +952,7 @@ def _matches_for_tn_allocations(
         if qty <= 0:
             continue
         receipt_id = _meta_receipt_id(meta)
-        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty)):
+        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty) or (meta.get("receipt_upc") and meta["receipt_upc"] != getattr(item, "receipt_upc", None))):
             continue
         lines.append((display_tn, qty, meta))
 
@@ -980,6 +991,7 @@ def _matches_for_tn_allocations(
                 receipt_id=receipt_id,
                 scanned_at=_iso_date(scanned_dt),
                 received_item=received_item,
+                receipt_upc=meta.get("receipt_upc"),
                 received_qty=qty,
                 received_price=unit_payout,
                 received_ext_total=received_ext,
@@ -990,7 +1002,7 @@ def _matches_for_tn_allocations(
                 row_id=f"{item.id}:{MATCH_KIND_RECEIVED}:{tn_key}:{index}",
                 match_kind=MATCH_KIND_RECEIVED,
                 original_quantity=demand,
-                split_keep_quantity=qty if more_after else None,
+                split_keep_quantity=qty if more_after and not update_receipt_only else None,
                 update_receipt_only=update_receipt_only,
             )
         )
@@ -2521,225 +2533,229 @@ def _check_receiving_buyinggroup(
         return next((tn for tn in numbers if tn.casefold() in local_tracking_keys),
                     numbers[0] if numbers else "")
 
-    supply_by_tn: dict[str, int] = {}
-    meta_by_tn: dict[str, dict[str, Any]] = {}
-    for row in receipts:
-        if row.void:
-            continue
-        tn = receipt_tracking(row)
-        if not tn:
-            continue
-        qty = int(row.quantity) if row.quantity is not None else 1
-        if qty <= 0:
-            continue
-        key = tn.casefold()
-        supply_by_tn[key] = supply_by_tn.get(key, 0) + qty
-        meta = meta_by_tn.setdefault(
-            key,
-            {
-                "receipt_ids": [],
-                "statuses": [],
-                "unit_prices": [],
-                "scanned_at": None,
-                "received_item": None,
-            },
-        )
-        if row.receipt_id:
-            meta["receipt_ids"].append(row.receipt_id)
-        if row.status:
-            meta["statuses"].append(str(row.status))
-        if row.total is not None and qty > 0:
-            meta["unit_prices"].append((row.total / Decimal(qty)).quantize(Decimal("0.01")))
-        # Tracking Management owns the reward, once per tracking rather than receipt.
-        meta["reward_quantity"] = meta.get("reward_quantity", 0) + qty
-        for reward_tracking in (row.tracking_id, row.alt_tracking_id):
-            if not reward_tracking:
-                continue
-            reward = tracking_rewards.get(buyinggroup_api.tracking_reward_key(reward_tracking))
-            if reward is not None:
-                meta["reward_total"] = reward
-                break
-        if "reward_total" in meta:
-            meta["unit_reward"] = meta["reward_total"] / Decimal(meta["reward_quantity"])
-        row_scanned = _parse_created_date(row.created_dt)
-        if row_scanned is not None and (
-            meta["scanned_at"] is None or row_scanned > meta["scanned_at"]
-        ):
-            meta["scanned_at"] = row_scanned
-        if meta["received_item"] is None and row.order_id:
-            meta["received_item"] = row.order_id
-
-    # BG quantities are cumulative. Already-scanned lines consume receipt
-    # supply even when their receipt/reward details need no further updates.
-    # Preserve original supply for receipt-only backfills below.
-    received_demands = []
-    for item, _order, trackings in scanned_pending:
-        if _is_zero_payout(item):
-            continue
-        saved_tracking = (item.receipt_tracking_number or "").strip().casefold()
-        receipt_trackings = [
-            tn for tn in trackings
-            if _receipt_ids_on_item(item) & set(meta_by_tn.get(tn.casefold(), {}).get("receipt_ids", []))
-        ]
-        reserved_trackings = ([saved_tracking] if saved_tracking in supply_by_tn
-                              else receipt_trackings or trackings)
-        received_demands.append((item.id, item.quantity or 1, reserved_trackings))
-    _reserved, reserved_by_tn = _allocate_received_across_shared_trackings(
-        item_demands=received_demands, supply_by_tn=supply_by_tn,
-    )
-    available_supply = dict(supply_by_tn)
-    for allocations in reserved_by_tn.values():
-        for key, qty in allocations:
-            available_supply[key] -= qty
-
-    eligible: list[tuple[Item, Order, list[str]]] = []
-    void_matched_ids: set[int] = set()
-    void_skipped = 0
-    not_found = 0
-    for item, order, trackings in pending:
-        if _is_zero_payout(item):
-            continue
-        has_hit = False
-        all_void = True
-        any_cand = False
-        for tn in trackings:
-            rows = by_tracking.get(tn.casefold()) or []
-            if not rows:
-                continue
-            any_cand = True
-            if any(not r.void for r in rows):
-                all_void = False
-            if tn.casefold() in supply_by_tn:
-                has_hit = True
-        if has_hit:
-            eligible.append((item, order, trackings))
-        elif any_cand and all_void:
-            void_skipped += 1
-            void_matched_ids.add(item.id)
-        else:
-            not_found += 1
-
-    allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
-        item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
-        supply_by_tn=available_supply,
-    )
-
-    matches: list[ReceivingMatch] = []
-    for item, order, trackings in eligible:
-        got = int(allocated.get(item.id, 0))
-        if got <= 0:
-            not_found += 1
-            continue
-        matches.extend(
-            _matches_for_tn_allocations(
-                item=item,
-                order=order,
-                trackings=trackings,
-                tn_allocations=allocated_by_tn.get(item.id, []),
-                meta_by_tn=meta_by_tn,
-            )
-        )
-
-    for item, order, trackings in scanned_pending:
-        if _is_zero_payout(item):
-            continue
-        matches.extend(
-            _matches_for_tn_allocations(
-                item=item,
-                order=order,
-                trackings=trackings,
-                # Reuse the receipt supply reserved for this received line.
-                # Searching other aliases after skipping its unchanged receipt
-                # can overwrite it with a sibling's order-number receipt.
-                tn_allocations=reserved_by_tn.get(item.id, []),
-                meta_by_tn=meta_by_tn,
-                update_receipt_only=True,
-            )
-        )
-
-    known_trackings = _known_shipment_trackings(db)
-    known_trackings.update(local_tracking_keys)
-    orphan_receipts: list[buyinggroup_api.BuyinggroupReceipt] = []
-    orphan_seen: set[int] = set()
-    for row in receipts:
-        if row.void:
-            continue
-        tn = receipt_tracking(row)
-        if not tn:
-            continue
-        if tn.casefold() in known_trackings:
-            continue
-        if id(row) in orphan_seen:
-            continue
-        orphan_seen.add(id(row))
-        orphan_receipts.append(row)
-
-    analytics_by_tracking: dict[str, list[buyinggroup_api.BuyinggroupAnalyticsRow]] = {}
-    analytics_rows: list[buyinggroup_api.BuyinggroupAnalyticsRow] = []
-    if orphan_receipts:
+    # Never use the receipt header quantity: it includes unconfirmed Task rows.
+    # Fetch concurrently, once per receipt, while retaining list order for allocation.
+    detail_rows = [r for r in receipts if not r.void and (r.quantity or 0) > 0]
+    def fetch_details(row):
         try:
-            analytics_rows = buyinggroup_api.list_receipt_analytics(
-                base_url=base_url,
-                username=username,
-                password=password,
+            detail = buyinggroup_api.get_receipt_details(
+                base_url=base_url, username=username, password=password,
+                receipt_key=str(row.raw.get("key") or ""),
             )
-            analytics_by_tracking = _index_analytics_by_tracking(analytics_rows)
-        except Exception as exc:
-            # Still show orphans from receipt data; note analytics failure in message later.
-            analytics_error = str(exc).strip() or exc.__class__.__name__
-        else:
-            analytics_error = None
-    else:
-        analytics_error = None
+            if detail.get("receipt_id") != row.receipt_id:
+                raise ValueError("Receipt identity changed")
+            for line in detail["received_items"]:
+                qty = line.get("qty")
+                if (not isinstance(line.get("verified"), bool)
+                    or not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0
+                    or (line["verified"] and (_money(line.get("price")) is None
+                                             or _money(line.get("total")) is None))):
+                    raise ValueError("Invalid receipt product details")
+                if line["verified"] and (not _money(line["price"]).is_finite()
+                                         or not _money(line["total"]).is_finite()):
+                    raise ValueError("Invalid product amount")
+            return detail
+        except Exception:
+            return None
 
-    unknown_receipts: list[dict[str, Any]] = []
-    for row in orphan_receipts:
-        tn = (row.tracking_id or row.alt_tracking_id or "").strip()
-        analytics_list = analytics_by_tracking.get(tn.casefold()) or []
-        analytics = analytics_list[0] if analytics_list else None
-        description = (analytics.description if analytics else None) or row.order_id
-        note = None
-        if analytics:
-            note = analytics.note or analytics.tracking_note
-        if not note:
-            note = row.note or row.tracking_note
-        qty = row.quantity
-        if qty is None and analytics and analytics.quantity is not None:
-            qty = analytics.quantity
-        total = row.total
-        if total is None and analytics and analytics.total is not None:
-            total = analytics.total
-        price = None
-        if analytics and analytics.price is not None:
-            price = analytics.price
-        elif total is not None and qty and qty > 0:
-            price = (total / Decimal(qty)).quantize(Decimal("0.01"))
-        scanned_dt = _parse_created_date(row.created_dt)
-        reward = _reward_from_meta(meta_by_tn.get(tn.casefold(), {}), row.quantity or 1)
-        unknown_receipts.append(
-            {
-                "receipt_id": row.receipt_id,
-                "tracking_number": tn,
-                "tracking_numbers": list(dict.fromkeys(
-                    t.strip() for t in (row.tracking_id, row.alt_tracking_id) if t and t.strip()
-                )),
-                "source_data": {
-                    "receipt": _receipt_details(row),
-                    "analytics": [_receipt_details(a) for a in analytics_list],
-                },
-                "bg_order_id": row.order_id or (analytics.order_id if analytics else None),
-                "description": description,
-                "quantity": qty,
-                "received_price": str(price) if price is not None else None,
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        details = dict(zip((id(r) for r in detail_rows), pool.map(fetch_details, detail_rows)))
+
+    lots = []
+    unknown_receipts = []
+    detail_failures = 0
+    for row in detail_rows:
+        tn = receipt_tracking(row)
+        detail = details[id(row)]
+        if detail is None:
+            detail_failures += 1
+        lines = detail["received_items"] if detail is not None else [None]
+        for index, line in enumerate(lines):
+            confirmed = line is not None and line["verified"]
+            qty = line["qty"] if line else None
+            upc = (str(line.get("upc") or "").strip() or None) if line else None
+            if upc and len(upc) > 64:
+                upc = None
+            unit = _money(line.get("price")) if line else None
+            # BG's total is the authoritative product payout (commission included).
+            total = _money(line.get("total")) if line else None
+            if confirmed:
+                unit = total / Decimal(qty)
+                lots.append({
+                    "lot_id": f"{row.raw.get('key')}:{index}".casefold(), "tn_key": tn.casefold(),
+                    "display_tn": tn, "qty": qty, "unit_price": unit,
+                    "received_item": line.get("item_id"), "receipt_upc": upc,
+                    "receipt_ids": [row.receipt_id], "statuses": ["Confirmed"],
+                    "scanned_at": _parse_created_date(row.created_dt),
+                    "require_product_match": True,
+                })
+            unknown_receipts.append({
+                "receipt_id": row.receipt_id, "tracking_number": tn,
+                "tracking_numbers": list(dict.fromkeys(t.strip() for t in
+                    (row.tracking_id, row.alt_tracking_id) if t and t.strip())),
+                "description": line.get("item_id") if line else row.order_id,
+                "receipt_upc": upc, "quantity": qty,
+                "received_price": str(unit) if unit is not None else None,
                 "received_ext_total": str(total) if total is not None else None,
-                "received_status": row.status,
-                "reward": str(reward) if reward is not None else None,
-                "note": note,
-                "created_dt": row.created_dt,
-                "scanned_at": _iso_date(scanned_dt),
+                "received_status": "Confirmed" if confirmed else
+                    "Not confirmed" if line else "Receipt details unavailable",
+                "linkable": confirmed, "bg_order_id": row.order_id,
+                "_lot_id": f"{row.raw.get('key')}:{index}".casefold() if confirmed else None,
+                "source_data": {"receipt": row.raw, "item": line},
+                "note": row.note, "created_dt": row.created_dt,
+                "scanned_at": _iso_date(_parse_created_date(row.created_dt)),
                 "delivery": row.delivery,
-            }
-        )
+            })
+
+    # A tracking reward is shared only by its confirmed units, once across products.
+    confirmed_qty = {}
+    for lot in lots:
+        key = lot["tn_key"]
+        confirmed_qty[key] = confirmed_qty.get(key, 0) + lot["qty"]
+    reward_by_tn = {}
+    for row in detail_rows:
+        key = receipt_tracking(row).casefold()
+        for alias in (row.tracking_id, row.alt_tracking_id):
+            reward = tracking_rewards.get(buyinggroup_api.tracking_reward_key(alias or ""))
+            if reward is not None:
+                reward_by_tn[key] = reward
+                break
+    for lot in lots:
+        key = lot["tn_key"]
+        if key in reward_by_tn:
+            lot["unit_reward"] = reward_by_tn[key] / Decimal(confirmed_qty[key])
+    for receipt in unknown_receipts:
+        key = receipt["tracking_number"].casefold()
+        if receipt["linkable"] and key in reward_by_tn and confirmed_qty.get(key):
+            receipt["reward"] = str((reward_by_tn[key] * receipt["quantity"] /
+                                     Decimal(confirmed_qty[key])).quantize(Decimal("0.01")))
+
+    lots_by_tn = {}
+    lots_by_id = {lot["lot_id"]: lot for lot in lots}
+    for lot in lots:
+        lots_by_tn.setdefault(lot["tn_key"], []).append(lot)
+    # Alias identifiers refer to the same supply, including Walmart order numbers.
+    for row in detail_rows:
+        primary = receipt_tracking(row).casefold()
+        for alias in (row.tracking_id, row.alt_tracking_id):
+            key = (alias or "").strip().casefold()
+            if key and key != primary:
+                for lot in lots_by_tn.get(primary, []):
+                    if lot not in lots_by_tn.setdefault(key, []):
+                        lots_by_tn[key].append(lot)
+    meta_by_lot = {lid: _lot_as_match_meta(lot) for lid, lot in lots_by_id.items()}
+    supply = {lid: lot["qty"] for lid, lot in lots_by_id.items()}
+
+    def choices(item, trackings, received=False):
+        candidates = []
+        seen = set()
+        for tn in trackings:
+            for lot in lots_by_tn.get(tn.casefold(), []):
+                lid = lot["lot_id"]
+                if lid not in seen:
+                    seen.add(lid)
+                    candidates.append(lot)
+        if received:
+            saved = (item.receipt_tracking_number or "").casefold()
+            exact = [lot for lot in candidates if
+                     _receipt_ids_on_item(item) & set(lot["receipt_ids"])
+                     and (not saved or saved == lot["tn_key"])]
+            if exact:
+                candidates = exact
+        ranked = [(score, lot) for lot in candidates
+                  if not (item.description and lot.get("received_item")
+                          and not getattr(item, "receipt_upc", None)
+                          and _name_similarity(item.description, lot["received_item"]) < _LOT_NAME_ONLY_MIN)
+                  if (score := _score_item_to_lot(item, lot)) is not None]
+        if not ranked:
+            return []
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        best_score, best = ranked[0]
+        # Identical products across receipts share demand; different products
+        # with indistinguishable scores must be reviewed instead of guessed.
+        same_product = lambda lot: lot.get("receipt_upc") or lot.get("received_item")
+        if any(same_product(lot) != same_product(best) and _scores_ambiguous(best_score, score)
+               for score, lot in ranked[1:]):
+            return []
+        return [lot["lot_id"] for _score, lot in ranked if same_product(lot) == same_product(best)]
+
+    received_demands = [(item.id, item.quantity or 1, choices(item, tns, True))
+                        for item, _o, tns in scanned_pending if not _is_zero_payout(item)]
+    _reserved, reserved = _allocate_received_across_shared_trackings(
+        item_demands=received_demands, supply_by_tn=supply)
+    available = dict(supply)
+    for allocations in reserved.values():
+        for lid, qty in allocations:
+            available[lid] -= qty
+    demands = [(item.id, item.quantity or 1, choices(item, tns))
+               for item, _o, tns in pending if not _is_zero_payout(item)]
+    allocated, allocations = _allocate_received_across_shared_trackings(
+        item_demands=demands, supply_by_tn=available)
+    # Cumulative rounding preserves each tracking's exact reward across splits.
+    reward_allocations = {}
+    reward_qty_used = {}
+    for batch in (reserved, allocations):
+        for item_id, item_allocations in batch.items():
+            for lid, qty in item_allocations:
+                key = lots_by_id[lid]["tn_key"]
+                if key in reward_by_tn:
+                    before = reward_qty_used.get(key, 0)
+                    unit_reward = reward_by_tn[key] / Decimal(confirmed_qty[key])
+                    reward_allocations[item_id, lid] = (
+                        (unit_reward * (before + qty)).quantize(Decimal("0.01"))
+                        - (unit_reward * before).quantize(Decimal("0.01")))
+                    reward_qty_used[key] = before + qty
+    remaining_supply = dict(available)
+    for item_allocations in allocations.values():
+        for lid, qty in item_allocations:
+            remaining_supply[lid] -= qty
+    unresolved = []
+    for receipt in unknown_receipts:
+        lid = receipt.pop("_lot_id")
+        if lid is not None:
+            qty = remaining_supply[lid]
+            if qty <= 0:
+                continue
+            receipt["quantity"] = qty
+            receipt["received_ext_total"] = str((lots_by_id[lid]["unit_price"] * qty).quantize(Decimal("0.01")))
+            key = lots_by_id[lid]["tn_key"]
+            if key in reward_by_tn:
+                before = reward_qty_used.get(key, 0)
+                unit_reward = reward_by_tn[key] / Decimal(confirmed_qty[key])
+                receipt["reward"] = str(
+                    (unit_reward * (before + qty)).quantize(Decimal("0.01"))
+                    - (unit_reward * before).quantize(Decimal("0.01")))
+                reward_qty_used[key] = before + qty
+        unresolved.append(receipt)
+    unknown_receipts = unresolved
+    matches = []
+    not_found = 0
+    void_matched_ids = set()
+    void_skipped = 0
+    for item, order, trackings in pending + scanned_pending:
+        if _is_zero_payout(item):
+            continue
+        received = item.status not in _UNSCANNED_STATUSES
+        item_allocations = (reserved if received else allocations).get(item.id, [])
+        if not item_allocations and not received:
+            rows = [r for tn in trackings for r in by_tracking.get(tn.casefold(), [])]
+            if rows and all(r.void for r in rows):
+                void_matched_ids.add(item.id)
+                void_skipped += 1
+            else:
+                not_found += 1
+        item_meta = {lid: dict(meta_by_lot[lid]) for lid, _qty in item_allocations}
+        for lid, qty in item_allocations:
+            if (item.id, lid) in reward_allocations:
+                item_meta[lid]["unit_reward"] = reward_allocations[item.id, lid] / Decimal(qty)
+        matches.extend(_matches_for_tn_allocations(
+            item=item, order=order, trackings=trackings,
+            tn_allocations=item_allocations, meta_by_tn=item_meta,
+            update_receipt_only=received,
+        ))
+    analytics_rows = []
+    analytics_error = (f"{detail_failures} receipt detail request(s) unavailable; no summary quantities used"
+                       if detail_failures else None)
 
     discrepancy_count = sum(1 for m in matches if m.amount_discrepancy)
     received_count = _received_match_count(matches)
@@ -2761,7 +2777,7 @@ def _check_receiving_buyinggroup(
             part += f" ({discrepancy_count} amount discrepancy)"
         parts.append(part)
     if unknown_receipts:
-        parts.append(f"{len(unknown_receipts)} BG receipt(s) with tracking not in Order Manager")
+        parts.append(f"{len(unknown_receipts)} unresolved BG receipt item(s)")
     if analytics_error:
         parts.append(f"Analytics enrich failed: {analytics_error}")
     if not matches and not unknown_receipts:
