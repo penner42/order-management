@@ -36,6 +36,7 @@ from app.utils.buying_group_apis.submit_tracking import (
     usabg_group_ready,
 )
 from app.utils.dates import to_date_only
+from app.utils.receipt_upc import receipt_upc, absorb_upc
 from app.utils.receiving_cache import ReceiptSource, fetch_receipt_source, provider_identity
 from app.utils.receiving_links import (
     applied_receipt_pairs, match_includes_receipt, receipt_is_applied, receipt_key, with_receipt_keys,
@@ -639,22 +640,22 @@ def _name_similarity(a: str | None, b: str | None) -> float:
     return float(inter) / float(union) if union else 0.0
 
 
-def _usabg_lot_merge_key(row: usabg_api.UsabgReceivedRow) -> tuple[str, str, str, str]:
+def _usabg_lot_merge_key(row: usabg_api.UsabgReceivedRow) -> tuple[str, str, str, str, str | None]:
     tn = (row.tracking_number or "").strip().casefold()
     sku = (row.sku or "").strip().casefold()
     price = str(_money(row.unit_price) if row.unit_price is not None else "")
     name = (row.received_item or "").strip().casefold()[:120]
-    return (tn, sku, price, name)
+    return (tn, sku, price, name, receipt_upc(row))
 
 
 def _dnr_lot_merge_key(
     row: dealandrunner_api.DealandrunnerReceivedRow, tn: str
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str | None]:
     """Lot key for D&R: tracking + unit amount + product name (no SKU)."""
     tn_key = (tn or "").strip().casefold()
     price = str(_money(row.amount) if row.amount is not None else "")
     name = (row.product_name or "").strip().casefold()[:120]
-    return (tn_key, price, name)
+    return (tn_key, price, name, receipt_upc(row))
 
 
 def _dnr_lots_from_receipts(
@@ -664,8 +665,8 @@ def _dnr_lots_from_receipts(
 
     Each API row is one warehouse unit (qty 1). Supply for a TN is the row count.
     """
-    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
-    order: list[tuple[str, str, str]] = []
+    merged: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
+    order: list[tuple[str, str, str, str | None]] = []
     for row in receipts:
         if row.entry_type_id != dealandrunner_api.RECEIVING_ENTRY_TYPE_ID:
             continue
@@ -687,6 +688,7 @@ def _dnr_lots_from_receipts(
                 "unit_price": _money(row.amount),
                 "received_item": (row.product_name or "").strip() or None,
                 "sku": None,
+                "receipt_upc": receipt_upc(row),
                 "receipt_ids": [],
                 "statuses": [],
                 "scanned_at": None,
@@ -716,8 +718,8 @@ def _usabg_lots_from_receipts(
     receipts: list[usabg_api.UsabgReceivedRow],
 ) -> list[dict[str, Any]]:
     """Collapse identical USABG box lines into product lots per tracking."""
-    merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    order: list[tuple[str, str, str, str]] = []
+    merged: dict[tuple[str, str, str, str, str | None], dict[str, Any]] = {}
+    order: list[tuple[str, str, str, str, str | None]] = []
     for row in receipts:
         tn = (row.tracking_number or "").strip()
         if not tn:
@@ -735,6 +737,7 @@ def _usabg_lots_from_receipts(
                 "unit_price": _money(row.unit_price),
                 "received_item": (row.received_item or "").strip() or None,
                 "sku": (row.sku or "").strip() or None,
+                "receipt_upc": receipt_upc(row),
                 "receipt_ids": [],
                 "statuses": [],
                 "scanned_at": None,
@@ -791,6 +794,7 @@ def _meta_by_tn_from_lots(lots: list[dict[str, Any]]) -> dict[str, dict[str, Any
                 "display_tn": lot.get("display_tn"),
             },
         )
+        absorb_upc(meta, lot.get("receipt_upc"))
         meta["receipt_ids"].extend(list(lot.get("receipt_ids") or []))
         meta["statuses"].extend(list(lot.get("statuses") or []))
         unit = _money(lot.get("unit_price"))
@@ -982,7 +986,7 @@ def _matches_for_tn_allocations(
             continue
         meta = meta_by_tn.get(tn_key) or {}
         receipt_id = _meta_receipt_id(meta)
-        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty) or (meta.get("receipt_upc") and meta["receipt_upc"] != getattr(item, "receipt_upc", None))):
+        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty) or _upc_needs_update(item, meta)):
             continue
         display = (meta.get("display_tn") or "").strip() or _tn_display(trackings, tn_key)
         lines.append((display, qty, meta))
@@ -990,7 +994,7 @@ def _matches_for_tn_allocations(
         if qty <= 0:
             continue
         receipt_id = _meta_receipt_id(meta)
-        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty) or (meta.get("receipt_upc") and meta["receipt_upc"] != getattr(item, "receipt_upc", None))):
+        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty) or _upc_needs_update(item, meta)):
             continue
         lines.append((display_tn, qty, meta))
 
@@ -1014,6 +1018,14 @@ def _matches_for_tn_allocations(
         scanned_dt = meta.get("scanned_at") or fallback_scanned_at
         if scanned_dt is None:
             scanned_dt = to_date_only(datetime.now(timezone.utc))
+        upc_only = (update_receipt_only and _upc_needs_update(item, meta)
+                    and not _receipt_needs_update(item, receipt_id)
+                    and not _reward_needs_update(item, meta, qty))
+        if upc_only:
+            unit_payout = received_ext = None
+            discrepancy = False
+            scanned_dt = None
+            receipt_id = item.receipt_id
         received_item = meta.get("received_item")
         tn_key = display_tn.casefold() if display_tn else f"line{index}"
         out.append(
@@ -1029,11 +1041,11 @@ def _matches_for_tn_allocations(
                 receipt_id=receipt_id,
                 scanned_at=_iso_date(scanned_dt),
                 received_item=received_item,
-                receipt_upc=meta.get("receipt_upc"),
+                receipt_upc=(getattr(item, "receipt_upc", None) or meta.get("receipt_upc")),
                 received_qty=qty,
                 received_price=unit_payout,
                 received_ext_total=received_ext,
-                reward=_reward_from_meta(meta, qty),
+                reward=None if upc_only else _reward_from_meta(meta, qty),
                 received_status=_join_unique_strs(statuses),
                 amount_discrepancy=discrepancy,
                 selected=True,
@@ -1078,6 +1090,10 @@ def _matches_for_tn_allocations(
     return out
 
 
+def _upc_needs_update(item: Item, meta: dict[str, Any]) -> bool:
+    return bool(meta.get("receipt_upc") and not getattr(item, "receipt_upc", None))
+
+
 def _receipt_update_matches_for_item(
     *,
     item: Item,
@@ -1089,9 +1105,23 @@ def _receipt_update_matches_for_item(
     extra_meta: dict[str, Any] | None = None,
     extra_qty: int = 0,
     extra_display_tn: str = "",
+    lots_by_tn: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[ReceivingMatch]:
-    """Rows for already-scanned+ items whose warehouse receipt ID differs."""
+    """Review receipt changes and unambiguous missing UPCs on received items."""
     demand = item.quantity or 1
+    if lots_by_tn and not getattr(item, "receipt_upc", None):
+        assignment = _assign_items_to_lots(claimants=[(item, trackings)], lots_by_tn=lots_by_tn)
+        lot_id = assignment.get(item.id)
+        lot = next((lot for tn in trackings for lot in lots_by_tn.get(tn.casefold(), [])
+                    if lot["lot_id"] == lot_id), None)
+        if lot and lot.get("receipt_upc") and lot["qty"] >= demand:
+            meta = _lot_as_match_meta(lot)
+            if not _receipt_needs_update(item, _meta_receipt_id(meta)):
+                return _matches_for_tn_allocations(
+                    item=item, order=order, trackings=trackings,
+                    tn_allocations=[(lot_id, demand)], meta_by_tn={lot_id: meta},
+                    update_receipt_only=True,
+                )
     remaining = demand
     tn_allocations: list[tuple[str, int]] = []
     for tn in trackings:
@@ -1102,19 +1132,26 @@ def _receipt_update_matches_for_item(
         if not meta:
             continue
         receipt_id = _meta_receipt_id(meta)
-        if not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, demand)):
+        if not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, demand) or _upc_needs_update(item, meta)):
             continue
         supply = int(supply_by_tn.get(key, 0) or 0)
         qty = min(remaining, supply if supply > 0 else 1)
         if qty <= 0:
             continue
+        if qty < demand and _upc_needs_update(item, meta):
+            meta_by_tn = dict(meta_by_tn)
+            meta_by_tn[key] = {**meta, "receipt_upc": None}
+            if not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, demand)):
+                continue
         tn_allocations.append((key, qty))
         remaining -= qty
 
     extra_lines: list[tuple[str, int, dict[str, Any]]] = []
     if extra_meta and extra_qty > 0 and remaining > 0:
         receipt_id = _meta_receipt_id(extra_meta)
-        if _receipt_needs_update(item, receipt_id):
+        if min(remaining, extra_qty) < demand:
+            extra_meta = {**extra_meta, "receipt_upc": None}
+        if _receipt_needs_update(item, receipt_id) or _upc_needs_update(item, extra_meta):
             give = min(remaining, extra_qty)
             if give > 0:
                 extra_lines.append((extra_display_tn, give, extra_meta))
@@ -1268,11 +1305,11 @@ def _score_item_to_lot_soft(
     return (float(LOT_PRICE_TOLERANCE - delta), name_score)
 
 
-def _soft_lot_product_key(lot: dict[str, Any]) -> tuple[str, str]:
+def _soft_lot_product_key(lot: dict[str, Any]) -> tuple[str, str, str | None]:
     """Fungible soft-lot key: same unit price + product name."""
     price = str(_money(lot.get("unit_price")) if lot.get("unit_price") is not None else "")
     name = (lot.get("received_item") or "").strip().casefold()[:120]
-    return (price, name)
+    return (price, name, lot.get("receipt_upc"))
 
 
 def _merge_fungible_orphan_lots(lots: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1282,8 +1319,8 @@ def _merge_fungible_orphan_lots(lots: list[dict[str, Any]]) -> list[dict[str, An
     many qty-1 lots. Without merging, soft-assign treats them as ambiguous ties
     and skips every claimant.
     """
-    merged: dict[tuple[str, str], dict[str, Any]] = {}
-    order: list[tuple[str, str]] = []
+    merged: dict[tuple[str, str, str | None], dict[str, Any]] = {}
+    order: list[tuple[str, str, str | None]] = []
     for lot in lots:
         key = _soft_lot_product_key(lot)
         existing = merged.get(key)
@@ -1756,6 +1793,7 @@ def _check_receiving_usabg(
                 trackings=trackings,
                 meta_by_tn=meta_by_tn,
                 supply_by_tn=supply_by_tn,
+                lots_by_tn=lots_by_tn,
             )
         )
 
@@ -1781,6 +1819,7 @@ def _check_receiving_usabg(
                 "tracking_number": tn,
                 "tracking_numbers": [tn],
                 "source_data": _receipt_details(row),
+                "receipt_upc": receipt_upc(row),
                 "bg_order_id": row.purchase_id,
                 "description": row.received_item,
                 "quantity": row.quantity,
@@ -1964,10 +2003,12 @@ def _check_receiving_dealandrunner(
             lots_by_tn.setdefault(alias, []).append(lot)
     meta_by_tn = _meta_by_tn_from_lots(lots)
     # Also expose alias TNs in meta for receipt-only updates.
-    for lot in lots:
-        for alias in lot.get("alias_tns") or []:
-            if alias not in meta_by_tn:
-                meta_by_tn[alias] = _lot_as_match_meta(lot)
+    for alias, alias_lots in lots_by_tn.items():
+        if alias not in meta_by_tn:
+            meta_by_tn[alias] = _meta_by_tn_from_lots(
+                [{**lot, "tn_key": alias} for lot in alias_lots]
+            )[alias]
+            supply_by_tn[alias] = sum(int(lot["qty"]) for lot in alias_lots)
     meta_by_lot = {lot_id: _lot_as_match_meta(lot) for lot_id, lot in lots_by_id.items()}
 
     eligible: list[tuple[Item, Order, list[str]]] = []
@@ -2133,6 +2174,7 @@ def _check_receiving_dealandrunner(
                 trackings=trackings,
                 meta_by_tn=meta_by_tn,
                 supply_by_tn=supply_by_tn,
+                lots_by_tn=lots_by_tn,
             )
         )
 
@@ -2156,6 +2198,7 @@ def _check_receiving_dealandrunner(
                 "tracking_number": tns[0],
                 "tracking_numbers": tns,
                 "source_data": _receipt_details(row),
+                "receipt_upc": receipt_upc(row),
                 "bg_order_id": None,
                 "description": row.product_name,
                 "quantity": 1,
@@ -2347,6 +2390,7 @@ def _check_receiving_parsefile(
                 "received_item": None,
             },
         )
+        absorb_upc(meta, receipt_upc(row))
         if row.receipt_id:
             meta["receipt_ids"].append(row.receipt_id)
         if row.status:
@@ -2458,6 +2502,7 @@ def _check_receiving_parsefile(
                 "tracking_number": tn,
                 "tracking_numbers": row.tracking_numbers,
                 "source_data": _receipt_details(row),
+                "receipt_upc": receipt_upc(row),
                 "bg_order_id": None,
                 "description": (row.item or "").strip() or None,
                 "quantity": row.qty,
@@ -3004,6 +3049,7 @@ def _check_receiving_bfmr(
         return int(qty) if qty is not None and int(qty) > 0 else 1
 
     def _absorb_meta(meta: dict[str, Any], row: bfmr_api.BfmrTrackerRow) -> None:
+        absorb_upc(meta, receipt_upc(row))
         rid = _bfmr_receipt_id(row)
         if rid:
             meta["receipt_ids"].append(rid)
@@ -3165,6 +3211,7 @@ def _check_receiving_bfmr(
                 "tracking_number": tn,
                 "tracking_numbers": [tn],
                 "source_data": _receipt_details(row),
+                "receipt_upc": receipt_upc(row),
                 "bg_order_id": row.order_id,
                 "description": (row.item_name or row.deal_title or "").strip() or None,
                 "quantity": received_qty,

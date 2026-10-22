@@ -161,7 +161,7 @@ def manual_allocations(items, receipt, tracking, key):
             "quantity": item.quantity, "tracking_number": tracking, "receipt_tracking_number": tracking,
             "price_sold": str(item.price_sold or 0), "expected_amount": str(expected),
             "receipt_id": receipt.get("receipt_id"), "scanned_at": receipt.get("scanned_at"),
-            "receipt_upc": receipt.get("receipt_upc"),
+            "receipt_upc": item.receipt_upc or receipt.get("receipt_upc"),
             "received_item": receipt.get("description"), "received_qty": item.quantity,
             "received_price": receipt.get("received_price"), "received_ext_total": str(amount) if amount is not None else None,
             "received_status": receipt.get("received_status"),
@@ -291,7 +291,7 @@ def apply_manual_link(db: Session, item: Item, entry: ItemBulkUpdateEntry, chang
         raise HTTPException(400, "Unlink to change the receipt assigned to this line.")
     changes["receipt_tracking_number"] = match["receipt_tracking_number"]
     if match.get("receipt_upc"):
-        changes["receipt_upc"] = match["receipt_upc"]
+        changes["receipt_upc"] = item.receipt_upc or match["receipt_upc"]
     if match.get("reward") is not None:
         changes["reward"] = Decimal(match["reward"])
     if item.payment_line_items or item.status not in OPEN_STATUSES:

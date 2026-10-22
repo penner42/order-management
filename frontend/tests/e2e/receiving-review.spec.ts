@@ -337,3 +337,36 @@ test('manual receipt review requires a manual split, then supports unlink and ap
     receipt_tracking_number: 'WRONG-SCAN',
   })
 })
+
+for (const provider of ['bfmr', 'usabg', 'dealandrunner', 'parsefile']) {
+  test(`${provider} UPC-only receipt backfill preserves received item details`, async ({ app, data }) => {
+    const store = await data.create('/stores', { name: data.name('upc-store') })
+    const groupName = data.name(`${provider}-upc-group`)
+    const group = await data.create('/buying-groups', { name: groupName, api_framework: provider })
+    const order = await data.create<{ id: number; items: Item[] }>('/orders', {
+      store_id: store.id, buying_group_id: group.id,
+      items: [{ description: 'Received headphones', quantity: 2, status: 'scanned',
+        receipt_id: 'UPC-RECEIPT', scanned_at: '2026-10-01T14:33:15Z',
+        price_sold: '21.00', reward: '2.50' }],
+    })
+    const item = order.items[0]
+    const before = await data.get<Item>(`/items/${item.id}`)
+    await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
+      buying_group_id: group.id, buying_group_name: groupName, unknown_receipts: [],
+      matches: [{ item_id: item.id, order_id: order.id, description: item.description, quantity: 2,
+        tracking_number: 'UPC-TRACK', price_sold: '21.00', expected_amount: '42.00',
+        receipt_id: 'UPC-RECEIPT', receipt_upc: '000012345678', scanned_at: null,
+        received_ext_total: null, reward: null, update_receipt_only: true,
+        selected: true, amount_discrepancy: false }],
+    }] }))
+    await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
+    await app.goto('/receiving-review')
+    await expect(app.getByText('Receipt UPC: 000012345678')).toBeVisible()
+    await app.getByRole('button', { name: 'Apply 1 selected' }).click()
+    await expect(app.getByText('All listed rows were applied.')).toBeVisible()
+    const after = await data.get<Item>(`/items/${item.id}`)
+    expect(after).toMatchObject({ receipt_upc: '000012345678', receipt_id: before.receipt_id,
+      quantity: before.quantity, status: before.status, price_sold: before.price_sold,
+      reward: before.reward, scanned_at: before.scanned_at })
+  })
+}

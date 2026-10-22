@@ -135,7 +135,7 @@ function buildEdits(matches: ReceivingMatch[]): Record<string, RowEdit> {
     next[key] = {
       selected: isNotReceived ? false : m.selected !== false,
       receipt_id: m.receipt_id ?? '',
-      scanned_date: toYyyyMmDd(m.scanned_at),
+      scanned_date: m.update_receipt_only && !m.scanned_at ? '' : toYyyyMmDd(m.scanned_at),
       use_received_total: false,
     }
   }
