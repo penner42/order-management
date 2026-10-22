@@ -84,7 +84,8 @@ def fetch_receipt_source(group, *, usabg_details=None):
     if framework == "parsefile":
         source.request("rows", parsefile.list_all_received_items,
                        base_url=base_url, bearer_token=group.bearer_token,
-                       user_id=int(group.api_user_id), email=group.api_email)
+                       user_id=int(group.api_user_id), email=group.api_email,
+                       portal_password=group.api_password)
     elif framework == "bfmr":
         source.request("rows", bfmr.list_received_tracker_rows,
                        base_url=base_url, api_key=username, api_secret=password)

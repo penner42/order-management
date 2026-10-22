@@ -23,6 +23,7 @@ from typing import Any
 
 from app.submission_policy import require_group_submissions_enabled
 from app.utils.buying_group_apis import parsefile_crypto
+from app.utils.receipt_upc import receipt_upc
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,15 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
         if (new.scheme != old.scheme or new.username or new.password
                 or new.port != old.port or (new.hostname or "").removeprefix("www.") != host):
             raise RuntimeError("Portal redirected to an untrusted host")
+        # Canonical www redirects must retain API/portal POST bodies. urllib's
+        # default 301/302 handling changes POST into GET and returns the HTML UI.
+        if (req.data is not None and old.path == new.path and old.query == new.query
+                and old.netloc != new.netloc):
+            return urllib.request.Request(
+                newurl, data=req.data, method=req.get_method(),
+                headers={k: v for k, v in req.header_items() if k.casefold() != "host"},
+                origin_req_host=req.origin_req_host, unverifiable=True,
+            )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -343,6 +353,12 @@ def parse_received_items_csv(raw_text: str) -> list[ParsefileReceivedItem]:
     if not text:
         return []
 
+    if text.startswith("<"):
+        raise RuntimeError(
+            "Parsefile received-items returned an HTML page instead of a CSV export. "
+            "Check the group URL and API access."
+        )
+
     # Error responses are JSON; success is CSV.
     if text[:1] in "{[":
         try:
@@ -401,6 +417,7 @@ class ParsefileReceivedItemsSearchResult:
     rows: list[ParsefileReceivedItem]
     raw_csv: str
     url: str
+    upc_warning: str | None = None
 
 
 def search_received_items(
@@ -524,6 +541,7 @@ def list_all_received_items(
     min_modified_date: str | None = None,
     max_modified_date: str | None = None,
     timeout_seconds: float = 120.0,
+    portal_password: str | None = None,
 ) -> ParsefileReceivedItemsSearchResult:
     """POST received-items search with empty trackings/receipts to return all rows.
 
@@ -540,7 +558,7 @@ def list_all_received_items(
     min_created = (min_created_date or min_dt).strip()
     min_modified = (min_modified_date or min_dt).strip()
 
-    return search_received_items(
+    result = search_received_items(
         base_url=base_url,
         bearer_token=bearer_token,
         user_id=user_id,
@@ -554,6 +572,91 @@ def list_all_received_items(
         timeout_seconds=timeout_seconds,
         include_empty_trackings_receipts=True,
     )
+    missing_upcs = [row for row in result.rows if not receipt_upc(row)]
+    if missing_upcs and portal_password:
+        try:
+            upcs = load_receiving_analytics_upcs(
+                base_url=base_url, email=email, password=portal_password,
+                timeout_seconds=timeout_seconds,
+            )
+            for row in missing_upcs:
+                key = _analytics_product_key(None, row.item, row.warehouse)[1:]
+                if upcs.get(key):
+                    row.raw = {**row.raw, "f_upc": upcs[key]}
+        except Exception:
+            result.upc_warning = "Receipt UPCs could not be loaded from receiving analytics. Check the group portal login."
+    elif missing_upcs:
+        result.upc_warning = "Set this group's portal password to load receipt UPCs from receiving analytics."
+    return result
+
+
+def _analytics_product_key(item_id, name, warehouse) -> tuple[str, str, str]:
+    return tuple(str(value).strip() if value is not None else "" for value in (item_id, name, warehouse))
+
+
+def load_receiving_analytics_upcs(
+    *, base_url: str, email: str, password: str, timeout_seconds: float = 60.0,
+) -> dict[tuple[str, str], str]:
+    """Match exact item/warehouse groups only when all their links agree.
+
+    Analytics aggregates multiple receipt lines, and its representative f_id
+    cannot identify every individual receipt row in the CSV export.
+    """
+    session_id = _ensure_portal_session(
+        base_url=base_url, email=email, password=password, timeout_seconds=timeout_seconds,
+    )
+    rows, seen = [], set()
+    expected_count = None
+    table_name = "it@receive-analysis"
+    for page in range(1, 1001):
+        def load(sid):
+            return _portal_post(
+                base_url=base_url, session_id=sid, page="it@analysis",
+                cmd={"cmd": "load", "instance": "table", "_table": table_name, "checkLoading": 0, "init": True},
+                data={"page": page, "limit": 500, "rows": 500, "order": "f_id", "filters": {}},
+                timeout_seconds=timeout_seconds,
+            )
+
+        try:
+            session_id, payload = load(session_id)
+        except _PortalSessionExpired:
+            session_id = _rellogin_portal_session(
+                base_url=base_url, email=email, password=password,
+                stale_session=session_id, timeout_seconds=timeout_seconds,
+            )
+            session_id, payload = load(session_id)
+        tables = [table for table in payload.get("loadtable", []) if table.get("table") == table_name]
+        if len(tables) != 1:
+            raise RuntimeError("Parsefile did not return the receiving analytics table")
+        data = tables[0].get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            raise RuntimeError("Parsefile receiving analytics is incomplete")
+        count = int(data["count"])
+        if count < 0 or (expected_count is not None and count != expected_count):
+            raise RuntimeError("Parsefile receiving analytics changed while reading pages")
+        expected_count = count
+        batch = data["data"]
+        for row in batch:
+            key = _analytics_product_key(row.get("f_id"), row.get("f_item"), row.get("f_warehouse"))
+            if not key[0] or key in seen:
+                raise RuntimeError("Parsefile receiving analytics repeated or omitted a product identity")
+            seen.add(key)
+        rows.extend(batch)
+        if len(rows) == count:
+            break
+        if not batch or len(rows) > count:
+            raise RuntimeError("Parsefile receiving analytics ended before its record count")
+    else:
+        raise RuntimeError("Parsefile receiving analytics exceeds the retrieval limit")
+    with _session_lock:
+        _session_cache[_portal_cache_key(base_url, email, password)] = session_id
+    grouped_upcs: dict[tuple[str, str], set[str | None]] = {}
+    for row in rows:
+        key = _analytics_product_key(None, row.get("f_item"), row.get("f_warehouse"))[1:]
+        if key[0]:
+            grouped_upcs.setdefault(key, set()).add(receipt_upc(row))
+    return {key: next(iter(upcs)) for key, upcs in grouped_upcs.items()
+            if len(upcs) == 1 and None not in upcs}
 
 
 # --- Encrypted portal session + it@orders-all (submission id lookup) ---

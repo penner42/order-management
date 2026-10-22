@@ -44,6 +44,58 @@ class ReceiptUpcExtractionTests(unittest.TestCase):
         row, = parsefile.parse_received_items_csv('Receipt ID,Item,Qty\nR1,Headphones,1\n')
         self.assertIsNone(receipt_upc(row))
 
+    def test_parsefile_html_response_is_not_a_receipt_export(self):
+        with self.assertRaisesRegex(RuntimeError, "HTML page instead of a CSV export"):
+            parsefile.parse_received_items_csv('<!DOCTYPE html>\n<html><body>Login</body></html>')
+
+    def test_parsefile_internal_upc_field(self):
+        self.assertEqual(receipt_upc(SimpleNamespace(raw={'f_upc': UPC})), UPC)
+
+    def test_parsefile_item_links_preserve_leading_zeros(self):
+        for value in (
+            f'https://www.upcitemdb.com/upc/{UPC}',
+            f'http://upcitemdb.com/upc/{UPC}/',
+            f'//www.upcitemdb.com/upc/{UPC}',
+            f'<a href="https://www.upcitemdb.com/upc/{UPC}" target="_blank">Headphones</a>',
+            f'<a href="https://www.upcitemdb.com/upc/{UPC}?a=1&amp;b=2">Headphones</a>',
+            f'=HYPERLINK("https://www.upcitemdb.com/upc/{UPC}","Headphones")',
+        ):
+            for field in ('Item', 'f_upc', 'UPC', 'Item URL'):
+                with self.subTest(value=value, field=field):
+                    self.assertEqual(receipt_upc(SimpleNamespace(raw={field: value})), UPC)
+
+    def test_item_links_ignore_other_sites_and_ambiguous_products(self):
+        for value in (
+            f'https://evil.example/upc/{UPC}',
+            f'https://www.upcitemdb.com.evil.example/upc/{UPC}',
+            f'https://www.upcitemdb.com@evil.example/upc/{UPC}',
+            f'https://evil.example/?next=https://www.upcitemdb.com/upc/{UPC}',
+            'https://www.upcitemdb.com/upc/not-a-upc',
+            f'https://www.upcitemdb.com/upc/{"1" * 65}',
+            f'<a href="https://www.upcitemdb.com/upc/{UPC}">One</a>'
+            '<a href="https://www.upcitemdb.com/upc/999999999999">Two</a>',
+        ):
+            for field in ('Item', 'UPC'):
+                with self.subTest(value=value, field=field):
+                    self.assertIsNone(receipt_upc(SimpleNamespace(raw={field: value})))
+        self.assertIsNone(receipt_upc(SimpleNamespace(raw={
+            'UPC': '999999999999', 'Item': f'https://www.upcitemdb.com/upc/{UPC}',
+        })))
+
+    def test_parsefile_csv_item_anchor_and_internal_field(self):
+        import csv
+        import io
+        for field, value in (
+            ('Item', f'<a href="https://www.upcitemdb.com/upc/{UPC}">Headphones</a>'),
+            ('f_upc', UPC),
+        ):
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(['Receipt ID', 'Qty', 'Tracking Numbers', field])
+            writer.writerow(['R1', 1, 'TRACK', value])
+            row, = parsefile.parse_received_items_csv(output.getvalue())
+            self.assertEqual(receipt_upc(row), UPC)
+
 
 class ProviderReceiptUpcTests(unittest.TestCase):
     initialize_data = cache_tests.ReceivingCacheTests.initialize_data
@@ -232,6 +284,18 @@ class ProviderReceiptUpcTests(unittest.TestCase):
             match, = self.check('bfmr').matches
             self.assertEqual(match.receipt_upc, UPC)
             self.assertTrue(match.update_receipt_only)
+
+    def test_parsefile_link_upc_survives_cache_and_received_backfill(self):
+        self.product_raw = {'Item': f'<a href="https://www.upcitemdb.com/upc/{UPC}">Headphones</a>'}
+        self.backfill('parsefile')
+
+    def test_parsefile_link_upc_on_new_receipt_and_manual_link(self):
+        self.product_raw = {'Item': f'https://www.upcitemdb.com/upc/{UPC}'}
+        self.new_receipt('parsefile')
+        self.item.receipt_upc = None
+        self.item.receipt_id = None
+        self.db.commit()
+        self.orphan_link('parsefile')
 
     def test_dnr_conflicting_aliases_do_not_backfill(self):
         self.item.status = ItemStatus.SCANNED

@@ -2353,6 +2353,7 @@ def _check_receiving_parsefile(
             bearer_token=bearer_token,
             user_id=api_user_id,
             email=api_email,
+            portal_password=group.api_password,
         )
     except Exception as exc:
         return CheckReceivingResult(
@@ -2523,6 +2524,8 @@ def _check_receiving_parsefile(
         f"Checked {len(pending)} unscanned item(s) / {len(all_trackings)} tracking number(s) "
         f"against {group_name} ({len(received_rows)} received row(s))."
     )
+    if api_result.upc_warning:
+        checked_summary += f" {api_result.upc_warning}"
 
     matched_ids = {m.item_id for m in matches}
     unmatched = _build_unmatched(pending, matched_ids, void_matched_ids=void_matched_ids)
@@ -2535,6 +2538,8 @@ def _check_receiving_parsefile(
             else f"{len(unscanned_items)} unscanned item(s) but none have tracking numbers, "
             f"and no unknown {group_name} receipts."
         )
+        if api_result.upc_warning:
+            message += f" {api_result.upc_warning}"
         payload = {
             "buying_group_id": buying_group_id,
             "buying_group_name": group_name,
