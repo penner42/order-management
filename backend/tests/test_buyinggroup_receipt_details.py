@@ -7,14 +7,48 @@ from app.models import Item, ShipmentItem
 from app.models.item import ItemStatus
 from app.routers.items import bulk_update_items
 from app.schemas.item import ItemBulkUpdateEntry, ItemBulkUpdateRequest, ItemRead, ItemSplitRequest
+from app.schemas.buying_group import ReceivingReceiptLinkRequest
 from app.utils.item_split import split_item_record
-from app.utils.receiving_links import applied_receipt_pairs, receipt_is_applied
+from app.utils.receiving_links import applied_receipt_pairs, link_receipt, receipt_is_applied, receipt_key
 from app.utils.buying_group_apis import buyinggroup as api, check_receiving as receiving
 from tests import test_buyinggroup_rewards as reward_tests
 
 
 class ReceiptDetailsTests(unittest.TestCase):
     setUp = reward_tests.BuyingGroupRewardTests.setUp
+
+    def test_receipt_without_tracking_can_be_linked_and_applied_using_receipt_id(self):
+        self.item.quantity = 2
+        self.db.commit()
+        def check():
+            return reward_tests.BuyingGroupRewardTests.check(
+                self, receipt_id="R-123456", tracking_id=None, rewards={})
+        result = check()
+        receipt, = result.session_payload["unknown_receipts"]
+        self.assertEqual(receipt["tracking_number"], "R-123456")
+        self.assertEqual(receipt["tracking_numbers"], ["R-123456"])
+        receiving.save_receiving_review_pending(self.db, result.session_payload)
+        staged = link_receipt(self.db, ReceivingReceiptLinkRequest(
+            buying_group_id=self.group.id, receipt_key=receipt_key(receipt),
+            item_ids=[self.item.id], receipt_tracking_number="R-123456"))
+        match, = staged["matches"]
+        bulk_update_items(ItemBulkUpdateRequest(updates=[ItemBulkUpdateEntry(
+            item_id=self.item.id, status=ItemStatus.SCANNED, receipt_id=match["receipt_id"],
+            receipt_tracking_number=match["receipt_tracking_number"],
+            receiving_group_id=self.group.id, receiving_row_id=match["row_id"],
+        )]), db=self.db, _=None)
+        self.db.refresh(self.item)
+        self.assertEqual(self.item.receipt_tracking_number, "R-123456")
+        self.assertEqual(self.item.shipment_items[0].shipment.tracking_number, "TRACK")
+        receiving.save_receiving_review_pending(self.db, check().session_payload)
+        self.assertEqual(receiving.list_receiving_review_pending_payloads(self.db), [])
+
+    def test_alternate_tracking_is_used_before_receipt_id(self):
+        result = reward_tests.BuyingGroupRewardTests.check(
+            self, receipt_id="R-123456", tracking_id=None, alt_tracking="ALT", rewards={})
+        receipt, = result.session_payload["unknown_receipts"]
+        self.assertEqual(receipt["tracking_number"], "ALT")
+        self.assertEqual(receipt["tracking_numbers"], ["ALT"])
 
     def product(self, *, name="HP laptop", upc="199764359179", qty=1,
                 price="199.00", verified=True):

@@ -2666,7 +2666,7 @@ def _check_receiving_buyinggroup(
         # Keep each receipt's quantity under one key even when both identifiers match.
         numbers = [tn.strip() for tn in (row.tracking_id, row.alt_tracking_id) if tn and tn.strip()]
         return next((tn for tn in numbers if tn.casefold() in local_tracking_keys),
-                    numbers[0] if numbers else "")
+                    numbers[0] if numbers else (row.receipt_id or "").strip())
 
     # Never use the receipt header quantity: it includes unconfirmed Task rows.
     # Fetch concurrently, once per receipt, while retaining list order for allocation.
@@ -2731,7 +2731,7 @@ def _check_receiving_buyinggroup(
             unknown_receipts.append({
                 "receipt_id": row.receipt_id, "tracking_number": tn,
                 "tracking_numbers": list(dict.fromkeys(t.strip() for t in
-                    (row.tracking_id, row.alt_tracking_id) if t and t.strip())),
+                    (row.tracking_id, row.alt_tracking_id) if t and t.strip())) or ([tn] if tn else []),
                 "description": line.get("item_id") if line else row.order_id,
                 "receipt_upc": upc, "quantity": qty,
                 "received_price": str(unit) if unit is not None else None,
