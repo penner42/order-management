@@ -3,7 +3,7 @@ import type { BrowserProfile, StoreAccount } from '../../src/api/types'
 
 test('main navigation and grouped settings support direct loads and history', async ({ app }) => {
   const mainNav = app.getByRole('navigation', { name: 'Main navigation', exact: true })
-  await expect(mainNav.getByRole('link')).toHaveText(['Orders', 'Receiving', 'Payments', 'Log', 'Settings'])
+  await expect(mainNav.getByRole('link')).toHaveText(['Orders', 'Duplicate audit', 'Receiving', 'Payments', 'Log', 'Settings'])
   await app.locator('header a[href="/settings/account"]').click()
   await expect(app).toHaveURL(/\/settings\/account$/)
   await mainNav.getByRole('link', { name: 'Settings', exact: true }).click()
@@ -116,7 +116,7 @@ test('mobile navigation and settings picker fit phone width', async ({ app, data
   await app.setViewportSize({ width: 390, height: 844 })
   await app.getByRole('button', { name: 'Open navigation menu', exact: true }).click()
   const mobileNav = app.getByRole('navigation', { name: 'Mobile navigation', exact: true })
-  await expect(mobileNav.getByRole('link')).toHaveText(['Orders', 'Receiving', 'Payments', 'Log', 'Settings'])
+  await expect(mobileNav.getByRole('link')).toHaveText(['Orders', 'Duplicate audit', 'Receiving', 'Payments', 'Log', 'Settings'])
   await mobileNav.getByRole('link', { name: 'Settings', exact: true }).click()
   await app.getByLabel('Settings section', { exact: true }).selectOption('/settings/stores')
   await expect(app.getByRole('heading', { name: 'Stores', exact: true })).toBeVisible()

@@ -14,6 +14,7 @@ from app.models.browser_profile import BrowserProfile
 from app.models.browser_import_log import BrowserImportLog
 from app.models.ignored_zip_code import IgnoredZipCode
 from app.models.receiving_review_pending import ReceivingReviewPending
+from app.models.receiving_receipt_cache import ReceivingReceiptCache
 from app.models.usabg_po_cache import UsabgPoCache
 from app.models.monarch import MonarchConnection, MonarchDeposit, MonarchConfirmation, MonarchPaymentReceipt
 from app.models.payment_import import PaymentSource, PaymentReview, PaymentCoverage, PaymentCorrection
@@ -38,6 +39,7 @@ __all__ = [
     "BrowserImportLog",
     "IgnoredZipCode",
     "ReceivingReviewPending",
+    "ReceivingReceiptCache",
     "UsabgPoCache",
     "PaymentSource",
     "PaymentReview",

@@ -243,6 +243,7 @@ class ReceivingReviewUnknownReceipt(BaseModel):
 
 
 class ReceivingReviewSession(BaseModel):
+    rematched_at: str | None = None
     buying_group_id: int
     buying_group_name: str
     created_at: str | None = None

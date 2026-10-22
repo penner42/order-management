@@ -67,6 +67,7 @@ interface ReceivingUnknownReceipt {
 }
 
 interface ReceivingSession {
+  rematched_at?: string | null
   buying_group_id: number
   buying_group_name: string
   created_at: string | null
@@ -149,8 +150,10 @@ function ReceivingGroupSection({
   appliedIds,
   setAppliedIds,
   onSessionChange,
+  onBusyChange,
 }: {
   session: ReceivingSession
+  onBusyChange: (groupId: number, busy: boolean) => void
   onSessionChange: (session: ReceivingSession) => void
   highlighted: boolean
   edits: Record<string, RowEdit>
@@ -164,6 +167,11 @@ function ReceivingGroupSection({
   const [showExtra, setShowExtra] = useState(false)
   const [showCsv, setShowCsv] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
+
+  useEffect(() => {
+    onBusyChange(session.buying_group_id, applying || linkReceipt !== null)
+    return () => onBusyChange(session.buying_group_id, false)
+  }, [applying, linkReceipt, session.buying_group_id, onBusyChange])
 
   const matches = session.matches ?? []
   const receivableMatches = matches.filter((m) => m.match_kind !== 'not_received')
@@ -681,12 +689,47 @@ export default function ReceivingReview() {
   const [appliedByGroup, setAppliedByGroup] = useState<Record<number, Set<string>>>({})
   const [flashGroupId, setFlashGroupId] = useState<number | null>(null)
   const sectionRefs = useRef<Record<number, HTMLElement | null>>({})
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+  const [refreshDeferred, setRefreshDeferred] = useState(false)
+  const [busyGroups, setBusyGroups] = useState<Record<number, boolean>>({})
+  const busyRef = useRef<Record<number, boolean>>({})
+  const dirtyRef = useRef(false)
+  const editRevision = useRef(0)
+  const inFlight = useRef(false)
+  const requestVersion = useRef(0)
+  useEffect(() => {
+    dirtyRef.current = sessions.some(session => {
+      const defaults = buildEdits(session.matches)
+      const edits = editsByGroup[session.buying_group_id] ?? {}
+      const applied = appliedByGroup[session.buying_group_id]
+      return Object.entries(defaults).some(([key, value]) =>
+        !applied?.has(key) && edits[key] && JSON.stringify(edits[key]) !== JSON.stringify(value))
+    })
+  }, [sessions, editsByGroup, appliedByGroup])
+  const onBusyChange = useCallback((groupId: number, busy: boolean) => {
+    if (busy) editRevision.current++
+    busyRef.current = { ...busyRef.current, [groupId]: busy }
+    setBusyGroups(busyRef.current)
+  }, [])
 
-  const loadSessions = useCallback(async () => {
-    setLoading(true)
-    setError(null)
+  const loadSessions = useCallback(async (background = false, force = false) => {
+    if (inFlight.current) return
+    if (background && (Object.values(busyRef.current).some(Boolean) || (dirtyRef.current && !force))) {
+      setRefreshDeferred(true)
+      return
+    }
+    inFlight.current = true
+    const version = ++requestVersion.current
+    const revision = editRevision.current
+    if (!background) { setLoading(true); setError(null) }
+    setRefreshError(null)
     try {
       const data = await api.get<ReceivingSession[]>('/buying-groups/receiving-review')
+      if (version !== requestVersion.current) return
+      if (background && (Object.values(busyRef.current).some(Boolean) || editRevision.current !== revision)) {
+        setRefreshDeferred(true)
+        return
+      }
       setSessions(data)
       const edits: Record<number, Record<string, RowEdit>> = {}
       for (const s of data) {
@@ -694,17 +737,42 @@ export default function ReceivingReview() {
       }
       setEditsByGroup(edits)
       setAppliedByGroup({})
+      dirtyRef.current = false
+      setRefreshDeferred(false)
     } catch (e) {
+      if (version !== requestVersion.current) return
       console.error(e)
-      setError(e instanceof Error ? e.message : 'Failed to load receiving review')
+      const message = e instanceof Error ? e.message : 'Failed to load receiving review'
+      if (background) setRefreshError(message)
+      else setError(message)
     } finally {
-      setLoading(false)
+      if (version === requestVersion.current) {
+        inFlight.current = false
+        setLoading(false)
+      }
     }
   }, [])
 
   useEffect(() => {
     loadSessions()
+    return () => { requestVersion.current++; inFlight.current = false }
   }, [loadSessions, highlightRaw])
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = () => {
+      if (document.visibilityState !== 'visible') return
+      clearTimeout(timer)
+      timer = setTimeout(() => { void loadSessions(true) }, 100)
+    }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [loadSessions])
 
   useEffect(() => {
     if (!Number.isFinite(highlightGroupId) || loading) return
@@ -753,6 +821,15 @@ export default function ReceivingReview() {
         </Link>
       </div>
 
+      {(refreshDeferred || refreshError) && (
+        <div role="status" className="mb-4 rounded-lg border border-brand-200 p-3 text-sm text-ink dark:text-gray-200">
+          <p>{refreshError ? `Could not refresh matches: ${refreshError}` : 'Refresh paused while you edit or link receipts. Reloading discards unsaved receiving edits.'}</p>
+          <button type="button" disabled={Object.values(busyGroups).some(Boolean)}
+            className="mt-2 text-brand-600 underline disabled:opacity-50"
+            onClick={() => { void loadSessions(true, true) }}>Reload current matches</button>
+        </div>
+      )}
+
       {sessions.length === 0 ? (
         <div className="rounded-xl border border-brand-200/80 dark:border-gray-700 px-4 py-8 text-center">
           <p className="text-ink-muted dark:text-gray-400 mb-3">No pending received updates or unknown tracking numbers.</p>
@@ -773,8 +850,10 @@ export default function ReceivingReview() {
             }}
           >
             <ReceivingGroupSection
+              onBusyChange={onBusyChange}
               session={session}
               onSessionChange={(next) => {
+                editRevision.current++
                 setAppliedByGroup(prev => ({ ...prev, [next.buying_group_id]: new Set() }))
                 setSessions(prev => prev.map(s => s.buying_group_id === next.buying_group_id ? next : s))
                 setEditsByGroup(prev => {
@@ -787,6 +866,8 @@ export default function ReceivingReview() {
               highlighted={flashGroupId === session.buying_group_id}
               edits={editsByGroup[session.buying_group_id] ?? {}}
               setEdits={(updater) => {
+                dirtyRef.current = true
+                editRevision.current++
                 setEditsByGroup((prev) => {
                   const current = prev[session.buying_group_id] ?? {}
                   const nextEdits =
@@ -796,6 +877,7 @@ export default function ReceivingReview() {
               }}
               appliedIds={appliedByGroup[session.buying_group_id] ?? new Set()}
               setAppliedIds={(updater) => {
+                editRevision.current++
                 setAppliedByGroup((prev) => {
                   const current = prev[session.buying_group_id] ?? new Set<string>()
                   const nextApplied =

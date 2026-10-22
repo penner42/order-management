@@ -148,6 +148,20 @@ environment; `APPLICATION_LOG_FILE` selects the file path. Use a persistent moun
 if changing the path. These files contain order and tracking information.
 The Log screen continues to use the database; no migration is required.
 
+### Receiving matches
+
+Manual and scheduled **Check receiving** runs save complete receipt data for all
+supported buying groups. Opening Receiving, or returning to its browser tab,
+matches the saved receipts against current saved orders without contacting the
+buying group. New warehouse receipts still require a receipt check.
+
+Unsaved receiving edits and open receipt-link dialogs pause tab-return refreshes.
+**Reload current matches** discards unsaved receiving edits and refreshes the
+suggestions. Applying matches does not remove the saved receipt data.
+
+Migration `080` adds the receipt cache. Existing pending reviews remain available;
+each group starts using cached matching after its next successful receipt check.
+
 ### Receiving audit
 
 Open **Receiving → Receiving audit** and choose **Run report** to compare existing

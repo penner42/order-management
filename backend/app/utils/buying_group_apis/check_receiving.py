@@ -17,6 +17,7 @@ from app.models import (
     Item,
     Order,
     ReceivingReviewPending,
+    ReceivingReceiptCache,
     Shipment,
     ShipmentItem,
     UsabgPoCache,
@@ -35,8 +36,10 @@ from app.utils.buying_group_apis.submit_tracking import (
     usabg_group_ready,
 )
 from app.utils.dates import to_date_only
+from app.utils.receiving_cache import ReceiptSource, fetch_receipt_source, provider_identity
 from app.utils.receiving_links import (
     applied_receipt_pairs, match_includes_receipt, receipt_is_applied, receipt_key, with_receipt_keys,
+    refresh_manual_assignments,
 )
 
 # Items that may already be at the warehouse but not marked scanned locally.
@@ -289,9 +292,10 @@ def _receipt_details(row: Any) -> dict[str, Any]:
     return json.loads(json.dumps(asdict(row), default=str))
 
 
-def save_receiving_review_pending(db: Session, payload: dict[str, Any]) -> int:
+def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commit: bool = True) -> int:
     """Upsert or clear pending review for one buying group. Returns actionable match count."""
     buying_group_id = int(payload["buying_group_id"])
+    db.query(BuyingGroup).filter_by(id=buying_group_id).with_for_update().one()
     existing = (
         db.query(ReceivingReviewPending)
         .filter(ReceivingReviewPending.buying_group_id == buying_group_id)
@@ -301,30 +305,38 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any]) -> int:
     # Unknown receipts are a separate review queue. Keep them when a later check
     # no longer returns them (for example, outside a provider's date window).
     previous = existing.payload if existing and isinstance(existing.payload, dict) else {}
-    manual = [m for m in previous.get("matches", []) if m.get("manual_receipt")]
+    manual, released = refresh_manual_assignments(db, buying_group_id, previous)
+    released = [r for r in previous.get("unknown_receipts", []) if r.get("manual_link_invalid")] + released
     manual_keys = {m["manual_receipt_key"] for m in manual}
     manual_items = {m["item_id"] for m in manual}
     payload = {**payload, "matches": [
         m for m in payload.get("matches", [])
         if m.get("item_id") not in manual_items
-        and not any(match_includes_receipt(m, staged["manual_receipt"]) for staged in manual)
+        and not any(match_includes_receipt(m, receipt)
+                    for receipt in [*(staged["manual_receipt"] for staged in manual), *released])
     ] + manual}
+    received_items = {m["item_id"] for m in payload["matches"] if _is_actionable_match_dict(m)}
+    payload["matches"] = [m for m in payload["matches"]
+                          if _is_actionable_match_dict(m) or m["item_id"] in received_items]
     count = actionable_count_from_payload(payload)
     applied_pairs = applied_receipt_pairs(db, buying_group_id)
     known_trackings = _known_shipment_trackings(db)
     unknown_by_key = {}
-    for receipt in [*(r for r in (previous.get("unknown_receipts") or []) if r.get("linkable") is not False), *(payload.get("unknown_receipts") or [])]:
+    for receipt in [*(r for r in (previous.get("unknown_receipts") or []) if r.get("linkable") is not False), *(payload.get("unknown_receipts") or []), *released]:
         if receipt_key(receipt) in manual_keys or receipt_is_applied(receipt, applied_pairs):
             continue
         trackings = receipt.get("tracking_numbers") or [receipt["tracking_number"]]
-        if any(tn.strip().casefold() in known_trackings for tn in trackings):
+        if not receipt.get("manual_link_invalid") and any(tn.strip().casefold() in known_trackings for tn in trackings):
             continue
         unknown_by_key[receipt_key(receipt)] = receipt
     payload = {**payload, "unknown_receipts": list(unknown_by_key.values())}
     if count <= 0 and not payload["unknown_receipts"]:
         if existing is not None:
             db.delete(existing)
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return 0
     now = datetime.now(timezone.utc)
     if existing is not None:
@@ -340,27 +352,52 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any]) -> int:
                 updated_at=now,
             )
         )
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return count
 
 
 def list_receiving_review_pending_payloads(db: Session) -> list[dict[str, Any]]:
-    from sqlalchemy import func
-
-    rows = (
-        db.query(ReceivingReviewPending)
-        .join(BuyingGroup, BuyingGroup.id == ReceivingReviewPending.buying_group_id)
-        .order_by(func.lower(BuyingGroup.name))
-        .all()
-    )
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        payload = row.payload
-        if not isinstance(payload, dict):
-            continue
-        if actionable_count_from_payload(payload) > 0 or payload.get("unknown_receipts"):
-            out.append(with_receipt_keys(payload))
-    return out
+    # Lock groups in a stable order before reading caches or pending assignments.
+    from sqlalchemy import or_
+    groups = (db.query(BuyingGroup)
+              .outerjoin(ReceivingReceiptCache, ReceivingReceiptCache.buying_group_id == BuyingGroup.id)
+              .outerjoin(ReceivingReviewPending, ReceivingReviewPending.buying_group_id == BuyingGroup.id)
+              .filter(or_(ReceivingReceiptCache.buying_group_id.isnot(None),
+                          ReceivingReviewPending.buying_group_id.isnot(None)))
+              .order_by(BuyingGroup.id).with_for_update(of=BuyingGroup).all())
+    matchers = {
+        "parsefile": _check_receiving_parsefile, "buyinggroup": _check_receiving_buyinggroup,
+        "bfmr": _check_receiving_bfmr, "usabg": _check_receiving_usabg,
+        "dealandrunner": _check_receiving_dealandrunner,
+    }
+    out = []
+    for group in groups:
+        cache = db.query(ReceivingReceiptCache).populate_existing().filter_by(buying_group_id=group.id).first()
+        row = db.query(ReceivingReviewPending).populate_existing().filter_by(buying_group_id=group.id).first()
+        if cache is not None:
+            # Never show warehouse data belonging to a previous account/provider.
+            if cache.provider_identity != provider_identity(group):
+                continue
+            if cache.payload.get("version") == 1:
+                matcher = matchers.get((group.api_framework or "").strip().casefold())
+                if matcher:
+                    result = matcher(db, group=group, group_name=group.name, source=ReceiptSource(cache.payload))
+                    if result.error:
+                        raise ValueError(result.error)
+                    payload = result.session_payload
+                    payload["created_at"] = cache.fetched_at.isoformat()
+                    payload["rematched_at"] = datetime.now(timezone.utc).isoformat()
+                    save_receiving_review_pending(db, payload, commit=False)
+                    row = db.get(ReceivingReviewPending, group.id)
+        if row is not None and isinstance(row.payload, dict):
+            payload = row.payload
+            if actionable_count_from_payload(payload) > 0 or payload.get("unknown_receipts"):
+                out.append(with_receipt_keys(payload))
+    db.commit()
+    return sorted(out, key=lambda p: p["buying_group_name"].casefold())
 
 
 def _load_usabg_po_detail_cache(db: Session, buying_group_id: int) -> dict[str, dict[str, Any]]:
@@ -419,7 +456,7 @@ def _persist_usabg_po_detail_cache(
                     fetched_at=now,
                 )
             )
-    db.commit()
+    db.flush()
 
 
 def prune_receiving_review_pending(
@@ -429,6 +466,7 @@ def prune_receiving_review_pending(
     item_ids: list[int],
 ) -> tuple[int, bool]:
     """Remove applied item rows from pending snapshot. Returns (remaining_count, deleted)."""
+    db.query(BuyingGroup).filter_by(id=buying_group_id).with_for_update().one()
     id_set = {int(i) for i in item_ids if i}
     existing = (
         db.query(ReceivingReviewPending)
@@ -1529,16 +1567,57 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
 
     group_name = (group.name or "").strip() or f"group {buying_group_id}"
     framework = (group.api_framework or "").strip().casefold()
-    if framework == "parsefile":
-        return _check_receiving_parsefile(db, group=group, group_name=group_name)
-    if framework == "buyinggroup":
-        return _check_receiving_buyinggroup(db, group=group, group_name=group_name)
-    if framework == "bfmr":
-        return _check_receiving_bfmr(db, group=group, group_name=group_name)
-    if framework == "usabg":
-        return _check_receiving_usabg(db, group=group, group_name=group_name)
-    if framework == "dealandrunner":
-        return _check_receiving_dealandrunner(db, group=group, group_name=group_name)
+    matchers = {
+        "parsefile": _check_receiving_parsefile, "buyinggroup": _check_receiving_buyinggroup,
+        "bfmr": _check_receiving_bfmr, "usabg": _check_receiving_usabg,
+        "dealandrunner": _check_receiving_dealandrunner,
+    }
+    if framework in matchers:
+        ready, reason = receiving_check_group_ready(group)
+        if not ready:
+            return CheckReceivingResult(buying_group_id, group_name, error=reason)
+        identity = provider_identity(group)
+        try:
+            source = fetch_receipt_source(group, usabg_details=(
+                _load_usabg_po_detail_cache(db, buying_group_id) if framework == "usabg" else None))
+        except Exception as exc:
+            items, _, _ = _collect_pending(db, buying_group_id=buying_group_id)
+            return CheckReceivingResult(buying_group_id, group_name, submitted_count=len(items),
+                                        error=str(exc).strip() or exc.__class__.__name__)
+        # Provider calls are finished. Hold the lock only for local matching/publication.
+        group = (db.query(BuyingGroup).populate_existing().filter_by(id=buying_group_id)
+                 .with_for_update(of=BuyingGroup).first())
+        if group is None or provider_identity(group) != identity:
+            return CheckReceivingResult(buying_group_id, group_name,
+                                        error="Buying group configuration changed during the receipt check. Check again.")
+        cache = db.query(ReceivingReceiptCache).populate_existing().filter_by(buying_group_id=buying_group_id).first()
+        newer_cache = (cache is not None and cache.provider_identity == identity
+                       and cache.payload.get("started_at", "") > source.payload["started_at"])
+        inputs = cache.payload if newer_cache else source.payload
+        result = matchers[framework](db, group=group, group_name=group.name, source=ReceiptSource(inputs))
+        if not result.error and result.session_payload is not None:
+            if newer_cache:
+                result.session_payload["created_at"] = cache.fetched_at.isoformat()
+                return result
+            if framework == "usabg":
+                fetched = ReceiptSource(inputs).request("rows", None)
+                _persist_usabg_po_detail_cache(db, buying_group_id, fetched.newly_fetched_details,
+                    receiving_status_by_po={r.po_number: r.receiving_status for r in fetched.rows})
+            now = datetime.now(timezone.utc)
+            if cache is not None and cache.provider_identity != identity:
+                previous = db.get(ReceivingReviewPending, buying_group_id)
+                if previous is not None:
+                    db.delete(previous)
+                    db.flush()
+            if cache is None:
+                cache = ReceivingReceiptCache(buying_group_id=buying_group_id)
+                db.add(cache)
+            cache.provider_identity = identity
+            cache.payload = source.payload
+            cache.fetched_at = now
+            result.session_payload["created_at"] = now.isoformat()
+            db.flush()
+        return result
     return CheckReceivingResult(
         buying_group_id=buying_group_id,
         buying_group_name=group_name,
@@ -1554,10 +1633,12 @@ def _check_receiving_usabg(
     *,
     group: BuyingGroup,
     group_name: str,
+    source: ReceiptSource | None = None,
 ) -> CheckReceivingResult:
+    source = source or ReceiptSource()
     buying_group_id = int(group.id)
     ready, reason = usabg_group_ready(group)
-    if not ready:
+    if not source.cached and not ready:
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
@@ -1575,7 +1656,7 @@ def _check_receiving_usabg(
     cached_details = _load_usabg_po_detail_cache(db, buying_group_id)
 
     try:
-        fetched = usabg_api.list_received_po_rows(
+        fetched = source.request("rows", usabg_api.list_received_po_rows,
             base_url=base_url,
             username=username,
             password=password,
@@ -1589,7 +1670,7 @@ def _check_receiving_usabg(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
-    if fetched.newly_fetched_details:
+    if fetched.newly_fetched_details and not source.cached:
         status_by_po: dict[str, str | None] = {}
         for row in fetched.rows:
             if row.po_number in fetched.newly_fetched_details and row.po_number not in status_by_po:
@@ -1833,10 +1914,12 @@ def _check_receiving_dealandrunner(
     *,
     group: BuyingGroup,
     group_name: str,
+    source: ReceiptSource | None = None,
 ) -> CheckReceivingResult:
+    source = source or ReceiptSource()
     buying_group_id = int(group.id)
     ready, reason = dealandrunner_group_ready(group)
-    if not ready:
+    if not source.cached and not ready:
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
@@ -1853,7 +1936,7 @@ def _check_receiving_dealandrunner(
     base_url = (group.base_url or "").strip() or None
 
     try:
-        fetched = dealandrunner_api.list_runner_transactions(
+        fetched = source.request("rows", dealandrunner_api.list_runner_transactions,
             base_url=base_url,
             email=username,
             password=password,
@@ -2198,10 +2281,12 @@ def _check_receiving_parsefile(
     *,
     group: BuyingGroup,
     group_name: str,
+    source: ReceiptSource | None = None,
 ) -> CheckReceivingResult:
+    source = source or ReceiptSource()
     buying_group_id = int(group.id)
     ready, reason = parsefile_group_ready(group)
-    if not ready:
+    if not source.cached and not ready:
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
@@ -2216,11 +2301,11 @@ def _check_receiving_parsefile(
 
     base_url = str(group.base_url)
     bearer_token = str(group.bearer_token)
-    api_user_id = int(group.api_user_id)
+    api_user_id = int(group.api_user_id or 0)
     api_email = str(group.api_email)
 
     try:
-        api_result = parsefile_api.list_all_received_items(
+        api_result = source.request("rows", parsefile_api.list_all_received_items,
             base_url=base_url,
             bearer_token=bearer_token,
             user_id=api_user_id,
@@ -2480,10 +2565,12 @@ def _check_receiving_buyinggroup(
     *,
     group: BuyingGroup,
     group_name: str,
+    source: ReceiptSource | None = None,
 ) -> CheckReceivingResult:
+    source = source or ReceiptSource()
     buying_group_id = int(group.id)
     ready, reason = buyinggroup_group_ready(group)
-    if not ready:
+    if not source.cached and not ready:
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
@@ -2500,7 +2587,7 @@ def _check_receiving_buyinggroup(
     base_url = (group.base_url or "").strip() or None
 
     try:
-        receipts = buyinggroup_api.list_receipts(
+        receipts = source.request("rows", buyinggroup_api.list_receipts,
             base_url=base_url,
             username=username,
             password=password,
@@ -2513,18 +2600,16 @@ def _check_receiving_buyinggroup(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
-    receipts = _receipts_since_first_order(db, receipts, date_field="created_dt")
     tracking_rewards: dict[str, Decimal] = {}
     reward_error = None
     if receipts:
         try:
-            tracking_rewards = buyinggroup_api.list_tracking_rewards(
+            tracking_rewards = source.request("rewards", buyinggroup_api.list_tracking_rewards,
                 base_url=base_url, username=username, password=password,
             )
         except Exception as exc:
             # Receiving can still be reviewed; never replace a saved reward with zero.
             reward_error = str(exc).strip() or exc.__class__.__name__
-    by_tracking = _index_bg_receipts_by_tracking(receipts)
     local_tracking_keys = {tn.casefold() for tn in all_trackings}
 
     def receipt_tracking(row: buyinggroup_api.BuyinggroupReceipt) -> str:
@@ -2538,7 +2623,7 @@ def _check_receiving_buyinggroup(
     detail_rows = [r for r in receipts if not r.void and (r.quantity or 0) > 0]
     def fetch_details(row):
         try:
-            detail = buyinggroup_api.get_receipt_details(
+            detail = source.request("detail:" + str(row.raw.get("key") or ""), buyinggroup_api.get_receipt_details,
                 base_url=base_url, username=username, password=password,
                 receipt_key=str(row.raw.get("key") or ""),
             )
@@ -2561,6 +2646,10 @@ def _check_receiving_buyinggroup(
     with ThreadPoolExecutor(max_workers=6) as pool:
         details = dict(zip((id(r) for r in detail_rows), pool.map(fetch_details, detail_rows)))
 
+    # Cache details before the local order cutoff, which may change on a later visit.
+    receipts = _receipts_since_first_order(db, receipts, date_field="created_dt")
+    by_tracking = _index_bg_receipts_by_tracking(receipts)
+    detail_rows = [r for r in receipts if not r.void and (r.quantity or 0) > 0]
     lots = []
     unknown_receipts = []
     detail_failures = 0
@@ -2862,10 +2951,12 @@ def _check_receiving_bfmr(
     *,
     group: BuyingGroup,
     group_name: str,
+    source: ReceiptSource | None = None,
 ) -> CheckReceivingResult:
+    source = source or ReceiptSource()
     buying_group_id = int(group.id)
     ready, reason = bfmr_group_ready(group)
-    if not ready:
+    if not source.cached and not ready:
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
             buying_group_name=group_name,
@@ -2882,7 +2973,7 @@ def _check_receiving_bfmr(
     base_url = (group.base_url or "").strip() or None
 
     try:
-        fetched = bfmr_api.list_received_tracker_rows(
+        fetched = source.request("rows", bfmr_api.list_received_tracker_rows,
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,

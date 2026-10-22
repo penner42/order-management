@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.models import Item, Order, ReceivingReviewPending, ShipmentItem
+from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, ShipmentItem
 from app.models.item import ItemStatus
 from app.schemas.item import ItemBulkUpdateEntry
 from app.schemas.buying_group import ReceivingReceiptLinkRequest
@@ -70,6 +70,7 @@ def match_includes_receipt(match: dict, receipt: dict) -> bool:
 
 
 def pending_row(db: Session, group_id: int) -> ReceivingReviewPending:
+    db.query(BuyingGroup).filter_by(id=group_id).with_for_update().one()
     row = db.query(ReceivingReviewPending).filter_by(buying_group_id=group_id).with_for_update().first()
     if row is None:
         raise HTTPException(409, "Receiving review changed. Refresh and select the receipt again.")
@@ -128,38 +129,8 @@ def _check_receipt(item: Item, rid: str | None) -> None:
         raise HTTPException(409, "This line already has a different receipt. Split it or correct its receipt on Orders.")
 
 
-def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
-    row = pending_row(db, body.buying_group_id)
-    payload = dict(row.payload)
-    receipts = list(payload.get("unknown_receipts") or [])
-    receipt = next((r for r in receipts if receipt_key(r) == body.receipt_key), None)
-    if receipt is None:
-        raise HTTPException(409, "Receipt is no longer unknown. Refresh receiving review.")
-    if receipt.get("linkable") is False:
-        raise HTTPException(409, "Receipt product is not confirmed or its details are unavailable.")
-    ids = body.item_ids or ([body.item_id] if body.item_id is not None else [])
-    if not ids or len(set(ids)) != len(ids) or (body.item_ids and body.item_id is not None):
-        raise HTTPException(400, "Select each order line once.")
-    if body.split_quantity is not None:
-        raise HTTPException(400, "Split order lines manually on Orders before linking a receipt.")
-    items = db.query(Item).filter(Item.id.in_(ids)).order_by(Item.id).with_for_update(of=Item).all()
-    if len(items) != len(ids) or any(i.order.buying_group_id != body.buying_group_id for i in items):
-        raise HTTPException(404, "Order line not found in this buying group.")
-    matches = list(payload.get("matches") or [])
-    if any(m.get("item_id") in ids and m.get("manual_receipt") for m in matches):
-        raise HTTPException(409, "This line already has a pending manual receipt. Apply or unlink it first.")
-    tracking = body.receipt_tracking_number.strip()
-    allowed = [receipt.get("tracking_number") or "", *(receipt.get("tracking_numbers") or [])]
-    if tracking not in [tn.strip() for tn in allowed] or not tracking:
-        raise HTTPException(400, "Choose a tracking number reported on this receipt.")
-    selected_qty = sum(i.quantity for i in items)
-    qty = receipt.get("quantity")
-    if qty is None or qty <= 0:
-        if not body.confirm_full_quantity:
-            raise HTTPException(400, "Confirm that this receipt covers all selected lines.")
-        qty = selected_qty
-    if selected_qty != qty:
-        raise HTTPException(409, "Selected quantities must equal the receipt quantity. Split larger lines manually on Orders first.")
+def manual_allocations(items, receipt, tracking, key):
+    qty = sum(item.quantity for item in items)
     for item in items:
         _check_receipt(item, receipt.get("receipt_id"))
     try:
@@ -196,10 +167,69 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
             "received_status": receipt.get("received_status"),
             "reward": str(line_reward) if line_reward is not None else None,
             "amount_discrepancy": amount is not None and abs(amount - expected) > Decimal("0.01"),
-            "selected": True, "row_id": f"manual:{body.receipt_key}:{item.id}", "manual_receipt_key": body.receipt_key,
+            "selected": True, "row_id": f"manual:{key}:{item.id}", "manual_receipt_key": key,
             "manual_receipt": receipt, "match_kind": "received",
             "update_receipt_only": bool(item.payment_line_items) or item.status not in OPEN_STATUSES,
         })
+    return allocations
+
+
+def refresh_manual_assignments(db: Session, group_id: int, previous: dict) -> tuple[list, list]:
+    """Rebuild staged allocations from current orders, or release the entire receipt."""
+    groups = {}
+    for match in previous.get("matches", []):
+        if match.get("manual_receipt"):
+            groups.setdefault(match["manual_receipt_key"], []).append(match)
+    valid, released = [], []
+    for key, matches in groups.items():
+        receipt = matches[0]["manual_receipt"]
+        ids = {m["item_id"] for m in matches}
+        items = db.query(Item).filter(Item.id.in_(ids)).order_by(Item.id).all()
+        qty = receipt.get("quantity") or sum(m["quantity"] for m in matches)
+        try:
+            if len(items) != len(ids) or any(i.order.buying_group_id != group_id for i in items):
+                raise HTTPException(409)
+            if sum(i.quantity for i in items) != qty:
+                raise HTTPException(409)
+            valid.extend(manual_allocations(items, receipt, matches[0]["tracking_number"], key))
+        except HTTPException:
+            released.append({**receipt, "manual_link_invalid": True})
+    return valid, released
+
+
+def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
+    row = pending_row(db, body.buying_group_id)
+    payload = dict(row.payload)
+    receipts = list(payload.get("unknown_receipts") or [])
+    receipt = next((r for r in receipts if receipt_key(r) == body.receipt_key), None)
+    if receipt is None:
+        raise HTTPException(409, "Receipt is no longer unknown. Refresh receiving review.")
+    if receipt.get("linkable") is False:
+        raise HTTPException(409, "Receipt product is not confirmed or its details are unavailable.")
+    ids = body.item_ids or ([body.item_id] if body.item_id is not None else [])
+    if not ids or len(set(ids)) != len(ids) or (body.item_ids and body.item_id is not None):
+        raise HTTPException(400, "Select each order line once.")
+    if body.split_quantity is not None:
+        raise HTTPException(400, "Split order lines manually on Orders before linking a receipt.")
+    items = db.query(Item).filter(Item.id.in_(ids)).order_by(Item.id).with_for_update(of=Item).all()
+    if len(items) != len(ids) or any(i.order.buying_group_id != body.buying_group_id for i in items):
+        raise HTTPException(404, "Order line not found in this buying group.")
+    matches = list(payload.get("matches") or [])
+    if any(m.get("item_id") in ids and m.get("manual_receipt") for m in matches):
+        raise HTTPException(409, "This line already has a pending manual receipt. Apply or unlink it first.")
+    tracking = body.receipt_tracking_number.strip()
+    allowed = [receipt.get("tracking_number") or "", *(receipt.get("tracking_numbers") or [])]
+    if tracking not in [tn.strip() for tn in allowed] or not tracking:
+        raise HTTPException(400, "Choose a tracking number reported on this receipt.")
+    selected_qty = sum(i.quantity for i in items)
+    qty = receipt.get("quantity")
+    if qty is None or qty <= 0:
+        if not body.confirm_full_quantity:
+            raise HTTPException(400, "Confirm that this receipt covers all selected lines.")
+        qty = selected_qty
+    if selected_qty != qty:
+        raise HTTPException(409, "Selected quantities must equal the receipt quantity. Split larger lines manually on Orders first.")
+    allocations = manual_allocations(items, receipt, tracking, body.receipt_key)
     payload["matches"] = [m for m in matches if m.get("item_id") not in ids] + allocations
     payload["unknown_receipts"] = [r for r in receipts if receipt_key(r) != body.receipt_key]
     store_payload(db, row, payload)

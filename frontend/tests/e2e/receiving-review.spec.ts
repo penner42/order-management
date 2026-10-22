@@ -160,6 +160,7 @@ test('unknown receipt selects whole items across searches and pages up to its to
   await candidateCheckboxes.first().check()
   await expect(add).toBeDisabled()
   await dialog.getByRole('button', { name: 'Next', exact: true }).click()
+  await expect(candidateCheckboxes).toHaveCount(1)
   await candidateCheckboxes.check()
   await expect(dialog.getByText('Selected 3 of 3 units across 2 order items.')).toBeVisible()
   await expect(add).toBeEnabled()
