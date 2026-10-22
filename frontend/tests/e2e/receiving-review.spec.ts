@@ -1,6 +1,106 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('receipt search opens another-group order and refreshes after correction without changing payment', async ({ app, data }) => {
+  const store = await data.create('/stores', { name: data.name('cross-group-store') })
+  const groupName = data.name('receipt-group')
+  const group = await data.create('/buying-groups', { name: groupName })
+  const wrongName = data.name('wrong-group')
+  const wrong = await data.create('/buying-groups', { name: wrongName })
+  const orderNumber = data.name('cross-group-order')
+  const order = await data.create<{ id: number; items: Item[] }>('/orders', {
+    store_id: store.id, buying_group_id: group.id, store_order_number: orderNumber,
+    items: [{ description: 'Cross-group headphones', quantity: 1, status: 'submitted', price_sold: '20.00' }],
+  })
+  const item = order.items[0]
+  const payment = await data.create('/payments', { buying_group_id: group.id, payment_id: data.name('payment') })
+  const lineResponse = await data.request.post(`/api/payments/${payment.id}/line-items`, {
+    headers: data.headers, data: { item_id: item.id, amount: 20 },
+  })
+  expect(lineResponse.ok(), await lineResponse.text()).toBeTruthy()
+  const misassigned = await data.request.patch(`/api/orders/${order.id}`, {
+    headers: data.headers, data: { buying_group_id: wrong.id },
+  })
+  expect(misassigned.ok()).toBeTruthy()
+  const paymentSnapshot = async () => {
+    const current = await data.get<Record<string, unknown> & { line_items: Array<Record<string, unknown>> }>(`/payments/${payment.id}`)
+    return { ...current, line_items: current.line_items.map(({ item: _item, ...line }) => line) }
+  }
+  const paymentBefore = await paymentSnapshot()
+  const tracking = data.name('cross-group-tracking')
+  await data.create('/shipments', { tracking_number: tracking, item_ids: [item.id] })
+  const receipt = { receipt_key: 'cross-group', receipt_id: 'CROSS-GROUP', tracking_number: tracking, quantity: 1 }
+  let staged = false
+  const match = { item_id: item.id, order_id: order.id, description: item.description, quantity: 1,
+    tracking_number: tracking, receipt_tracking_number: tracking, receipt_id: receipt.receipt_id,
+    price_sold: '20.00', expected_amount: '20.00', received_ext_total: '20.00',
+    update_receipt_only: true, selected: true, row_id: 'manual:cross-group', manual_receipt_key: receipt.receipt_key }
+  const session = () => ({ buying_group_id: group.id, buying_group_name: groupName,
+    matches: staged ? [match] : [], unknown_receipts: staged ? [] : [receipt] })
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [session()] }))
+  // The warehouse queue is isolated; candidate searches and order correction use the real API.
+  // Supply tracking suggestions for this mocked queue (real queue lookup is covered in backend tests).
+  await app.route('**/api/buying-groups/receiving-review/candidates?*', async route => {
+    const response = await route.fetch()
+    const result = await response.json()
+    const current = await data.get<{ buying_group_id: number }>(`/orders/${order.id}`)
+    result.suggestions = current.buying_group_id === group.id ? [] : [{
+      ...match, buying_group_id: wrong.id, buying_group_name: wrongName,
+      store_order_number: orderNumber, payment_linked: true, tracking_numbers: [tracking],
+    }]
+    await route.fulfill({ json: result })
+  })
+  await app.route('**/api/buying-groups/receiving-review/link', route => {
+    expect(route.request().postDataJSON().item_ids).toEqual([item.id])
+    staged = true
+    return route.fulfill({ json: session() })
+  })
+  await app.route('**/api/items/bulk-update', async route => {
+    const body = route.request().postDataJSON()
+    const updates = body.updates.map(({ receiving_group_id: _group, receiving_row_id: _row, ...fields }: Record<string, unknown>) => fields)
+    const response = await data.request.post('/api/items/bulk-update', { headers: data.headers, data: { updates } })
+    expect(response.ok()).toBeTruthy()
+    await route.fulfill({ response })
+  })
+  await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
+  await app.goto('/receiving-review')
+  await app.getByText('Unknown tracking numbers (1 receipt)', { exact: true }).click()
+  await app.getByRole('button', { name: 'Link to order item' }).click()
+  const dialog = app.getByRole('dialog', { name: 'Link receipt to order items', exact: true })
+  const suggestions = dialog.getByRole('complementary', { name: 'Possible matches in other groups' })
+  await expect(suggestions).toContainText(wrongName)
+  await dialog.getByLabel('Search order number, description, or receipt ID').fill(orderNumber)
+  await expect(dialog.getByText('0 order lines in this buying group')).toBeVisible()
+  await expect(suggestions).toBeVisible()
+  await dialog.getByRole('checkbox', { name: 'Search all buying groups', exact: true }).check()
+  const candidate = dialog.getByRole('checkbox', { name: /Cross-group headphones/ })
+  await expect(candidate).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: 'Add to review', exact: true })).toBeDisabled()
+  const popupPromise = app.waitForEvent('popup')
+  await suggestions.getByRole('link', { name: 'Open order to correct group' }).click()
+  const orderPage = await popupPromise
+  await expect(orderPage).toHaveURL(new RegExp(`order_id=${order.id}$`))
+  const groupInput = orderPage.getByPlaceholder('Buying group…', { exact: true })
+  await expect(groupInput).toHaveValue(wrongName)
+  await groupInput.fill(groupName)
+  const saved = orderPage.waitForResponse(r => r.url().endsWith(`/api/orders/${order.id}`) && r.request().method() === 'PATCH')
+  await orderPage.getByRole('option', { name: groupName, exact: true }).click()
+  expect((await saved).ok()).toBeTruthy()
+  await orderPage.close()
+  await dialog.getByRole('button', { name: 'Refresh order lines' }).click()
+  await expect(suggestions).toHaveCount(0)
+  await expect(candidate).toBeEnabled()
+  await candidate.check()
+  await dialog.getByRole('button', { name: 'Refresh order lines' }).click()
+  await expect(candidate).not.toBeChecked()
+  await candidate.check()
+  await dialog.getByRole('button', { name: 'Add to review', exact: true }).click()
+  await app.getByRole('button', { name: 'Apply 1 selected' }).click()
+  await expect(app.getByText('All listed rows were applied.')).toBeVisible()
+  expect(await paymentSnapshot()).toEqual(paymentBefore)
+  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ status: 'submitted', receipt_id: receipt.receipt_id })
+})
+
 test('partial BG receipt stores UPC on received unit and splits missing unit for review', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('bg-upc-store') })
   const groupName = data.name('bg-upc-group')
@@ -122,6 +222,7 @@ test('unknown receipt selects whole items across searches and pages up to its to
   const receipt = { receipt_key: 'multi', receipt_id: 'MULTI', tracking_number: 'UNKNOWN', quantity: 3 }
   const candidates = [2, 1, 4].map((quantity, index) => ({
     item_id: 800 + index, order_id: 900 + index, store_order_number: `ORDER-${index}`,
+    buying_group_id: 901, buying_group_name: 'Multiple orders',
     description: `Headphones ${index}`, quantity, status: 'submitted', receipt_id: null,
     receipt_tracking_number: null, tracking_numbers: [], payment_linked: false, store: 'Test store',
   }))
@@ -264,6 +365,7 @@ test('manual receipt review requires a manual split, then supports unlink and ap
     const current = await data.get<Item>(`/items/${item.id}`)
     const items = orderNumber.includes(search) ? [{
       item_id: item.id, order_id: order.id, store_order_number: orderNumber, store: 'Receipt store',
+      buying_group_id: group.id, buying_group_name: 'Receipt group',
       description: current.description, quantity: current.quantity, status: current.status,
       receipt_id: null, receipt_tracking_number: null, payment_linked: false, tracking_numbers: [originalTracking],
     }] : []

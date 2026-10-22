@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, ShipmentItem
+from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, ShipmentItem
 from app.models.item import ItemStatus
 from app.schemas.item import ItemBulkUpdateEntry
 from app.schemas.buying_group import ReceivingReceiptLinkRequest
@@ -92,8 +92,11 @@ def store_payload(db: Session, row: ReceivingReviewPending, payload: dict) -> No
         row.updated_at = datetime.now(timezone.utc)
 
 
-def candidate_lines(db: Session, group_id: int, search: str, page: int, include_received: bool = False) -> dict:
-    query = db.query(Item).join(Order).filter(Order.buying_group_id == group_id)
+def candidate_lines(db: Session, group_id: int, search: str, page: int, include_received: bool = False,
+                    include_all_groups: bool = False, receipt_key_value: str | None = None) -> dict:
+    query = db.query(Item).join(Order)
+    if not include_all_groups:
+        query = query.filter(Order.buying_group_id == group_id)
     if not include_received:
         query = query.filter(
             func.trim(func.coalesce(Item.receipt_id, "")) == "",
@@ -106,12 +109,40 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int, include_
                                  Item.description.ilike(term, escape="\\"),
                                  Item.receipt_id.ilike(term, escape="\\")))
     total = query.count()
-    items = query.options(joinedload(Item.order).joinedload(Order.store),
+    items = _candidate_items(query).offset((page - 1) * 25).limit(25).all()
+    suggestions = []
+    if receipt_key_value:
+        row = db.get(ReceivingReviewPending, group_id)
+        receipt = next((r for r in (row.payload.get("unknown_receipts", []) if row else [])
+                        if receipt_key(r) == receipt_key_value), None)
+        trackings = {(tn or "").strip().casefold() for tn in
+                     ([receipt.get("tracking_number"), *(receipt.get("tracking_numbers") or [])] if receipt else [])}
+        trackings.discard("")
+        if trackings:
+            tracking_items = db.query(ShipmentItem.item_id).join(Shipment).filter(
+                func.lower(func.trim(Shipment.tracking_number)).in_(trackings))
+            other_lines = db.query(Item).join(Order).filter(
+                or_(Order.buying_group_id != group_id, Order.buying_group_id.is_(None)),
+                or_(Item.id.in_(tracking_items),
+                    func.lower(func.trim(Item.receipt_tracking_number)).in_(trackings)))
+            suggestions = [_candidate_data(i) for i in _candidate_items(other_lines).all()]
+    return {"total": total, "page": page, "items": [_candidate_data(i) for i in items],
+            "suggestions": suggestions}
+
+
+def _candidate_items(query):
+    return query.options(joinedload(Item.order).joinedload(Order.store),
+                          joinedload(Item.order).joinedload(Order.buying_group),
                           selectinload(Item.payment_line_items),
                           selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment)).order_by(
-                              Order.purchase_date.desc(), Item.id.desc()).offset((page - 1) * 25).limit(25).all()
-    return {"total": total, "page": page, "items": [{
+                              Order.purchase_date.desc(), Item.id.desc())
+
+
+def _candidate_data(i: Item) -> dict:
+    return {
         "item_id": i.id, "order_id": i.order_id, "store_order_number": i.order.store_order_number,
+        "buying_group_id": i.order.buying_group_id,
+        "buying_group_name": i.order.buying_group.name if i.order.buying_group else None,
         "store": i.order.store.name if i.order.store else None,
         "description": i.description, "quantity": i.quantity, "status": i.status.value,
         "purchase_date": i.purchased_at or i.order.purchase_date,
@@ -121,7 +152,7 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int, include_
         "receipt_id": i.receipt_id, "receipt_tracking_number": i.receipt_tracking_number,
         "payment_linked": bool(i.payment_line_items),
         "tracking_numbers": [si.shipment.tracking_number for si in i.shipment_items if si.shipment],
-    } for i in items]}
+    }
 
 
 def _check_receipt(item: Item, rid: str | None) -> None:

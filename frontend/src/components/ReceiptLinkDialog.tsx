@@ -13,6 +13,8 @@ interface Receipt {
 interface Candidate {
   item_id: number
   order_id: number
+  buying_group_id: number | null
+  buying_group_name: string | null
   store_order_number: string | null
   store: string | null
   description: string | null
@@ -38,7 +40,9 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const [includeReceived, setIncludeReceived] = useState(false)
-  const [result, setResult] = useState<{ items: Candidate[]; total: number }>({ items: [], total: 0 })
+  const [includeAllGroups, setIncludeAllGroups] = useState(false)
+  const [refreshVersion, setRefreshVersion] = useState(0)
+  const [result, setResult] = useState<{ items: Candidate[]; total: number; suggestions?: Candidate[] }>({ items: [], total: 0 })
   const [selected, setSelected] = useState<Candidate[]>([])
   const [tracking, setTracking] = useState(receipt.tracking_number)
   const [confirmFull, setConfirmFull] = useState(false)
@@ -49,24 +53,29 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
     let active = true
     setLoading(true)
     const timer = window.setTimeout(() => {
-      api.get<{ items: Candidate[]; total: number }>(
-        `/buying-groups/receiving-review/candidates?buying_group_id=${groupId}&page=${page}&q=${encodeURIComponent(search)}&include_received=${includeReceived}`
+      api.get<typeof result>(
+        `/buying-groups/receiving-review/candidates?buying_group_id=${groupId}&page=${page}&q=${encodeURIComponent(search)}&include_received=${includeReceived}&include_all_groups=${includeAllGroups}&receipt_key=${encodeURIComponent(receipt.receipt_key ?? '')}`
       ).then(data => { if (active) { setResult(data); setError(null) } })
         .catch(e => { if (active) setError(e instanceof Error ? e.message : 'Could not load order lines') })
         .finally(() => { if (active) setLoading(false) })
     }, 250)
     return () => { active = false; window.clearTimeout(timer) }
-  }, [groupId, page, search, includeReceived])
+  }, [groupId, page, search, includeReceived, includeAllGroups, receipt.receipt_key, refreshVersion])
 
   const quantity = receipt.quantity != null && receipt.quantity > 0 ? receipt.quantity : null
   const selectedQuantity = selected.reduce((sum, item) => sum + item.quantity, 0)
+  const wrongGroup = (item: Candidate) => item.buying_group_id !== groupId
   const conflict = (item: Candidate) => !!item.receipt_id?.trim() && item.receipt_id.trim() !== (receipt.receipt_id ?? '').trim()
   const invalid = !selected.length || loading || saving || (quantity != null && selectedQuantity !== quantity) ||
-    (!quantity && !confirmFull) || selected.some(conflict) || !receipt.receipt_key
+    (!quantity && !confirmFull) || selected.some(item => conflict(item) || wrongGroup(item)) || !receipt.receipt_key
   const inputClass = 'w-full rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm'
   const date = (value: string | null) => value ? value.slice(0, 10) : '—'
   const money = (value: string) => value != null && Number.isFinite(Number(value))
     ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value)) : '—'
+  const correction = (item: Candidate) => <span className="block text-xs mt-1">
+    <a href={`/?order_id=${item.order_id}`} target="_blank" rel="noopener noreferrer" className="text-brand-600 underline">Open order to correct group</a>
+    <span className="block">The buying group applies to the whole order. Review its other lines before changing it.</span>
+  </span>
 
   const stage = async () => {
     if (invalid) return
@@ -98,18 +107,38 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
           <input autoFocus className={inputClass} value={search} disabled={saving} onChange={e => { setSearch(e.target.value); setPage(1) }} />
         </label>
         <label className="flex items-center gap-2 text-sm mb-3">
+          <input type="checkbox" checked={includeAllGroups} disabled={saving} onChange={e => {
+            setIncludeAllGroups(e.target.checked); setPage(1)
+          }} />
+          Search all buying groups
+        </label>
+        <label className="flex items-center gap-2 text-sm mb-3">
           <input type="checkbox" checked={includeReceived} disabled={saving} onChange={e => {
             setIncludeReceived(e.target.checked); setPage(1)
           }} />
           Show lines with receipts
         </label>
-        <div aria-live="polite" className="text-sm mb-2">{loading ? 'Loading order lines…' : `${result.total} order lines in this buying group`}</div>
+        <button type="button" disabled={saving || loading} className="text-sm text-brand-600 underline mb-3" onClick={() => {
+          setSelected([]); setConfirmFull(false); setPage(1); setLoading(true); setRefreshVersion(v => v + 1)
+        }}>Refresh order lines</button>
+        {!loading && !!result.suggestions?.length && <aside aria-label="Possible matches in other groups" className="rounded border border-amber-300 p-3 mb-3 text-sm">
+          <p className="font-medium">Possible match in another group</p>
+          <p>These lines share a tracking number with this receipt. Review the order before correcting its group.</p>
+          <ul className="space-y-2 mt-2">{result.suggestions.map(item => <li key={item.item_id}>
+            {item.store_order_number || `Order ${item.order_id}`} · {item.quantity} × {item.description || 'Item'}
+            <span className="block">Buying group: {item.buying_group_name || 'Unassigned'}</span>
+            <span className="block font-mono text-xs">Original tracking: {item.tracking_numbers.filter(Boolean).join(', ') || '—'}</span>
+            <span className="block">Receipt: {item.receipt_id || '—'} · Receipt tracking: {item.receipt_tracking_number || '—'}{item.payment_linked ? ' · Linked to payment' : ''}</span>
+            {correction(item)}
+          </li>)}</ul>
+        </aside>}
+        <div aria-live="polite" className="text-sm mb-2">{loading ? 'Loading order lines…' : `${result.total} order lines ${includeAllGroups ? 'across all buying groups' : 'in this buying group'}`}</div>
         <div className="space-y-2 max-h-64 overflow-y-auto mb-3">
           {!loading && result.items.map(item => (
             <label key={item.item_id} className={`flex gap-3 rounded border p-3 ${selected.some(i => i.item_id === item.item_id) ? 'border-brand-600' : 'border-brand-200 dark:border-gray-600'}`}>
               <input type="checkbox" checked={selected.some(i => i.item_id === item.item_id)}
                 disabled={saving || (!selected.some(i => i.item_id === item.item_id) &&
-                  (conflict(item) || (quantity != null && selectedQuantity + item.quantity > quantity)))}
+                  (wrongGroup(item) || conflict(item) || (quantity != null && selectedQuantity + item.quantity > quantity)))}
                 onChange={e => {
                   setSelected(prev => e.target.checked ? [...prev, item] : prev.filter(i => i.item_id !== item.item_id))
                   setConfirmFull(false)
@@ -117,6 +146,8 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
               <span className="text-sm">
                 <span className="font-medium">{item.store_order_number || `Order ${item.order_id}`} · {item.store || 'Store'} · {item.quantity} × {item.description || 'Item'}</span>
                 <span className="block">Status: {item.status}{item.payment_linked ? ' · Linked to payment' : ''}</span>
+                <span className="block">Buying group: {item.buying_group_name || 'Unassigned'}</span>
+                {wrongGroup(item) && correction(item)}
                 <span className="block">Expected payout: {money(item.expected_amount)} total · {money(item.price_sold)} per unit</span>
                 <span className="block text-xs">Purchased: {date(item.purchase_date)} · Submitted: {date(item.submitted_at)} · Received: {date(item.scanned_at)}</span>
                 <span className="block font-mono text-xs">Original tracking: {item.tracking_numbers.filter(Boolean).join(', ') || '—'}</span>

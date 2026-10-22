@@ -241,6 +241,75 @@ class ReceiptLinkTests(unittest.TestCase):
         self.assertEqual(results["items"][0]["status"], "canceled")
         self.assertEqual(results["items"][0]["tracking_numbers"], ["ORIGINAL"])
 
+    def test_all_groups_includes_unassigned_and_preserves_receipt_filter(self):
+        for group_id in (self.other_group.id, None):
+            order = Order(store_id=self.store.id, buying_group_id=group_id)
+            self.db.add(order)
+            self.db.flush()
+            self.db.add(Item(order_id=order.id, description="Headphones", quantity=2,
+                             receipt_id="EXISTING" if group_id else None))
+        self.db.commit()
+        self.assertEqual(candidate_lines(self.db, self.group.id, "", 1)["total"], 1)
+        result = candidate_lines(self.db, self.group.id, "", 1, include_all_groups=True)
+        self.assertEqual({i["buying_group_id"] for i in result["items"]}, {self.group.id, None})
+        result = candidate_lines(self.db, self.group.id, "", 1, include_received=True, include_all_groups=True)
+        self.assertEqual(result["total"], 3)
+        other = next(i for i in result["items"] if i["buying_group_id"] == self.other_group.id)
+        self.assertEqual(other["buying_group_name"], self.other_group.name)
+        self.assertEqual(candidate_lines(self.db, self.group.id, "EXISTING", 1,
+                         include_received=True, include_all_groups=True)["total"], 1)
+
+    def test_tracking_suggestions_ignore_filters_and_require_exact_nonempty_tracking(self):
+        self.receipt["tracking_numbers"] = [" original ", "ALT", " "]
+        # Model an already-persisted receipt; automatic checks prune known tracking numbers.
+        row = self.db.get(ReceivingReviewPending, self.group.id)
+        row.payload = {**row.payload, "unknown_receipts": [dict(self.receipt)]}
+        self.db.commit()
+        expected = []
+        for group_id, tracking in ((self.other_group.id, " ORIGINAL "), (None, " alt "),
+                                   (self.other_group.id, "ORIGINAL-extra"), (None, "")):
+            order = Order(store_id=self.store.id, buying_group_id=group_id)
+            self.db.add(order)
+            self.db.flush()
+            item = Item(order_id=order.id, description="Headphones", quantity=2, receipt_id="EXISTING",
+                        receipt_tracking_number=tracking)
+            self.db.add(item)
+            self.db.flush()
+            if tracking.strip() in {"ORIGINAL", "alt"}:
+                expected.append(item.id)
+        # Also match a shipment, without duplicating its line for multiple matching tracking fields.
+        self.order.buying_group_id = self.other_group.id
+        self.item.receipt_tracking_number = "original"
+        expected.append(self.item.id)
+        self.db.commit()
+        result = candidate_lines(self.db, self.group.id, "no search results", 7,
+                                 receipt_key_value=receipt_key(self.receipt))
+        self.assertEqual(result["total"], 0)
+        self.assertCountEqual([i["item_id"] for i in result["suggestions"]], expected)
+        self.assertEqual(candidate_lines(self.db, self.group.id, "", 1,
+                         receipt_key_value="stale")["suggestions"], [])
+        self.order.buying_group_id = self.group.id
+        self.db.commit()
+        result = candidate_lines(self.db, self.group.id, "", 1, receipt_key_value=receipt_key(self.receipt))
+        self.assertNotIn(self.item.id, [i["item_id"] for i in result["suggestions"]])
+
+    def test_group_change_after_candidate_selection_or_staging_is_rejected(self):
+        self.assertEqual(candidate_lines(self.db, self.group.id, "", 1)["total"], 1)
+        self.order.buying_group_id = self.other_group.id
+        self.db.commit()
+        with self.assertRaises(HTTPException):
+            self.link()
+        self.db.rollback()
+        self.order.buying_group_id = self.group.id
+        self.db.commit()
+        match = self.link()["matches"][0]
+        self.order.buying_group_id = None
+        self.db.commit()
+        with self.assertRaises(HTTPException):
+            self.apply(match)
+        self.db.rollback()
+        self.assertIsNone(self.item.receipt_id)
+
     def test_candidates_only_hide_lines_with_receipt_details(self):
         for changes in ({"status": ItemStatus.SCANNED},
                         {"scanned_at": datetime(2026, 10, 15, tzinfo=timezone.utc)},

@@ -102,9 +102,11 @@ def prune_receiving_review(
 def receiving_candidates(
     buying_group_id: int, q: str = "", page: int = Query(default=1, ge=1),
     include_received: bool = False,
+    include_all_groups: bool = False, receipt_key: str | None = None,
     db: Session = Depends(get_db), _: User = Depends(get_current_user),
 ):
-    return candidate_lines(db, buying_group_id, q, page, include_received=include_received)
+    return candidate_lines(db, buying_group_id, q, page, include_received=include_received,
+                           include_all_groups=include_all_groups, receipt_key_value=receipt_key)
 
 
 @router.post("/receiving-review/link", response_model=ReceivingReviewSession)
