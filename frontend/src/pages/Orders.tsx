@@ -2581,6 +2581,9 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                       disabled={savingOrderId === o.id}
                     />
                     </div>
+                    {!!o.bfmr_order_tasks?.length && <Link className="text-xs underline" to={`/bfmr-order-review?group=${o.bfmr_order_tasks[0].buying_group_id}`}>
+                      BFMR order: {Array.from(new Set(o.bfmr_order_tasks.map(task => task.status))).join(', ')}
+                    </Link>}
                     <label className="text-xs text-ink-muted shrink-0">Discount</label>
                     <input
                       type="text"

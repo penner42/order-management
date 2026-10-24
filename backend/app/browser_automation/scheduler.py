@@ -25,6 +25,9 @@ async def _tick() -> None:
 
     await scheduled_tick()
 
+    from app.bfmr_orders import worker_tick
+    await asyncio.to_thread(worker_tick)
+
     db = SessionLocal()
     try:
         due = list_due_profile_jobs(db)

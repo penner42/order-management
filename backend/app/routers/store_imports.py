@@ -50,6 +50,7 @@ from app.utils.ignored_zip_codes import (
     shipping_postal_code_from_payload,
 )
 from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
+from app.bfmr_orders import capture_import_metadata, enqueue_order, import_identity
 
 router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
 
@@ -1507,6 +1508,9 @@ def _apply_items_and_shipments(
         item.quantity = keep
         remainder = Item(
             order_id=item.order_id,
+            import_line_key=item.import_line_key,
+            external_sku=item.external_sku,
+            product_url=item.product_url,
             price_paid=item.price_paid,
             price_sold=item.price_sold,
             status=item.status,
@@ -1783,6 +1787,7 @@ def _apply_items_and_shipments(
                 continue
             item = Item(
                 order_id=order.id,
+                **import_identity(item_data, item_index),
                 price_paid=unit_price,
                 price_sold=payout,
                 status=status,
@@ -1919,6 +1924,7 @@ def _apply_items_and_shipments(
                 )
                 item = Item(
                     order_id=order.id,
+                    **import_identity(item_data, item_index),
                     price_paid=unit_price,
                     price_sold=effective_payout,
                     status=status,
@@ -2228,6 +2234,8 @@ def apply_store_order_payload(
         if filename:
             order.invoice_pdf_path = filename
 
+    capture_import_metadata(db, order, normalized, payload.store)
+    enqueue_order(db, order)
     if commit:
         db.commit()
     else:

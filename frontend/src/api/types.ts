@@ -44,6 +44,7 @@ export interface BuyingGroup {
   api_username?: string | null
   api_password?: string | null
   tracking_submit_enabled?: boolean
+  order_number_submit_enabled?: boolean
   schedule_interval_minutes?: number
   schedule_next_run_at?: string | null
   tracking_submit_last_run_at?: string | null
@@ -146,6 +147,7 @@ export interface Item {
 export type OrderStatus = 'imported' | 'personal'
 
 export interface Order {
+  bfmr_order_tasks?: BfmrOrderTask[]
   id: number
   user_id: number | null
   store_id: number
@@ -167,6 +169,19 @@ export interface Order {
   buying_group?: BuyingGroup
   items: Item[]
   order_payments: OrderPaymentMethod[]
+}
+
+export interface BfmrOrderTask {
+  id: number
+  order_id: number
+  buying_group_id: number
+  product_key: string
+  snapshot: { retailer: string; sku: string | null; title: string | null; product_url: string | null; order_no: string; quantity: number }
+  allocations: { reserve_id: string; qty: number; status: string; purchase_id?: string }[]
+  status: string
+  message: string | null
+  attempts: number
+  next_attempt_at: string | null
 }
 
 export interface OrderListPage {

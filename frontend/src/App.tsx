@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 're
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Orders from './pages/Orders'
 import BuyingGroups from './pages/BuyingGroups'
+import BfmrOrderReview from './pages/BfmrOrderReview'
 import Rewards from './pages/Rewards'
 import PaymentMethods from './pages/PaymentMethods'
 import Payments from './pages/Payments'
@@ -239,6 +240,7 @@ function AppShell() {
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
           <Route path="/receiving-review" element={<ReceivingReview />} />
+          <Route path="/bfmr-order-review" element={<BfmrOrderReview />} />
           <Route path="/receiving-audit" element={<ReceivingAudit />} />
           <Route path="/buying-groups" element={<LegacyRedirect to="/settings/buying-groups" />} />
           <Route path="/rewards" element={<LegacyRedirect to="/settings/rewards" />} />

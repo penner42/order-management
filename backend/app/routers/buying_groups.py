@@ -59,6 +59,8 @@ def list_buying_groups(db: Session = Depends(get_db), _: User = Depends(get_curr
 
 @router.post("", response_model=BuyingGroupRead)
 def create_buying_group(data: BuyingGroupCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if data.order_number_submit_enabled and data.api_framework != "bfmr":
+        raise HTTPException(400, "Automatic order-number submission is available only for BFMR")
     user_id = (current_user.id if current_user.role != "admin" else None) or get_default_app_user_id(db)
     group = BuyingGroup(**data.model_dump(exclude={"user_id"}), user_id=user_id)
     db.add(group)
@@ -153,6 +155,11 @@ def update_buying_group(group_id: int, data: BuyingGroupUpdate, db: Session = De
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
     updates = data.model_dump(exclude_unset=True)
+    framework = updates.get("api_framework", group.api_framework)
+    if updates.get("order_number_submit_enabled") and framework != "bfmr":
+        raise HTTPException(400, "Automatic order-number submission is available only for BFMR")
+    if framework != "bfmr":
+        updates["order_number_submit_enabled"] = False
     changed = any(k in SCHEDULE_FIELDS and getattr(group, k) != v for k, v in updates.items())
     for k, v in updates.items():
         setattr(group, k, v)

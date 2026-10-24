@@ -216,6 +216,7 @@ type EditDraft = {
   api_username: string
   api_password: string
   tracking_submit_enabled: boolean
+  order_number_submit_enabled: boolean
   schedule_interval_minutes: number
   received_check_enabled: boolean
 }
@@ -232,6 +233,7 @@ function emptyDraft(): EditDraft {
     api_username: '',
     api_password: '',
     tracking_submit_enabled: false,
+    order_number_submit_enabled: false,
     schedule_interval_minutes: DEFAULT_INTERVAL_MINUTES,
     received_check_enabled: false,
   }
@@ -249,6 +251,7 @@ function draftFromGroup(g: BuyingGroup): EditDraft {
     api_username: g.api_username ?? '',
     api_password: g.api_password ?? '',
     tracking_submit_enabled: !!g.tracking_submit_enabled,
+    order_number_submit_enabled: !!g.order_number_submit_enabled,
     schedule_interval_minutes: g.schedule_interval_minutes ?? DEFAULT_INTERVAL_MINUTES,
     received_check_enabled: !!g.received_check_enabled,
   }
@@ -349,6 +352,7 @@ export default function BuyingGroups() {
         tracking_submit_enabled: supportsTrackingSubmit(draft.api_framework)
           ? draft.tracking_submit_enabled
           : false,
+        order_number_submit_enabled: draft.api_framework === 'bfmr' && draft.order_number_submit_enabled,
         schedule_interval_minutes: draft.schedule_interval_minutes,
         received_check_enabled: supportsCheckReceiving(draft.api_framework) && draft.received_check_enabled,
       })
@@ -757,6 +761,17 @@ export default function BuyingGroups() {
                           </p>
                         </div>
                       )}
+                      {draft.api_framework === 'bfmr' && (
+                        <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
+                          <label className="inline-flex items-center gap-2 text-sm text-ink">
+                            <input type="checkbox" checked={draft.order_number_submit_enabled}
+                              onChange={(e) => setDraft((d) => ({ ...d, order_number_submit_enabled: e.target.checked }))}
+                              disabled={saving || !groupSubmissionsEnabled} className="rounded border-brand-300" />
+                            <span>Auto-submit order numbers after import</span>
+                          </label>
+                          <p className="text-xs text-ink-muted">Registers unique product matches after saving. Uncertain matches need review. Existing orders require an explicit scan.</p>
+                        </div>
+                      )}
                       {supportsCheckReceiving(draft.api_framework) && (
                         <div className="rounded-lg border border-brand-100 dark:border-gray-600 px-3 py-2 space-y-2">
                           <label className="inline-flex items-center gap-2 text-sm text-ink">
@@ -833,6 +848,12 @@ export default function BuyingGroups() {
                           {checkingPayments === g.id ? 'Checking payments…' : 'Check payments'}
                         </button>
                         <Link className="underline" to={`/payments/review?group=${g.id}`}>Payment review</Link>
+                      </div>
+                    )}
+                    {g.api_framework === 'bfmr' && (
+                      <div className="flex items-center gap-3 text-xs text-ink-muted">
+                        <span>Order numbers: {!groupSubmissionsEnabled ? 'disabled in this environment' : g.order_number_submit_enabled ? 'automatic after import' : 'off'}</span>
+                        <Link className="underline" to={`/bfmr-order-review?group=${g.id}`}>Order number review</Link>
                       </div>
                     )}
                     {supportsTrackingSubmit(g.api_framework) && (

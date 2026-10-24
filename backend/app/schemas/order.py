@@ -70,6 +70,7 @@ class OrderRead(OrderBase, TimestampsMixin):
     order_payments: list[OrderPaymentMethodRead] = []
     # Internal: read from the ORM object, excluded from responses (has_invoice is exposed instead).
     invoice_pdf_path: str | None = Field(default=None, exclude=True)
+    bfmr_order_tasks: list["BfmrOrderTaskRead"] = []
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -104,5 +105,7 @@ class OrderListPage(BaseModel):
     audit_findings: dict[int, list[DuplicateAuditFinding]] = {}
 
 
+from app.schemas.bfmr_orders import BfmrOrderTaskRead  # noqa: E402
 from app.schemas.item import ItemCreateNested  # noqa: E402
 OrderCreate.model_rebuild()
+OrderRead.model_rebuild()

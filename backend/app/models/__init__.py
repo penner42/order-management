@@ -7,6 +7,7 @@ from app.models.payment_method_store_earnings import PaymentMethodStoreEarnings
 from app.models.store import Store, StoreAccount
 from app.models.order import Order, OrderPaymentMethod
 from app.models.item import Item
+from app.models.bfmr_order_task import BfmrOrderTask
 from app.models.shipment import Shipment, ShipmentItem
 from app.models.payment import Payment, PaymentLineItem
 from app.models.portal import Portal
@@ -30,6 +31,7 @@ __all__ = [
     "Order",
     "OrderPaymentMethod",
     "Item",
+    "BfmrOrderTask",
     "Shipment",
     "ShipmentItem",
     "Payment",

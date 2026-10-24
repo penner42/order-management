@@ -43,6 +43,7 @@ class BuyingGroupBase(BaseModel):
     api_username: str | None = None
     api_password: str | None = None
     tracking_submit_enabled: bool = False
+    order_number_submit_enabled: bool = False
     schedule_interval_minutes: int = Field(default=DEFAULT_INTERVAL_MINUTES, ge=1, le=525600, strict=True)
     received_check_enabled: bool = False
 
@@ -93,6 +94,7 @@ class BuyingGroupCreate(BuyingGroupBase):
 
 
 class BuyingGroupUpdate(BaseModel):
+    order_number_submit_enabled: bool = False
     name: str | None = None
     aliases: list[str] | None = None
     api_framework: ApiFramework | None = None

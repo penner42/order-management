@@ -265,6 +265,7 @@ def _materialize_orders(
         joinedload(Order.store),
         joinedload(Order.store_account),
         joinedload(Order.buying_group),
+        selectinload(Order.bfmr_order_tasks),
         selectinload(Order.items).selectinload(Item.payment_line_items).joinedload(PaymentLineItem.payment),
         selectinload(Order.order_payments).joinedload(OrderPaymentMethod.payment_method),
     )
@@ -489,6 +490,8 @@ def create_order(data: OrderCreate, db: Session = Depends(get_db), current_user:
             **it.model_dump(exclude={"order_id"}),
         )
         db.add(item)
+    from app.bfmr_orders import enqueue_order
+    enqueue_order(db, order)
     db.commit()
     db.refresh(order)
     return order
@@ -554,6 +557,12 @@ def update_order(order_id: int, data: OrderUpdate, db: Session = Depends(get_db)
                 amount=pm.get("amount"),
             )
             db.add(opm)
+    from app.bfmr_orders import enqueue_order
+    if "buying_group_id" in payload and order.buying_group_id and not order.imported_from_store:
+        from app.bfmr_orders import retailer
+        if order.status == "imported" and order.store and retailer(order.store.name) in {"amazon", "walmart", "costco"}:
+            order.imported_from_store = retailer(order.store.name)
+    enqueue_order(db, order)
     db.commit()
     db.refresh(order)
     return order

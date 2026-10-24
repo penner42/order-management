@@ -11,6 +11,7 @@ from app.routers import (
     auth,
     users,
     buying_groups,
+    bfmr_orders,
     rewards,
     payment_methods,
     payments,
@@ -101,6 +102,7 @@ app.include_router(admin.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(buying_groups.router, prefix="/api")
+app.include_router(bfmr_orders.router, prefix="/api")
 app.include_router(rewards.router, prefix="/api")
 app.include_router(payment_methods.router, prefix="/api")
 app.include_router(payments.router, prefix="/api")

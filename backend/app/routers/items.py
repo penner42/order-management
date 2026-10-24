@@ -31,6 +31,7 @@ from app.utils.buying_group_apis.submit_tracking import (
     tracking_number_for_item,
 )
 from app.utils.dates import to_date_only
+from app.bfmr_orders import enqueue_order
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,15 @@ _ITEM_DATE_FIELDS = frozenset({
 })
 
 router = APIRouter(prefix="/items", tags=["items"])
+
+
+def _refresh_bfmr_tasks(db, order_ids):
+    db.flush()
+    for order_id in set(order_ids):
+        order = db.get(Order, order_id)
+        if order:
+            db.expire(order, ["items"])
+            enqueue_order(db, order)
 
 
 @router.get("", response_model=list[ItemRead])
@@ -68,6 +78,7 @@ def _normalize_item_dates(data: dict) -> dict:
 def create_item(data: ItemCreate, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     item = Item(**_normalize_item_dates(data.model_dump()))
     db.add(item)
+    _refresh_bfmr_tasks(db, [item.order_id])
     db.commit()
     db.refresh(item)
     return item
@@ -123,6 +134,7 @@ def bulk_update_items(
         ):
             newly_submitted.append(item)
         updated.append(item)
+    _refresh_bfmr_tasks(db, [item.order_id for item in updated])
     db.commit()
     for item in updated:
         db.refresh(item)
@@ -208,6 +220,7 @@ def bulk_delete_items(
         raise HTTPException(status_code=409, detail="Cannot delete lines linked to a payment. Update the payment on the Payments page first.")
     for item in items:
         db.delete(item)
+    _refresh_bfmr_tasks(db, [item.order_id for item in items])
     db.commit()
     return None
 
@@ -224,6 +237,7 @@ def split_item(item_id: int, data: ItemSplitRequest, db: Session = Depends(get_d
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     new_item = split_item_record(db, item, data)
+    _refresh_bfmr_tasks(db, [item.order_id])
     db.commit()
     db.refresh(item)
     db.refresh(new_item)
@@ -319,11 +333,12 @@ def submit_item_tracking(
         if matched:
             display_id, api_id = matched
     for it in items_to_mark:
+        item_display, item_api = result.submission_ids_by_item.get(it.id, (display_id, api_id))
         mark_item_submitted(
             it,
             when=now,
-            submission_id=display_id,
-            submission_api_id=api_id,
+            submission_id=item_display,
+            submission_api_id=item_api,
         )
     db.commit()
     for it in items_to_mark:
@@ -414,6 +429,7 @@ def update_item(item_id: int, data: ItemUpdate, db: Session = Depends(get_db), _
             setattr(item, k, to_date_only(v) if v is not None else None)
         else:
             setattr(item, k, v)
+    _refresh_bfmr_tasks(db, [item.order_id])
     db.commit()
     db.refresh(item)
     return item
@@ -427,5 +443,6 @@ def delete_item(item_id: int, db: Session = Depends(get_db), _: User = Depends(g
     if item.payment_line_items:
         raise HTTPException(status_code=409, detail="Cannot delete a line linked to a payment. Update the payment on the Payments page first.")
     db.delete(item)
+    _refresh_bfmr_tasks(db, [item.order_id])
     db.commit()
     return None

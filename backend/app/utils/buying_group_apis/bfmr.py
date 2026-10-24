@@ -107,6 +107,32 @@ class BfmrSubmitResult:
     submission_ids: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
 
 
+def retailer_identifiers(row: BfmrTrackerRow) -> list[tuple[str, str]]:
+    links = row.raw.get("retailer_links")
+    if not isinstance(links, list):
+        return []
+    return [
+        (str(link.get("retailer") or "").strip().casefold(), str(link.get("identifier_id") or "").strip().casefold())
+        for link in links if isinstance(link, dict) and link.get("retailer") and link.get("identifier_id")
+    ]
+
+
+def create_purchase(*, base_url: str | None, api_key: str, api_secret: str,
+                    reserve_id: str, order_no: str, qty: int) -> dict[str, Any]:
+    """Register one purchase; callers reconcile a fresh tracker read before retrying."""
+    require_group_submissions_enabled()
+    if not api_key.strip() or not api_secret.strip():
+        raise ValueError("BFMR API key and secret are required")
+    if not reserve_id.strip() or not order_no.strip() or isinstance(qty, bool) or not isinstance(qty, int) or qty < 1:
+        raise ValueError("Reservation, order number and positive integer quantity are required")
+    return _post_tracker_data(
+        base_url=base_url or DEFAULT_BASE_URL, api_key=api_key, api_secret=api_secret,
+        tracker_data=[{"reserve_id": reserve_id, "order_no": order_no, "qty": qty,
+                       "purchase_id": None, "shipment_id": None, "tracking_number": None}],
+        timeout_seconds=30.0,
+    )
+
+
 def resolve_base_url(base_url: str | None) -> str:
     base = (base_url or "").strip().rstrip("/")
     if not base:
@@ -573,6 +599,7 @@ def _post_tracker_data(
     tracker_data: list[dict[str, Any]],
     timeout_seconds: float,
 ) -> dict[str, Any]:
+    require_group_submissions_enabled()
     url = f"{resolve_base_url(base_url)}{MY_TRACKER_PATH}"
     body = json.dumps({"tracker_data": tracker_data}).encode("utf-8")
     headers = _auth_headers(api_key=api_key, api_secret=api_secret)

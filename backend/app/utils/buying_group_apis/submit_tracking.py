@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Sequence
 
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload, object_session
 
 from app.submission_policy import require_group_submissions_enabled
 from app.models import BuyingGroup, Item, Order, ShipmentItem
@@ -249,6 +249,7 @@ class SubmitResult:
     """Normalized result from any buying-group tracking submit."""
 
     message: str
+    submission_ids_by_item: dict[int, tuple[str | None, str | None]] = field(default_factory=dict)
     affected: int | None = None
     item_ids: list[int] = field(default_factory=list)
     # tracking number -> (display_id, api_id)
@@ -599,6 +600,13 @@ def submit_item_tracking_to_group(
         )
     if framework == "bfmr":
         store_order = (order.store_order_number or "").strip()
+        db = object_session(item)
+        if db is not None:
+            from app.bfmr_orders import submit_tracking
+            result = submit_tracking(db, group, [(it, ord_, tracking) for it, ord_ in pairs])
+            if not result.item_ids:
+                raise ValueError(result.message)
+            return result
         if not store_order:
             raise ValueError("Order has no store order number to match a BFMR purchase")
         purchases = _fetch_bfmr_purchases_needing_tracking(group)
@@ -960,6 +968,7 @@ def batch_submit_pending_trackings(
     item_ids = [item.id for item, _, _ in pending]
     tracking_numbers = [tracking for *_, tracking in pending]
     submission_ids_by_tracking: dict[str, tuple[str | None, str | None]] = {}
+    submission_ids_by_item: dict[int, tuple[str | None, str | None]] = {}
     # item_id -> tracking for applying ids after submit
     item_tracking: dict[int, str] = {item.id: tracking for item, _order, tracking in pending}
 
@@ -1067,70 +1076,15 @@ def batch_submit_pending_trackings(
                 if sid
             }
         elif framework == "bfmr":
-            base_url = group.base_url
-            api_key = str(group.api_username)
-            api_secret = str(group.api_password)
-            purchases_by_order = bfmr_api.index_purchases_needing_tracking_by_order(
-                bfmr_api.list_purchases_needing_tracking(
-                    base_url=base_url,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                ).rows
+            from app.bfmr_orders import submit_tracking
+            linked_result = submit_tracking(db, group, pending)
+            tracking_numbers = list(dict.fromkeys(tn for item, _order, tn in pending if item.id in linked_result.item_ids))
+            return BatchSubmitResult(
+                buying_group_id=buying_group_id, buying_group_name=group_name,
+                submitted_count=len(linked_result.item_ids), shipped_count=shipped_count,
+                missing_tracking_count=missing_tracking, tracking_numbers=tracking_numbers,
+                message=linked_result.message,
             )
-            entries, matched_pending, skip_notes = _aggregate_bfmr_entries(
-                pending, purchases_by_order
-            )
-            if not entries:
-                skip_msg = "; ".join(skip_notes) if skip_notes else (
-                    f"No matching BFMR purchases needing tracking "
-                    f"({shipped_count} shipped item(s) with tracking)."
-                )
-                return BatchSubmitResult(
-                    buying_group_id=buying_group_id,
-                    buying_group_name=group_name,
-                    shipped_count=shipped_count,
-                    missing_tracking_count=missing_tracking,
-                    message=skip_msg,
-                )
-            tracking_numbers = [e.tracking_number for e in entries]
-            item_ids = [item.id for item, _order, _tn in matched_pending]
-            item_tracking = {
-                item.id: tracking for item, _order, tracking in matched_pending
-            }
-            api_result = bfmr_api.submit_trackings(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                trackings=entries,
-            )
-            message = api_result.message
-            if skip_notes:
-                message = f"{message}\n" + "\n".join(skip_notes) if message else "\n".join(skip_notes)
-            ok_tns = {tn.casefold() for tn in api_result.succeeded}
-            if ok_tns and api_result.failed:
-                item_ids = [
-                    item.id
-                    for item, _order, tracking in matched_pending
-                    if (tracking or "").strip().casefold() in ok_tns
-                ]
-            if api_result.failed and not item_ids:
-                raise RuntimeError(api_result.message or "BFMR tracking submit failed")
-            # Enrich submission ids with my_tracker_id when we still have the purchase.
-            submission_ids_by_tracking = {}
-            for tn, (display, api) in (api_result.submission_ids or {}).items():
-                submission_ids_by_tracking[tn] = (display, api)
-            for entry in entries:
-                tn = entry.tracking_number
-                if tn.casefold() not in ok_tns:
-                    continue
-                purchase = purchases_by_order.get(entry.order_no.casefold())
-                display = None
-                if purchase is not None:
-                    display = (purchase.my_tracker_id or purchase.purchase_id or "").strip() or None
-                api = (entry.purchase_id or "").strip() or None
-                if tn not in submission_ids_by_tracking or display:
-                    prev = submission_ids_by_tracking.get(tn, (None, None))
-                    submission_ids_by_tracking[tn] = (display or prev[0], api or prev[1])
         else:
             return BatchSubmitResult(
                 buying_group_id=buying_group_id,
@@ -1148,7 +1102,7 @@ def batch_submit_pending_trackings(
             .all()
         )
         for item in items_to_mark:
-            display_id, api_id = _ids_for_tracking(
+            display_id, api_id = submission_ids_by_item.get(item.id) or _ids_for_tracking(
                 submission_ids_by_tracking, item_tracking.get(item.id)
             )
             mark_item_submitted(

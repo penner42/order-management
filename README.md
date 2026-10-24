@@ -469,6 +469,39 @@ order-management/
 └── README.md
 ```
 
+### BFMR order-number registration
+
+BFMR groups have a separate **Auto-submit order numbers after import** setting,
+off by default. When enabled in an environment that permits group submissions,
+saved imports assigned to that BFMR group queue purchase registration immediately
+after commit, independently of the tracking interval. Assigning an imported order
+to BFMR later also queues it. Personal orders and canceled/returning units are excluded.
+
+Amazon ASINs, Walmart product IDs, and Costco item numbers are retained from imports
+and matched against the retailer identifiers in BFMR's My Tracker. Only a unique
+active commitment with enough quantity is selected automatically. Shipment slices
+are aggregated by product, and a commitment can be fulfilled across several orders.
+Order numbers register purchases; this does not mark items as tracking-submitted.
+
+Open **Order number review** on the BFMR buying-group card to inspect status,
+refresh commitments, allocate quantities manually across commitments, or retry
+reconciliation. Orders also link to this queue beside their buying-group selector.
+Enabling the setting does not scan historical orders: use **Scan existing BFMR
+orders** explicitly. Older imports without retained product IDs require manual
+allocation unless re-imported with product identifiers.
+
+Submission intents and resulting purchase IDs persist across restarts. Retries
+reconcile My Tracker before another write; uncertain outcomes stay in review.
+Retry intervals increase from one minute to at most fifteen minutes, with review
+after five failed attempts. Registered quantity, product, order-number, or account
+changes require review; automatic remote correction and cancellation are not supported.
+Tracking uses the saved product/purchase allocations, including multiple products
+sharing one retailer order or tracking number.
+
+Migration 081 adds product metadata and the durable queue without enabling any
+existing group. Verify an active reservation read-only before first enabling live
+registration, since the initial account inspection contained only historical rows.
+
 ### Group submissions in development
 
 The development Compose configuration sets `GROUP_SUBMISSIONS_ENABLED=false`.

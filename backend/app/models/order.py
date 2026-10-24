@@ -30,6 +30,7 @@ class Order(Base):
     insurance_cost = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
     notes = Column(String(2000), nullable=True)
     invoice_pdf_path = Column(String(500), nullable=True)  # saved store invoice PDF (relative to invoice dir)
+    imported_from_store = Column(String(50), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -39,6 +40,7 @@ class Order(Base):
     buying_group = relationship("BuyingGroup", back_populates="orders")
     items = relationship("Item", back_populates="order", cascade="all, delete-orphan")
     order_payments = relationship("OrderPaymentMethod", back_populates="order", cascade="all, delete-orphan")
+    bfmr_order_tasks = relationship("BfmrOrderTask", cascade="all, delete-orphan", passive_deletes=True)
 
 
 class OrderPaymentMethod(Base):

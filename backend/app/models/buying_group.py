@@ -24,6 +24,7 @@ class BuyingGroup(Base):
     api_password = Column(String(500), nullable=True)  # login password / BFMR API-SECRET
     # Interval schedules use persisted UTC run times, staggered across groups.
     tracking_submit_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    order_number_submit_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
     schedule_interval_minutes = Column(Integer, nullable=False, default=360, server_default="360")
     schedule_next_run_at = Column(DateTime(timezone=True), nullable=True)
     tracking_submit_cron = Column(
