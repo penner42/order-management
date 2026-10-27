@@ -565,3 +565,11 @@ replacement. Before changing any rows, the app saves the current database under
 To recover that file, use `docker compose cp backend:/data/invoices/database-backups/<filename> ./<filename>`
 and select it in the import control. Import never removes database, invoice, or
 browser profile volumes. Existing migrations are retained.
+
+Development sets `SCHEDULED_JOBS_ENABLED=false` in Docker Compose. This environment
+switch prevents the scheduler from starting and blocks scheduled store imports,
+buying-group receiving/submission jobs, Monarch checks, and BFMR retries even when
+the database has enabled or overdue schedules. Manual actions remain available
+subject to their existing permissions and group-submission policy. The production
+Compose override explicitly sets `SCHEDULED_JOBS_ENABLED=true`. The application
+default is disabled; deployments outside Compose must opt in to scheduled jobs.

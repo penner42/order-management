@@ -413,7 +413,7 @@ def check_buying_group_receiving(
 
 def run_scheduled_tracking_submit(group_id: int) -> bool:
     """Run a scheduled tracking submit for one buying group. Returns True if started."""
-    if not settings.group_submissions_enabled:
+    if not settings.scheduled_jobs_enabled or not settings.group_submissions_enabled:
         return False
     db = SessionLocal()
     try:
@@ -646,6 +646,8 @@ def _execute_received_check(
 
 
 def run_scheduled_received_check(group_id: int) -> bool:
+    if not settings.scheduled_jobs_enabled:
+        return False
     db = SessionLocal()
     try:
         group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
@@ -671,6 +673,8 @@ def run_scheduled_received_check(group_id: int) -> bool:
 
 def run_scheduled_group(group_id: int) -> bool:
     """One interval per group: submit first, then receive, when each is enabled."""
+    if not settings.scheduled_jobs_enabled:
+        return False
     db = SessionLocal()
     try:
         group = claim_group_job(db, group_id)

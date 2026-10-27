@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Explicit production opt-in; production snapshots cannot enable submissions.
     group_submissions_enabled: bool = False
     database_import_enabled: bool = False
+    scheduled_jobs_enabled: bool = False
 
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/order_management"

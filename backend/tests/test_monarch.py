@@ -27,6 +27,9 @@ from app.browser_automation.scheduler import list_due_profile_jobs
 
 class MonarchTests(unittest.TestCase):
     def setUp(self):
+        schedules = patch("app.config.settings.scheduled_jobs_enabled", True)
+        schedules.start()
+        self.addCleanup(schedules.stop)
         self.engine = create_engine("sqlite:///:memory:")
         with self.engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA foreign_keys=ON")

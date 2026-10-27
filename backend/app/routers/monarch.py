@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth import get_current_user
+from app.config import settings
 from app.database import SessionLocal, get_db
 from app.models import BrowserProfile, BuyingGroup, Payment, User, MonarchConnection, MonarchDeposit, MonarchConfirmation, MonarchPaymentReceipt
 from app.monarch import (PACIFIC, confirm_receipt, deposit_evidence, next_daily_check, payment_choice,
@@ -163,6 +164,8 @@ async def run_check(profile_id, job_id, start, end):
 
 
 async def scheduled_tick():
+    if not settings.scheduled_jobs_enabled:
+        return
     db = SessionLocal()
     try:
         connection = db.get(MonarchConnection, 1)

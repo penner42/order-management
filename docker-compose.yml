@@ -25,6 +25,7 @@ services:
     environment:
       GROUP_SUBMISSIONS_ENABLED: "false"
       DATABASE_IMPORT_ENABLED: "true"
+      SCHEDULED_JOBS_ENABLED: "false"
       DATABASE_URL: postgresql://postgres:postgres@db:5432/order_management
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}

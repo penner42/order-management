@@ -377,7 +377,7 @@ def process_task(db, task, group):
 
 
 def worker_tick():
-    if not settings.group_submissions_enabled:
+    if not settings.scheduled_jobs_enabled or not settings.group_submissions_enabled:
         return
     with SessionLocal() as db:
         ids = [row.id for row in db.query(BfmrOrderTask).join(BuyingGroup, BuyingGroup.id == BfmrOrderTask.buying_group_id)

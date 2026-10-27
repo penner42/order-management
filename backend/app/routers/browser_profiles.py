@@ -26,6 +26,7 @@ from app.browser_automation.session_manager import (
 )
 from app.browser_automation.walmart_import import run_walmart_import
 from app.database import SessionLocal, get_db
+from app.config import settings
 from app.models import (
     BrowserImportLog,
     BrowserProfile,
@@ -972,6 +973,8 @@ async def start_import(
 
 async def start_scheduled_import(profile_id: int, *, mode: str, max_pages: int) -> bool:
     """Start a due scheduled job. Returns False if the profile is busy / missing."""
+    if not settings.scheduled_jobs_enabled:
+        return False
     db = SessionLocal()
     try:
         from app.browser_automation.schedules import claim_profile_job

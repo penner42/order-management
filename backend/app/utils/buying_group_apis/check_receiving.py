@@ -2797,9 +2797,18 @@ def _check_receiving_buyinggroup(
     def choices(item, trackings, received=False):
         candidates = []
         seen = set()
+        shipment_lot_ids = set()
+        order = item.order
+        walmart_order_number = (
+            (order.store_order_number or "").strip().casefold()
+            if order.store and (order.store.name or "").strip().casefold() == "walmart"
+            else ""
+        )
         for tn in trackings:
             for lot in lots_by_tn.get(tn.casefold(), []):
                 lid = lot["lot_id"]
+                if tn.casefold() != walmart_order_number:
+                    shipment_lot_ids.add(lid)
                 if lid not in seen:
                     seen.add(lid)
                     candidates.append(lot)
@@ -2817,6 +2826,12 @@ def _check_receiving_buyinggroup(
                   if (score := _score_item_to_lot(item, lot)) is not None]
         if not ranked:
             return []
+        # The Walmart order number spans packages/products. Use it only when
+        # no eligible product is found through a shipment tracking identifier.
+        shipment_ranked = [(score, lot) for score, lot in ranked
+                           if lot["lot_id"] in shipment_lot_ids]
+        if shipment_ranked:
+            ranked = shipment_ranked
         ranked.sort(key=lambda pair: pair[0], reverse=True)
         best_score, best = ranked[0]
         # Identical products across receipts share demand; different products

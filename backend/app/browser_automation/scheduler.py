@@ -5,6 +5,7 @@ import asyncio
 import logging
 
 from app.database import SessionLocal
+from app.config import settings
 from app.browser_automation.schedules import list_due_profile_jobs
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,8 @@ _lock = asyncio.Lock()
 
 
 async def _tick() -> None:
+    if not settings.scheduled_jobs_enabled:
+        return
     # Import here to avoid circular imports at module load.
     from app.routers.browser_profiles import start_scheduled_import
     from app.buying_group_schedules import list_due_group_ids
@@ -84,6 +87,9 @@ async def _loop() -> None:
 
 def start_scheduler() -> None:
     global _task
+    if not settings.scheduled_jobs_enabled:
+        logger.info("Scheduled jobs are disabled in this environment")
+        return
     if _task is not None and not _task.done():
         return
     _task = asyncio.create_task(_loop(), name="browser-automation-scheduler")

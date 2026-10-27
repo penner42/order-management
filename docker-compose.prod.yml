@@ -2,6 +2,7 @@ services:
   backend:
     environment:
       GROUP_SUBMISSIONS_ENABLED: "true"
+      SCHEDULED_JOBS_ENABLED: "true"
   cloudflared:
     image: cloudflare/cloudflared:latest
     command: tunnel --no-autoupdate run

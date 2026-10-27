@@ -39,6 +39,9 @@ def tracker(*, rid="opaque+RID==", pid=None, qty=5, sku="ASIN1", retailer="Amazo
 
 class BfmrOrderNumberTests(unittest.TestCase):
     def setUp(self):
+        schedules = patch.object(settings, "scheduled_jobs_enabled", True)
+        schedules.start()
+        self.addCleanup(schedules.stop)
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.factory = sessionmaker(bind=self.engine)
@@ -476,7 +479,7 @@ class BfmrWorkerConcurrencyTests(unittest.TestCase):
                 remote[0].qty -= kw["qty"]
                 remote.append(tracker(pid=f"P{len(remote)}", qty=kw["qty"], status="purchased", order_no=kw["order_no"]))
                 return {}
-            with patch.object(settings, "group_submissions_enabled", True), patch.object(service, "SessionLocal", sessions), \
+            with patch.object(settings, "scheduled_jobs_enabled", True), patch.object(settings, "group_submissions_enabled", True), patch.object(service, "SessionLocal", sessions), \
                     patch.object(service, "fetch_rows", side_effect=lambda group: remote), \
                     patch.object(bfmr, "create_purchase", side_effect=create) as post, \
                     patch("urllib.request.urlopen", side_effect=AssertionError("No network in tests")):

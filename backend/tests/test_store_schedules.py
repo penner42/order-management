@@ -17,6 +17,9 @@ from app.schemas.browser_profile import BrowserProfileScheduleUpdate
 
 class StoreScheduleTests(unittest.TestCase):
     def setUp(self):
+        schedules = patch("app.config.settings.scheduled_jobs_enabled", True)
+        schedules.start()
+        self.addCleanup(schedules.stop)
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.db = sessionmaker(bind=self.engine, autoflush=False)()
