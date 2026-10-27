@@ -2,13 +2,13 @@
 import json
 import os
 import subprocess
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
 from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.admin_bootstrap import ensure_admin_user
@@ -18,6 +18,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import User
 from app.schemas.user import UserRead, UserCreate, UserUpdate
+from app.utils.database_transfer import snapshot, encode, restore
 
 
 def _backups_dir() -> str:
@@ -27,33 +28,6 @@ def _backups_dir() -> str:
     backups_dir = os.path.join(repo_root, "backups")
     os.makedirs(backups_dir, exist_ok=True)
     return backups_dir
-
-# Tables in export order (parents before children) for backup
-_BACKUP_TABLES = [
-    "users",
-    "buying_groups",
-    "rewards",
-    "payment_methods",
-    "stores",
-    "store_accounts",
-    "orders",
-    "shipments",
-    "items",
-    "order_payment_methods",
-    "shipment_items",
-    "payments",
-    "payment_line_items",
-    "ignored_zip_codes",
-]
-
-
-def _json_serializer(obj):
-    """Serialize datetime, date, Decimal for JSON."""
-    if isinstance(obj, (datetime, date)):
-        return obj.isoformat()
-    if isinstance(obj, Decimal):
-        return str(obj)
-    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -176,24 +150,51 @@ def download_backup(
     _: User = Depends(require_admin),
 ):
     """Export all tables as a JSON backup file (admin only)."""
-    backup = {}
-    for table in _BACKUP_TABLES:
-        try:
-            result = db.execute(text(f'SELECT * FROM "{table}"'))
-            rows = result.fetchall()
-            columns = result.keys()
-            backup[table] = [dict(zip(columns, row)) for row in rows]
-        except Exception:
-            backup[table] = []
-    content = json.dumps(backup, indent=2, default=_json_serializer)
-    buffer = BytesIO(content.encode("utf-8"))
-    buffer.seek(0)
+    with db.get_bind().connect().execution_options(isolation_level="REPEATABLE READ") as connection:
+        with connection.begin():
+            connection.execute(text("SET TRANSACTION READ ONLY"))
+            content = encode(snapshot(connection))
+    buffer = BytesIO(content)
     filename = f"order-management-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
     return StreamingResponse(
         buffer,
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/database-transfer")
+def database_transfer_options(_: User = Depends(require_admin)):
+    return {"import_enabled": settings.database_import_enabled}
+
+
+@router.post("/import")
+def import_database(
+    file: UploadFile,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Replace a development database with a complete export, atomically."""
+    if not settings.database_import_enabled:
+        raise HTTPException(status_code=403, detail="Database import is disabled in this environment.")
+    content = file.file.read(256 * 1024 * 1024 + 1)
+    if len(content) > 256 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Database export exceeds the 256 MiB import limit.")
+    try:
+        payload = json.loads(content)
+        bind = db.get_bind()
+        # Release the auth query's read lock before locking every table for replacement.
+        db.rollback()
+        with bind.begin() as connection:
+            result = restore(connection, payload, os.path.join(settings.invoice_dir, "database-backups"))
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except SQLAlchemyError:
+        # SQL errors may contain imported account credentials in query parameters.
+        raise HTTPException(status_code=400, detail="Import failed database validation. Existing data was preserved.") from None
+    except OSError:
+        raise HTTPException(status_code=503, detail="Could not save the pre-import backup. Existing data was preserved.") from None
+    return result
 
 
 @router.post("/create-backup")

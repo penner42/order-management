@@ -539,3 +539,29 @@ expressions such as specific weekdays or month days.
 The production Compose override sets `GROUP_SUBMISSIONS_ENABLED=true`. Deployments
 that do not use that override must explicitly set this variable on the backend
 to allow submissions. No database migration is needed.
+
+### Copy production data into development
+
+In **Admin > Database**, choose **Export database** on production, then select that
+JSON file and choose **Import database** in development. Confirm **Replace database**
+to replace development data. After import, sign in with an administrator account
+from the imported database. Deploy this version to production before exporting;
+legacy JSON backups omitted tables and are not accepted for import.
+
+Exports include every application table, receipt caches, users, password hashes,
+and integration credentials. Keep export files private. Both environments must
+have the same Alembic migration revision and table columns. Invoice PDFs and
+browser session files live outside PostgreSQL and are not included or replaced.
+
+Import is admin-only and requires `DATABASE_IMPORT_ENABLED=true`. Docker Compose
+sets it for development; production defaults to disabled. Group submissions remain
+controlled by the environment's `GROUP_SUBMISSIONS_ENABLED` setting. Import disables
+buying-group, store-browser, and Monarch schedules; enable them manually if needed.
+
+Imports accept JSON files up to 256 MiB, validate their structure before replacement,
+and replace data in one PostgreSQL transaction. A failed import rolls back the
+replacement. Before changing any rows, the app saves the current database under
+`INVOICE_DIR/database-backups/before-import-*.json` on the persistent invoice volume.
+To recover that file, use `docker compose cp backend:/data/invoices/database-backups/<filename> ./<filename>`
+and select it in the import control. Import never removes database, invoice, or
+browser profile volumes. Existing migrations are retained.

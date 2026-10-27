@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { api, getStoredToken } from '../api/client'
+import { api, getStoredToken, setStoredToken } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { AlertDialog } from '../components/AlertDialog'
 import type { User, UserRole } from '../api/types'
@@ -19,6 +19,10 @@ export default function Admin() {
   const [formRole, setFormRole] = useState<UserRole>('user')
   const [showResetConfirm, setShowResetConfirm] = useState(false)
   const [alertMessage, setAlertMessage] = useState<string | null>(null)
+  const [importEnabled, setImportEnabled] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const [showImportConfirm, setShowImportConfirm] = useState(false)
+  const [transferring, setTransferring] = useState(false)
   const [upsTesting, setUpsTesting] = useState(false)
 
   async function loadUsers() {
@@ -34,6 +38,9 @@ export default function Admin() {
 
   useEffect(() => {
     loadUsers()
+    api.get<{ import_enabled: boolean }>('/admin/database-transfer')
+      .then(data => setImportEnabled(data.import_enabled))
+      .catch(err => setAlertMessage(err instanceof Error ? err.message : 'Failed to load database options'))
   }, [])
 
   function startCreate() {
@@ -118,6 +125,7 @@ export default function Admin() {
   }
 
   async function handleDownloadBackup() {
+    setTransferring(true)
     try {
       const token = getStoredToken()
       const res = await fetch('/api/admin/backup', {
@@ -139,6 +147,33 @@ export default function Admin() {
       URL.revokeObjectURL(url)
     } catch (err) {
       setAlertMessage(err instanceof Error ? err.message : 'Failed to download backup')
+    } finally {
+      setTransferring(false)
+    }
+  }
+
+  async function handleImportDatabase() {
+    setShowImportConfirm(false)
+    if (!importFile) return
+    setTransferring(true)
+    try {
+      const body = new FormData()
+      body.append('file', importFile)
+      const token = getStoredToken()
+      const response = await fetch('/api/admin/import', {
+        method: 'POST', body,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.detail || 'Database import failed')
+      setStoredToken(null)
+      setAlertMessage(`${result.message} Imported ${result.rows_imported} rows. Previous database saved as ${result.backup_filename}.`)
+      setImportFile(null)
+      setUsers([])
+    } catch (err) {
+      setAlertMessage(err instanceof Error ? err.message : 'Database import failed')
+    } finally {
+      setTransferring(false)
     }
   }
 
@@ -295,6 +330,7 @@ export default function Admin() {
           <button
             type="button"
             onClick={handleSeedDev}
+            disabled={transferring}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700"
           >
             Load sample data
@@ -302,6 +338,7 @@ export default function Admin() {
           <button
             type="button"
             onClick={handleCreateBackup}
+            disabled={transferring}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700"
           >
             Create backup
@@ -309,23 +346,43 @@ export default function Admin() {
           <button
             type="button"
             onClick={handleDownloadBackup}
+            disabled={transferring}
             className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700"
           >
-            Download backup
+            {transferring ? 'Transferring…' : 'Export database'}
           </button>
           <button
             type="button"
             onClick={() => setShowResetConfirm(true)}
+            disabled={transferring}
             className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700"
           >
             Empty database
           </button>
         </div>
         <p className="mt-2 text-sm text-ink-muted dark:text-gray-400">
-          Load sample orders, stores, items, and related data for development (idempotent—safe to run again). Create a pg_dump backup in the backups folder,
-          download a JSON backup of all data, or permanently delete all orders, shipments, stores, and other data. Admin user is recreated from environment
-          after reset. Reset cannot be undone.
+          Export a complete database snapshot to copy production data into development. Exports include account credentials and receipt caches;
+          invoice files and browser session files are stored separately.
         </p>
+        {importEnabled && (
+          <div className="mt-4 space-y-2">
+            <label className="block text-sm text-ink dark:text-gray-200">
+              Database export file (JSON, up to 256 MiB)
+              <input type="file" accept=".json,application/json" disabled={transferring}
+                onChange={e => setImportFile(e.target.files?.[0] ?? null)}
+                className="block mt-2 text-sm" />
+            </label>
+            <button type="button" disabled={!importFile || transferring}
+              onClick={() => setShowImportConfirm(true)}
+              className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-60">
+              Import database
+            </button>
+            <p className="text-sm text-ink-muted dark:text-gray-400">
+              Import replaces this database and saves a backup first. Scheduled jobs start disabled.
+              Both environments must use the same database version. Sign in again with an imported administrator account afterward.
+            </p>
+          </div>
+        )}
       </section>
 
       <section>
@@ -354,10 +411,21 @@ export default function Admin() {
         onConfirm={handleResetDatabase}
         onCancel={() => setShowResetConfirm(false)}
       />
+      <ConfirmDialog
+        open={showImportConfirm}
+        message={`Replace this database with ${importFile?.name ?? 'the selected export'}? All current data will be replaced. A backup will be saved first. You will need to sign in with an imported administrator account.`}
+        confirmLabel="Replace database"
+        danger
+        onConfirm={handleImportDatabase}
+        onCancel={() => setShowImportConfirm(false)}
+      />
       <AlertDialog
         open={alertMessage !== null}
         message={alertMessage ?? ''}
-        onClose={() => setAlertMessage(null)}
+        onClose={() => {
+          setAlertMessage(null)
+          if (!getStoredToken()) window.location.href = '/login'
+        }}
       />
     </div>
   )
