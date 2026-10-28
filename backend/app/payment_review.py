@@ -8,7 +8,8 @@ import hashlib
 import json
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
 from app.models import (BuyingGroup, Item, Order, Payment, PaymentLineItem,
     PaymentSource, PaymentReview, PaymentCoverage, PaymentCorrection)
 from app.payment_providers import PaymentFetch, provider_for
@@ -549,6 +550,34 @@ def review_token(db, review, content):
     receipts = [(s.id, s.revision, s.present) for rid in receipt_ids if (s := db.get(PaymentSource, rid))]
     return digest({"version": review.version, "source": review.source.revision, "present": review.source.present,
         "content": content, "items": items, "receipts": receipts})
+
+
+def allocation_evidence(db, group_id):
+    """Load only editor choices, with a fixed query count as group history grows."""
+    if db.get(BuyingGroup, group_id) is None:
+        raise HTTPException(404, "Buying group not found")
+    items = db.query(Item).join(Order).filter(Order.buying_group_id == group_id).options(
+        joinedload(Item.order).joinedload(Order.store),
+        joinedload(Item.order).joinedload(Order.buying_group),
+    ).order_by(Item.id).all()
+    allocated = defaultdict(lambda: ZERO)
+    # Aggregate separately so multiple corrections cannot multiply line amounts.
+    for model in (PaymentLineItem, PaymentCorrection):
+        totals = db.query(model.item_id, func.sum(model.amount)).join(
+            Item, model.item_id == Item.id).join(Order).filter(
+                Order.buying_group_id == group_id).group_by(model.item_id)
+        for item_id, amount in totals:
+            allocated[item_id] += amount
+    receipts = db.query(PaymentSource.id, PaymentSource.external_id, PaymentSource.present,
+        PaymentSource.payload).filter_by(buying_group_id=group_id, kind="receipt").order_by(PaymentSource.id).all()
+    return {
+        "receipts": [{"id": r.id, "external_id": r.external_id, "present": r.present,
+            "payload": {k: r.payload.get(k) for k in ("description", "amount", "quantity", "void")}}
+            for r in receipts],
+        "items": [{"id": i.id, "label": item_label(i), "quantity": i.quantity,
+            "order_id": i.order_id, "remaining": str(max(item_payable(i) - allocated[i.id], ZERO))}
+            for i in items],
+    }
 
 
 def group_view(db, group_id):

@@ -22,6 +22,11 @@ def get_group(group_id: int, db: Session = Depends(get_db)):
     return service.group_view(db, group_id)
 
 
+@router.get("/groups/{group_id}/allocation-evidence")
+def get_allocation_evidence(group_id: int, db: Session = Depends(get_db)):
+    return service.allocation_evidence(db, group_id)
+
+
 @router.post("/groups/{group_id}/refresh")
 def refresh_group(group_id: int, db: Session = Depends(get_db)):
     return sync_group(db, group_id)

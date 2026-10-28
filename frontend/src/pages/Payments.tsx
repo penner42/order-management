@@ -24,17 +24,18 @@ function PaymentCard({ payment, saved }: {payment: Payment; saved: () => Promise
   const [note, setNote] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [loadingEvidence, setLoadingEvidence] = useState(false)
   const b = payment.allocation_breakdown
   const legacy = payment.ledger_state !== 'imported'
   async function edit() {
-    setError(null); setBusy(true)
+    setError(null); setBusy(true); setLoadingEvidence(true)
     try {
-      setEvidence(await api.get<Evidence>(`/payment-review/groups/${payment.buying_group_id}`))
+      setEvidence(await api.get<Evidence>(`/payment-review/groups/${payment.buying_group_id}/allocation-evidence`))
       setAllocations(payment.source_details?.receipts.map(r => ({receipt_source_id: r.source_id, item_id: r.item_id, quantity: r.quantity, amount: r.amount})) ?? [])
       setHistorical(b?.historical_amount ?? '0'); setAdjustment(b?.adjustment_amount ?? '0')
       setNote(payment.allocation_details?.note ?? ''); setOpen(true)
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not load evidence') }
-    finally { setBusy(false) }
+    finally { setBusy(false); setLoadingEvidence(false) }
   }
   async function save(reset = false) {
     setBusy(true); setError(null)
@@ -52,7 +53,7 @@ function PaymentCard({ payment, saved }: {payment: Payment; saved: () => Promise
         <p className="text-sm text-ink-muted">{payment.source_details?.source?.status ?? 'Legacy'} · Requested {date(payment.payment_requested_at)} · Sent {date(payment.payment_sent_at)}</p>
         <p className="text-sm">{payment.monarch_receipt ? `${payment.receipt_conflict ? 'Receipt conflict' : 'Received'} · ${payment.monarch_receipt.account_name} · ${date(payment.monarch_receipt.posted_date)}` : 'Awaiting Monarch deposit link'}</p>
       </div>
-      {!legacy && <button className={button} disabled={busy} onClick={edit}>Adjust allocations</button>}
+      {!legacy && <button className={button} disabled={busy} onClick={edit}>{loadingEvidence ? 'Loading allocations…' : 'Adjust allocations'}</button>}
     </div>
     {b && <p className="text-sm">Linked items {money(b.linked_amount)} · Corrections {money(b.correction_amount)} · Historical {money(b.historical_amount)} · Adjustments {money(b.adjustment_amount)} · Unresolved {money(b.unresolved_amount)}</p>}
     {payment.allocation_manual && <p className="text-sm text-ink-muted">Manual allocation edits retained{payment.allocation_details?.note ? `: ${payment.allocation_details.note}` : ''}</p>}

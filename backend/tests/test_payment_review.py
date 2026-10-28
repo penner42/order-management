@@ -8,7 +8,7 @@ from unittest.mock import patch
 from urllib.request import Request
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import (BuyingGroup, Store, Order, Item, Payment, PaymentLineItem,
@@ -78,6 +78,68 @@ class PaymentReviewTests(unittest.TestCase):
     def edit(self, review, **changes):
         content = {**review["content"], **changes}
         return service.save_review(self.db, review["id"], ReviewEdit(version=review["version"], content=content))
+
+    def test_allocation_evidence_preserves_signed_balances_and_group_boundaries(self):
+        self.confirm(self.load()["reviews"][0])
+        source = self.db.query(PaymentSource).filter_by(kind="receipt").one()
+        payment = self.db.query(Payment).one()
+        # Multiple signed corrections must not multiply the original allocation.
+        for amount in ("-15", "5"):
+            self.db.add(PaymentCorrection(receipt_source_id=source.id, payment_id=payment.id,
+                origin_payment_id=payment.id, item_id=self.item.id, amount=Decimal(amount),
+                explanation="Receipt correction", source_revision=source.revision))
+        source.present = False
+        source.payload = {**source.payload, "void": True}
+        other = BuyingGroup(name="Other", api_framework="parsefile")
+        self.db.add(other); self.db.flush()
+        other_order = Order(store_id=self.store.id, buying_group_id=other.id)
+        self.db.add(other_order); self.db.flush()
+        self.db.add(Item(order_id=other_order.id, quantity=1, price_sold=999))
+        self.db.add(PaymentSource(buying_group_id=other.id, provider="parsefile", kind="receipt",
+            external_id="other", payload={}, revision="other"))
+        self.db.commit()
+        view = service.allocation_evidence(self.db, self.group.id)
+        self.assertEqual([i["id"] for i in view["items"]], [self.item.id])
+        self.assertEqual(Decimal(view["items"][0]["remaining"]), Decimal("10"))
+        self.assertEqual(view["items"][0]["label"], service.item_label(self.item))
+        self.assertEqual([r["id"] for r in view["receipts"]], [source.id])
+        self.assertFalse(view["receipts"][0]["present"])
+        self.assertTrue(view["receipts"][0]["payload"]["void"])
+        self.assertEqual(set(view), {"items", "receipts"})
+
+    def test_allocation_evidence_query_count_is_constant(self):
+        group_id, store_id = self.group.id, self.store.id
+
+        def measured():
+            self.db.expunge_all()
+            statements = []
+            def record(conn, cursor, statement, parameters, context, executemany):
+                statements.append(statement)
+            event.listen(self.engine, "before_cursor_execute", record)
+            try:
+                view = service.allocation_evidence(self.db, group_id)
+            finally:
+                event.remove(self.engine, "before_cursor_execute", record)
+            return len(statements), view
+
+        before, _ = measured()
+        for n in range(30):
+            order = Order(store_id=store_id, buying_group_id=group_id)
+            self.db.add(order); self.db.flush()
+            self.db.add(Item(order_id=order.id, quantity=1, price_sold=100))
+            self.db.add(PaymentSource(buying_group_id=group_id, provider="parsefile", kind="receipt",
+                external_id=f"scale-{n}", payload={"amount": "100"}, revision=str(n)))
+        self.db.commit()
+        after, view = measured()
+        self.assertEqual(len(view["items"]), 31)
+        self.assertEqual(len(view["receipts"]), 30)
+        self.assertEqual(before, after)
+        self.assertLessEqual(after, 5)
+
+    def test_allocation_evidence_missing_group(self):
+        with self.assertRaises(HTTPException) as error:
+            service.allocation_evidence(self.db, -1)
+        self.assertEqual(error.exception.status_code, 404)
 
     def test_import_confirm_idempotency_and_sent_not_received(self):
         first = self.load()["reviews"][0]

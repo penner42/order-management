@@ -21,13 +21,36 @@ const evidence = {
   items: [{id: 3,label: 'Example local item',quantity: 1,order_id: 4,remaining: '0'}],
 }
 
+test('Allocation evidence shows progress and can be retried after a failed load', async ({app}) => {
+  await app.route('**/api/payments', r => r.fulfill({json: [fixture()]}))
+  await app.route('**/api/payment-review/capabilities', r => r.fulfill({json: [capability]}))
+  let release = () => {}
+  const pending = new Promise<void>(resolve => { release = resolve })
+  let requests = 0
+  await app.route('**/api/payment-review/groups/170001/allocation-evidence', async r => {
+    if (++requests === 1) {
+      await pending
+      await r.fulfill({status: 503, json: {detail: 'Evidence temporarily unavailable'}})
+    } else await r.fulfill({json: evidence})
+  })
+  await app.goto('/payments')
+  await app.getByRole('button', {name: 'Adjust allocations'}).click()
+  await expect(app.getByRole('button', {name: 'Loading allocations…'})).toBeDisabled()
+  release()
+  await expect(app.getByRole('alert')).toContainText('Evidence temporarily unavailable')
+  await app.getByRole('button', {name: 'Adjust allocations'}).click()
+  await expect(app.getByLabel('Historical amount', {exact: true})).toBeVisible()
+  await expect(app.getByRole('alert')).toHaveCount(0)
+  expect(requests).toBe(2)
+})
+
 for (const width of [1280,390]) {
   test(`Imported payments allow explained historical allocation at width ${width}`,async ({app}) => {
     await app.setViewportSize({width,height: 900})
     const payment = fixture()
     await app.route('**/api/payments',route => route.fulfill({json:[payment]}))
     await app.route('**/api/payment-review/capabilities',route => route.fulfill({json:[capability]}))
-    await app.route('**/api/payment-review/groups/170001',route => route.fulfill({json:evidence}))
+    await app.route('**/api/payment-review/groups/170001/allocation-evidence',route => route.fulfill({json:evidence}))
     await app.route('**/api/payments/99/allocations',async route => {
       const body = route.request().postDataJSON()
       expect(body.version).toBe(1)
@@ -67,7 +90,7 @@ test('Reset uses the displayed allocation version', async ({app}) => {
   const payment=fixture();payment.allocation_manual=true
   await app.route('**/api/payments',r=>r.fulfill({json:[payment]}))
   await app.route('**/api/payment-review/capabilities',r=>r.fulfill({json:[capability]}))
-  await app.route('**/api/payment-review/groups/170001',r=>r.fulfill({json:evidence}))
+  await app.route('**/api/payment-review/groups/170001/allocation-evidence',r=>r.fulfill({json:evidence}))
   await app.route('**/api/payments/99/allocations/reset',async r=>{
     expect(r.request().postDataJSON()).toEqual({version:1})
     payment.allocation_manual=false;payment.allocation_version++
@@ -94,7 +117,7 @@ test('Legacy records have a separate view and do not inflate source totals', asy
 test('Stale allocation errors keep the unsaved form visible', async ({app}) => {
   await app.route('**/api/payments',r=>r.fulfill({json:[fixture()]}))
   await app.route('**/api/payment-review/capabilities',r=>r.fulfill({json:[capability]}))
-  await app.route('**/api/payment-review/groups/170001',r=>r.fulfill({json:evidence}))
+  await app.route('**/api/payment-review/groups/170001/allocation-evidence',r=>r.fulfill({json:evidence}))
   await app.route('**/api/payments/99/allocations',r=>r.fulfill({status:409,json:{detail:'Payment changed. Reload before adjusting allocations.'}}))
   await app.goto('/payments')
   await app.getByRole('button',{name:'Adjust allocations'}).click()
