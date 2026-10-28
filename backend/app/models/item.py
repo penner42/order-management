@@ -129,7 +129,7 @@ class Item(Base):
     @property
     def payment_received_at(self):
         pli = self.payment_line_items[0] if self.payment_line_items else None
-        return pli.payment.payment_received_at if pli and pli.payment else None
+        return pli.payment.effective_received_at if pli and pli.payment else None
 
     @property
     def payment_id(self):

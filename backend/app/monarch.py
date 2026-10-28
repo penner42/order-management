@@ -37,6 +37,8 @@ from app.payment_totals import payment_amount
 def payment_fingerprint(payment):
     value = {
         "id": payment.id, "group": payment.buying_group_id, "reference": payment.payment_id,
+        "source_amount": str(payment.source_amount), "ledger_state": payment.ledger_state,
+        "allocation_version": payment.allocation_version,
         "bonus": str(payment.payment_bonus),
         "requested": str(payment.payment_requested_at), "sent": str(payment.payment_sent_at),
         "received": str(payment.payment_received_at),
@@ -50,7 +52,7 @@ def payment_choice(payment):
     return {"id": payment.id, "reference": payment.payment_id, "buying_group_id": payment.buying_group_id,
             "buying_group_name": payment.buying_group.name if payment.buying_group else "Unknown group",
             "amount": str(payment_amount(payment)), "fingerprint": payment_fingerprint(payment),
-            "received_at": payment.payment_received_at.isoformat() if payment.payment_received_at else None,
+            "received_at": payment.effective_received_at.isoformat() if payment.effective_received_at else None,
             "date": (payment.payment_sent_at or payment.payment_requested_at).date().isoformat()}
 
 
@@ -126,7 +128,7 @@ def lock_editable_payment(db: Session, payment_id: int):
     return payment
 
 
-def confirm_receipt(db, deposit_id, data, reviewer_id):
+def confirm_receipt(db, deposit_id, data, reviewer_id, *, commit=True):
     connection = require_connection(db, lock=True)
     deposit = db.query(MonarchDeposit).filter_by(id=deposit_id).with_for_update().populate_existing().first()
     if not deposit:
@@ -146,8 +148,11 @@ def confirm_receipt(db, deposit_id, data, reviewer_id):
     for payment in payments:
         db.expire(payment, ["line_items", "corrections"])
         if (db.get(MonarchPaymentReceipt, payment.id)
-                or payment_fingerprint(payment) != expected[payment.id] or payment_amount(payment) <= 0):
+                or payment_fingerprint(payment) != expected[payment.id] or payment_amount(payment) <= 0
+                or payment.ledger_state != "imported"):
             raise HTTPException(409, "A payment changed or is already linked to Monarch. Refresh the review.")
+        if not source_receipt_eligible(db, payment):
+            raise HTTPException(409, "Source payment is missing, void, or has unsupported status/currency.")
     if sum((payment_amount(p) for p in payments), Decimal(0)) != deposit.amount:
         raise HTTPException(409, "Selected whole payments must exactly equal the deposit.")
     confirmation = MonarchConfirmation(deposit_id=deposit.id, active_deposit_id=deposit.id,
@@ -160,7 +165,8 @@ def confirm_receipt(db, deposit_id, data, reviewer_id):
     for payment in payments:
         payment.payment_received_at = received
         db.add(MonarchPaymentReceipt(payment_id=payment.id, confirmation_id=confirmation.id))
-    db.commit()
+    if commit:
+        db.commit()
     return {"confirmation_id": confirmation.id}
 
 
@@ -172,11 +178,8 @@ def undo_receipt(db, confirmation_id, reviewer_id):
     links = db.query(MonarchPaymentReceipt).filter_by(confirmation_id=confirmation.id).all()
     ids = sorted(link.payment_id for link in links)
     payments = db.query(Payment).filter(Payment.id.in_(ids)).order_by(Payment.id).with_for_update().all()
-    previous_received = {row["id"]: row.get("received_at") for row in confirmation.evidence.get("payments", [])}
     for payment in payments:
-        previous = previous_received.get(payment.id)
-        # Older confirmations predate support for payments already marked received.
-        payment.payment_received_at = datetime.fromisoformat(previous) if previous else None
+        payment.payment_received_at = None
     for link in links:
         db.delete(link)
     confirmation.active_deposit_id = None
@@ -184,6 +187,60 @@ def undo_receipt(db, confirmation_id, reviewer_id):
     confirmation.undone_by = reviewer_id
     db.commit()
     return {"undone": True}
+
+
+def auto_confirm_receipts(db):
+    """Only globally unambiguous exact matches; ambiguous deposits also reserve their candidates."""
+    from app.schemas.monarch import MonarchConfirmRequest
+    connection = db.get(MonarchConnection, 1)
+    if not connection or not connection.selected_account_ids:
+        return 0
+    # Serialize competing scheduled/manual receipt work before computing candidates.
+    connection = require_connection(db, lock=True)
+    payments = [p for p in db.query(Payment).filter(Payment.ledger_state == "imported",
+        ~Payment.id.in_(db.query(MonarchPaymentReceipt.payment_id))) if source_receipt_eligible(db, p)]
+    deposits = db.query(MonarchDeposit).filter(MonarchDeposit.pending.is_(False),
+        MonarchDeposit.dismissed.is_(False), MonarchDeposit.amount > 0,
+        MonarchDeposit.account_id.in_(connection.selected_account_ids),
+        ~MonarchDeposit.id.in_(db.query(MonarchConfirmation.active_deposit_id).filter(
+            MonarchConfirmation.active_deposit_id.isnot(None)))).all()
+    from collections import defaultdict
+    claims = defaultdict(set)
+    options = {}
+    for deposit in deposits:
+        result = suggest_matches(deposit, payments, connection.sender_rules)
+        if result["search_truncated"]:
+            db.commit()
+            return 0  # Unknown competing combinations cannot establish uniqueness.
+        options[deposit.id] = result["suggestions"]
+        for suggestion in result["suggestions"]:
+            for pid in suggestion["payment_ids"]:
+                claims[pid].add(deposit.id)
+    count = 0
+    for deposit in deposits:
+        suggestions = options[deposit.id]
+        if len(suggestions) != 1:
+            continue
+        ids = suggestions[0]["payment_ids"]
+        if any(len(claims[pid]) != 1 for pid in ids):
+            continue
+        selections = [{"id": pid, "fingerprint": payment_fingerprint(db.get(Payment, pid))} for pid in ids]
+        data = MonarchConfirmRequest(revision=deposit.revision, payments=selections)
+        try:
+            confirm_receipt(db, deposit.id, data, None, commit=False)
+            count += 1
+        except HTTPException:
+            db.rollback()
+            return 0
+    db.commit()
+    return count
+
+
+def source_receipt_eligible(db, payment):
+    from app.models import PaymentReview
+    review = db.query(PaymentReview).filter_by(payment_id=payment.id).first()
+    return not review or (review.source.present and not review.source.payload.get("void")
+        and review.source.payload.get("status_known", True) and review.source.payload.get("currency") == "USD")
 
 
 def upsert_deposits(db, rows, start_date, end_date, selected_accounts):

@@ -1,5 +1,5 @@
 """Payment and payment line item models."""
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, UniqueConstraint, Numeric
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, UniqueConstraint, Numeric, JSON, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -16,6 +16,12 @@ class Payment(Base):
     buying_group_id = Column(Integer, ForeignKey("buying_groups.id", ondelete="RESTRICT"), nullable=False)
     payment_id = Column(String(255), nullable=True)  # External reference; not unique
     payment_bonus = Column(Numeric(12, 2), nullable=False, server_default="0")
+    source_amount = Column(Numeric(12, 2), nullable=True)
+    ledger_state = Column(String(16), nullable=False, default="legacy", server_default="legacy")
+    allocation_manual = Column(Boolean, nullable=False, default=False, server_default="false")
+    allocation_version = Column(Integer, nullable=False, default=1, server_default="1")
+    allocation_details = Column(JSON, nullable=False, default=dict, server_default="{}")
+    sync_issues = Column(JSON, nullable=False, default=list, server_default="[]")
     payment_requested_at = Column(DateTime(timezone=True), nullable=False)
     payment_sent_at = Column(DateTime(timezone=True), nullable=True)
     payment_received_at = Column(DateTime(timezone=True), nullable=True)
@@ -31,9 +37,23 @@ class Payment(Base):
         return payment_amount(self)
 
     @property
+    def allocation_breakdown(self):
+        from app.payment_ledger import breakdown
+        return breakdown(self)
+
+    @property
+    def receipt_conflict(self):
+        from app.payment_ledger import receipt_conflict
+        return receipt_conflict(self)
+
+    @property
+    def effective_received_at(self):
+        return self.payment_received_at if self.monarch_receipt_link and not self.receipt_conflict else None
+
+    @property
     def source_details(self):
         from sqlalchemy.orm import object_session
-        from app.models.payment_import import PaymentReview, PaymentCoverage
+        from app.models.payment_import import PaymentReview, PaymentCoverage, PaymentSource
         db = object_session(self)
         if not db:
             return None
@@ -41,7 +61,14 @@ class Payment(Base):
         if not review:
             return None
         coverage = db.query(PaymentCoverage).filter_by(payment_id=self.id).all()
+        evidence = [db.get(PaymentSource, rid) for rid in review.content.get("receipt_ids", [])]
         return {"provider": review.source.provider, "external_id": review.source.external_id,
+                "revision": review.source.revision, "present": review.source.present,
+                "source": review.source.payload,
+                "receipt_evidence": [{"source_id": r.id, "external_id": r.payload["external_id"],
+                    "amount": r.payload["amount"], "quantity": r.payload.get("quantity"),
+                    "description": r.payload.get("description", ""), "created_at": r.payload.get("created_at"),
+                    "present": r.present, "details": r.payload.get("details", [])} for r in evidence if r],
                 "review_id": review.id, "receipts": [{"source_id": c.receipt_source_id,
                 "item_id": c.item_id, "amount": str(c.amount), "quantity": c.quantity,
                 "snapshot": c.snapshot} for c in coverage]}

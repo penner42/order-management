@@ -125,3 +125,33 @@ class BuyingGroupScheduleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PaymentScheduleTests(unittest.TestCase):
+    setUp = BuyingGroupScheduleTests.setUp
+    tearDown = BuyingGroupScheduleTests.tearDown
+    rebuild = BuyingGroupScheduleTests.rebuild
+
+    def test_ready_payment_only_group_gets_a_schedule(self):
+        self.a.tracking_submit_enabled=False
+        self.a.received_check_enabled=False
+        self.a.api_framework='usabg'
+        self.a.api_username='fixture'
+        self.a.api_password='fixture'
+        self.rebuild()
+        self.assertIsNotNone(self.a.schedule_next_run_at)
+        self.a.payment_sync_enabled=False
+        self.rebuild()
+        self.assertIsNone(self.a.schedule_next_run_at)
+
+    def test_scheduled_payment_sync_uses_the_shared_service(self):
+        self.a.tracking_submit_enabled=False
+        self.a.received_check_enabled=False
+        self.a.api_framework='usabg'
+        self.a.api_username='fixture'
+        self.a.api_password='fixture'
+        self.a.schedule_next_run_at=self.now
+        self.db.commit()
+        with patch.object(buying_groups,'SessionLocal',return_value=self.db), patch('app.payment_ledger.sync_group') as sync:
+            self.assertTrue(buying_groups.run_scheduled_group(self.a.id))
+            sync.assert_called_once()

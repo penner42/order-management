@@ -92,7 +92,9 @@ def _build_orders_query(
             if "payment_sent" in payment_statuses:
                 payment_filters.append(Payment.payment_sent_at.isnot(None))
             if "payment_received" in payment_statuses:
-                payment_filters.append(Payment.payment_received_at.isnot(None))
+                received_ids = [p.id for p in db.query(Payment).filter(Payment.payment_received_at.isnot(None))
+                    if p.effective_received_at is not None]
+                payment_filters.append(Payment.id.in_(received_ids))
             if payment_filters:
                 queries.append(
                     base.join(Item)

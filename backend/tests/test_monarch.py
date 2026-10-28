@@ -60,7 +60,7 @@ class MonarchTests(unittest.TestCase):
         self.engine.dispose()
 
     def payment(self, amount="30", bonus="0", days=5, group_id=None):
-        p = Payment(buying_group_id=group_id or self.group.id, payment_bonus=Decimal(bonus),
+        p = Payment(ledger_state="imported", buying_group_id=group_id or self.group.id, payment_bonus=Decimal(bonus),
             payment_requested_at=datetime(2026, 10, 10, 12, tzinfo=timezone.utc) - timedelta(days=days))
         self.db.add(p)
         self.db.flush()
@@ -142,7 +142,7 @@ class MonarchTests(unittest.TestCase):
         original = p.payment_received_at
         review = monarch.review(db=self.db, _=self.user)
         choice = next(row for row in review["payments"] if row["id"] == p.id)
-        self.assertEqual(choice["received_at"], original.isoformat())
+        self.assertIsNone(choice["received_at"])
         self.assertIn([p.id], [s["payment_ids"] for s in review["deposits"][0]["suggestions"]])
         result = self.confirm([p])
         self.db.expire_all()
@@ -152,7 +152,7 @@ class MonarchTests(unittest.TestCase):
         with self.assertRaises(HTTPException): self.confirm([p])
         undo_receipt(self.db, result["confirmation_id"], self.user.id)
         self.db.expire_all()
-        self.assertEqual(self.db.get(Payment, p.id).payment_received_at, original)
+        self.assertIsNone(self.db.get(Payment, p.id).payment_received_at)
         self.assertIn(p.id, [row["id"] for row in monarch.review(db=self.db, _=self.user)["payments"]])
 
     def test_combined_received_and_unreceived_payments_restore_their_own_dates(self):
@@ -166,7 +166,7 @@ class MonarchTests(unittest.TestCase):
         self.assertEqual(self.db.get(Payment, unpaid.id).payment_received_at.date(), self.deposit.posted_date)
         undo_receipt(self.db, result["confirmation_id"], self.user.id)
         self.db.expire_all()
-        self.assertEqual(self.db.get(Payment, paid.id).payment_received_at, original)
+        self.assertIsNone(self.db.get(Payment, paid.id).payment_received_at)
         self.assertIsNone(self.db.get(Payment, unpaid.id).payment_received_at)
 
     def test_received_date_change_after_preview_is_still_rejected(self):

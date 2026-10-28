@@ -1,6 +1,6 @@
 import { test, expect, createThroughUI } from './fixtures'
 import type { Locator, Page } from '@playwright/test'
-import type { Order, Payment, PaymentMethod, Shipment, Store } from '../../src/api/types'
+import type { Order, PaymentMethod, Shipment, Store } from '../../src/api/types'
 
 test.setTimeout(60_000)
 
@@ -203,37 +203,11 @@ test('Walmart import reviews and applies physical items without email delivery',
   await expect(app.getByRole('region', { name: `Order ${order_id}`, exact: true }).getByRole('textbox', { name: 'Description', exact: true })).toHaveValue(data.name('physical'))
 })
 
-test('payment creation and allocation edits retain bonus-inclusive totals', async ({ app, data }) => {
-  const store = await data.create('/stores', { name: data.name('payment-store') })
-  const group = await data.create('/buying-groups', { name: data.name('payment-group') })
-  await data.create('/orders', {
-    store_id: store.id, buying_group_id: group.id, store_order_number: data.name('paid-order'),
-    items: [{ description: data.name('scanned-item'), status: 'scanned', quantity: 2, price_paid: 10, price_sold: 25, scanned_at: new Date().toISOString() }],
-  })
+test('payments use group synchronization instead of manual creation', async ({ app }) => {
   await app.goto('/payments')
-  await app.getByRole('button', { name: 'Add payment', exact: true }).click()
-  const dialog = app.getByRole('dialog', { name: 'Add payment', exact: true })
-  await dialog.getByLabel('Buying group', { exact: true }).selectOption(String(group.id))
-  await dialog.getByLabel('Payment ID', { exact: true }).fill(data.name('payment'))
-  await dialog.getByLabel('Payment Bonus', { exact: true }).fill('2.50')
-  const itemRow = dialog.getByRole('row').filter({ hasText: data.name('scanned-item') })
-  await itemRow.getByRole('checkbox').check()
-  await expect(dialog).toContainText('$52.50')
-  const payment = await createThroughUI(app, '/payments', () => dialog.getByRole('button', { name: 'Create payment', exact: true }).click())
-  await expect(dialog).toHaveCount(0)
-  const row = app.getByRole('row').filter({ hasText: data.name('payment') })
-  await expect(row).toContainText('52.50')
-  await row.getByRole('button', { name: 'Edit payment', exact: true }).click()
-  const editDialog = app.getByRole('dialog', { name: 'Edit payment', exact: true })
-  await editDialog.getByRole('row').filter({ hasText: data.name('scanned-item') }).getByRole('button', { name: 'Edit allocated amount' }).click()
-  const saved = app.waitForResponse(response => response.url().includes(`/api/payments/${payment.id}/line-items/`) && response.request().method() === 'PATCH')
-  await editDialog.getByLabel('Allocated amount', { exact: true }).fill('30')
-  await editDialog.getByLabel('Allocated amount', { exact: true }).blur()
-  expect((await saved).ok()).toBeTruthy()
-  await expect(editDialog).toContainText('$32.50')
-  await app.reload()
-  await expect(row).toContainText('32.50')
-  const persisted = await data.get<Payment>(`/payments/${payment.id}`)
-  expect(persisted.line_items?.[0].amount).toBe(30)
-  expect(persisted.payment_bonus).toBe(2.5)
+  await expect(app.getByRole('heading', { name: 'Payments', exact: true })).toBeVisible()
+  await expect(app.getByRole('button', { name: 'Add payment', exact: true })).toHaveCount(0)
+  await expect(app.getByRole('link', { name: 'Monarch review', exact: true })).toBeVisible()
+  await app.getByLabel('Payment view').selectOption('legacy')
+  await expect(app.getByText('These preserved manual payments are excluded from imported totals.', { exact: false })).toBeVisible()
 })

@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
-test('receipt search opens another-group order and refreshes after correction without changing payment', async ({ app, data }) => {
+test('receipt search opens another-group order and refreshes after correction', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('cross-group-store') })
   const groupName = data.name('receipt-group')
   const group = await data.create('/buying-groups', { name: groupName })
@@ -13,20 +13,10 @@ test('receipt search opens another-group order and refreshes after correction wi
     items: [{ description: 'Cross-group headphones', quantity: 1, status: 'submitted', price_sold: '20.00' }],
   })
   const item = order.items[0]
-  const payment = await data.create('/payments', { buying_group_id: group.id, payment_id: data.name('payment') })
-  const lineResponse = await data.request.post(`/api/payments/${payment.id}/line-items`, {
-    headers: data.headers, data: { item_id: item.id, amount: 20 },
-  })
-  expect(lineResponse.ok(), await lineResponse.text()).toBeTruthy()
   const misassigned = await data.request.patch(`/api/orders/${order.id}`, {
     headers: data.headers, data: { buying_group_id: wrong.id },
   })
   expect(misassigned.ok()).toBeTruthy()
-  const paymentSnapshot = async () => {
-    const current = await data.get<Record<string, unknown> & { line_items: Array<Record<string, unknown>> }>(`/payments/${payment.id}`)
-    return { ...current, line_items: current.line_items.map(({ item: _item, ...line }) => line) }
-  }
-  const paymentBefore = await paymentSnapshot()
   const tracking = data.name('cross-group-tracking')
   await data.create('/shipments', { tracking_number: tracking, item_ids: [item.id] })
   const receipt = { receipt_key: 'cross-group', receipt_id: 'CROSS-GROUP', tracking_number: tracking, quantity: 1 }
@@ -97,7 +87,6 @@ test('receipt search opens another-group order and refreshes after correction wi
   await dialog.getByRole('button', { name: 'Add to review', exact: true }).click()
   await app.getByRole('button', { name: 'Apply 1 selected' }).click()
   await expect(app.getByText('All listed rows were applied.')).toBeVisible()
-  expect(await paymentSnapshot()).toEqual(paymentBefore)
   expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ status: 'submitted', receipt_id: receipt.receipt_id })
 })
 

@@ -142,6 +142,8 @@ async def run_check(profile_id, job_id, start, end):
         connection.profile.status = "ready"
         connection.profile.last_import_at = connection.last_check_at
         db.commit()
+        from app.monarch import auto_confirm_receipts
+        auto_confirm_receipts(db)
         update_job(job_id, status="succeeded", message=f"Checked {count} transactions" if selected else "Accounts discovered. Select receiving accounts to import deposits.", review_url="/payments/monarch")
         logger.info("Monarch check succeeded (job=%s, transactions=%s)", job_id, count)
     except (Exception, asyncio.CancelledError) as exc:
@@ -193,7 +195,7 @@ async def stop_checks():
 def review(show_all: bool = False, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     connection = require_connection(db)
     payments = db.query(Payment).options(selectinload(Payment.line_items), selectinload(Payment.corrections), selectinload(Payment.buying_group)).filter(
-        ~Payment.id.in_(db.query(MonarchPaymentReceipt.payment_id))).all()
+        Payment.ledger_state == "imported", ~Payment.id.in_(db.query(MonarchPaymentReceipt.payment_id))).all()
     active = {row.active_deposit_id: row for row in db.query(MonarchConfirmation).filter(MonarchConfirmation.active_deposit_id.isnot(None))}
     deposits = []
     for deposit in db.query(MonarchDeposit).filter(MonarchDeposit.amount > 0).order_by(MonarchDeposit.posted_date.desc(), MonarchDeposit.id.desc()).all():
@@ -205,7 +207,9 @@ def review(show_all: bool = False, db: Session = Depends(get_db), _: User = Depe
         deposits.append({**deposit_evidence(deposit), "pending": deposit.pending, "dismissed": deposit.dismissed,
             "eligible": eligible, "confirmation_id": confirmation.id if confirmation else None,
             "confirmation": confirmation.evidence if confirmation else None,
-            "evidence_changed": bool(confirmation and confirmation.evidence["deposit"]["revision"] != deposit.revision),
+            "evidence_changed": bool(confirmation and (confirmation.evidence["deposit"]["revision"] != deposit.revision
+                or any(not (payment := db.get(Payment, row["id"])) or payment.receipt_conflict
+                       for row in confirmation.evidence["payments"]))),
             **suggestions})
     return {"deposits": deposits, "payments": [payment_choice(p) for p in payments]}
 

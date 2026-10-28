@@ -37,7 +37,7 @@ class MonarchConcurrencyTests(unittest.TestCase):
                 profile = BrowserProfile(integration="monarch", retailer="monarch", status="ready")
                 db.add_all([order, profile]); db.flush()
                 item = Item(order_id=order.id, price_sold=30, quantity=1)
-                payment = Payment(buying_group_id=group.id, payment_requested_at=datetime(2026, 10, 1, 12, tzinfo=timezone.utc))
+                payment = Payment(ledger_state="imported", buying_group_id=group.id, payment_requested_at=datetime(2026, 10, 1, 12, tzinfo=timezone.utc))
                 db.add_all([item, payment]); db.flush()
                 db.add(PaymentLineItem(payment_id=payment.id, item_id=item.id, amount=30))
                 db.add(MonarchConnection(id=1, browser_profile_id=profile.id, selected_account_ids=["bank"]))
@@ -71,7 +71,7 @@ class MonarchConcurrencyTests(unittest.TestCase):
                     self.assertEqual(db.query(MonarchConfirmation).filter(MonarchConfirmation.active_deposit_id.isnot(None)).count(), 1)
                     receipt = db.get(MonarchPaymentReceipt, payment_id)
                     undo_receipt(db, receipt.confirmation_id, user_id)
-                    self.assertEqual(db.get(Payment, payment_id).payment_received_at, original_received)
+                self.assertIsNone(db.get(Payment, payment_id).payment_received_at)
         finally:
             if engine is not None:
                 engine.dispose()

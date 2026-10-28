@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { test as base, expect, type APIRequestContext, type Page, type Response } from '@playwright/test'
+import { test as base, expect, type APIRequestContext, type Page, type Request, type Response } from '@playwright/test'
 
 type Entity = { id: number }
 type Cleanup = { path: string; priority: number }
@@ -140,9 +140,26 @@ export const test = base.extend<{ data: TestData; app: Page }>({
   app: async ({ page, data }, use) => {
     // Depend on data so its authenticated session and cleanup registry are ready.
     void data
-    await page.goto('/')
-    await expect(page.getByRole('heading', { name: 'Orders', exact: true })).toBeVisible()
-    await use(page)
+    const pendingAuth = new Set<Request>()
+    const started = (request: Request) => {
+      if (new URL(request.url()).pathname === '/api/auth/me') pendingAuth.add(request)
+    }
+    const finished = (request: Request) => { pendingAuth.delete(request) }
+    page.on('request', started)
+    page.on('requestfinished', finished)
+    page.on('requestfailed', finished)
+    try {
+      await page.goto('/')
+      await expect(page.getByRole('heading', { name: 'Orders', exact: true })).toBeVisible()
+      // Development StrictMode starts two auth checks. A test navigation must not
+      // abort the second check while its old document can still clear the token.
+      await expect.poll(() => pendingAuth.size).toBe(0)
+      await use(page)
+    } finally {
+      page.off('request', started)
+      page.off('requestfinished', finished)
+      page.off('requestfailed', finished)
+    }
   },
 })
 

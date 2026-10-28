@@ -682,10 +682,16 @@ def run_scheduled_group(group_id: int) -> bool:
             return False
         submit = group.tracking_submit_enabled and settings.group_submissions_enabled
         receive = group.received_check_enabled
+        from app.buying_group_schedules import payment_enabled
+        payments = payment_enabled(group)
     finally:
         db.close()
     if submit:
         run_scheduled_tracking_submit(group_id)
     if receive:
         run_scheduled_received_check(group_id)
+    if payments:
+        from app.payment_ledger import sync_group
+        with SessionLocal() as payment_db:
+            sync_group(payment_db, group_id)
     return True

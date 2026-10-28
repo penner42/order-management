@@ -208,7 +208,7 @@ All API routes are under `/api`. Auth: send `Authorization: Bearer <token>` (fro
 - **Buying groups:** `GET/POST /api/buying-groups`, `GET/PATCH/DELETE /api/buying-groups/{id}`
 - **Rewards:** `GET/POST /api/rewards`, `GET/PATCH/DELETE /api/rewards/{id}`
 - **Payment methods:** `GET/POST /api/payment-methods`, `GET/PATCH/DELETE /api/payment-methods/{id}`, `GET /api/payment-methods/{id}/store-earnings`
-- **Payments:** `GET/POST /api/payments`, `GET/PATCH/DELETE /api/payments/{id}`, `POST /api/payments/{id}/line-items`, `DELETE /api/payments/{id}/line-items/{line_item_id}`
+- **Payments:** `GET /api/payments`, `GET /api/payments/{id}`, `PATCH /api/payments/{id}/allocations`, `POST /api/payments/{id}/allocations/reset`
 - **Stores:** `GET/POST /api/stores`, `GET/PATCH/DELETE /api/stores/{id}`, `GET/POST /api/stores/{id}/accounts`, `GET/PATCH/DELETE /api/stores/{id}/accounts/{account_id}`
 - **Store accounts:** `GET /api/store-accounts`
 - **Browser profiles:** `GET/POST /api/browser-profiles`, `DELETE /api/browser-profiles/{id}`, `POST .../login/start|done|cancel`, `POST .../import`, `GET /api/browser-profiles/jobs/{job_id}`, WebSocket `.../live?token=`
@@ -222,33 +222,45 @@ The **browser-extension** folder contains a Chrome/Firefox extension that can re
 
 ## Buying group payment imports
 
-Open **Payments → Payment review**, select a buying group, and choose **Check
-payments**. Buying Groups also has a Check payments action for supported groups.
-Providers support Parsefile, BuyingGroup.com, USABG, and Deal & Runner. Parsefile
-uses its configured HTTPS website, API token, user ID, email, and portal password;
-the other three use their existing group API username/password configuration.
-BFMR payment history is deferred. Imports only read the
-remote portal; all confirmation happens locally. No recurring import is enabled.
+Open **Payments**, select a buying group, and choose **Sync now**. Payments are
+created and updated automatically from Parsefile, BuyingGroup.com, USABG, and
+Deal & Runner. BFMR payment history remains unsupported. Sync only reads remote
+history; it never requests a payout. Group settings enable payment sync by
+default for configured providers, using the existing per-group interval and
+`SCHEDULED_JOBS_ENABLED` control (disabled in Docker development).
 
-Payment history and receipt evidence remain in a persisted review queue. Default
-coverage includes receipts after the previous payment's creation through the
-current payment's creation. Explicit receipt links from a provider take precedence.
-Review the receipt selection, match all received local items and quantities, and
-save edits before confirming. Older receipts remain visible even when no local
-order exists yet. Use Receiving or Orders to prepare missing items; payment review
-does not create orders. Window edits, allocations, explanations, and correction
-destinations survive refreshes. You can explicitly link an existing local payment
-whose allocations and bonus match the review.
+The active ledger includes payments requested or sent on/after January 1, 2026.
+The group's full amount is authoritative independently of local item coverage.
+Older purchases do not require historical orders: use an explained historical
+allocation when appropriate. Unmatched money remains unresolved until evidence
+or a manual adjustment explains it; it never becomes an automatic bonus.
+**Needs attention** collects source and allocation issues. **Legacy reconciliation**
+retains unmatched manual records separately and excludes them from imported totals.
+Unique source references and equal totals automatically adopt existing payments.
 
-Parsefile PAID maps to **Sent**, using its explicit sent/paid date. **Received**
-still requires manual or Monarch confirmation. Imported coverage is fixed after
-confirmation. Later receipt amount changes become signed corrections on a later
-payment, or remain queued until one exists. Partial carries leave the balance
-queued. To move a saved correction, remove/save it on its current draft before
-adding it elsewhere. Bonuses or fees require an explicit amount and explanation;
-unexplained differences block confirmation. Missing evidence and source payment
-changes are flagged without rewriting local payments. Historical values start
-with the first imported snapshot; earlier receipt revisions cannot be recovered.
+Clear receipt/item matches apply automatically, including partial installments,
+and are reconsidered when purchases or receiving change. **Adjust allocations**
+allows versioned, explained changes to included items, allocated amounts, historical
+portions, and signed adjustments. Manual edits survive sync; changed source or
+receipt evidence flags conflicts. **Reset to automatic matching** resumes matching.
+Source totals, identity, dates, and status cannot be edited, and manual payment
+creation/deletion is disabled through both the UI and API.
+
+Parsefile discovers annual archive sites through the authenticated portal menu.
+It reads archived activity, payments, and receiving tables with separate portal
+sessions; current API tokens are not assumed valid on archives. Annual source
+identities distinguish reused IDs and remain stable when records move into an
+archive. Unavailable archives preserve prior evidence and report incomplete history.
+
+Parsefile PAID means **Sent**. Bank receipt requires a Monarch deposit link;
+standalone received dates are not accepted. Unique exact matches under the
+configured sender/date rules link automatically only when no competing deposit
+or payment combination exists. Ambiguous deposits require manual linking in
+**Monarch review**. Source or deposit changes retain the audit link but flag a
+receipt conflict and suppress received status until the link is reconciled.
+Original receipt coverage is retained when values change; signed corrections
+carry to later payments or remain queued. Corrections affect item accounting
+without adding money twice to the group's authoritative payment total.
 
 BuyingGroup.com combines payment history with Activity, receiving receipts, and
 tracking rewards. Maximum available payments are assumed. Receipt balances carry
@@ -271,12 +283,20 @@ receipt balances. Unpaid principal is not a correction; source revisions are
 compared with the first confirmed receipt baseline. Migration `078` adds installment
 coverage without changing existing payments; downgrade refuses to discard it.
 
-Authenticated endpoints are under `/api/payment-review`: `GET /capabilities`,
-`GET /groups/{id}`, `POST /groups/{id}/refresh`, `PATCH /drafts/{id}`, and
-`POST /drafts/{id}/confirm`. Confirmation requires the displayed draft version and
-fingerprint, and commits payment metadata, allocations, and corrections together.
-Payment responses expose `total_amount`, `source_details`, and signed `corrections`;
-Monarch uses the same total and includes corrections in its confirmation fingerprint.
+Payment sync/evidence endpoints are `/api/payment-review/capabilities`,
+`GET /api/payment-review/groups/{id}`, and `POST /api/payment-review/groups/{id}/refresh`.
+The old draft save/confirm endpoints return 410. Allocation edits use
+`PATCH /api/payments/{id}/allocations`; reset uses
+`POST /api/payments/{id}/allocations/reset`. Both require `version` from the
+payment's `allocation_version`; edits include `allocations`, `historical_amount`,
+`adjustment_amount`, and an explanation in `note`. Receipt/item allocations include
+`receipt_source_id`, `item_id`, `quantity`, and decimal `amount`.
+Payment responses expose `source_amount`, `ledger_state`, `allocation_breakdown`,
+`allocation_manual`, `allocation_version`, `sync_issues`, `source_details`, and
+`receipt_conflict`. Monarch and ledger summaries use the authoritative source total.
+Migration `082` preserves existing payment/coverage/correction/deposit history and
+adopts confirmed imports with their allocations retained. Downgrade refuses to
+discard this history.
 
 To add an API or website provider, implement `PaymentProvider` in
 `backend/app/payment_providers.py`, register it in `PROVIDERS` using the group's
@@ -289,8 +309,7 @@ partial fetch and `history_complete=False` for truncated history; incomplete
 fetches never replace evidence. Keep pagination, sessions, credential handling,
 and sanitized evidence inside the adapter. New framework keys also need adding
 to the buying-group schema and framework selector. Shared matching, corrections,
-review APIs, and UI require no provider-specific changes. The fake provider tests
-demonstrate explicit receipt links and the shared confirmation contract.
+review APIs, and UI require no provider-specific changes. The provider and ledger tests cover explicit receipt links and automatic synchronization.
 
 ## Monarch payment receipts
 

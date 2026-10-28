@@ -4,6 +4,8 @@ from sqlalchemy import func
 
 
 def payment_amount(payment):
+    if payment.source_amount is not None:
+        return Decimal(payment.source_amount)
     return (sum((Decimal(li.amount) for li in payment.line_items), Decimal(0))
             + Decimal(payment.payment_bonus or 0)
             + sum((Decimal(c.amount) for c in payment.corrections), Decimal(0)))

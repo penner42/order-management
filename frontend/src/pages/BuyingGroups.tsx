@@ -219,6 +219,7 @@ type EditDraft = {
   order_number_submit_enabled: boolean
   schedule_interval_minutes: number
   received_check_enabled: boolean
+  payment_sync_enabled: boolean
 }
 
 function emptyDraft(): EditDraft {
@@ -236,6 +237,7 @@ function emptyDraft(): EditDraft {
     order_number_submit_enabled: false,
     schedule_interval_minutes: DEFAULT_INTERVAL_MINUTES,
     received_check_enabled: false,
+    payment_sync_enabled: true,
   }
 }
 
@@ -254,6 +256,7 @@ function draftFromGroup(g: BuyingGroup): EditDraft {
     order_number_submit_enabled: !!g.order_number_submit_enabled,
     schedule_interval_minutes: g.schedule_interval_minutes ?? DEFAULT_INTERVAL_MINUTES,
     received_check_enabled: !!g.received_check_enabled,
+    payment_sync_enabled: g.payment_sync_enabled ?? true,
   }
 }
 
@@ -292,7 +295,7 @@ export default function BuyingGroups() {
     setSubmitAlert(null)
     try {
       await api.post(`/payment-review/groups/${groupId}/refresh`, {})
-      navigate(`/payments/review?group=${groupId}`)
+      navigate(`/payments?group=${groupId}`)
     } catch (e) {
       setSubmitAlert(e instanceof Error ? e.message : 'Failed to check payments')
     } finally { setCheckingPayments(null) }
@@ -355,6 +358,7 @@ export default function BuyingGroups() {
         order_number_submit_enabled: draft.api_framework === 'bfmr' && draft.order_number_submit_enabled,
         schedule_interval_minutes: draft.schedule_interval_minutes,
         received_check_enabled: supportsCheckReceiving(draft.api_framework) && draft.received_check_enabled,
+        payment_sync_enabled: draft.payment_sync_enabled,
       })
       setGroups(sortGroupsByName(await api.get<BuyingGroup[]>('/buying-groups')))
       setEditing(null)
@@ -785,7 +789,11 @@ export default function BuyingGroups() {
                           </p>
                         </div>
                       )}
-                      <p className="text-xs text-ink-muted">Each run submits first, then checks receiving, when enabled. Saving schedule changes rebuilds the staggered run times for all groups.</p>
+                      {['parsefile', 'buyinggroup', 'usabg', 'dealandrunner'].includes(draft.api_framework) && <div className="space-y-2">
+                        <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={draft.payment_sync_enabled} disabled={saving} onChange={e => setDraft(d => ({...d, payment_sync_enabled: e.target.checked}))} />Automatically sync payments</label>
+                        <p className="text-xs text-ink-muted">Last payment sync: {formatLastRun(g.payment_sync_last_run_at)}{g.payment_sync_error ? ` · ${g.payment_sync_error}` : ''}</p>
+                      </div>}
+                      <p className="text-xs text-ink-muted">Each run submits, checks receiving, then syncs payments, when enabled. Saving schedule changes rebuilds the staggered run times for all groups.</p>
                     </div>
                   </div>
                 ) : (
@@ -845,9 +853,10 @@ export default function BuyingGroups() {
                           title={paymentCapabilities.find(c => c.buying_group_id === g.id)?.reason ?? undefined}
                           disabled={checkingPayments !== null || !paymentCapabilities.find(c => c.buying_group_id === g.id)?.ready}
                           className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs text-ink disabled:opacity-50">
-                          {checkingPayments === g.id ? 'Checking payments…' : 'Check payments'}
+                          {checkingPayments === g.id ? 'Syncing payments…' : 'Sync payments'}
                         </button>
-                        <Link className="underline" to={`/payments/review?group=${g.id}`}>Payment review</Link>
+                        <Link className="underline" to={`/payments?group=${g.id}`}>Payments</Link>
+                        <span>Auto-sync: {g.payment_sync_enabled ? 'on' : 'off'} · Last run: {formatLastRun(g.payment_sync_last_run_at)}{g.payment_sync_error ? ` · ${g.payment_sync_error}` : ''}</span>
                       </div>
                     )}
                     {g.api_framework === 'bfmr' && (
@@ -865,7 +874,7 @@ export default function BuyingGroups() {
                             : 'off'}
                         </span>
                         <span>Last submit: {formatLastRun(g.tracking_submit_last_run_at)}</span>
-                        {(g.tracking_submit_enabled || g.received_check_enabled) && <span>Every {g.schedule_interval_minutes ?? DEFAULT_INTERVAL_MINUTES} minutes · Next run: {formatLastRun(g.schedule_next_run_at)}</span>}
+                        {(g.tracking_submit_enabled || g.received_check_enabled || g.payment_sync_enabled) && <span>Every {g.schedule_interval_minutes ?? DEFAULT_INTERVAL_MINUTES} minutes · Next run: {formatLastRun(g.schedule_next_run_at)}</span>}
                         {supportsCheckReceiving(g.api_framework) && (
                           <span>
                             Receiving: {g.received_check_enabled ? 'on' : 'off'} · Last check:{' '}

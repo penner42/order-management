@@ -45,6 +45,7 @@ class BuyingGroupBase(BaseModel):
     tracking_submit_enabled: bool = False
     order_number_submit_enabled: bool = False
     schedule_interval_minutes: int = Field(default=DEFAULT_INTERVAL_MINUTES, ge=1, le=525600, strict=True)
+    payment_sync_enabled: bool = True
     received_check_enabled: bool = False
 
     @field_validator("aliases", mode="before")
@@ -107,6 +108,7 @@ class BuyingGroupUpdate(BaseModel):
     api_password: str | None = None
     tracking_submit_enabled: bool = False
     schedule_interval_minutes: int = Field(default=DEFAULT_INTERVAL_MINUTES, ge=1, le=525600, strict=True)
+    payment_sync_enabled: bool = True
     received_check_enabled: bool = False
 
     @field_validator("aliases", mode="before")
@@ -139,6 +141,8 @@ class BuyingGroupUpdate(BaseModel):
 class BuyingGroupRead(BuyingGroupBase):
     id: int
     user_id: int | None = None
+    payment_sync_last_run_at: datetime | None = None
+    payment_sync_error: str | None = None
     schedule_next_run_at: datetime | None = None
     tracking_submit_last_run_at: datetime | None = None
     received_check_last_run_at: datetime | None = None

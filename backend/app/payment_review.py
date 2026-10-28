@@ -151,7 +151,7 @@ def in_window(receipt, start, end):
     return boundary(end, True) and (start is None or boundary(start, False))
 
 
-def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str):
+def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str, *, automate=False):
     """A failed/partial fetch never replaces the last complete snapshot."""
     if not result.complete:
         raise HTTPException(409, "Payment fetch was incomplete. Existing review data was preserved.")
@@ -164,7 +164,7 @@ def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str)
     seen = set()
     for kind, records in (("payment", result.payments), ("receipt", result.receipts)):
         for evidence in records:
-            key = (kind, evidence.external_id)
+            key = (kind, evidence.identity_key or evidence.external_id)
             if not evidence.external_id or key in seen:
                 raise HTTPException(409, "Provider returned duplicate or missing source identities.")
             money(evidence.amount)
@@ -172,6 +172,8 @@ def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str)
                 raise HTTPException(409, "Provider returned an invalid negative source amount.")
             seen.add(key)
             payload = evidence.model_dump(mode="json")
+            if payload.get("identity_key") is None:
+                payload.pop("identity_key", None)
             if kind == "payment":
                 payload["warnings"] = list(dict.fromkeys(result.warnings + payload.get("warnings", [])))
                 payload["history_complete"] = result.history_complete
@@ -185,13 +187,25 @@ def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str)
                     if set(shares) != set(payload.get("receipt_ids") or []) or any(money(v) <= 0 for v in shares.values()):
                         raise HTTPException(409, "Provider returned invalid receipt payment shares.")
             row = index.get(key)
+            if row is None and evidence.identity_key:
+                # Adopt pre-ledger identities without changing their source/coverage primary keys.
+                old_key = (kind, evidence.external_id)
+                previous_row = index.get(old_key)
+                if previous_row and previous_row.payload.get("created_at") == payload.get("created_at"):
+                    row = index.pop(old_key)
+                    row.external_id = key[1]
+                    index[key] = row
             if row is None:
                 row = PaymentSource(buying_group_id=group_id, provider=provider_key, kind=kind, external_id=key[1])
                 db.add(row)
                 index[key] = row
-            row.payload, row.revision, row.present = payload, digest(payload), True
+            revision = digest(payload)
+            if row.revision and row.revision != revision:
+                row.revisions = list(row.revisions or []) + [{"revision": row.revision, "payload": row.payload,
+                    "at": datetime.now(timezone.utc).isoformat()}]
+            row.payload, row.revision, row.present = payload, revision, True
     for key, row in index.items():
-        if key not in seen:
+        if key not in seen and result.history_complete:
             row.present = False
     db.flush()
     payments = sorted([s for s in index.values() if s.kind == "payment" and s.present], key=order_key)
@@ -208,7 +222,7 @@ def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str)
         else:
             review.version += 1
         content = dict(review.content or {})
-        if not content.get("manual") and review.payment_id is None:
+        if not content.get("manual") and (review.payment_id is None or automate):
             content.update(receipt_ids=ids, window_start=previous.payload.get("created_at") if previous else None,
                 window_end=source.payload.get("created_at"), allocations=[], corrections=[], note="", manual=False)
         review.content = content
@@ -218,25 +232,45 @@ def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str)
     missing_ids = [s.id for s in index.values() if s.kind == "payment" and not s.present]
     for review in db.query(PaymentReview).filter(PaymentReview.source_id.in_(missing_ids)).all():
         review.version += 1
+    if automate:
+        from app.payment_ledger import reconcile_group
+        db.flush()
+        reconcile_group(db, group_id)
+        group.payment_sync_last_run_at = datetime.now(timezone.utc)
+        group.payment_sync_error = None if result.history_complete else "History is incomplete; prior evidence was preserved."
     db.commit()
+    if automate:
+        from app.monarch import auto_confirm_receipts
+        auto_confirm_receipts(db)
+        return {"buying_group_id": group_id, "last_run_at": group.payment_sync_last_run_at,
+                "error": group.payment_sync_error}
     return group_view(db, group_id)
 
 
 def group_sources(db, group_id):
+    if group_id in db.info.get("payment_sources_cache", {}):
+        return db.info["payment_sources_cache"][group_id]
     return db.query(PaymentSource).filter_by(buying_group_id=group_id).all()
 
 
 def receipt_matches(db, source):
-    items = db.query(Item).join(Order).filter(Order.buying_group_id == source.buying_group_id).all()
+    items = db.info.get("payment_items_cache", {}).get(source.buying_group_id)
+    if items is None:
+        items = db.query(Item).join(Order).filter(Order.buying_group_id == source.buying_group_id).all()
+    raw_id = source.payload.get("external_id", source.external_id)
+    collisions = any(s.kind == "receipt" and s.id != source.id and s.provider == source.provider
+        and s.payload.get("external_id") == raw_id for s in group_sources(db, source.buying_group_id))
     out = []
     for item in items:
         tokens = {(s or "").strip().casefold() for s in (item.receipt_id or "").replace(";", ",").split(",")}
-        if source.external_id.casefold() not in tokens:
+        if raw_id.casefold() not in tokens:
             continue
         # Multiple receipt IDs on one local line are ambiguous: let the user split coverage.
         if len(tokens - {""}) != 1:
             continue
         trackings = source.payload.get("tracking_numbers") or []
+        if collisions and (not item.receipt_tracking_number or item.receipt_tracking_number.casefold() not in {t.casefold() for t in trackings}):
+            continue
         if trackings and item.receipt_tracking_number and item.receipt_tracking_number.casefold() not in {t.casefold() for t in trackings}:
             continue
         out.append({"receipt_source_id": source.id, "item_id": item.id,

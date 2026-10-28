@@ -25,7 +25,7 @@ function DepositReview({ deposit, payments, refresh }: { deposit: MonarchDeposit
     <p>{deposit.posted_date} · {deposit.account_name}</p>
     <p className="break-words">{deposit.description}</p>
     {error && <p role="alert" className="text-red-700 dark:text-red-300">{error}</p>}
-    {deposit.evidence_changed && <p role="alert">Monarch evidence changed since confirmation. Review the linked receipt and undo if needed.</p>}
+    {deposit.evidence_changed && <p role="alert">Payment or deposit evidence changed since confirmation. Review the linked receipt and undo if needed.</p>}
     {deposit.confirmation_id ? <>
       <p>Confirmed payments: {deposit.confirmation?.payments.map(p => `${p.buying_group_name} ${p.reference ?? ''} (${dollars(cents(p.amount))})`).join(', ')}</p>
       <p>Receipt evidence: {deposit.confirmation?.deposit.posted_date} · {dollars(cents(deposit.confirmation?.deposit.amount ?? '0'))}</p>
@@ -75,7 +75,7 @@ export default function MonarchReview() {
   return <div className="space-y-4 text-ink dark:text-gray-100">
     <h1 className="text-2xl font-semibold">Monarch review</h1>
     <div className="flex gap-4"><Link className="underline" to="/payments">Payments</Link><Link className="underline" to="/settings/monarch">Monarch settings and checks</Link></div>
-    <p>Link posted deposits to whole payments, including payments already marked received without a Monarch link. Confirmation sets received dates to the Monarch transaction’s posted date. Selected payments must exactly equal the deposit.</p>
+    <p>Unique exact matches link automatically. Choose whole imported payments for other posted deposits; selected payments must exactly equal the deposit. Bank receipt comes from the linked deposit’s posted date.</p>
     {error && <p role="alert">{error}</p>}
     <label>Show <select className="rounded border p-2 dark:bg-gray-800 dark:border-gray-600" value={filter} onChange={e => setFilter(e.target.value)}>
       <option value="review">Awaiting review</option><option value="confirmed">Confirmed</option><option value="all">All deposits</option>

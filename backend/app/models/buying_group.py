@@ -37,6 +37,9 @@ class BuyingGroup(Base):
         String(64), nullable=False, default="0 */6 * * *", server_default="0 */6 * * *"
     )
     received_check_last_run_at = Column(DateTime(timezone=True), nullable=True)
+    payment_sync_enabled = Column(Boolean, nullable=False, default=True, server_default="true")
+    payment_sync_last_run_at = Column(DateTime(timezone=True), nullable=True)
+    payment_sync_error = Column(String(2000), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="buying_groups")

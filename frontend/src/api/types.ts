@@ -50,6 +50,9 @@ export interface BuyingGroup {
   tracking_submit_last_run_at?: string | null
   received_check_enabled?: boolean
   received_check_last_run_at?: string | null
+  payment_sync_enabled?: boolean
+  payment_sync_last_run_at?: string | null
+  payment_sync_error?: string | null
 }
 
 export interface Reward {
@@ -231,8 +234,16 @@ export interface PaymentLineItem {
 }
 
 export interface Payment {
+  source_amount?: number | null
+  ledger_state?: string
+  allocation_manual?: boolean
+  allocation_version?: number
+  allocation_details?: { allocations?: {receipt_source_id: number; item_id: number; quantity: number; amount: string}[]; note?: string }
+  allocation_breakdown?: {linked_amount: string; correction_amount: string; historical_amount: string; adjustment_amount: string; unresolved_amount: string}
+  sync_issues?: string[]
+  receipt_conflict?: boolean
   total_amount?: number
-  source_details?: { provider: string; external_id: string; review_id: number; receipts: { source_id: number; item_id: number; amount: string; quantity: number; snapshot: { external_id: string; description: string } }[] } | null
+  source_details?: { provider: string; external_id: string; review_id: number; present?: boolean; source?: {status: string; void: boolean}; receipt_evidence?: {source_id: number; external_id: string; amount: string; quantity: number | null; description: string; created_at: string | null; present: boolean}[]; receipts: { source_id: number; item_id: number; amount: string; quantity: number; snapshot: { external_id: string; description: string } }[] } | null
   corrections?: { id: number; receipt_source_id: number; origin_payment_id: number; item_id: number; amount: number; explanation: string }[]
   monarch_receipt?: { confirmation_id: number; transaction_id: string; posted_date: string; amount: string; account_name: string; merchant: string } | null
   id: number

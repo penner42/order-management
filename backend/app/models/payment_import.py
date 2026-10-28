@@ -14,6 +14,7 @@ class PaymentSource(Base):
     payload = Column(JSON, nullable=False)
     revision = Column(String(64), nullable=False)
     present = Column(Boolean, nullable=False, default=True)
+    revisions = Column(JSON, nullable=False, default=list, server_default="[]")
     __table_args__ = (UniqueConstraint("buying_group_id", "provider", "kind", "external_id", name="uq_payment_source_identity"),)
 
 

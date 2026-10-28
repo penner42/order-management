@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 class ReceiptEvidence(BaseModel):
     external_id: str
+    identity_key: str | None = None
     amount: Decimal
     currency: str = "USD"
     created_at: datetime | None = None
@@ -22,6 +23,7 @@ class ReceiptEvidence(BaseModel):
 
 class PaymentEvidence(BaseModel):
     external_id: str
+    identity_key: str | None = None
     amount: Decimal
     currency: str = "USD"
     created_at: datetime | None = None

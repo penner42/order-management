@@ -4,7 +4,15 @@ from datetime import datetime, timedelta, timezone
 from app.config import settings
 from app.models import BuyingGroup
 
-SCHEDULE_FIELDS = frozenset({"tracking_submit_enabled", "received_check_enabled", "schedule_interval_minutes"})
+SCHEDULE_FIELDS = frozenset({"tracking_submit_enabled", "received_check_enabled", "payment_sync_enabled", "schedule_interval_minutes"})
+
+
+def payment_enabled(group):
+    if not getattr(group, "payment_sync_enabled", False):
+        return False
+    from app.payment_providers import provider_for
+    provider = provider_for(group)
+    return bool(provider and provider.ready(group)[0])
 
 
 def utc(dt):
@@ -12,7 +20,7 @@ def utc(dt):
 
 
 def enabled(group):
-    return group.received_check_enabled or (group.tracking_submit_enabled and settings.group_submissions_enabled)
+    return payment_enabled(group) or group.received_check_enabled or (group.tracking_submit_enabled and settings.group_submissions_enabled)
 
 
 def stagger_groups(groups, now):
@@ -20,7 +28,7 @@ def stagger_groups(groups, now):
     active = []
     for group in sorted(groups, key=lambda group: group.id):
         group.schedule_next_run_at = None
-        if group.tracking_submit_enabled or group.received_check_enabled:
+        if group.tracking_submit_enabled or group.received_check_enabled or payment_enabled(group):
             active.append(group)
     if not active:
         return
@@ -37,7 +45,7 @@ def rebuild_schedules(db, now=None):
 def list_due_group_ids(db, now=None):
     now = now or datetime.now(timezone.utc)
     rows = db.query(BuyingGroup).order_by(BuyingGroup.id).all()
-    if any((g.tracking_submit_enabled or g.received_check_enabled) and g.schedule_next_run_at is None for g in rows):
+    if any(enabled(g) and g.schedule_next_run_at is None for g in rows):
         rebuild_schedules(db, now)
         db.commit()
     return [g.id for g in rows if enabled(g) and g.schedule_next_run_at is not None
