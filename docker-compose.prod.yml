@@ -5,6 +5,8 @@ services:
       SCHEDULED_JOBS_ENABLED: "true"
   cloudflared:
     image: cloudflare/cloudflared:latest
+    deploy:
+      replicas: ${CF_TUNNEL_REPLICAS:-1}
     command: tunnel --no-autoupdate run
     environment:
       - TUNNEL_TOKEN=${CF_TOKEN}

@@ -20,6 +20,14 @@ containers. Production is deployed separately.
 On a fresh checkout, copy `.env.sample` to `.env` and set the admin credentials.
 Existing checkouts can keep their `.env` and data volumes.
 
+The Cloudflare tunnel is defined in `docker-compose.prod.yml`. Set
+`CF_TUNNEL_REPLICAS=0` in `.env` to disable its container, or
+`CF_TUNNEL_REPLICAS=1` to enable it (requires `CF_TOKEN`). Apply the setting with
+`docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d` on the
+deployment that uses the production override. Setting it to `0` also removes an
+existing tunnel container when that command runs. If the variable is absent,
+the production override defaults to one tunnel container.
+
 ```bash
 docker compose up -d --build --wait
 ```
