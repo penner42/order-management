@@ -116,7 +116,6 @@ const COSTCO_BULK_PORTS = new Set();
 const AMAZON_BULK_PORTS = new Set();
 
 const AMAZON_ORDER_DETAIL_STORAGE_KEY = "amazonOrderDetail";
-const AMAZON_ACCOUNT_EMAIL_STORAGE_KEY = "amazonAccountEmail";
 const AMAZON_CONTENT_SCRIPT_FILES = [
   "lib/amazon.js",
   "stores/amazon/selectors.js",
@@ -536,7 +535,7 @@ function normalizeAmazonOrderPayloadFallback(raw, sourceUrl, accountEmail) {
     customer: {
       email: (() => {
         const raw = coerceString(accountEmail);
-        return raw && isPlausibleCachedAmazonEmail(raw) ? raw : null;
+        return raw && isPlausibleAmazonEmail(raw) ? raw : null;
       })(),
     },
     shippingAddress,
@@ -1181,7 +1180,7 @@ async function clearAmazonDetailStorage() {
   });
 }
 
-function isPlausibleCachedAmazonEmail(email) {
+function isPlausibleAmazonEmail(email) {
   const am = globalThis.OrderManagerAmazon;
   if (am && typeof am.isPlausibleAccountEmail === "function") {
     return am.isPlausibleAccountEmail(email);
@@ -1191,35 +1190,6 @@ function isPlausibleCachedAmazonEmail(email) {
   const domain = value.toLowerCase().split("@")[1] || "";
   if (!domain || /service|naecp|\.prod\./i.test(domain)) return false;
   return true;
-}
-
-async function getAmazonAccountEmailAsync(cookieStoreId) {
-  const containerKey = cookieStoreId ? String(cookieStoreId) : "default";
-  return await new Promise((resolve) => {
-    try {
-      chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (s) => {
-        const row = s && s[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY];
-        if (!row || !row.email) {
-          resolve(null);
-          return;
-        }
-        const email = String(row.email).trim() || null;
-        if (!email || !isPlausibleCachedAmazonEmail(email)) {
-          resolve(null);
-          return;
-        }
-        const rowContainer = row.cookieStoreId ? String(row.cookieStoreId) : "default";
-        if (rowContainer === containerKey) {
-          resolve(email);
-          return;
-        }
-        // Same-origin fallback when container-specific cache is unavailable.
-        resolve(email);
-      });
-    } catch {
-      resolve(null);
-    }
-  });
 }
 
 function touchServiceWorker() {
@@ -1648,51 +1618,9 @@ async function requestAmazonDetailFromTab(
     break;
   }
 
-  try {
-    const remaining = Math.max(0, deadline - Date.now());
-    const stored = await waitForAmazonDetailCaptured(orderId, Math.max(8000, remaining), port, lastError);
-    return { url: stored.url || detailUrl, payload: stored.payload };
-  } catch (e) {
-    if (listSummary && listSummary.orderId) {
-      const merged = mergeAmazonListSummary({ orderId: String(listSummary.orderId) }, listSummary);
-      if (merged && merged.orderId) {
-        return { url: detailUrl, payload: merged };
-      }
-    }
-    throw e;
-  }
-}
-
-function mergeAmazonListSummary(detailPayload, listSummary) {
-  const detail =
-    detailPayload && typeof detailPayload === "object" ? { ...detailPayload } : { orderId: null };
-  const summary = listSummary && typeof listSummary === "object" ? listSummary : null;
-  if (!summary) return detail;
-
-  if (!detail.orderId && summary.orderId) detail.orderId = String(summary.orderId);
-  if (!detail.orderDate && summary.orderDate) detail.orderDate = summary.orderDate;
-  if (!detail.status && summary.status) detail.status = summary.status;
-  if (!detail.detailUrl && summary.detailUrl) detail.detailUrl = summary.detailUrl;
-
-  if ((!detail.items || detail.items.length === 0) && Array.isArray(summary.items) && summary.items.length > 0) {
-    detail.items = summary.items.map((it) => ({
-      asin: it && it.asin ? String(it.asin) : null,
-      name: it && it.name ? String(it.name) : null,
-      productUrl: it && it.productUrl ? String(it.productUrl) : null,
-      quantity: 1,
-      unitPrice: null,
-      lineTotal: null,
-    }));
-  }
-
-  if (detail.totals == null || typeof detail.totals !== "object") {
-    detail.totals = { subtotal: null, grandTotal: null, orderDiscount: null };
-  }
-  if (detail.totals.grandTotal == null && summary.totalAmount != null) {
-    detail.totals.grandTotal = summary.totalAmount;
-  }
-
-  return detail;
+  const remaining = Math.max(0, deadline - Date.now());
+  const stored = await waitForAmazonDetailCaptured(orderId, Math.max(8000, remaining), port, lastError);
+  return { url: stored.url || detailUrl, payload: stored.payload };
 }
 
 function extractAmazonOrderIdFromPayload(payload) {
@@ -2719,8 +2647,8 @@ function attachAmazonBulkPortHandlers(port) {
         emailResp && emailResp.success === true && emailResp.email
           ? String(emailResp.email).trim()
           : null;
-      if (!accountEmail || !isPlausibleCachedAmazonEmail(accountEmail)) {
-        accountEmail = await getAmazonAccountEmailAsync(cookieStoreId);
+      if (!accountEmail || !isPlausibleAmazonEmail(accountEmail)) {
+        accountEmail = null;
       }
 
       const sourceOrigin = (() => {
@@ -2853,14 +2781,9 @@ function attachAmazonBulkPortHandlers(port) {
             let payload = null;
             if (detailMsg && detailMsg.success === true && detailMsg.order && detailMsg.order.orderId) {
               payload = detailMsg.order;
-            } else if (summary && summary.orderId) {
-              const merged = mergeAmazonListSummary({ orderId: String(summary.orderId) }, summary);
-              if (merged && merged.orderId) {
-                payload = merged;
-              }
             }
 
-            if (!payload || !payload.orderId) {
+            if (!payload || String(payload.orderId) !== orderId) {
               throw new Error(
                 detailMsg && detailMsg.error
                   ? String(detailMsg.error)
@@ -2868,7 +2791,6 @@ function attachAmazonBulkPortHandlers(port) {
               );
             }
 
-            if (!accountEmail) accountEmail = await getAmazonAccountEmailAsync(cookieStoreId);
             const body = normalizeAmazonOrderPayloadSafe(
               payload,
               detailUrl,

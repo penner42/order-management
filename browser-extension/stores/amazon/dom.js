@@ -8,6 +8,9 @@
   const ORDER_DETAIL_LINK_SELECTOR =
     'a[href*="order-details"], a[href*="orderID="], a[href*="orderId="]'
   const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
+  const RECOMMENDATION_ROOT =
+    '[id*="recommend" i], [class*="recommend" i], [data-component*="recommend" i], ' +
+    '[aria-label*="recommend" i], [id^="sims-"], [id^="similarities"], [id*="sponsored" i]'
   const ORDER_DATE_RE =
     /(?:ordered on|order placed|placed on)\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})/i
 
@@ -99,6 +102,7 @@
     const scope = root && root.querySelectorAll ? root : document
     try {
       return Array.from(scope.querySelectorAll(PRODUCT_LINK_SELECTOR))
+        .filter((link) => !link.closest(RECOMMENDATION_ROOT))
     } catch {
       return []
     }
@@ -800,12 +804,17 @@
     }
 
     containers = containers.filter(
-      (el, _idx, arr) => !arr.some((other) => other !== el && other.contains(el))
+      (el, _idx, arr) => !el.closest(RECOMMENDATION_ROOT) &&
+        !arr.some((other) => other !== el && other.contains(el))
     )
 
     if (containers.length === 0) {
       const seen = new Set()
-      root.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"], a[href*="/gp/aw/d/"]').forEach((link) => {
+      queryProductLinks(root).forEach((link) => {
+        // Generic grids also contain recommendations. Require an order item or
+        // purchased-items/shipment boundary before using a product-link fallback.
+        const boundary = link.closest('[data-component="purchasedItems"], .shipment, .delivery-box')
+        if (!boundary || !(root === boundary || root.contains(boundary))) return
         let parent =
           link.closest('.yohtmlc-item, .item-box') ||
           link.closest('.a-fixed-left-grid, .a-row')
@@ -876,6 +885,8 @@
     const seen = seenKeys || new Set()
     const scope = root && root.querySelectorAll ? root : document
     queryProductLinks(scope).forEach((link) => {
+      const boundary = link.closest('[data-component="purchasedItems"], .shipment, .delivery-box')
+      if (!boundary || !(scope === boundary || scope.contains(boundary))) return
       const href = link.getAttribute('href') || ''
       const asin = extractAsinFromUrl(href)
       if (!asin || seen.has(asin)) {
@@ -1236,9 +1247,9 @@
    * Post-parse cleanup used by extension capture + browser-automation import.
    * Drops product-support false positives and attaches real ship-track links.
    */
-  function repairShipmentTracking(parsed) {
+  function repairShipmentTracking(parsed, scope) {
     if (!parsed || !Array.isArray(parsed.shipments)) return parsed
-    attachMissingTrackingToShipments(document, parsed.shipments)
+    attachMissingTrackingToShipments(scope || document, parsed.shipments)
     if (parsed.shipments.length === 1 && parsed.shipments[0] && parsed.shipments[0].shipmentId) {
       const onlyId = parsed.shipments[0].shipmentId
       ;(parsed.items || []).forEach((item) => {
@@ -1449,11 +1460,12 @@
       : ['img.pmts-payment-credit-card-instrument-logo']
     ).join(',')
     root.querySelectorAll(logoSelectors).forEach((img) => {
+      if (img.closest(RECOMMENDATION_ROOT)) return
       const alt = coerceString(img.getAttribute('alt'))
       let last4 = null
       let parent = img.parentElement
       for (let i = 0; i < 5 && parent; i++) {
-        const fromParent = last4FromText(textOf(parent)) || (/\b(\d{4})\b/.exec(textOf(parent)) || [])[1]
+        const fromParent = last4FromText(textOf(parent))
         if (fromParent) {
           last4 = fromParent
           break
@@ -1467,32 +1479,26 @@
       ? sel.PAYMENT_ROOT
       : ['[data-component="paymentMethod"]', '.pmts-instrument-details']
     ).join(',')
-    root.querySelectorAll(payRootSelectors).forEach((el) => {
+    const paymentRoots = new Set(root.querySelectorAll(payRootSelectors))
+    // Legacy order details use a labeled column rather than payment test IDs.
+    root.querySelectorAll('h2, h3, h4, h5, h6, [role="heading"]').forEach((heading) => {
+      if (!/^payment\s+(?:methods?|information)$/i.test(textOf(heading))) return
+      const section = heading.closest('.a-column, section, .a-box') || heading.parentElement
+      if (section && !section.matches('body, main, #orderDetails, #ordersContainer')) paymentRoots.add(section)
+    })
+    paymentRoots.forEach((el) => {
+      if (el.closest(RECOMMENDATION_ROOT)) return
       const text = textOf(el)
       const last4 = last4FromText(text)
       if (!last4 && methods.length > 0) return
       let description = null
       const brand = text.match(
-        /\b(Visa|MasterCard|Mastercard|Amex|American Express|Discover|Amazon(?: Store| Business)? Card|Chase|Debit|Credit Card|Pay by Invoice|Invoice)\b/i
+        /\b(Visa|MasterCard|Mastercard|Amex|American Express|Discover|Amazon(?: Store| Business)? Card|Chase|Debit|Credit Card|Pay by Invoice|Invoice|(?:Amazon )?Gift Card|Gift Card Balance|Rewards Points|Promotional Balance)\b/i
       )
       if (brand) description = brand[1]
       else if (last4) description = 'Card ending in ' + last4
       addMethod(description, last4, description)
     })
-
-    if (methods.length === 0) {
-      const bodyText = textOf(root)
-      const globalEnding = /(?:ending\s+in|ends?\s+in)\s*(\d{3,4})\b/gi
-      let match
-      while ((match = globalEnding.exec(bodyText)) !== null) {
-        const idx = match.index
-        const slice = bodyText.slice(Math.max(0, idx - 40), idx + match[0].length)
-        const brand = slice.match(
-          /\b(Visa|MasterCard|Mastercard|Amex|American Express|Discover|Amazon(?: Store| Business)? Card|Chase)\b/i
-        )
-        addMethod(brand ? brand[1] : 'Card ending in ' + match[1], match[1], brand ? brand[1] : null)
-      }
-    }
 
     return methods
   }
@@ -1534,9 +1540,10 @@
       (doc.defaultView && doc.defaultView.location ? doc.defaultView.location.href : window.location.href)
     const rootText = textOf(root)
 
-    let orderId = extractOrderIdFromText(textOf(queryFirst(root, sel.ORDER_ID)))
-    if (!orderId) orderId = extractOrderIdFromUrl(pageUrl)
-    if (!orderId) orderId = extractOrderIdFromText(rootText)
+    const orderId = extractOrderIdFromText(textOf(queryFirst(root, sel.ORDER_ID))) ||
+      extractOrderIdFromText(rootText)
+    const expectedOrderId = extractOrderIdFromUrl(pageUrl)
+    if (orderId && expectedOrderId && orderId !== expectedOrderId) return null
     if (!orderId) return null
 
     const orderDate =
@@ -1582,7 +1589,9 @@
       })
     }
     const shippingAddress = resolveShippingAddress(root)
-    const paymentMethods = parsePaymentMethods(root)
+    // Payment widgets can be siblings of #orderDetails. Read the same document
+    // that the payment readiness check observes, using payment-specific selectors.
+    const paymentMethods = parsePaymentMethods(doc.body || doc.documentElement)
     const totals = parseTotals(root)
 
     if (totals.grandTotal == null) {
@@ -1895,40 +1904,12 @@
   }
 
   function isOrderDetailContentReadyInDocument(doc, pageUrl) {
-    if (!doc) return false
-    if (hasPendingCsdEncryption(doc)) return false
-
-    const root = doc.body || doc.documentElement
-    const paymentsReady = parsePaymentMethods(root).length > 0
-    const addressReady = isPlausibleShippingAddress(resolveShippingAddress(root))
-
-    if (hasProductLinks(doc)) {
-      const urlOrderId = extractOrderIdFromUrl(pageUrl || '')
-      // Product links alone can appear before CSD finishes decrypting address/payment.
-      if (urlOrderId && ORDER_ID_RE.test(urlOrderId) && (addressReady || paymentsReady)) {
-        return true
-      }
-    }
-
+    if (!doc || hasPendingCsdEncryption(doc)) return false
     const parsed = parseOrderDetailPage(doc, pageUrl)
     if (!parsed || !parsed.orderId) return false
-
-    if (addressReady || paymentsReady) return true
-
-    if (parsed.items && parsed.items.some((it) => (it.name && it.name.length > 3) || it.asin)) {
-      return true
-    }
-    if (parsed.totals && (parsed.totals.grandTotal != null || parsed.totals.subtotal != null)) {
-      return true
-    }
-    if (parsed.status && parsed.status.length > 2) return true
-    if (
-      parsed.shipments &&
-      parsed.shipments.some((s) => (s.status && s.status.message) || s.trackingUrl || s.trackingNumber)
-    ) {
-      return true
-    }
-    return orderIdVisibleInDom(doc)
+    // An ID, address, or recommendation can arrive before the purchased items.
+    // Only an explicit cancellation is allowed to have no purchased items.
+    return parsed.items.length > 0 || /\bcancel(?:ed|led)\b/i.test(parsed.status || '')
   }
 
   function waitForDecryptedContentInDocument(doc, checkFn, timeoutMs) {
@@ -2001,12 +1982,20 @@
     )
   }
 
+  function paymentMethodsAreComplete(root) {
+    const methods = parsePaymentMethods(root)
+    return methods.length > 0 && methods.every((method) =>
+      /^\d{4}$/.test(method.last4 || '') ||
+      /gift\s*card|pay\s*by\s*invoice|invoice|balance|points|promotional/i.test(method.description || '')
+    )
+  }
+
   /** Extra wait for Amazon Business payment widgets that hydrate after address/totals. */
   function waitForPaymentMethodsInDocument(doc, timeoutMs) {
     const timeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 8000
     const root = doc && (doc.body || doc.documentElement)
     if (!root) return Promise.resolve(false)
-    if (parsePaymentMethods(root).length > 0) return Promise.resolve(true)
+    if (paymentMethodsAreComplete(root)) return Promise.resolve(true)
     return new Promise((resolve) => {
       let settled = false
       let observer = null
@@ -2026,7 +2015,7 @@
       }
       const check = () => {
         try {
-          if (parsePaymentMethods(root).length > 0) {
+          if (paymentMethodsAreComplete(root)) {
             finish(true)
             return true
           }
@@ -2045,44 +2034,7 @@
   }
 
   function isOrderDetailContentReady() {
-    if (hasPendingCsdEncryption(document)) return false
-
-    const sel = getSelectors()
-    const root = queryFirst(document, sel.ORDER_DETAILS_ROOT) || document.body
-    const paymentsReady = parsePaymentMethods(root).length > 0
-    const addressReady = isPlausibleShippingAddress(resolveShippingAddress(root))
-
-    if (hasProductLinks(document)) {
-      const urlOrderId = extractOrderIdFromUrl(window.location.href)
-      if (urlOrderId && ORDER_ID_RE.test(urlOrderId) && (addressReady || paymentsReady)) {
-        return true
-      }
-    }
-
-    const parsed = parseOrderDetailPage()
-    if (!parsed || !parsed.orderId) return false
-
-    if (addressReady || paymentsReady) return true
-
-    if (parsed.items && parsed.items.some((it) => (it.name && it.name.length > 3) || it.asin)) {
-      return true
-    }
-    if (parsed.totals && (parsed.totals.grandTotal != null || parsed.totals.subtotal != null)) {
-      return true
-    }
-    if (parsed.status && parsed.status.length > 2) return true
-    if (
-      parsed.shipments &&
-      parsed.shipments.some((s) => (s.status && s.status.message) || s.trackingUrl || s.trackingNumber)
-    ) {
-      return true
-    }
-
-    if (hasProductLinks(root) && (addressReady || paymentsReady)) return true
-
-    if (!orderIdVisibleInDom(document)) return false
-
-    return orderDetailHasDecryptedContent(root)
+    return isOrderDetailContentReadyInDocument(document, window.location.href)
   }
 
   function diagnoseOrderDetailContentReady() {
@@ -2319,9 +2271,13 @@
       const section = doc.querySelector(sectionSelectors[si])
       if (!section) continue
       const emails = extractEmailsFromText(textOf(section))
-      if (emails.length > 0) return emails[0]
+      if (emails.length === 1) return emails[0]
     }
 
+    // Older login/security pages use a label rather than a dedicated email ID.
+    // Do not apply that heuristic to arbitrary order or organization pages.
+    const headings = Array.from(doc.querySelectorAll('h1, h2, h3')).map(textOf).join(' ')
+    if (!/login\s*(?:and|&)\s*security/i.test(headings)) return null
     const labelNodes = doc.querySelectorAll('span, div, label, h4, h5, td, th')
     for (let i = 0; i < labelNodes.length; i++) {
       const label = textOf(labelNodes[i])
@@ -2329,106 +2285,41 @@
       const row = labelNodes[i].closest('.a-row, tr, li, .a-box, .a-section')
       if (!row) continue
       const emails = extractEmailsFromText(textOf(row))
-      if (emails.length > 0) return emails[0]
+      if (emails.length === 1) return emails[0]
     }
 
-    return null
-  }
-
-  function decodeHtmlForEmailSearch(html) {
-    return String(html || '')
-      .replace(/&#64;/g, '@')
-      .replace(/&#x40;/gi, '@')
-      .replace(/&amp;/g, '&')
-      .replace(/\\u0040/gi, '@')
-      .replace(/\\x40/gi, '@')
-  }
-
-  function parseEmailFromEmbeddedJson(html) {
-    const source = decodeHtmlForEmailSearch(coerceString(html) || '')
-    if (!source) return null
-    // Prefer Amazon Business buyer / account fields before generic "email" keys
-    // (generic keys often hit internal service hosts like ConfigurableRecsService.*).
-    const patterns = [
-      /"buyingCustomer"\s*:\s*\{[^{}]{0,400}?"email"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-      /"buyer"\s*:\s*\{[^{}]{0,400}?"email"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-      /"buyerEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-      /"buyingCustomerEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-      /"customerEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-      /"emailAddress"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-      /"userEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-      /"accountEmail"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-      /data-email="([^"]+@[^"]+)"/gi,
-      /&quot;buyerEmail&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
-      /&quot;customerEmail&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
-      /&quot;emailAddress&quot;\s*:\s*&quot;([^&]+@[^&]+)&quot;/gi,
-      /"email"\s*:\s*"([^"\\]+@[^"\\]+)"/gi,
-    ]
-    for (let pi = 0; pi < patterns.length; pi++) {
-      const re = new RegExp(patterns[pi].source, patterns[pi].flags)
-      let match
-      while ((match = re.exec(source)) !== null) {
-        const email = coerceString(match[1])
-        if (email && isPlausibleAccountEmail(email)) return email
-      }
-    }
-    return null
-  }
-
-  function parseEmailFromAccountFlyout(doc) {
-    if (!doc) return null
-    const flyoutSelectors = [
-      '#nav-flyout-ya-signin',
-      '#nav-flyout-accountList',
-      '#nav-al-signin',
-      '#nav-flyout-avab',
-      '[data-nav-role="signin"]',
-    ]
-    for (let i = 0; i < flyoutSelectors.length; i++) {
-      const flyout = doc.querySelector(flyoutSelectors[i])
-      if (!flyout) continue
-      const emails = extractEmailsFromText((flyout.innerHTML || '') + ' ' + textOf(flyout))
-      if (emails.length > 0) return emails[0]
-    }
     return null
   }
 
   function parseEmailFromCvfSwitcher(doc) {
     if (!doc) return null
-    const selectors = [
-      '.cvf-account-switcher-profile-details',
-      '.cvf-account-switcher-account-group',
-      '.cvf-widget-btn-val',
-      '[data-testid="account-switcher"]',
-      '.ab-account-switcher-accounts-list',
-      '#ab-accounts-switcher-wrapper',
-      '#ap-account-switcher-container',
-    ]
-    for (let si = 0; si < selectors.length; si++) {
-      const nodes = doc.querySelectorAll(selectors[si])
-      for (let ni = 0; ni < nodes.length; ni++) {
-        const emails = extractEmailsFromText(textOf(nodes[ni]) + ' ' + (nodes[ni].innerHTML || ''))
-        if (emails.length > 0) return emails[0]
-      }
-    }
-    return null
+    const switchers = doc.querySelectorAll(
+      '.cvf-account-switcher-profile-details, .cvf-account-switcher-account-group, ' +
+      '[data-testid="account-switcher"], .ab-account-switcher-accounts-list, ' +
+      '#ab-accounts-switcher-wrapper, #ap-account-switcher-container'
+    )
+    const emails = new Set()
+    const selected = '[aria-selected="true"], [aria-current="true"], [aria-current="page"], ' +
+      '[data-active="true"], [data-selected="true"], input:checked'
+    switchers.forEach((switcher) => {
+      const selectedNodes = switcher.matches(selected) || switcher.closest(selected)
+        ? [switcher]
+        : Array.from(switcher.querySelectorAll(selected)).map((node) =>
+            node.matches('input')
+              ? node.closest('.cvf-account-switcher-account-group, label') || node
+              : node
+          )
+      selectedNodes.forEach((node) => extractEmailsFromText(textOf(node)).forEach((email) => emails.add(email)))
+    })
+    return emails.size === 1 ? Array.from(emails)[0] : null
   }
 
   function parseEmailFromLiveDocument(doc) {
-    if (!doc || !doc.documentElement) return null
-    // Prefer visible account UI over embedded page JSON (JSON often has service hosts).
-    const fromFlyout = parseEmailFromAccountFlyout(doc)
-    if (fromFlyout) return fromFlyout
-    const fromCvf = parseEmailFromCvfSwitcher(doc)
-    if (fromCvf) return fromCvf
-    const fromNav = parseEmailFromNavAccount(doc)
-    if (fromNav) return fromNav
-    const fromSection = parseEmailFromLoginSecuritySection(doc)
-    if (fromSection) return fromSection
-    const html = doc.documentElement.outerHTML || ''
-    const fromJson = parseEmailFromEmbeddedJson(html)
-    if (fromJson) return fromJson
-    return parseEmailFromAccountHtml(html)
+    if (!doc || !doc.documentElement || isAmazonSignInHtml(doc)) return null
+    // Login/security and selected account UI identify the current account.
+    // Raw HTML, buyer records, and unselected switcher entries do not.
+    return parseEmailFromLoginSecuritySection(doc) ||
+      parseEmailFromCvfSwitcher(doc) || parseEmailFromNavAccount(doc)
   }
 
   function waitForAccountEmailInDocument(doc, timeoutMs) {
@@ -2566,45 +2457,7 @@
   function parseEmailFromAccountHtml(html) {
     if (!html) return null
     try {
-      const doc = new DOMParser().parseFromString(html, 'text/html')
-      if (isAmazonSignInHtml(doc)) return null
-
-      const fromNav = parseEmailFromNavAccount(doc)
-      if (fromNav) return fromNav
-
-      const fromFlyout = parseEmailFromAccountFlyout(doc)
-      if (fromFlyout) return fromFlyout
-
-      const fromCvf = parseEmailFromCvfSwitcher(doc)
-      if (fromCvf) return fromCvf
-
-      const emailInputs = doc.querySelectorAll(
-        'input[type="email"]:not(#ap_email), input[name*="email" i]:not(#ap_email):not([name="email"])'
-      )
-      for (let i = 0; i < emailInputs.length; i++) {
-        const val = coerceString(emailInputs[i].value)
-        if (val && isPlausibleAccountEmail(val)) return val
-      }
-
-      const fromSection = parseEmailFromLoginSecuritySection(doc)
-      if (fromSection) return fromSection
-
-      const fromJson = parseEmailFromEmbeddedJson(html)
-      if (fromJson) return fromJson
-
-      const fromRaw = extractEmailsFromText(decodeHtmlForEmailSearch(html))
-      if (fromRaw.length > 0) return fromRaw[0]
-
-      const bodyText = doc.body ? doc.body.textContent || '' : html
-      const labelMatch = /\bemail\b/i.exec(bodyText)
-      if (labelMatch && labelMatch.index >= 0) {
-        const slice = bodyText.slice(labelMatch.index, labelMatch.index + 300)
-        const nearbyEmails = extractEmailsFromText(slice)
-        if (nearbyEmails.length > 0) return nearbyEmails[0]
-      }
-
-      const allEmails = extractEmailsFromText(bodyText)
-      return allEmails.length > 0 ? allEmails[0] : null
+      return parseEmailFromLiveDocument(new DOMParser().parseFromString(html, 'text/html'))
     } catch {
       return null
     }
@@ -2627,14 +2480,6 @@
     const accountUrls = [
       origin + '/ax/account/manage',
       origin + '/gp/css/account/info/view.html',
-      origin + '/hz/profilepicker',
-      // Amazon Business account / org profile surfaces
-      origin + '/bb/account',
-      origin + '/ab/manage-organization',
-      origin + '/business/register/org/landing',
-      'https://www.amazon.com/ax/account/manage',
-      'https://www.amazon.com/gp/css/account/info/view.html',
-      'https://business.amazon.com/bb/account',
     ]
 
     for (let ui = 0; ui < accountUrls.length; ui++) {
@@ -2656,7 +2501,6 @@
       const iframeCandidates = [
         origin + '/ax/account/manage',
         origin + '/gp/css/account/info/view.html',
-        origin + '/bb/account',
       ]
       for (let ii = 0; ii < iframeCandidates.length; ii++) {
         try {
@@ -2693,7 +2537,6 @@
     diagnoseOrderDetailContentReady,
     fetchAccountEmail,
     parseEmailFromAccountHtml,
-    parseEmailFromEmbeddedJson,
     parseEmailFromNavAccount,
     parseEmailFromLiveDocument,
     isPlausibleAccountEmail,

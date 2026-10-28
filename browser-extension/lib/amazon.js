@@ -34,6 +34,10 @@
     if (!orderId) {
       throw new Error('Amazon order structure not recognized (missing order id).')
     }
+    const expectedId = orderIdFromUrl(sourceUrl)
+    if (expectedId && orderId !== expectedId) {
+      throw new Error('Captured Amazon order does not match the requested order. Refresh and try again.')
+    }
 
     const rawShipments = Array.isArray(raw.shipments) ? raw.shipments : []
     const shipmentStatus = (s) => coerceString(s?.status?.message) || coerceString(s?.status?.rawStatusType) || null
@@ -217,6 +221,15 @@
     }
   }
 
+  function orderIdFromUrl(url) {
+    const u = parseAmazonUrl(url)
+    if (!u || !isAmazonHostname(u.hostname)) return null
+    for (const [key, value] of u.searchParams) {
+      if (/^orderid$/i.test(key) && /^\d{3}-\d{7}-\d{7}$/.test(value)) return value
+    }
+    return null
+  }
+
   function isAmazonOrderDetailUrl(url) {
     if (!url) return false
     const u = parseAmazonUrl(url)
@@ -322,6 +335,7 @@
   if (typeof globalThis !== 'undefined') {
     globalThis.OrderManagerAmazon = {
       normalizeAmazonOrderPayload,
+      orderIdFromUrl,
       isAmazonHostname,
       isAmazonOrderDetailUrl,
       isAmazonOrdersListUrl,

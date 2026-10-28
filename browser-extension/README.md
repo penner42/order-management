@@ -8,6 +8,8 @@ A browser extension that integrates order data from store/account pages into the
   - Single-order import from an order detail page
   - Bulk import from the order history page (imports forward from the **current** page, then advances page-by-page)
   - Store Accounts in Order Manager should be named with your Amazon login email for auto-matching
+  - Imports require a fresh capture matching the requested order; failed bulk captures are reported per order
+  - Account email is read from current account UI on each import. If Amazon requires verification or the active account cannot be identified, select the Store Account in review
 - `Walmart` (`https://www.walmart.com/*`)
   - Order details import (single order)
   - Bulk import from the orders list page (multiple orders)

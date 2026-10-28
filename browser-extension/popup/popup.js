@@ -4,8 +4,6 @@ const COSTCO_ORDER_DETAIL_STORAGE_KEY = "costcoOrderDetailsGraphqlCapture";
 const WALMART_BULK_JOB_STORAGE_KEY = "walmartBulkJob";
 const COSTCO_BULK_JOB_STORAGE_KEY = "costcoBulkJob";
 const AMAZON_BULK_JOB_STORAGE_KEY = "amazonBulkJob";
-const AMAZON_ORDER_DETAIL_STORAGE_KEY = "amazonOrderDetail";
-const AMAZON_ACCOUNT_EMAIL_STORAGE_KEY = "amazonAccountEmail";
 const ORDER_MANAGER_API_BASE_URL_STORAGE_KEY_LEGACY = "orderManagerApiBaseUrl";
 const ORDER_MANAGER_PROD_API_BASE_URL_STORAGE_KEY = "orderManagerProdApiBaseUrl";
 const ORDER_MANAGER_DEV_API_BASE_URL_STORAGE_KEY = "orderManagerDevApiBaseUrl";
@@ -983,12 +981,6 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
 
         function resolveAccountEmailThenOpen() {
           const tabCookieStoreId = tab && tab.cookieStoreId ? String(tab.cookieStoreId) : "default";
-          let tabOrigin = null;
-          try {
-            if (tab && tab.url) tabOrigin = new URL(String(tab.url)).origin;
-          } catch {
-            tabOrigin = null;
-          }
 
           const openWithEmail = (accountEmail) => {
             normalizeAndOpen(accountEmail || null);
@@ -1020,30 +1012,7 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
             );
           };
 
-          chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (emailData) => {
-            const emailRow =
-              emailData && emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
-                ? emailData[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]
-                : null;
-            let accountEmail = null;
-            if (emailRow && emailRow.email) {
-              const cachedContainer =
-                emailRow.cookieStoreId ? String(emailRow.cookieStoreId) : "default";
-              const candidate = String(emailRow.email);
-              if (isPlausiblePopupEmail(candidate)) {
-                if (cachedContainer === tabCookieStoreId) {
-                  accountEmail = candidate;
-                } else if (tabOrigin && emailRow.origin === tabOrigin) {
-                  accountEmail = candidate;
-                }
-              }
-            }
-            if (accountEmail) {
-              openWithEmail(accountEmail);
-              return;
-            }
-            fetchFreshEmail();
-          });
+          fetchFreshEmail();
         }
 
         resolveAccountEmailThenOpen();
@@ -1059,16 +1028,13 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
                 finishImport({ url: pageUrl, payload: resp.order }, pageUrl);
                 return;
               }
-              chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
-                const captured = s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY];
-                finishImport(captured, pageUrl);
-              });
+              resultsEl.innerHTML = '<span class="error">Could not read this Amazon order. ' +
+                escapeHtml(resp && resp.error ? String(resp.error) : 'Refresh the order page and try again.') +
+                '</span>';
             }
           );
         } else {
-          chrome.storage.local.get(AMAZON_ORDER_DETAIL_STORAGE_KEY, (s) => {
-            finishImport(s && s[AMAZON_ORDER_DETAIL_STORAGE_KEY], pageUrl);
-          });
+          resultsEl.innerHTML = '<span class="error">The Amazon order tab is no longer available.</span>';
         }
       }
 

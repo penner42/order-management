@@ -3,8 +3,8 @@
  * Build a clean extension zip, then pack and sign it as a Chrome .crx.
  */
 import crx3 from 'crx3'
-import { execSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -31,23 +31,23 @@ if (!manifest.key) {
 mkdirSync(distDir, { recursive: true })
 
 console.log('Building clean extension zip…')
-execSync('npx web-ext build --source-dir=. --artifacts-dir=./dist --overwrite-dest', {
+const zipPath = join(distDir, `order-manager-${version}.zip`)
+execFileSync('npx', ['web-ext', 'build', '--source-dir=.', '--artifacts-dir=./dist',
+  '--overwrite-dest', '--filename', `order-manager-${version}.zip`], {
   cwd: extRoot,
   stdio: 'inherit',
 })
 
-const zipFile = readdirSync(distDir).find((name) => name.endsWith('.zip'))
-if (!zipFile) {
+if (!existsSync(zipPath)) {
   console.error('web-ext build did not produce a zip in dist/')
   process.exit(1)
 }
 
-const zipPath = join(distDir, zipFile)
 const crxPath = join(distDir, `order-manager-${version}.crx`)
 const stagingDir = mkdtempSync(join(tmpdir(), 'order-manager-ext-'))
 
 try {
-  execSync(`unzip -q "${zipPath}" -d "${stagingDir}"`)
+  execFileSync('unzip', ['-q', zipPath, '-d', stagingDir])
   await crx3([stagingDir], { keyPath, crxPath })
 } finally {
   rmSync(stagingDir, { recursive: true, force: true })

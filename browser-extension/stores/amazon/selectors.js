@@ -58,7 +58,6 @@
       '.item-box',
       '[data-component="purchasedItems"] .a-fixed-left-grid',
       '[data-component="purchasedItems"] .yohtmlc-item',
-      'div:has(> div.yohtmlc-item)',
     ],
     ITEM_TITLE: [
       '[data-component="itemTitle"]',
@@ -148,6 +147,13 @@
       '[data-component="paymentInformation"] img',
     ],
     PAYMENT_ROOT: [
+      '#payment-info',
+      '#payment-information',
+      '#od-payment',
+      '#od-payment-method',
+      '[data-testid="payment-method"]',
+      '[data-testid="payment-information"]',
+      '[data-component="paymentInfo"]',
       '[data-testid="payment-instrument-name"]',
       '[data-testid="payment-instrument-number"]',
       '[data-component="paymentMethod"]',

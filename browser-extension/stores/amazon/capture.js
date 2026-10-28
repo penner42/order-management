@@ -2,7 +2,6 @@
   'use strict'
 
   const AMAZON_ORDER_DETAIL_STORAGE_KEY = 'amazonOrderDetail'
-  const AMAZON_ACCOUNT_EMAIL_STORAGE_KEY = 'amazonAccountEmail'
 
   if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
     return
@@ -23,62 +22,16 @@
     }
   }
 
-  async function ensureAccountEmailCached(options) {
+  async function fetchCurrentAccountEmail(options) {
     const opts = options && typeof options === 'object' ? options : {}
-    const forceRefresh = !!opts.forceRefresh
-    const origin = window.location.origin
-    const cookieStoreId = opts.cookieStoreId ? String(opts.cookieStoreId) : 'default'
-    let cachedRow = null
-
-    if (!forceRefresh) {
-      cachedRow = await new Promise((resolve) => {
-        try {
-          chrome.storage.local.get(AMAZON_ACCOUNT_EMAIL_STORAGE_KEY, (data) => {
-            resolve(data && data[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY] ? data[AMAZON_ACCOUNT_EMAIL_STORAGE_KEY] : null)
-          })
-        } catch {
-          resolve(null)
-        }
-      })
-      const cachedContainer = cachedRow && cachedRow.cookieStoreId ? String(cachedRow.cookieStoreId) : 'default'
-      const dCheck = dom()
-      const cachedEmailOk =
-        cachedRow &&
-        cachedRow.email &&
-        cachedRow.origin === origin &&
-        cachedContainer === cookieStoreId &&
-        (!dCheck ||
-          typeof dCheck.isPlausibleAccountEmail !== 'function' ||
-          dCheck.isPlausibleAccountEmail(cachedRow.email))
-      if (cachedEmailOk) {
-        return cachedRow.email
-      }
-    }
-
     const d = dom()
     if (!d || typeof d.fetchAccountEmail !== 'function') return null
-    const email = await d.fetchAccountEmail(origin, {
+    // A container can switch accounts without changing its ID or origin.
+    // Resolve the active account on every import instead of reusing stored identity.
+    const email = await d.fetchAccountEmail(window.location.origin, {
       allowSlowLookup: !!opts.allowSlowLookup,
     })
-    if (
-      email &&
-      (typeof d.isPlausibleAccountEmail !== 'function' || d.isPlausibleAccountEmail(email))
-    ) {
-      await new Promise((resolve) => {
-        chrome.storage.local.set(
-          {
-            [AMAZON_ACCOUNT_EMAIL_STORAGE_KEY]: {
-              email,
-              capturedAt: new Date().toISOString(),
-              origin,
-              cookieStoreId,
-            },
-          },
-          () => resolve(null)
-        )
-      })
-    }
-    return email
+    return email && d.isPlausibleAccountEmail(email) ? email : null
   }
 
   function persistOrderDetail(raw, url) {
@@ -122,7 +75,7 @@
     }
     const parsed = d.parseOrderDetailPage()
 
-    if (!parsed || !parsed.orderId) {
+    if (!parsed || !parsed.orderId || !d.isOrderDetailContentReadyInDocument(document, window.location.href)) {
       throw new Error('Could not parse Amazon order detail page.')
     }
 
@@ -251,12 +204,15 @@
             }
 
             const parsed = d.parseOrderDetailPage(frameDoc, frameUrl)
-            if (!parsed || !parsed.orderId) {
+            const am = globalThis.OrderManagerAmazon
+            if (!parsed || !parsed.orderId ||
+                !d.isOrderDetailContentReadyInDocument(frameDoc, url) ||
+                (am && am.orderIdFromUrl(url) && parsed.orderId !== am.orderIdFromUrl(url))) {
               throw new Error('Could not parse Amazon order detail page.')
             }
 
             if (typeof d.repairShipmentTracking === 'function') {
-              d.repairShipmentTracking(parsed)
+              d.repairShipmentTracking(parsed, frameDoc)
             }
 
             if (!skipTracking && typeof d.enrichShipmentsWithTracking === 'function') {
@@ -278,8 +234,8 @@
         finish(() => reject(new Error('Failed to load Amazon order detail page.')))
       })
 
-      document.documentElement.appendChild(iframe)
       iframe.src = url
+      document.documentElement.appendChild(iframe)
     })
   }
 
@@ -314,7 +270,6 @@
       if (message.type === 'amazonParseCurrentListPage') {
         ;(async () => {
           try {
-            ensureAccountEmailCached().catch(() => {})
             const orders = await captureCurrentListPage({
               pageAlreadyReady: !!message.pageAlreadyReady,
             })
@@ -350,7 +305,6 @@
       if (message.type === 'amazonCaptureOrderDetailFromUrl') {
         ;(async () => {
           try {
-            ensureAccountEmailCached({ allowSlowLookup: false }).catch(() => {})
             const parsed = await captureOrderDetailFromUrl(message.detailUrl, {
               skipTrackingEnrichment: !!message.skipTrackingEnrichment,
             })
@@ -433,9 +387,7 @@
       if (message.type === 'amazonFetchAccountEmail') {
         ;(async () => {
           try {
-            const email = await ensureAccountEmailCached({
-              forceRefresh: !!message.forceRefresh,
-              cookieStoreId: message.cookieStoreId,
+            const email = await fetchCurrentAccountEmail({
               allowSlowLookup: !!message.allowSlowLookup,
             })
             sendResponse({ success: true, email: email || null })
