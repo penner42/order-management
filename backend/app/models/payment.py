@@ -15,7 +15,7 @@ class Payment(Base):
     id = Column(Integer, primary_key=True, index=True)
     buying_group_id = Column(Integer, ForeignKey("buying_groups.id", ondelete="RESTRICT"), nullable=False)
     payment_id = Column(String(255), nullable=True)  # External reference; not unique
-    payment_bonus = Column(Numeric(12, 2), nullable=False, server_default="0")
+    payment_bonus = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
     source_amount = Column(Numeric(12, 2), nullable=True)
     ledger_state = Column(String(16), nullable=False, default="legacy", server_default="legacy")
     allocation_manual = Column(Boolean, nullable=False, default=False, server_default="false")
