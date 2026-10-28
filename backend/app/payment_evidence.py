@@ -6,6 +6,9 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 
+PAYMENT_IMPORT_START_YEAR = 2025
+
+
 class ReceiptEvidence(BaseModel):
     external_id: str
     identity_key: str | None = None

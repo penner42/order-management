@@ -79,6 +79,20 @@ class PaymentReviewTests(unittest.TestCase):
         content = {**review["content"], **changes}
         return service.save_review(self.db, review["id"], ReviewEdit(version=review["version"], content=content))
 
+    def test_import_excludes_pre_2025_records_even_from_current_site(self):
+        before = datetime(2024, 12, 31, 23, 59, tzinfo=timezone.utc)
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        service.refresh(self.db, self.group.id, PaymentFetch([
+            PaymentEvidence(external_id='old', amount='100', created_at=before, sent_at=start, status='PAID'),
+            PaymentEvidence(external_id='old-sent-only', amount='100', sent_at=before, status='PAID'),
+            PaymentEvidence(external_id='start', amount='100', created_at=start, status='PAID'),
+        ], [
+            ReceiptEvidence(external_id='old', amount='100', created_at=before),
+            ReceiptEvidence(external_id='start', amount='100', created_at=start),
+        ]), 'parsefile')
+        self.assertEqual({(s.kind, s.external_id) for s in self.db.query(PaymentSource)},
+            {('payment', 'start'), ('receipt', 'start')})
+
     def test_allocation_evidence_preserves_signed_balances_and_group_boundaries(self):
         self.confirm(self.load()["reviews"][0])
         source = self.db.query(PaymentSource).filter_by(kind="receipt").one()

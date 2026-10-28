@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.models import (BuyingGroup, Item, Order, Payment, PaymentLineItem,
     PaymentSource, PaymentReview, PaymentCoverage, PaymentCorrection)
 from app.payment_providers import PaymentFetch, provider_for
+from app.payment_evidence import PAYMENT_IMPORT_START_YEAR
 from app.payment_totals import item_allocated, payment_amount
 from app.monarch import lock_editable_payment
 
@@ -165,6 +166,9 @@ def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str,
     seen = set()
     for kind, records in (("payment", result.payments), ("receipt", result.receipts)):
         for evidence in records:
+            date = evidence.created_at or (evidence.sent_at if kind == "payment" else None)
+            if date is not None and date.year < PAYMENT_IMPORT_START_YEAR:
+                continue
             key = (kind, evidence.identity_key or evidence.external_id)
             if not evidence.external_id or key in seen:
                 raise HTTPException(409, "Provider returned duplicate or missing source identities.")

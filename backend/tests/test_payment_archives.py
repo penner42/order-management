@@ -53,6 +53,18 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn('2025',result.warnings[0])
         self.assertNotIn('private',str(result.warnings))
 
+    def test_pre_2025_archives_are_never_contacted_or_reported_missing(self):
+        with patch('app.payment_providers.canonical_base', side_effect=lambda url: url) as canonical, patch.object(
+            self.provider, 'archives', return_value=[(2025, 'https://www.2025.example.test'),
+                (2024, 'https://www.2024.example.test')]), patch.object(
+            self.provider, '_fetch_partition', side_effect=[history(2026), history(2025)]) as fetch:
+            result = self.provider.fetch(self.group)
+        self.assertTrue(result.history_complete)
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual([call.args[0] for call in canonical.call_args_list],
+            [self.group.base_url, 'https://www.2025.example.test'])
+
     def test_archive_login_redirect_to_another_site_is_rejected(self):
         with patch('app.payment_providers.canonical_base',side_effect=['https://www.example.test','https://other.test']), patch.object(
             self.provider,'archives',return_value=[(2025,'https://www.2025.example.test')]), patch.object(

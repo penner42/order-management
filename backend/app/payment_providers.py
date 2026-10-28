@@ -9,7 +9,7 @@ import urllib.request
 import re
 
 from app.utils.buying_group_apis import parsefile
-from app.payment_evidence import ReceiptEvidence, PaymentEvidence, PaymentFetch
+from app.payment_evidence import ReceiptEvidence, PaymentEvidence, PaymentFetch, PAYMENT_IMPORT_START_YEAR
 
 
 class PaymentProvider(Protocol):
@@ -128,8 +128,10 @@ class ParsefilePaymentProvider:
         except Exception:
             archives = []
             warnings.append("Archive discovery failed; previously imported history was preserved.")
-        # Read every advertised older partition: older receipts can fund current-year payments.
+        # Older receipts can fund current payments, but pre-2025 history is out of scope.
         for year, url in archives:
+            if year < PAYMENT_IMPORT_START_YEAR:
+                continue
             try:
                 archive_base = canonical_base(url)
                 if urlsplit(archive_base).hostname.removeprefix("www.") != urlsplit(url).hostname.removeprefix("www."):
