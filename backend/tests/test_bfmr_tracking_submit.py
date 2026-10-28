@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -48,6 +49,45 @@ def _purchased_row(
 
 
 class BfmrParseAndFilterTests(unittest.TestCase):
+    def test_exact_filters_are_encoded_on_every_page(self):
+        urls = []
+
+        def respond(req, timeout):
+            urls.append(req.full_url)
+            page = len(urls)
+            payload = {"data": {"my_tracker": [_purchased_row(pid=page)],
+                                "paging": {"page": page, "pages": 2}}}
+            response = mock.MagicMock()
+            response.__enter__.return_value.status = 200
+            response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+            return response
+
+        with mock.patch("urllib.request.urlopen", side_effect=respond):
+            result = bfmr_api.list_my_tracker(
+                base_url=None, api_key="key", api_secret="secret",
+                orders=[" ORDER+1 ", "ORDER/2", "ORDER+1", ""],
+                trackings=["1Z+ABC", "TBA/123"], statuses=["shipped", "paid"],
+            )
+        self.assertEqual(len(result.rows), 2)
+        self.assertEqual(result.request_urls, urls)
+        for page, url in enumerate(urls, 1):
+            query = parse_qs(urlsplit(url).query)
+            self.assertEqual(query["orders[]"], ["ORDER+1", "ORDER/2"])
+            self.assertEqual(query["trackings[]"], ["1Z+ABC", "TBA/123"])
+            self.assertEqual(query["status"], ["shipped,paid"])
+            self.assertEqual(query["page_no"], [str(page)])
+            self.assertNotIn("search", query)
+            self.assertNotIn("quick_filter", query)
+
+    def test_unfiltered_reads_keep_all_statuses_and_no_exact_filters(self):
+        with mock.patch.object(bfmr_api, "_fetch_tracker_page", return_value=([], 1, 1, {})) as fetch:
+            result = bfmr_api.list_my_tracker(base_url=None, api_key="key", api_secret="secret")
+        query = parse_qs(urlsplit(result.request_urls[0]).query)
+        self.assertEqual(query["quick_filter"], ["all"])
+        self.assertNotIn("orders[]", query)
+        self.assertNotIn("trackings[]", query)
+        self.assertIsNone(fetch.call_args.kwargs["statuses"])
+
     def test_parse_reserve_and_purchase_ids(self) -> None:
         row = bfmr_api._parse_tracker_row(_purchased_row())
         self.assertEqual(row.reserve_id, "1997368")

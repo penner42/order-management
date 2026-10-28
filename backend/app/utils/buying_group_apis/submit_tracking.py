@@ -378,12 +378,14 @@ def build_bfmr_entry_from_purchase(
 
 def _fetch_bfmr_purchases_needing_tracking(
     group: BuyingGroup,
+    *, orders: list[str],
 ) -> dict[str, bfmr_api.BfmrTrackerRow]:
     """order_id.casefold() → BFMR purchase row still needing tracking."""
     fetched = bfmr_api.list_purchases_needing_tracking(
         base_url=group.base_url,
         api_key=str(group.api_username),
         api_secret=str(group.api_password),
+        orders=orders,
     )
     return bfmr_api.index_purchases_needing_tracking_by_order(fetched.rows)
 
@@ -609,7 +611,7 @@ def submit_item_tracking_to_group(
             return result
         if not store_order:
             raise ValueError("Order has no store order number to match a BFMR purchase")
-        purchases = _fetch_bfmr_purchases_needing_tracking(group)
+        purchases = _fetch_bfmr_purchases_needing_tracking(group, orders=[store_order])
         purchase = purchases.get(store_order.casefold())
         if purchase is None:
             raise ValueError(

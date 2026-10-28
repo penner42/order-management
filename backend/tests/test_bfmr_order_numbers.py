@@ -135,6 +135,42 @@ class BfmrOrderNumberTests(unittest.TestCase):
         self.assertEqual(order.items[0].status, ItemStatus.PURCHASED)
         self.assertEqual(self.create.call_args.kwargs["qty"], 2)
         self.assertGreaterEqual(self.fetch.call_count, 3)
+        self.assertEqual(self.fetch.call_args.kwargs, {"orders": ["ORDER-1"]})
+
+    def test_invalid_or_conflicting_post_requires_review_without_retry(self):
+        for code in (400, 409):
+            with self.subTest(code=code):
+                task = self.task(self.order(order_no=f"ORDER-{code}"))
+                self.fetch.return_value = [tracker()]
+                self.create.side_effect = urllib.error.HTTPError("https://example.invalid", code, "rejected", {}, None)
+                self.process(task)
+                self.assertEqual(task.status, "review")
+                self.assertIsNone(task.next_attempt_at)
+                self.assertEqual(task.allocations[0]["status"], "planned")
+
+    def test_invalid_or_conflicting_read_requires_review_without_post(self):
+        for code in (400, 409):
+            with self.subTest(code=code):
+                task = self.task(self.order(order_no=f"ORDER-{code}"))
+                self.fetch.side_effect = urllib.error.HTTPError("https://example.invalid", code, "rejected", {}, None)
+                self.process(task)
+                self.assertEqual(task.status, "review")
+                self.assertIsNone(task.next_attempt_at)
+                self.assertEqual(task.allocations, [])
+        self.create.assert_not_called()
+
+    def test_invalid_or_conflicting_verification_preserves_sending_journal(self):
+        for code in (400, 409):
+            with self.subTest(code=code):
+                task = self.task(self.order(order_no=f"ORDER-{code}"))
+                self.fetch.side_effect = [
+                    [tracker()], [tracker()],
+                    urllib.error.HTTPError("https://example.invalid", code, "rejected", {}, None),
+                ]
+                self.process(task)
+                self.assertEqual(task.status, "review")
+                self.assertIsNone(task.next_attempt_at)
+                self.assertEqual(task.allocations[0]["status"], "sending")
 
     def test_no_product_id_never_uses_title_match(self):
         task = self.task(self.order(sku=None))
@@ -191,7 +227,7 @@ class BfmrOrderNumberTests(unittest.TestCase):
         self.fetch.return_value = [tracker()]
         self.fulfill()
         reads = 0
-        def fetch(group):
+        def fetch(group, **kwargs):
             nonlocal reads
             reads += 1
             if reads == 3:
@@ -331,7 +367,7 @@ class BfmrOrderNumberTests(unittest.TestCase):
 
     def test_disable_during_lookup_prevents_purchase_post(self):
         task = self.task(self.order())
-        def fetch(group):
+        def fetch(group, **kwargs):
             group.order_number_submit_enabled = False
             self.db.commit()
             return [tracker()]
@@ -436,6 +472,7 @@ class BfmrOrderNumberTests(unittest.TestCase):
             bfmr.BfmrSubmitResult(success=False, message="rejected", failed=["TRACK-SHARED"]),
         ]) as send:
             result = service.submit_tracking(self.db, self.group, [(item, order, "TRACK-SHARED") for item in order.items])
+        self.assertEqual(self.fetch.call_args.kwargs, {"orders": ["ORDER-1"]})
         self.assertEqual([call.kwargs["trackings"][0].purchase_id for call in send.call_args_list], ["P1", "P2"])
         self.assertEqual(len(result.item_ids), 1)
         first = next(i for i in order.items if i.external_sku == "ASIN1")
@@ -480,7 +517,7 @@ class BfmrWorkerConcurrencyTests(unittest.TestCase):
                 remote.append(tracker(pid=f"P{len(remote)}", qty=kw["qty"], status="purchased", order_no=kw["order_no"]))
                 return {}
             with patch.object(settings, "scheduled_jobs_enabled", True), patch.object(settings, "group_submissions_enabled", True), patch.object(service, "SessionLocal", sessions), \
-                    patch.object(service, "fetch_rows", side_effect=lambda group: remote), \
+                    patch.object(service, "fetch_rows", side_effect=lambda group, **kwargs: remote), \
                     patch.object(bfmr, "create_purchase", side_effect=create) as post, \
                     patch("urllib.request.urlopen", side_effect=AssertionError("No network in tests")):
                 with ThreadPoolExecutor(max_workers=2) as pool:

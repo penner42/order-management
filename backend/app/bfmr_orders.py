@@ -147,9 +147,9 @@ def enqueue_order(db, order):
                                  message="Registered order details changed. Review BFMR before submitting new products." if changed_registered else None))
 
 
-def fetch_rows(group):
+def fetch_rows(group, *, orders=None):
     return bfmr.list_my_tracker(base_url=group.base_url, api_key=group.api_username or "",
-                                api_secret=group.api_password or "").rows
+                                api_secret=group.api_password or "", orders=orders).rows
 
 
 def matches_product(row, snapshot):
@@ -333,7 +333,7 @@ def process_task(db, task, group):
             except Exception as exc:
                 # Only a rejected POST proves that no purchase was created. A failed
                 # verification GET must retain the sending journal for reconciliation.
-                if http_status(exc) in (401, 403, 404, 422, 429):
+                if http_status(exc) in (400, 401, 403, 404, 409, 422, 429):
                     allocation["status"] = "planned"
                     task.allocations = [dict(a) for a in allocations]
                 raise
@@ -344,7 +344,7 @@ def process_task(db, task, group):
                 review(task, "BFMR rejected this allocation. Refresh commitments and choose again.")
                 db.commit()
                 return
-            rows = fetch_rows(group)
+            rows = fetch_rows(group, orders=[task.snapshot["order_no"]])
             purchases = [p for p in remote_purchases(rows, task, allocation)
                          if p["purchase_id"] not in allocation["before_purchase_ids"]]
             if len(purchases) != 1 or purchases[0]["qty"] != allocation["qty"]:
@@ -364,7 +364,7 @@ def process_task(db, task, group):
     except Exception as exc:
         # Store only a classification: provider errors may echo account or order data.
         code = http_status(exc)
-        if code in (401, 403, 404, 422):
+        if code in (400, 401, 403, 404, 409, 422):
             review(task, "BFMR rejected the request. Check account configuration and commitment details.")
         elif task.attempts >= 5:
             review(task, "Retry limit reached. Refresh and review BFMR before retrying.")
@@ -415,7 +415,10 @@ def submit_tracking(db, group, pending):
     with account_lock(db, group) as acquired:
         if not acquired:
             raise ValueError("BFMR account is busy. Try again shortly.")
-        rows = fetch_rows(group)
+        order_numbers = list(dict.fromkeys((order.store_order_number or "").strip()
+                                          for _item, order, _tracking in pending
+                                          if (order.store_order_number or "").strip()))
+        rows = fetch_rows(group, orders=order_numbers) if order_numbers else []
         capacities = defaultdict(int)
         shipped = defaultdict(int)
         purchase_rows = {}

@@ -297,9 +297,11 @@ def _fetch_tracker_page(
     statuses: str | None,
     quick_filter: str | None,
     timeout_seconds: float,
+    orders: Sequence[str] | None = None,
+    trackings: Sequence[str] | None = None,
 ) -> tuple[list[BfmrTrackerRow], int, int, dict[str, Any]]:
     base = resolve_base_url(base_url)
-    query: dict[str, str] = {
+    query: dict[str, Any] = {
         "page_size": str(page_size),
         "page_no": str(page_no),
         "start_date": start_date,
@@ -313,7 +315,11 @@ def _fetch_tracker_page(
         query["status"] = statuses
     elif quick_filter:
         query["quick_filter"] = quick_filter
-    url = f"{base}{MY_TRACKER_PATH}?{urllib.parse.urlencode(query)}"
+    if orders:
+        query["orders[]"] = orders
+    if trackings:
+        query["trackings[]"] = trackings
+    url = f"{base}{MY_TRACKER_PATH}?{urllib.parse.urlencode(query, doseq=True)}"
     req = urllib.request.Request(
         url,
         method="GET",
@@ -398,6 +404,8 @@ def list_my_tracker(
     start_date: str | None = None,
     end_date: str | None = None,
     statuses: tuple[str, ...] | list[str] | None = None,
+    orders: Sequence[str] | None = None,
+    trackings: Sequence[str] | None = None,
     quick_filter: str | None = "all",
     page_size: int = _DEFAULT_PAGE_SIZE,
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
@@ -407,6 +415,7 @@ def list_my_tracker(
 
     By default uses ``quick_filter=all`` and no ``status`` filter so BFMR applies
     the date range reliably; callers filter statuses client-side.
+    ``orders`` and ``trackings`` use indexed exact matches, not text search.
     """
     if not (api_key or "").strip():
         raise ValueError("api_key is required")
@@ -418,6 +427,8 @@ def list_my_tracker(
     end = (end_date or "").strip() or default_end
     status_csv = ",".join(s.strip() for s in (statuses or ()) if (s or "").strip()) or None
     qf = None if status_csv else ((quick_filter or "").strip() or None)
+    order_filters = list(dict.fromkeys(value.strip() for value in (orders or ()) if value.strip()))
+    tracking_filters = list(dict.fromkeys(value.strip() for value in (trackings or ()) if value.strip()))
     size = max(1, min(int(page_size or _DEFAULT_PAGE_SIZE), 1000))
 
     all_rows: list[BfmrTrackerRow] = []
@@ -436,10 +447,12 @@ def list_my_tracker(
             statuses=status_csv,
             quick_filter=qf,
             timeout_seconds=timeout_seconds,
+            orders=order_filters,
+            trackings=tracking_filters,
         )
         # Reconstruct URL for diagnostics (no secrets).
         base = resolve_base_url(base_url)
-        q: dict[str, str] = {
+        q: dict[str, Any] = {
             "page_size": str(size),
             "page_no": str(page_no),
             "start_date": start,
@@ -449,7 +462,11 @@ def list_my_tracker(
             q["status"] = status_csv
         elif qf:
             q["quick_filter"] = qf
-        request_urls.append(f"{base}{MY_TRACKER_PATH}?{urllib.parse.urlencode(q)}")
+        if order_filters:
+            q["orders[]"] = order_filters
+        if tracking_filters:
+            q["trackings[]"] = tracking_filters
+        request_urls.append(f"{base}{MY_TRACKER_PATH}?{urllib.parse.urlencode(q, doseq=True)}")
         if page_no == 1:
             total_pages = min(max(pages, 1), _MAX_LIST_PAGES)
         all_rows.extend(rows)
@@ -516,6 +533,7 @@ def list_purchases_needing_tracking(
     base_url: str | None,
     api_key: str,
     api_secret: str,
+    orders: Sequence[str] | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     page_size: int = _DEFAULT_PAGE_SIZE,
@@ -526,6 +544,7 @@ def list_purchases_needing_tracking(
         base_url=base_url,
         api_key=api_key,
         api_secret=api_secret,
+        orders=orders,
         start_date=start_date,
         end_date=end_date,
         statuses=None,
