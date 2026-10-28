@@ -70,6 +70,12 @@ function eventLabel(eventType: string): string {
       return 'Receiving check finished'
     case 'received_check_error':
       return 'Receiving check error'
+    case 'payment_sync_started':
+      return 'Payment sync started'
+    case 'payment_sync_finished':
+      return 'Payment sync finished'
+    case 'payment_sync_error':
+      return 'Payment sync error'
     default:
       return eventType
   }
@@ -85,6 +91,8 @@ function modeLabel(mode: string): string {
       return 'Tracking submit'
     case 'received_check':
       return 'Receiving check'
+    case 'payment_sync':
+      return 'Payment sync'
     default:
       return mode
   }
@@ -338,6 +346,9 @@ export default function BrowserImportLogPage() {
             <option value="received_check_started">Receiving check started</option>
             <option value="received_check_finished">Receiving check finished</option>
             <option value="received_check_error">Receiving check error</option>
+            <option value="payment_sync_started">Payment sync started</option>
+            <option value="payment_sync_finished">Payment sync finished</option>
+            <option value="payment_sync_error">Payment sync error</option>
           </select>
         </label>
         <label className="inline-flex items-center gap-2 text-sm text-ink dark:text-gray-200">

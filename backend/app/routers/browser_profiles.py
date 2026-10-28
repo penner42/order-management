@@ -523,6 +523,9 @@ def list_browser_import_logs(
         "tracking_submit_started",
         "tracking_submitted",
         "tracking_submit_error",
+        "payment_sync_started",
+        "payment_sync_finished",
+        "payment_sync_error",
     ):
         q = q.filter(BrowserImportLog.event_type == event_type)
     if scheduled_only:

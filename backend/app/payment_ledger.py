@@ -2,6 +2,7 @@
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -9,12 +10,13 @@ from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, object_session
 
-from app.models import (BuyingGroup, Item, Order, Payment, PaymentLineItem,
+from app.models import (BrowserImportLog, BuyingGroup, Item, Order, Payment, PaymentLineItem,
     PaymentSource, PaymentReview, PaymentCoverage, PaymentCorrection, MonarchPaymentReceipt)
 from app.payment_totals import item_allocated, payment_amount
 
 CUTOFF = datetime(2026, 1, 1, tzinfo=timezone.utc)
 ZERO = Decimal("0.00")
+logger = logging.getLogger(__name__)
 
 
 class LedgerAllocation(BaseModel):
@@ -375,7 +377,46 @@ def adjust(db, payment_id, body, *, reset=False):
     return payment
 
 
-def sync_group(db, group_id):
+def _payment_sync_log(db, context, scheduled, event_type, message, *, error=False):
+    from app.application_logging import redact
+    try:
+        # Keep logs independent of the evidence transaction and its rollbacks.
+        with Session(bind=db.get_bind()) as log_db:
+            log_db.add(BrowserImportLog(category="groups", mode="payment_sync",
+                event_type=event_type, level="error" if error else "info",
+                scheduled=scheduled, retailer=context["provider"], store_name=context["group_name"],
+                message=redact(message)))
+            log_db.commit()
+    except Exception:
+        logger.exception("Failed to persist payment sync log", extra={"details": context})
+
+
+def sync_group(db, group_id, *, scheduled=False):
+    group = db.get(BuyingGroup, group_id)
+    if not group:
+        raise HTTPException(404, "Buying group not found")
+    context = {"group_id": group_id, "group_name": group.name,
+               "provider": group.api_framework or "", "scheduled": scheduled}
+    _payment_sync_log(db, context, scheduled, "payment_sync_started", "Payment sync started.")
+    try:
+        result = _sync_group(db, group_id)
+    except Exception as exc:
+        logger.exception("Payment sync failed", extra={"details": context})
+        db.rollback()
+        cause = exc.__cause__ or exc
+        reason = str(cause.detail) if isinstance(cause, HTTPException) else str(cause)
+        _payment_sync_log(db, context, scheduled, "payment_sync_error",
+            f"Payment sync failed: {type(cause).__name__}: {reason or 'Unknown error'}", error=True)
+        raise
+    warning = result.get("error")
+    _payment_sync_log(db, context, scheduled,
+        "payment_sync_error" if warning else "payment_sync_finished",
+        f"Payment sync completed with warnings: {warning}" if warning else "Payment sync completed.",
+        error=bool(warning))
+    return result
+
+
+def _sync_group(db, group_id):
     """Network reads before locks; every caller uses the same snapshot/ledger transaction."""
     from app.payment_providers import provider_for
     from app.payment_review import refresh, capability
@@ -390,13 +431,13 @@ def sync_group(db, group_id):
     before = [(s.id, s.revision, s.present) for s in db.query(PaymentSource).filter_by(buying_group_id=group_id).order_by(PaymentSource.id)]
     try:
         result = provider.fetch(group)
-    except Exception:
+    except Exception as exc:
         db.rollback()
         group = db.get(BuyingGroup, group_id)
         group.payment_sync_last_run_at = datetime.now(timezone.utc)
         group.payment_sync_error = "Could not read complete payment history. Previous evidence was preserved."
         db.commit()
-        raise HTTPException(502, group.payment_sync_error) from None
+        raise HTTPException(502, group.payment_sync_error) from exc
     db.rollback()
     from app.payment_review import lock_group
     group = lock_group(db, group_id)
@@ -404,7 +445,12 @@ def sync_group(db, group_id):
     if before != after or signature != tuple(getattr(group, k) for k in fields):
         raise HTTPException(409, "Payment source or group configuration changed during sync. Retry.")
     try:
-        return refresh(db, group_id, result, provider.key, automate=True)
+        response = refresh(db, group_id, result, provider.key, automate=True)
+        logger.info("Payment sync history imported", extra={"details": {
+            "group_id": group_id, "provider": provider.key, "payments": len(result.payments),
+            "receipts": len(result.receipts), "history_complete": result.history_complete,
+            "warnings": result.warnings}})
+        return response
     except HTTPException:
         db.rollback()
         group = db.get(BuyingGroup, group_id)

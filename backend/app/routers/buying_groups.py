@@ -693,5 +693,5 @@ def run_scheduled_group(group_id: int) -> bool:
     if payments:
         from app.payment_ledger import sync_group
         with SessionLocal() as payment_db:
-            sync_group(payment_db, group_id)
+            sync_group(payment_db, group_id, scheduled=True)
     return True

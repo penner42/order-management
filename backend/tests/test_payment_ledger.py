@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.database import Base
-from app.models import BuyingGroup, Store, Order, Item, Payment, PaymentLineItem, PaymentSource, PaymentReview, PaymentCoverage
+from app.models import BrowserImportLog, BuyingGroup, Store, Order, Item, Payment, PaymentLineItem, PaymentSource, PaymentReview, PaymentCoverage
 from app.models.item import ItemStatus
 from app.payment_evidence import PaymentEvidence, ReceiptEvidence, PaymentFetch
 from app.payment_review import refresh
@@ -169,6 +169,39 @@ class PaymentLedgerTests(unittest.TestCase):
         self.assertEqual(e.exception.status_code,502)
         self.assertNotIn('sensitive',str(e.exception.detail))
         self.assertEqual(payment_amount(self.payment()),100)
+
+    def test_sync_failure_logs_underlying_reason_and_redacts_credentials(self):
+        self.fetch()
+        with patch('app.payment_providers.ParsefilePaymentProvider.ready', return_value=(True, None)), patch(
+            'app.payment_providers.ParsefilePaymentProvider.fetch',
+            side_effect=ValueError('History pagination repeated a record; password=private-password')):
+            with self.assertLogs('app.payment_ledger', level='ERROR') as captured:
+                with self.assertRaises(HTTPException):
+                    sync_group(self.db, self.group.id, scheduled=True)
+        logs = self.db.query(BrowserImportLog).order_by(BrowserImportLog.id).all()
+        self.assertEqual([row.event_type for row in logs], ['payment_sync_started', 'payment_sync_error'])
+        self.assertTrue(all(row.category == 'groups' and row.mode == 'payment_sync' and row.scheduled for row in logs))
+        self.assertEqual(logs[-1].store_name, 'Example')
+        self.assertEqual(logs[-1].retailer, 'parsefile')
+        self.assertEqual(logs[-1].level, 'error')
+        self.assertIn('History pagination repeated a record', logs[-1].message)
+        self.assertNotIn('private-password', logs[-1].message)
+        self.assertIsNotNone(captured.records[0].exc_info)
+        self.assertEqual(payment_amount(self.payment()), 100)
+
+    def test_sync_success_and_incomplete_history_are_logged(self):
+        for complete in (True, False):
+            with self.subTest(history_complete=complete), patch(
+                'app.payment_providers.ParsefilePaymentProvider.ready', return_value=(True, None)), patch(
+                'app.payment_providers.ParsefilePaymentProvider.fetch',
+                return_value=PaymentFetch([], [], history_complete=complete)):
+                sync_group(self.db, self.group.id)
+            log = self.db.query(BrowserImportLog).order_by(BrowserImportLog.id.desc()).first()
+            self.assertEqual(log.event_type, 'payment_sync_finished' if complete else 'payment_sync_error')
+            self.assertEqual(log.level, 'info' if complete else 'error')
+            self.assertFalse(log.scheduled)
+            if not complete:
+                self.assertIn('History is incomplete', log.message)
 
     def test_signed_receipt_revision_keeps_original_total_and_carries_to_later_payment(self):
         from datetime import timedelta
