@@ -272,6 +272,8 @@ def _materialize_orders(
         selectinload(Order.order_payments).joinedload(OrderPaymentMethod.payment_method),
     )
     orders = q.all()
+    from app.tracking_rewards import order_reward_summaries
+    order_reward_summaries(orders)
 
     # Build response: apply status filter and, when search is item-level-only, show only matching items
     status_set = set(status) if status else None
@@ -496,6 +498,8 @@ def create_order(data: OrderCreate, db: Session = Depends(get_db), current_user:
     enqueue_order(db, order)
     db.commit()
     db.refresh(order)
+    from app.tracking_rewards import order_reward_summaries
+    order_reward_summaries([order])
     return order
 
 
@@ -511,6 +515,8 @@ def get_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(ge
     )
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    from app.tracking_rewards import order_reward_summaries
+    order_reward_summaries([order])
     return order
 
 
@@ -567,6 +573,8 @@ def update_order(order_id: int, data: OrderUpdate, db: Session = Depends(get_db)
     enqueue_order(db, order)
     db.commit()
     db.refresh(order)
+    from app.tracking_rewards import order_reward_summaries
+    order_reward_summaries([order])
     return order
 
 

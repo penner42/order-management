@@ -44,10 +44,10 @@ def item_issue(item, detail, issue_links=None):
 
 
 def item_payable(item):
-    """BG cash credits include the warehouse reward, once per received unit."""
+    """BG reward is an allocated line total, added once after unit payout."""
     group = item.order.buying_group
     reward = money(item.reward or 0) if group and group.api_framework == "buyinggroup" else ZERO
-    return (money(item.price_sold or 0) + reward) * item.quantity
+    return money(item.price_sold or 0) * item.quantity + reward
 
 
 def receipt_balance(db, receipt):
@@ -215,6 +215,9 @@ def refresh(db: Session, group_id: int, result: PaymentFetch, provider_key: str,
     db.flush()
     payments = sorted([s for s in index.values() if s.kind == "payment" and s.present], key=order_key)
     receipts = [s for s in index.values() if s.kind == "receipt" and s.present]
+    if group.api_framework == "buyinggroup":
+        from app.tracking_rewards import sync_payment_rewards
+        sync_payment_rewards(db, group, [s for s in receipts if ("receipt", s.external_id) in seen])
     previous = None
     for source in payments:
         review = db.query(PaymentReview).filter_by(source_id=source.id).first()
@@ -530,6 +533,11 @@ def review_view(db, review, outstanding):
         if review.source.revision != review.confirmed_revision:
             issues.append("Source payment changed after confirmation; local payment was preserved.")
         total = payment_amount(db.get(Payment, review.payment_id))
+        payment = db.get(Payment, review.payment_id)
+        group = db.get(BuyingGroup, review.source.buying_group_id)
+        for line in payment.line_items if group and group.api_framework == "buyinggroup" else []:
+            if item_allocated(db, line.item_id) > item_payable(line.item):
+                issues.append(item_issue(line.item, "has confirmed allocations exceeding its corrected payout; payment was preserved.", issue_links))
     else:
         issues, total = validate_content(db, review, content, outstanding, issue_links=issue_links)
     return {"id": review.id, "version": review.version, "payment_id": review.payment_id,

@@ -57,6 +57,14 @@ class OrderUpdate(BaseModel):
     payment_methods: list[OrderPaymentMethodCreate] | None = None
 
 
+class TrackingRewardRead(BaseModel):
+    id: int
+    tracking_number: str
+    amount: Decimal
+    item_ids: list[int]
+    shared_order_count: int
+
+
 class OrderRead(OrderBase, TimestampsMixin):
     id: int
     user_id: int | None = None
@@ -67,6 +75,7 @@ class OrderRead(OrderBase, TimestampsMixin):
     store_account: StoreAccountRead | None = None
     buying_group: BuyingGroupSummary | None = None
     items: list[ItemRead] = []
+    tracking_rewards: list[TrackingRewardRead] = []
     order_payments: list[OrderPaymentMethodRead] = []
     # Internal: read from the ORM object, excluded from responses (has_invoice is exposed instead).
     invoice_pdf_path: str | None = Field(default=None, exclude=True)

@@ -150,6 +150,7 @@ export interface Item {
 export type OrderStatus = 'imported' | 'personal'
 
 export interface Order {
+  tracking_rewards?: { id: number; tracking_number: string; amount: string; item_ids: number[]; shared_order_count: number }[]
   bfmr_order_tasks?: BfmrOrderTask[]
   id: number
   user_id: number | null

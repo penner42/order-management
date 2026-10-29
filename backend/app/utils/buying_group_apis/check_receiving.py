@@ -950,6 +950,8 @@ def _reward_needs_update(item: Item, meta: dict[str, Any], qty: int) -> bool:
 
 
 def _reward_from_meta(meta: dict[str, Any], qty: int) -> Decimal | None:
+    if "allocated_reward" in meta:
+        return meta["allocated_reward"]
     unit_reward = meta.get("unit_reward")
     return (unit_reward * qty).quantize(Decimal("0.01")) if unit_reward is not None else None
 
@@ -2669,6 +2671,16 @@ def _check_receiving_buyinggroup(
         except Exception as exc:
             # Receiving can still be reviewed; never replace a saved reward with zero.
             reward_error = str(exc).strip() or exc.__class__.__name__
+    from app.tracking_rewards import receiving_credits, save_credits, saved_credit_values
+    from app.bg_reward_math import reward_share
+    try:
+        credits = receiving_credits(receipts, tracking_rewards)
+    except ValueError as exc:
+        # Conflicting reward identities do not make product receiving unusable.
+        reward_error = str(exc)
+        credits = {}
+    observed_at = datetime.fromisoformat(source.payload["started_at"]) if source.payload.get("started_at") else None
+    credits = saved_credit_values(credits, save_credits(db, group, credits, observed_at=observed_at))
     local_tracking_keys = {tn.casefold() for tn in all_trackings}
 
     def receipt_tracking(row: buyinggroup_api.BuyinggroupReceipt) -> str:
@@ -2755,29 +2767,14 @@ def _check_receiving_buyinggroup(
                 "delivery": row.delivery,
             })
 
-    # A tracking reward is shared only by its confirmed units, once across products.
+    # The reward belongs to the credited receipt, shared by its confirmed units.
     confirmed_qty = {}
     for lot in lots:
-        key = lot["tn_key"]
+        key = lot["receipt_ids"][0]
         confirmed_qty[key] = confirmed_qty.get(key, 0) + lot["qty"]
-    reward_by_tn = {}
-    for row in detail_rows:
-        key = receipt_tracking(row).casefold()
-        for alias in (row.tracking_id, row.alt_tracking_id):
-            reward = tracking_rewards.get(buyinggroup_api.tracking_reward_key(alias or ""))
-            if reward is not None:
-                reward_by_tn[key] = reward
-                break
-    for lot in lots:
-        key = lot["tn_key"]
-        if key in reward_by_tn:
-            lot["unit_reward"] = reward_by_tn[key] / Decimal(confirmed_qty[key])
-    for receipt in unknown_receipts:
-        key = receipt["tracking_number"].casefold()
-        if receipt["linkable"] and key in reward_by_tn and confirmed_qty.get(key):
-            receipt["reward"] = str((reward_by_tn[key] * receipt["quantity"] /
-                                     Decimal(confirmed_qty[key])).quantize(Decimal("0.01")))
-
+    reward_by_receipt = {}
+    for rid, credit in credits.items():
+        reward_by_receipt[rid] = Decimal(credit["amount"]) if credit["receipt_id"] == rid else Decimal("0.00")
     lots_by_tn = {}
     lots_by_id = {lot["lot_id"]: lot for lot in lots}
     for lot in lots:
@@ -2860,13 +2857,10 @@ def _check_receiving_buyinggroup(
     for batch in (reserved, allocations):
         for item_id, item_allocations in batch.items():
             for lid, qty in item_allocations:
-                key = lots_by_id[lid]["tn_key"]
-                if key in reward_by_tn:
+                key = lots_by_id[lid]["receipt_ids"][0]
+                if key in reward_by_receipt:
                     before = reward_qty_used.get(key, 0)
-                    unit_reward = reward_by_tn[key] / Decimal(confirmed_qty[key])
-                    reward_allocations[item_id, lid] = (
-                        (unit_reward * (before + qty)).quantize(Decimal("0.01"))
-                        - (unit_reward * before).quantize(Decimal("0.01")))
+                    reward_allocations[item_id, lid] = reward_share(reward_by_receipt[key], before, qty, confirmed_qty[key])
                     reward_qty_used[key] = before + qty
     remaining_supply = dict(available)
     for item_allocations in allocations.values():
@@ -2881,13 +2875,10 @@ def _check_receiving_buyinggroup(
                 continue
             receipt["quantity"] = qty
             receipt["received_ext_total"] = str((lots_by_id[lid]["unit_price"] * qty).quantize(Decimal("0.01")))
-            key = lots_by_id[lid]["tn_key"]
-            if key in reward_by_tn:
+            key = lots_by_id[lid]["receipt_ids"][0]
+            if key in reward_by_receipt:
                 before = reward_qty_used.get(key, 0)
-                unit_reward = reward_by_tn[key] / Decimal(confirmed_qty[key])
-                receipt["reward"] = str(
-                    (unit_reward * (before + qty)).quantize(Decimal("0.01"))
-                    - (unit_reward * before).quantize(Decimal("0.01")))
+                receipt["reward"] = str(reward_share(reward_by_receipt[key], before, qty, confirmed_qty[key]))
                 reward_qty_used[key] = before + qty
         unresolved.append(receipt)
     unknown_receipts = unresolved
@@ -2910,7 +2901,7 @@ def _check_receiving_buyinggroup(
         item_meta = {lid: dict(meta_by_lot[lid]) for lid, _qty in item_allocations}
         for lid, qty in item_allocations:
             if (item.id, lid) in reward_allocations:
-                item_meta[lid]["unit_reward"] = reward_allocations[item.id, lid] / Decimal(qty)
+                item_meta[lid]["allocated_reward"] = reward_allocations[item.id, lid]
         matches.extend(_matches_for_tn_allocations(
             item=item, order=order, trackings=trackings,
             tn_allocations=item_allocations, meta_by_tn=item_meta,

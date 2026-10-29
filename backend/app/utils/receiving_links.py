@@ -14,6 +14,7 @@ from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipmen
 from app.models.item import ItemStatus
 from app.schemas.item import ItemBulkUpdateEntry
 from app.schemas.buying_group import ReceivingReceiptLinkRequest
+from app.bg_reward_math import reward_share
 
 
 OPEN_STATUSES = {ItemStatus.PURCHASED, ItemStatus.SHIPPED, ItemStatus.SUBMITTED, ItemStatus.NEEDS_REVIEW}
@@ -173,7 +174,7 @@ def manual_allocations(items, receipt, tracking, key):
     allocations = []
     allocated = Decimal(0)
     reward = Decimal(receipt["reward"]) if receipt.get("reward") is not None else None
-    allocated_reward = Decimal(0)
+    reward_quantity = 0
     for index, item in enumerate(items):
         expected = Decimal(item.price_sold or 0) * item.quantity
         amount = None if total is None else (
@@ -181,11 +182,8 @@ def manual_allocations(items, receipt, tracking, key):
             else (total * item.quantity / qty).quantize(Decimal("0.01")))
         if amount is not None:
             allocated += amount
-        line_reward = None if reward is None else (
-            reward - allocated_reward if index == len(items) - 1
-            else (reward * item.quantity / qty).quantize(Decimal("0.01")))
-        if line_reward is not None:
-            allocated_reward += line_reward
+        line_reward = None if reward is None else reward_share(reward, reward_quantity, item.quantity, qty)
+        reward_quantity += item.quantity
         allocations.append({
             "item_id": item.id, "order_id": item.order_id,
             "store_order_number": item.order.store_order_number, "description": item.description,

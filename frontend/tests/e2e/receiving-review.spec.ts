@@ -136,7 +136,7 @@ test('partial BG receipt stores UPC on received unit and splits missing unit for
   expect(linked.shipment_items.map(link => link.item_id).sort()).toEqual(saved.items.map(i => i.id).sort())
 })
 
-test('received reward is saved separately and shown beside payout on Orders', async ({ app, data }) => {
+test('received reward is saved separately from unit payout', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('reward-store') })
   const group = await data.create('/buying-groups', { name: data.name('reward-group') })
   const orderNumber = data.name('reward-order')
@@ -160,11 +160,11 @@ test('received reward is saved separately and shown beside payout on Orders', as
   await expect(app.getByText('All listed rows were applied.')).toBeVisible()
   expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ reward: '6.50', price_sold: '20.00', status: 'scanned' })
   await app.goto(`/?q=${encodeURIComponent(orderNumber)}`)
-  await expect(app.getByRole('columnheader', { name: 'Reward', exact: true })).toBeVisible()
-  await expect(app.locator('td[title="Total warehouse reward for this line"]')).toHaveText('$6.50')
+  await expect(app.getByRole('columnheader', { name: 'Reward', exact: true })).toHaveCount(0)
   await expect(app.getByLabel('Payout price')).toHaveValue('20.00')
   await app.reload()
-  await expect(app.locator('td[title="Total warehouse reward for this line"]')).toHaveText('$6.50')
+  await expect(app.getByLabel('Payout price')).toHaveValue('20.00')
+  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ reward: '6.50', price_sold: '20.00' })
 })
 
 test('receipt candidates only hide lines with receipts and show dates and expected payouts', async ({ app, data }) => {

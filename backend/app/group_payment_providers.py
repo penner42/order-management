@@ -8,6 +8,7 @@ from itertools import combinations
 from urllib.parse import urlencode, quote, urlsplit
 
 from app.payment_evidence import PaymentEvidence, ReceiptEvidence, PaymentFetch
+from app.bg_reward_math import tracking_credits
 from app.utils.buying_group_apis import buyinggroup as bg, usabg, dealandrunner as dar
 
 ZERO = Decimal("0.00")
@@ -147,23 +148,19 @@ def normalize_buyinggroup(payments, activity, receipts, orders):
     receipt_rows = {identity(r.get("receipt_id")): r for r in receipts}
     if len(receipt_rows) != len(receipts):
         raise ValueError("Receipt history repeats an identity")
-    # A tracking reward is paid once, even when its tracking has several receipts.
-    reward_used = set()
+    credits = tracking_credits([{
+        "receipt_id": identity(row["receipt_id"]),
+        "trackings": [t for k in ("tracking", "alt_tracking") if (t := bg._nested_tracking_id(row.get(k)))],
+        "sort_date": date(row.get("created_dt")).isoformat() if row.get("created_dt") else "",
+        "void": flag(row.get("void")),
+    } for row in receipts], rewards, reward_aliases.values())
     normalized_receipts = []
     cash_total = {}
     for row in sorted(receipts, key=lambda r: (date(r.get("created_dt")) or datetime.min.replace(tzinfo=timezone.utc), r["receipt_id"])):
         rid = identity(row["receipt_id"])
         tracking = [t for k in ("tracking", "alt_tracking") if (t := bg._nested_tracking_id(row.get(k)))]
-        reward = ZERO
-        for tn in tracking:
-            key = bg.tracking_reward_key(tn)
-            if key in rewards:
-                aliases = reward_aliases[key]
-                if not (aliases & reward_used):
-                    reward = rewards[key]
-                    # Mark both aliases as used.
-                    reward_used.update(aliases)
-                break
+        credit = credits.get(rid)
+        reward = Decimal(credit["amount"]) if credit and credit["receipt_id"] == rid else ZERO
         # Void/unpriced receipts remain visible without inventing a monetary value.
         total = amount(row["total"]) if row.get("total") not in (None, "", "---") else ZERO
         cash_total[rid] = total + reward
@@ -171,7 +168,8 @@ def normalize_buyinggroup(payments, activity, receipts, orders):
             created_at=date(row.get("created_dt")), void=flag(row.get("void")), verified=flag(row.get("verified")),
             quantity=int(row["quantity"]) if row.get("quantity") is not None else None,
             tracking_numbers=sorted(set(tracking)), description=str(row.get("order_id") or ""),
-            details=[{"amount": str(total), "cash_reward": str(reward)}]))
+            details=[{"amount": str(total), "cash_reward": str(reward),
+                      **({"tracking_reward": credit} if credit else {})}]))
 
     processed = {}
     credits = []

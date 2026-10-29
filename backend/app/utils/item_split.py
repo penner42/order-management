@@ -6,6 +6,7 @@ from app.models import Item, ShipmentItem
 from app.models.item import ItemStatus
 from app.schemas.item import ItemSplitRequest
 from app.utils.dates import to_date_only
+from app.bg_reward_math import reward_share
 
 
 def split_item_record(db: Session, item: Item, data: ItemSplitRequest) -> Item:
@@ -19,6 +20,10 @@ def split_item_record(db: Session, item: Item, data: ItemSplitRequest) -> Item:
             detail=f"keep_quantity must be between 1 and {qty - 1} (inclusive) for quantity {qty}",
         )
     split_off_qty = qty - keep
+    if item.reward is not None and item.receipt_id:
+        # The unreceived remainder loses its receipt; reserve its reward share
+        # rather than leaving the full tracking reward on the reduced line.
+        item.reward = reward_share(item.reward, 0, keep, qty)
     item.quantity = keep
     split_off_status = data.split_off_status if data.split_off_status is not None else item.status
     now = datetime.now(timezone.utc)
