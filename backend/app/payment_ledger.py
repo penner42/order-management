@@ -145,6 +145,15 @@ def _automatic_allocations(db, review):
     shares = payload.get("receipt_amounts")
     # Provider warnings can indicate ambiguous cash coverage. Do not promote a time window to evidence.
     allocation_warnings = [w for w in payload.get("warnings", []) if not w.startswith("Archive ")]
+    bg_window = source.provider == "buyinggroup" and payload.get("evidence", {}).get("receipt_selection") == "payment_created_window"
+    if bg_window and shares is not None:
+        # The date window establishes receipt membership independently of a
+        # referral/adjustment difference. Keep those warnings visible while
+        # allowing exact local receipt matches to consume their own balances.
+        allocation_warnings = [w for w in allocation_warnings if not w.startswith((
+            "BG receipt creation window totals ", "BG Activity includes cash adjustments in this payment window;"))]
+        if sum((money(v) for v in shares.values()), ZERO) > money(payload["amount"]):
+            return []  # Do not select an arbitrary subset to fit an unexplained shortfall.
     if allocation_warnings or (payload.get("receipt_ids") is None and not payload.get("history_complete", True)) or (shares is None and payload.get("receipt_ids") is None and
         sum((money(r.payload["amount"]) for r in receipts), ZERO) != money(payload["amount"])):
         return []

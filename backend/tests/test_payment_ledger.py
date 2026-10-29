@@ -98,6 +98,48 @@ class PaymentLedgerTests(unittest.TestCase):
         self.assertEqual(len(p.line_items), 1)
         self.assertEqual(Decimal(breakdown(p)['historical_amount']), 0)
 
+    def test_bg_window_links_exact_receipt_despite_referral_difference(self):
+        from app.group_payment_providers import normalize_buyinggroup
+        from tests.test_group_payment_providers import bg_payment, bg_receipt
+        self.group.api_framework = 'buyinggroup'
+        self.db.commit()
+        item = self.item(value='199')
+        item.reward = Decimal('0.05')
+        item.receipt_tracking_number = 'TRACK'
+        self.db.commit()
+        result = normalize_buyinggroup([bg_payment('p1', '200.05')], [
+            {'type': 'Referral Reward', 'amount': '1', 'created_dt': '01-01-2026 12:00:00'}],
+            [bg_receipt('r1', '199', tracking='TRACK')], [{'tracking_id': 'TRACK', 'reward': '0.05'}])
+        refresh(self.db, self.group.id, result, 'buyinggroup', automate=True)
+        payment = self.payment()
+        self.assertEqual(len(payment.line_items), 1)
+        self.assertEqual(payment.line_items[0].amount, Decimal('199.05'))
+        self.assertEqual(Decimal(breakdown(payment)['unresolved_amount']), Decimal('1.00'))
+        self.assertTrue(any('cash adjustments' in issue for issue in payment.sync_issues))
+
+    def test_bg_window_does_not_choose_subset_to_hide_a_shortfall(self):
+        from app.group_payment_providers import normalize_buyinggroup
+        from tests.test_group_payment_providers import bg_payment, bg_receipt
+        self.group.api_framework = 'buyinggroup'
+        self.db.commit()
+        self.item('r1', '100')
+        self.item('r2', '100')
+        result = normalize_buyinggroup([bg_payment('p1', '100')], [], [bg_receipt('r1'), bg_receipt('r2')], [])
+        refresh(self.db, self.group.id, result, 'buyinggroup', automate=True)
+        self.assertEqual(result.payments[0].receipt_ids, ['r1', 'r2'])
+        self.assertEqual(self.payment().line_items, [])
+
+    def test_bg_window_keeps_unsupported_activity_as_an_automatic_link_blocker(self):
+        from app.group_payment_providers import normalize_buyinggroup
+        from tests.test_group_payment_providers import bg_payment, bg_receipt
+        self.group.api_framework = 'buyinggroup'
+        self.db.commit()
+        self.item('r1', '100')
+        result = normalize_buyinggroup([bg_payment('p1', '100')], [{'type': 'Unknown', 'details': 'Unsupported cash'}],
+                                     [bg_receipt('r1')], [])
+        refresh(self.db, self.group.id, result, 'buyinggroup', automate=True)
+        self.assertEqual(self.payment().line_items, [])
+
     def test_source_total_is_independent_of_corrections_and_bonus(self):
         self.fetch(); p = self.payment(); p.payment_bonus = 50
         self.assertEqual(payment_amount(p), 100)

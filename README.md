@@ -271,12 +271,19 @@ carry to later payments or remain queued. Corrections affect item accounting
 without adding money twice to the group's authoritative payment total.
 
 BuyingGroup.com combines payment history with Activity, receiving receipts, and
-tracking rewards. Maximum available payments are assumed. Receipt balances carry
-across requests; ambiguous held-receipt assignments and unexplained opening
-balances require review. Activity processing dates are not request boundaries.
+tracking rewards. Receipts belong to the payment whose creation window contains
+their receipt creation date: after the previous non-void payment's creation time
+and through the current payment's creation time, inclusive. Verification,
+processing, and sent dates do not move receipts between payments. The first
+request includes available earlier receipts; missing or identical request dates
+require review. Exact local receipt matches can link while a referral or other
+payment-total difference remains flagged. Receipts are never selected by trying
+to find a combination of amounts matching the request.
 Cash tracking rewards count once, including alternate tracking aliases; points
 are separate from cash. Received local item rewards should be prepared through
 Receiving before payment confirmation. Referral adjustments require explanation.
+Existing imports receive the new window selection on the next BG payment sync;
+manual allocation choices remain preserved.
 
 USABG supplies explicit PO payment shares and may pay one PO in installments.
 Approved requests are sent only when an issued check provides a date. D&R imports

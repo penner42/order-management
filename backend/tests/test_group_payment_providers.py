@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.group_payment_providers import (HistoryPages, amount, date, normalize_buyinggroup,
-    normalize_usabg, normalize_dealandrunner, BuyinggroupPaymentProvider, UsabgPaymentProvider, unique_receipt_subset)
+    normalize_usabg, normalize_dealandrunner, BuyinggroupPaymentProvider, UsabgPaymentProvider)
 from app.utils.buying_group_apis import buyinggroup as bg, usabg
 
 
@@ -53,12 +53,13 @@ class GroupProviderTests(unittest.TestCase):
             with self.assertRaises(ValueError): pages.add(rows, count, lambda r:r["id"])
         self.assertTrue(pages.add([{"id":"r2"}], 2, lambda r:r["id"]))
 
-    def test_bg_carries_held_receipt_across_maximum_requests(self):
+    def test_bg_does_not_move_old_receipts_to_a_later_request_to_match_amount(self):
         result = normalize_buyinggroup([bg_payment("p1", "40"), bg_payment("p2", "60", "01-03-2026 12:00:00")],
             [bg_activity("held", "60"), bg_activity("ready", "40")],
             [bg_receipt("held", "60"), bg_receipt("ready", "40")], [])
-        self.assertEqual(result.payments[0].receipt_amounts, {"ready": Decimal("40")})
-        self.assertEqual(result.payments[1].receipt_amounts, {"held": Decimal("60")})
+        self.assertEqual(result.payments[0].receipt_amounts, {"held": Decimal("60"), "ready": Decimal("40")})
+        self.assertEqual(result.payments[1].receipt_amounts, {})
+        self.assertTrue(result.payments[0].warnings)
 
     def test_bg_cash_reward_once_per_tracking_and_points_excluded(self):
         result = normalize_buyinggroup([bg_payment("p", "205")],
@@ -79,22 +80,48 @@ class GroupProviderTests(unittest.TestCase):
         self.assertEqual(result.payments[0].receipt_ids, ["r1"])
         self.assertEqual(result.payments[0].sent_at, date(payment["paid_dt"]))
 
-    def test_bg_ambiguous_equal_receipts_require_review(self):
-        self.assertIsNone(unique_receipt_subset({"a":Decimal(50), "b":Decimal(50)}, Decimal(50)))
+    def test_bg_equal_amount_receipts_are_selected_by_dates_without_subset_guessing(self):
         result = normalize_buyinggroup([bg_payment("p", "100")], [bg_activity("a", "100"), bg_activity("b", "100")],
             [bg_receipt("a"), bg_receipt("b")], [])
-        self.assertIsNone(result.payments[0].receipt_amounts)
+        self.assertEqual(result.payments[0].receipt_amounts, {"a": Decimal(100), "b": Decimal(100)})
         self.assertTrue(result.payments[0].warnings)
 
     def test_bg_revision_is_not_a_second_receipt_credit(self):
         result = normalize_buyinggroup([bg_payment("p", "100")], [bg_activity("r", "100"), bg_activity("r", "120", detail="Revised Receipt")], [bg_receipt("r", "120")], [])
-        self.assertEqual(result.payments[0].receipt_amounts, {"r":Decimal(100)})
+        self.assertEqual(result.payments[0].receipt_amounts, {"r":Decimal(120)})
         self.assertEqual(result.receipts[0].amount, Decimal(120))
 
     def test_bg_disagreement_with_processed_amount_fails_closed(self):
         with self.assertRaises(ValueError):
             normalize_buyinggroup([bg_payment("p", "100")],
                 [dict(type="Payment", details="Processed Payment", reference_id="p", amount="-99")], [], [])
+
+    def test_bg_receipt_creation_window_boundaries_ignore_activity_dates(self):
+        result = normalize_buyinggroup([
+            bg_payment("p2", "200", "01-03-2026 12:00:00"), bg_payment("p1", "100")],
+            [bg_activity("r1", "100", "01-04-2026 12:00:00"),
+             bg_activity("r2", "200", "01-01-2026 12:00:00")],
+            [bg_receipt("r1", created="01-02-2026 12:00:00"),
+             bg_receipt("r2", "200", created="01-03-2026 12:00:00"),
+             bg_receipt("future", "500", created="01-03-2026 12:00:01")], [])
+        self.assertEqual(result.payments[0].receipt_ids, ["r1"])
+        self.assertEqual(result.payments[1].receipt_ids, ["r2"])
+        self.assertEqual(result.payments[1].evidence["window_start"], date("01-02-2026 12:00:00").isoformat())
+
+    def test_bg_old_referral_warning_does_not_follow_every_later_payment(self):
+        result = normalize_buyinggroup([bg_payment("p1", "101"), bg_payment("p2", "100", "01-03-2026 12:00:00")],
+            [dict(type="Referral Reward", amount="1", created_dt="01-01-2026 12:00:00")],
+            [bg_receipt("r1"), bg_receipt("r2", created="01-03-2026 12:00:00")], [])
+        self.assertTrue(any("cash adjustments" in w for w in result.payments[0].warnings))
+        self.assertEqual(result.payments[1].warnings, [])
+
+    def test_bg_missing_or_identical_payment_creation_dates_require_review(self):
+        for payments in ([bg_payment("p", "100", created=None)],
+                         [bg_payment("p1", "100"), bg_payment("p2", "100")]):
+            with self.subTest(payments=payments):
+                result = normalize_buyinggroup(payments, [], [bg_receipt("r")], [])
+                self.assertTrue(all(p.receipt_ids is None for p in result.payments))
+                self.assertTrue(result.warnings or any(p.warnings for p in result.payments))
 
     def test_bg_fetch_reauthenticates_on_same_page(self):
         group = SimpleNamespace(base_url="https://example.test", api_username="user", api_password="password")

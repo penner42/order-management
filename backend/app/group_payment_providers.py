@@ -172,7 +172,6 @@ def normalize_buyinggroup(payments, activity, receipts, orders):
                       **({"tracking_reward": credit} if credit else {})}]))
 
     processed = {}
-    credits = []
     cash_adjustments = []
     warnings = []
     for row in activity:
@@ -188,10 +187,9 @@ def normalize_buyinggroup(payments, activity, receipts, orders):
             rid = identity(row.get("reference_id"))
             if rid not in receipt_rows:
                 raise ValueError("Activity references an unavailable receipt")
-            # Verified/revised events can repeat a full value, not a cash delta.
-            if detail in {"New Receipt", "Verified Receipt"}:
-                credits.append((date(row.get("created_dt")), rid, amount(row["amount"])))
-            elif detail != "Revised Receipt":
+            # Receipt creation dates determine coverage. Activity verification or
+            # revision dates must not move a receipt to another payment window.
+            if detail not in {"New Receipt", "Verified Receipt", "Revised Receipt"}:
                 warnings.append("Review unsupported cash activity: " + str(detail))
         elif typ == "Referral Reward":
             cash_adjustments.append((date(row.get("created_dt")), amount(row["amount"])))
@@ -201,92 +199,53 @@ def normalize_buyinggroup(payments, activity, receipts, orders):
     if set(processed) - known:
         raise ValueError("Activity and payment identities disagree")
 
-    # Retain unspent receipts across requests. A maximum request can skip unverified
-    # receipts; use only uniquely reconciling whole-receipt selections automatically.
-    credits.sort(key=lambda x: (x[0] or datetime.max.replace(tzinfo=timezone.utc), x[1]))
-    consumed = defaultdict(lambda: ZERO)
     normalized_payments = []
     previous_request = None
+    dated_requests = [date(r.get("created_dt")) for r in payments
+                      if not flag(r.get("void")) and str(r.get("status") or "").upper() != "VOIDED"]
+    request_counts = {t: dated_requests.count(t) for t in set(dated_requests)}
+    receipt_dates = {rid: date(row.get("created_dt")) for rid, row in receipt_rows.items()}
+    if any(t is None for t in receipt_dates.values()):
+        warnings.append("BG receipt creation date is missing; review receipt coverage before automatic linking.")
+    if None in dated_requests:
+        warnings.append("BG payment creation date is missing; review payment boundaries before automatic linking.")
     for row in sorted(payments, key=lambda r: (date(r.get("created_dt")) or datetime.min.replace(tzinfo=timezone.utc), r["payment_id"])):
         pid, value = identity(row.get("payment_id")), amount(row["amount"])
         status = str(row.get("status") or "UNKNOWN").upper()
+        void = flag(row.get("void")) or status == "VOIDED"
         ledger = processed.get(pid)
         if ledger and -amount(ledger["amount"]) != value:
             raise ValueError("Activity and payment amounts disagree")
         if status in {"PAID", "SENT", "PROCESSING"} and not ledger:
             raise ValueError("Processed payment is missing from Activity")
         created = date(row.get("created_dt"))
-        candidates = {}
-        for credited, rid, gross in credits:
-            if created and credited and credited <= created:
-                # Do not count a verification event as a second receipt.
-                candidates[rid] = min(gross, cash_total[rid]) - consumed[rid]
-        candidates = {rid: v for rid, v in candidates.items() if v > 0 and not flag(receipt_rows[rid].get("void"))}
         shares = None
         notes = []
-        if not flag(row.get("void")) and value > 0:
-            if sum(candidates.values(), ZERO) == value:
-                shares = candidates
-            elif candidates and sum(candidates.values(), ZERO) < value:
-                # Maximum requests consume all available evidenced receipts. A
-                # missing opening balance/adjustment must still be explained locally.
-                shares = candidates
-                notes.append("Receipt credits are below the maximum request. Reconcile the opening balance or cash adjustment and explain any bonus before confirming.")
-            else:
-                # Most carryovers involve one held receipt. Limit combinatorial work
-                # and refuse ambiguous matches instead of assigning a FIFO fiction.
-                selection = unique_receipt_subset(candidates, value)
-                if selection is not None:
-                    shares = selection
-                else:
-                    recent_ids = {rid for t, rid, _ in credits if t and created and (previous_request is None or t > previous_request) and t <= created}
-                    recent = {rid: v for rid, v in candidates.items() if rid in recent_ids}
-                    if recent and sum(recent.values(), ZERO) == value:
-                        shares = recent
-                        notes.append("This request's Activity window reconciles, but earlier receipt balances remain unresolved. Verify held receipts before confirming.")
-            if shares is None:
-                notes.append("Maximum-payment receipt balance does not reconcile uniquely. Review held receipts, earlier requests, and adjustments before confirming.")
-                # Reserving an arbitrary subset here would contaminate later requests.
-                # Use the request's chronological candidates for review only.
-            else:
-                for rid, share in shares.items():
-                    consumed[rid] += share
-        if any(created and t and t <= created for t, _ in cash_adjustments):
-            notes.append("Cash referral rewards or reversals exist in Activity; verify their payment allocation and explain any bonus or fee.")
+        boundary_known = created is not None and request_counts.get(created, 0) == 1
+        if created and not boundary_known:
+            notes.append("BG payment creation times are identical; review receipt coverage before automatic linking.")
+        if boundary_known and not void:
+            shares = {rid: cash_total[rid] for rid, received in receipt_dates.items()
+                      if received and (previous_request is None or received > previous_request)
+                      and received <= created and not flag(receipt_rows[rid].get("void")) and cash_total[rid] > 0}
+            total = sum(shares.values(), ZERO)
+            if total != value:
+                notes.append(f"BG receipt creation window totals ${total:,.2f}; source payment is ${value:,.2f}. Review the remaining difference.")
+        if any(created and t and (previous_request is None or t > previous_request) and t <= created for t, _ in cash_adjustments):
+            notes.append("BG Activity includes cash adjustments in this payment window; verify their allocation and explain any bonus or fee.")
         normalized_payments.append(PaymentEvidence(external_id=pid, amount=value, created_at=created,
             sent_at=date(row.get("paid_dt")) if status in {"PAID", "SENT"} else None,
             status=status, status_known=status in {"PAID", "SENT", "PROCESSING", "REQUESTED", "VOIDED"},
-            void=flag(row.get("void")) or status == "VOIDED",
+            void=void,
             receipt_ids=list(shares) if shares is not None else None, receipt_amounts=shares,
-            warnings=notes, evidence={"processed_at": row.get("processed_dt"), "activity_reference": pid if ledger else None},
-            memo="Maximum available payment requested. Activity processing dates do not define receipt coverage."))
-        if not flag(row.get("void")):
+            warnings=notes, evidence={"processed_at": row.get("processed_dt"), "activity_reference": pid if ledger else None,
+                "receipt_selection": "payment_created_window" if shares is not None else None,
+                "window_start": previous_request.isoformat() if previous_request else None,
+                "window_end": created.isoformat() if created else None},
+            memo="Receipts are selected by creation date: after the previous payment request and through this request, inclusive."))
+        if not void and created:
             previous_request = created
     return PaymentFetch(normalized_payments, normalized_receipts, warnings=sorted(set(warnings)))
-
-
-def unique_receipt_subset(candidates, target):
-    """Find a unique monetary subset; cap states and never break ties by ordering."""
-    # Work in integer cents to avoid decimal context and rounding ambiguity.
-    limit = int(target * 100)
-    states = {0: ()}
-    for rid, value in candidates.items():
-        cents = int(value * 100)
-        if cents <= 0 or cents > limit:
-            continue
-        for subtotal, path in list(states.items()):
-            new = subtotal + cents
-            if new > limit:
-                continue
-            proposal = None if path is None else (*path, rid)
-            if new in states:
-                states[new] = None
-            else:
-                states[new] = proposal
-        if len(states) > 20000:
-            return None
-    selected = states.get(limit)
-    return {rid: candidates[rid] for rid in selected} if selected else None
 
 
 class UsabgPaymentProvider(LoginProvider):
