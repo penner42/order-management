@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
+import { createBrowserRouter, RouterProvider, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Orders from './pages/Orders'
 import BuyingGroups from './pages/BuyingGroups'
@@ -7,6 +7,7 @@ import BfmrOrderReview from './pages/BfmrOrderReview'
 import Rewards from './pages/Rewards'
 import PaymentMethods from './pages/PaymentMethods'
 import Payments from './pages/Payments'
+import PaymentLinking from './pages/PaymentLinking'
 import PaymentReview from './pages/PaymentReview'
 import Stores from './pages/Stores'
 import Login from './pages/Login'
@@ -246,6 +247,7 @@ function AppShell() {
           <Route path="/rewards" element={<LegacyRedirect to="/settings/rewards" />} />
           <Route path="/payment-methods" element={<LegacyRedirect to="/settings/payment-methods" />} />
           <Route path="/payments" element={<Payments />} />
+          <Route path="/payments/:paymentId/link" element={<PaymentLinking />} />
           <Route path="/payments/review" element={<PaymentReview />} />
           <Route path="/payments/monarch" element={<MonarchReview />} />
           <Route path="/stores" element={<LegacyRedirect to="/settings/stores" />} />
@@ -275,14 +277,11 @@ function AppShell() {
   )
 }
 
+// A data router provides navigation blocking for unsaved allocation drafts.
+const router = createBrowserRouter([{path: '*', element: <AuthProvider><AppShell /></AuthProvider>}])
+
 function App() {
-  return (
-    <BrowserRouter>
-      <AuthProvider>
-        <AppShell />
-      </AuthProvider>
-    </BrowserRouter>
-  )
+  return <RouterProvider router={router} />
 }
 
 export default App

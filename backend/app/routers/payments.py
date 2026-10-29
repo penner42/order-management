@@ -26,6 +26,12 @@ def get_payment(payment_id: int, db: Session = Depends(get_db)):
     return payment
 
 
+@router.get("/{payment_id}/linking-workspace")
+def get_linking_workspace(payment_id: int, db: Session = Depends(get_db)):
+    from app.payment_workspace import linking_workspace
+    return linking_workspace(db, payment_id)
+
+
 @router.post("")
 def create_payment():
     raise HTTPException(405, "Manual payment creation is disabled. Sync buying-group payments.")
