@@ -2963,7 +2963,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                         )}
                                       </div>
                                       {canPreviewBfmrOrderNumber(o, item) && o.buying_group_id &&
-                                        <BfmrOrderNumber orderId={o.id} groupId={o.buying_group_id} enabled={groupSubmissionsEnabled}
+                                        <BfmrOrderNumber orderId={o.id} groupId={o.buying_group_id} enabled={groupSubmissionsEnabled} submitted={o.bfmr_submitted_item_ids?.includes(item.id)}
                                           onSaved={() => setRefreshVersion(value => value + 1)} />}
                                       {canSubmitTrackingToApi(o, item, trackingRaw) && (
                                         <button
@@ -3243,7 +3243,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                           </span>
                                         ))}
                                         {canPreviewBfmrOrderNumber(o, item) && o.buying_group_id &&
-                                          <BfmrOrderNumber orderId={o.id} groupId={o.buying_group_id} enabled={groupSubmissionsEnabled}
+                                          <BfmrOrderNumber orderId={o.id} groupId={o.buying_group_id} enabled={groupSubmissionsEnabled} submitted={o.bfmr_submitted_item_ids?.includes(item.id)}
                                             onSaved={() => setRefreshVersion(value => value + 1)} />}
                                         {canSubmitTrackingToApi(o, item, trackingRaw) && (
                                           <button

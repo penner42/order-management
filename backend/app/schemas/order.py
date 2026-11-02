@@ -80,6 +80,7 @@ class OrderRead(OrderBase, TimestampsMixin):
     # Internal: read from the ORM object, excluded from responses (has_invoice is exposed instead).
     invoice_pdf_path: str | None = Field(default=None, exclude=True)
     bfmr_order_tasks: list["BfmrOrderTaskRead"] = []
+    bfmr_submitted_item_ids: list[int] = []
 
     @computed_field  # type: ignore[prop-decorator]
     @property

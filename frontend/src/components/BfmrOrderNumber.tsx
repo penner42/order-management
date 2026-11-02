@@ -7,8 +7,8 @@ type Candidate = { reserve_id: string; title: string; qty: number; exact_match: 
 type Product = { product_key: string; snapshot: BfmrOrderTask['snapshot']; task: BfmrOrderTask | null; candidates: Candidate[] }
 type Preview = { order_no: string | null; products: Product[] }
 
-export function BfmrOrderNumber({ orderId, groupId, enabled, onSaved }: {
-  orderId: number; groupId: number; enabled: boolean; onSaved: () => void
+export function BfmrOrderNumber({ orderId, groupId, enabled, submitted, onSaved }: {
+  orderId: number; groupId: number; enabled: boolean; submitted?: boolean; onSaved: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [preview, setPreview] = useState<Preview | null>(null)
@@ -79,7 +79,9 @@ export function BfmrOrderNumber({ orderId, groupId, enabled, onSaved }: {
   }
 
   return <>
-    <button ref={trigger} type="button" className="shrink-0 whitespace-nowrap text-xs underline" onClick={() => { setOpen(true); setPreview(null); setResult(''); void refresh() }}>BFMR order number</button>
+    {submitted
+      ? <span className="shrink-0 whitespace-nowrap text-xs text-ink-muted">BFMR order number submitted</span>
+      : <button ref={trigger} type="button" className="shrink-0 whitespace-nowrap text-xs underline" onClick={() => { setOpen(true); setPreview(null); setResult(''); void refresh() }}>BFMR order number</button>}
     {open && createPortal(<div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
       <div role="dialog" aria-modal="true" aria-label="BFMR order number" className="bg-white dark:bg-gray-800 rounded-xl p-5 w-full max-w-3xl max-h-[90vh] overflow-y-auto space-y-4 text-ink"
         onKeyDown={event => {

@@ -55,6 +55,17 @@ test('Orders submits selected products with split commitments and shows partial 
   await app.route('**/api/capabilities', route => route.fulfill({ json: { group_submissions_enabled: true } }))
   let task: BfmrOrderTask | null = null
   let failRefresh = false
+  await app.route('**/api/orders/paged?*', async route => {
+    const response = await route.fetch()
+    const page = await response.json()
+    for (const order of page.items) {
+      if (order.id === order_id) {
+        order.bfmr_submitted_item_ids = task?.status === 'submitted'
+          ? order.items.map((item: { id: number }) => item.id) : []
+      }
+    }
+    await route.fulfill({ response, json: page })
+  })
   await app.route(`**${base}/preview`, route => failRefresh
     ? route.fulfill({ status: 502, json: { detail: 'Commitment lookup failed' } })
     : route.fulfill({ json: { order_no: snapshot.order_no, products: [{ product_key: 'sku:2040144', snapshot, task,
@@ -104,4 +115,10 @@ test('Orders submits selected products with split commitments and shows partial 
   await expect(dialog.getByRole('checkbox')).toBeDisabled()
   expect(writes).toBe(2)
   await expect(app).toHaveURL(new RegExp(`/\\?order_id=${order_id}`))
+  // Saving refreshes the order list, so the completed line loses its trigger.
+  await expect(app.getByLabel(`Order ${order_id}`, { exact: true }).getByRole('button', { name: 'BFMR order number', exact: true })).toHaveCount(0)
+  await app.reload()
+  await expect(app.getByLabel(`Order ${order_id}`, { exact: true })).toBeVisible()
+  await expect(app.getByLabel(`Order ${order_id}`, { exact: true }).getByText('BFMR order number submitted', { exact: true }).filter({ visible: true })).toBeVisible()
+  await expect(app.getByLabel(`Order ${order_id}`, { exact: true }).getByRole('button', { name: 'BFMR order number', exact: true })).toHaveCount(0)
 })

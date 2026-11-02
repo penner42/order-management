@@ -21,7 +21,7 @@ from app.routers.orders import update_order
 from app.routers.store_imports import apply_store_order_payload
 from app.schemas.bfmr_orders import BfmrAllocateRequest, BfmrManualSubmitRequest
 from app.schemas.item import ItemSplitRequest
-from app.schemas.order import OrderUpdate
+from app.schemas.order import OrderRead, OrderUpdate
 from app.schemas.store_import import StoreOrderImportPayload
 from app.utils.buying_group_apis import bfmr
 from app.utils.item_split import split_item_record
@@ -107,6 +107,30 @@ class BfmrOrderNumberTests(unittest.TestCase):
                 self.assertTrue(service.matches_product(tracker(retailer=name, sku=sku.lower()), snapshot))
                 self.assertFalse(service.matches_product(tracker(retailer="Other", sku=sku), snapshot))
                 self.assertFalse(service.matches_product(tracker(retailer=name, sku=sku + "x"), snapshot))
+
+    def test_submitted_lines_follow_product_identity_and_current_details(self):
+        order = self.order(qty=4, slices=2)
+        task = self.task(order)
+        task.status = "submitted"
+        self.db.add(Item(order_id=order.id, description="Other product", quantity=1,
+                         external_sku="OTHER", status=ItemStatus.PURCHASED, price_sold=0))
+        self.db.flush()
+        self.db.expire(order, ["items", "bfmr_order_tasks"])
+        submitted_ids = [item.id for item in order.items if item.external_sku == "ASIN1"]
+        self.assertEqual(order.bfmr_submitted_item_ids, submitted_ids)
+        self.assertEqual(OrderRead.model_validate(order).model_dump()["bfmr_submitted_item_ids"], submitted_ids)
+
+        task.status = "review"
+        self.assertEqual(order.bfmr_submitted_item_ids, [])
+        task.status = "submitted"
+        order.store_order_number = "CHANGED"
+        self.assertEqual(order.bfmr_submitted_item_ids, [])
+        order.store_order_number = "ORDER-1"
+        order.items[0].quantity += 1
+        self.assertEqual(order.bfmr_submitted_item_ids, [])
+        order.items[0].quantity -= 1
+        task.buying_group_id = self.group.id + 1
+        self.assertEqual(order.bfmr_submitted_item_ids, [])
 
     def test_parse_quantity_opaque_ids_and_reserved_eligibility(self):
         row = tracker()

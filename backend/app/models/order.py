@@ -42,6 +42,19 @@ class Order(Base):
     order_payments = relationship("OrderPaymentMethod", back_populates="order", cascade="all, delete-orphan")
     bfmr_order_tasks = relationship("BfmrOrderTask", cascade="all, delete-orphan", passive_deletes=True)
 
+    @property
+    def bfmr_submitted_item_ids(self):
+        from app.bfmr_orders import product_key, snapshots
+
+        group = self.buying_group
+        if not group or group.api_framework != "bfmr":
+            return []
+        current = snapshots(self, group)
+        submitted = {task.product_key for task in self.bfmr_order_tasks
+                     if task.buying_group_id == group.id and task.status == "submitted"
+                     and task.snapshot == current.get(task.product_key)}
+        return [item.id for item in self.items if product_key(item) in submitted]
+
 
 class OrderPaymentMethod(Base):
     """Which payment method(s) were used for an order, and optional amount."""
