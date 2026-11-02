@@ -142,6 +142,38 @@ class BfmrOrderNumberTests(unittest.TestCase):
             self.assertFalse(service.active_reservation(row))
         self.assertTrue(service.active_reservation(tracker(tracking_deadline="2000-01-01")))
 
+    def test_legacy_tracking_submission_implies_registered_order_number(self):
+        self.group.order_number_submit_enabled = False
+        order = self.order(qty=4, slices=2, sku=None)
+        order.imported_from_store = None
+        order.items[0].status = ItemStatus.SUBMITTED
+        order.items[1].status = ItemStatus.SCANNED
+        self.db.commit()
+        submitted_ids = [item.id for item in order.items]
+        self.assertEqual(OrderRead.model_validate(order).bfmr_submitted_item_ids, submitted_ids)
+        self.fetch.assert_not_called()
+        self.create.assert_not_called()
+
+        order.items[0].status = ItemStatus.SHIPPED
+        self.assertEqual(order.bfmr_submitted_item_ids, [order.items[1].id])
+        order.status = "personal"
+        self.assertEqual(order.bfmr_submitted_item_ids, [])
+        order.status = "imported"
+        self.group.api_framework = "parsefile"
+        self.assertEqual(order.bfmr_submitted_item_ids, [])
+
+    def test_legacy_status_does_not_override_registration_review(self):
+        order = self.order()
+        order.items[0].status = ItemStatus.SUBMITTED
+        task = self.task(order)
+        task.status = "submitted"
+        self.assertEqual(order.bfmr_submitted_item_ids, [order.items[0].id])
+        task.status = "review"
+        self.assertEqual(order.bfmr_submitted_item_ids, [])
+        task.status = "submitted"
+        order.items[0].quantity += 1
+        self.assertEqual(order.bfmr_submitted_item_ids, [])
+
     def test_purchase_payload_has_null_tracking_and_purchase_ids(self):
         with patch.object(bfmr, "_post_tracker_data", return_value={}) as post:
             create_purchase(base_url=None, api_key="test", api_secret="secret", reserve_id="opaque+RID==", order_no="ORDER", qty=2)

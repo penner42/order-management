@@ -47,8 +47,17 @@ class Order(Base):
         from app.bfmr_orders import product_key, snapshots
 
         group = self.buying_group
-        if not group or group.api_framework != "bfmr":
+        if not group or group.api_framework != "bfmr" or self.status == "personal":
             return []
+        # Older BFMR registrations predate order-number tasks. Tracking could
+        # only be submitted after the order number was registered with BFMR.
+        # Keep task validation authoritative when a journal exists, so changed
+        # account/product details still require review.
+        if not self.bfmr_order_tasks:
+            from app.models.item import ItemStatus
+
+            return [item.id for item in self.items
+                    if item.status in {ItemStatus.SUBMITTED, ItemStatus.SCANNED}]
         current = snapshots(self, group)
         submitted = {task.product_key for task in self.bfmr_order_tasks
                      if task.buying_group_id == group.id and task.status == "submitted"

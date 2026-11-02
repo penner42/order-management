@@ -60,6 +60,7 @@ test('Orders submits selected products with split commitments and shows partial 
     const page = await response.json()
     for (const order of page.items) {
       if (order.id === order_id) {
+        order.bfmr_order_tasks = task ? [task] : []
         order.bfmr_submitted_item_ids = task?.status === 'submitted'
           ? order.items.map((item: { id: number }) => item.id) : []
       }
@@ -121,4 +122,22 @@ test('Orders submits selected products with split commitments and shows partial 
   await expect(app.getByLabel(`Order ${order_id}`, { exact: true })).toBeVisible()
   await expect(app.getByLabel(`Order ${order_id}`, { exact: true }).getByText('BFMR order number submitted', { exact: true }).filter({ visible: true })).toBeVisible()
   await expect(app.getByLabel(`Order ${order_id}`, { exact: true }).getByRole('button', { name: 'BFMR order number', exact: true })).toHaveCount(0)
+  await expect(app.getByLabel(`Order ${order_id}`, { exact: true }).getByRole('link', { name: /^BFMR order:/ })).toHaveCount(0)
+})
+
+test('Older submitted BFMR lines show registration beside tracking on desktop and mobile', async ({ app, data }) => {
+  const { order_id } = await importedOrder(data)
+  const order = await data.get<{ items: { id: number }[] }>(`/orders/${order_id}`)
+  const updated = await data.request.patch(`/api/items/${order.items[0].id}`, {
+    headers: data.headers, data: { status: 'submitted' },
+  })
+  expect(updated.ok(), await updated.text()).toBeTruthy()
+  for (const width of [1280, 390]) {
+    await app.setViewportSize({ width, height: 900 })
+    await app.goto(`/?order_id=${order_id}`)
+    const card = app.getByLabel(`Order ${order_id}`, { exact: true })
+    await expect(card.getByText('BFMR order number submitted', { exact: true }).filter({ visible: true })).toBeVisible()
+    await expect(card.getByRole('button', { name: 'BFMR order number', exact: true })).toHaveCount(0)
+    await expect(card.getByRole('link', { name: /^BFMR order:/ })).toHaveCount(0)
+  }
 })
