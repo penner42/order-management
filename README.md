@@ -517,6 +517,16 @@ active commitment with enough quantity is selected automatically. Shipment slice
 are aggregated by product, and a commitment can be fulfilled across several orders.
 Order numbers register purchases; this does not mark items as tracking-submitted.
 
+On the **Orders** page, click **BFMR order number** beside a line item’s
+tracking controls to preview live commitments and register selected products without
+tracking numbers. Choose the products explicitly and allocate their remaining
+quantities across commitments, then click **Submit order number**. This manual
+flow works independently of automatic submission settings and scheduled jobs.
+Development remains preview-only; remote writes require environment group
+submissions to be enabled. Bundled software marked **No payment necessary**,
+canceled, returning, and lost items are excluded. Uncertain submissions can be
+reconciled in the same dialog without blindly sending another purchase.
+
 Open **Order number review** on the BFMR buying-group card to inspect status,
 refresh commitments, allocate quantities manually across commitments, or retry
 reconciliation. Orders also link to this queue beside their buying-group selector.

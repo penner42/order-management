@@ -34,3 +34,13 @@ class BfmrAllocation(BaseModel):
 
 class BfmrAllocateRequest(BaseModel):
     allocations: list[BfmrAllocation] = Field(min_length=1, max_length=100)
+
+
+class BfmrManualProduct(BaseModel):
+    product_key: str = Field(min_length=1, max_length=500)
+    snapshot: dict[str, Any]
+    allocations: list[BfmrAllocation] = Field(default_factory=list, max_length=100)
+
+
+class BfmrManualSubmitRequest(BaseModel):
+    products: list[BfmrManualProduct] = Field(min_length=1, max_length=100)

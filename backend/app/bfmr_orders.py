@@ -8,6 +8,7 @@ import hashlib
 import logging
 import threading
 import urllib.error
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import or_, text
 
@@ -20,7 +21,7 @@ from app.utils.buying_group_apis import bfmr
 from app.utils.product_upc import product_upc
 
 logger = logging.getLogger(__name__)
-INELIGIBLE = {ItemStatus.CANCELED, *RETURN_PROCESS_STATUSES, ItemStatus.LOST_PACKAGE}
+INELIGIBLE = {ItemStatus.CANCELED, *RETURN_PROCESS_STATUSES, ItemStatus.LOST_PACKAGE, ItemStatus.NO_PAYMENT_NECESSARY}
 _local_locks: dict[int, threading.Lock] = defaultdict(threading.Lock)
 
 
@@ -180,13 +181,15 @@ def active_reservation(row):
         return False
     # Only explicit order deadlines apply; tracking_deadline is a different deadline.
     deadline = row.raw.get("order_deadline")
-    if deadline not in (None, "", 0, "0"):
+    if deadline not in (None, ""):
         try:
-            if str(deadline).replace(".", "", 1).isdigit():
-                timestamp = float(deadline)
-                parsed = datetime.fromtimestamp(timestamp / 1000 if timestamp > 10**11 else timestamp, tz=timezone.utc)
-            else:
-                parsed = datetime.fromisoformat(str(deadline).replace("Z", "+00:00"))
+            seconds = Decimal(str(deadline))
+        except InvalidOperation:
+            seconds = None
+        if seconds is not None:
+            return seconds.is_finite() and seconds > 0
+        try:
+            parsed = datetime.fromisoformat(str(deadline).replace("Z", "+00:00"))
             if (parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed) <= now():
                 return False
         except (ValueError, OverflowError, OSError):
@@ -251,9 +254,9 @@ def validate_task(db, task, group):
     return True
 
 
-def process_task(db, task, group):
+def process_task(db, task, group, *, manual=False):
     require_group_submissions_enabled()
-    if not group.order_number_submit_enabled or group.api_framework != "bfmr":
+    if (not manual and not group.order_number_submit_enabled) or group.api_framework != "bfmr":
         return
     if not validate_task(db, task, group):
         db.commit()
@@ -265,6 +268,29 @@ def process_task(db, task, group):
     try:
         rows = fetch_rows(group)
         allocations = [dict(a) for a in task.allocations]
+        # A manual selection can name a different reservation than an existing
+        # purchase for this same order/product. Reconcile it before any new write.
+        if manual and allocations and all(a["status"] == "planned" for a in allocations):
+            existing = remote_purchases(rows, task)
+            if existing:
+                if sum(a["qty"] for a in existing) == task.snapshot["quantity"]:
+                    task.allocations = existing
+                    if not validate_task(db, task, group):
+                        db.commit()
+                        return
+                    task.status = "submitted"
+                    task.message = "Existing BFMR purchase(s) reconciled."
+                    task.next_attempt_at = None
+                else:
+                    review(task, "BFMR already has purchases for this order/product with a different quantity.")
+                db.commit()
+                return
+            if any(row.purchase_id and row.order_id
+                   and row.order_id.strip().casefold() == task.snapshot["order_no"].casefold()
+                   and matches_product(row, task.snapshot) for row in rows):
+                review(task, "An inactive BFMR purchase already uses this order/product. Review My Tracker before registering again.")
+                db.commit()
+                return
         # Recover the write journal first. A transport failure is never blindly replayed.
         for allocation in allocations:
             if allocation["status"] != "sending":
@@ -328,7 +354,7 @@ def process_task(db, task, group):
                 db.commit()
                 return
             db.refresh(group)
-            if not group.order_number_submit_enabled or group.api_framework != "bfmr":
+            if (not manual and not group.order_number_submit_enabled) or group.api_framework != "bfmr":
                 task.status = "pending"
                 task.message = "Automatic order-number submission was disabled before sending."
                 task.next_attempt_at = None
@@ -381,6 +407,8 @@ def process_task(db, task, group):
         code = http_status(exc)
         if code in (400, 401, 403, 404, 409, 422):
             review(task, "BFMR rejected the request. Check account configuration and commitment details.")
+        elif manual:
+            review(task, "BFMR request failed. Select this product in the order dialog to reconcile and retry.")
         elif task.attempts >= 5:
             review(task, "Retry limit reached. Refresh and review BFMR before retrying.")
         else:

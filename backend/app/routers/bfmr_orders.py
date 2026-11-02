@@ -5,9 +5,9 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import BfmrOrderTask, BuyingGroup, Order, User
-from app.schemas.bfmr_orders import BfmrAllocateRequest, BfmrOrderTaskRead
+from app.schemas.bfmr_orders import BfmrAllocateRequest, BfmrOrderTaskRead, BfmrManualSubmitRequest
 from app.bfmr_orders import (account_lock, active_reservation, enqueue_order, fetch_rows,
-                             matches_product, retailer, validate_task)
+                             matches_product, retailer, validate_task, snapshots, process_task)
 from app.submission_policy import require_group_submissions_enabled
 
 router = APIRouter(prefix="/buying-groups/{group_id}/order-numbers", tags=["bfmr-order-numbers"])
@@ -36,6 +36,104 @@ def tracker_rows(group):
         return fetch_rows(group)
     except Exception as exc:
         raise HTTPException(502, "Could not fetch BFMR commitments. Check account configuration and try again.") from exc
+
+
+def owned_order(db, group_id, order_id, user):
+    group = owned_group(db, group_id, user)
+    order = db.get(Order, order_id)
+    if not order or order.buying_group_id != group_id or (user.role != "admin" and order.user_id != user.id):
+        raise HTTPException(404, "BFMR order not found")
+    return group, order
+
+
+def public_snapshot(value):
+    return {key: val for key, val in value.items() if key != "account"}
+
+
+@router.get("/orders/{order_id}/preview")
+def preview_order(group_id: int, order_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    group, order = owned_order(db, group_id, order_id, user)
+    rows = tracker_rows(group)
+    tasks = {t.product_key: t for t in order.bfmr_order_tasks if t.buying_group_id == group_id}
+    products = []
+    for key, snapshot in snapshots(order, group).items():
+        task = tasks.get(key)
+        products.append({"product_key": key, "snapshot": public_snapshot(snapshot),
+                         "task": BfmrOrderTaskRead.model_validate(task).model_dump(mode="json") if task else None,
+                         "candidates": [{"reserve_id": row.reserve_id, "qty": row.qty,
+                                         "title": row.item_name or row.deal_title,
+                                         "exact_match": matches_product(row, snapshot),
+                                         "eligible": active_reservation(row),
+                                         "order_deadline": row.raw.get("order_deadline"),
+                                         "reason": None if active_reservation(row) else "Commitment is expired or is no longer an unassigned reservation"}
+                                        for row in rows if active_reservation(row) or (
+                                            matches_product(row, snapshot) and row.reserve_id
+                                            and (row.status or "").strip().casefold() == "reserved"
+                                            and not row.purchase_id and not row.order_id)]})
+    return {"order_id": order.id, "order_no": order.store_order_number, "products": products}
+
+
+@router.post("/orders/{order_id}/submit", response_model=list[BfmrOrderTaskRead])
+def submit_order(group_id: int, order_id: int, body: BfmrManualSubmitRequest,
+                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_group_submissions_enabled()
+    group, order = owned_order(db, group_id, order_id, user)
+    if len({p.product_key for p in body.products}) != len(body.products):
+        raise HTTPException(400, "Choose each product once")
+    with account_lock(db, group) as acquired:
+        if not acquired:
+            raise HTTPException(409, "BFMR account is busy. Try again shortly.")
+        # Also coordinate task creation with imports/assignment transactions.
+        db.query(Order.id).filter(Order.id == order_id).with_for_update().one()
+        db.refresh(order)
+        db.expire(order, ["items", "bfmr_order_tasks"])
+        if order.buying_group_id != group_id:
+            raise HTTPException(409, "Order account changed. Refresh the preview.")
+        current = snapshots(order, group)
+        tasks = {t.product_key: t for t in order.bfmr_order_tasks if t.buying_group_id == group_id}
+        for product in body.products:
+            snapshot = current.get(product.product_key)
+            if not snapshot or public_snapshot(snapshot) != product.snapshot:
+                raise HTTPException(409, "Order details changed. Refresh the preview before submitting.")
+            selected = [a.model_dump() for a in product.allocations]
+            task = tasks.get(product.product_key)
+            if task and task.snapshot != snapshot:
+                raise HTTPException(409, "Registered order details changed. Review BFMR before correcting purchases.")
+            if task and task.status == "submitted":
+                continue
+            completed = [a for a in task.allocations if a["status"] == "submitted"] if task else []
+            if len({a["reserve_id"] for a in selected}) != len(selected):
+                raise HTTPException(400, "Choose each reservation once per product")
+            if selected and sum(a["qty"] for a in selected + completed) != snapshot["quantity"]:
+                raise HTTPException(400, "Completed and selected quantities must equal the product quantity")
+            if not selected and not (task and task.allocations):
+                raise HTTPException(400, "Select commitment quantities before submitting")
+        results = []
+        for product in body.products:
+            task = tasks.get(product.product_key)
+            if task is None:
+                task = BfmrOrderTask(order_id=order_id, buying_group_id=group_id, product_key=product.product_key,
+                                     snapshot=current[product.product_key], allocations=[], status="review", attempts=0)
+                db.add(task)
+                db.flush()
+            if task.status == "submitted":
+                results.append(task)
+                continue
+            # An uncertain write must be reconciled using its original journal.
+            if not any(a["status"] == "sending" for a in task.allocations):
+                if product.allocations:
+                    completed = [a for a in task.allocations if a["status"] == "submitted"]
+                    task.allocations = completed + [{**a.model_dump(), "status": "planned"} for a in product.allocations]
+                elif any(a["status"] == "rejected" for a in task.allocations):
+                    task.status = "review"
+                    task.message = "Choose fresh allocations for the rejected commitment."
+                    db.commit()
+                    results.append(task)
+                    continue
+            task.attempts = 0
+            process_task(db, task, group, manual=True)
+            results.append(task)
+        return results
 
 
 @router.get("", response_model=list[BfmrOrderTaskRead])

@@ -19,7 +19,7 @@ from app.models.item import ItemStatus
 from app.routers import bfmr_orders as routes
 from app.routers.orders import update_order
 from app.routers.store_imports import apply_store_order_payload
-from app.schemas.bfmr_orders import BfmrAllocateRequest
+from app.schemas.bfmr_orders import BfmrAllocateRequest, BfmrManualSubmitRequest
 from app.schemas.item import ItemSplitRequest
 from app.schemas.order import OrderUpdate
 from app.schemas.store_import import StoreOrderImportPayload
@@ -123,6 +123,122 @@ class BfmrOrderNumberTests(unittest.TestCase):
             create_purchase(base_url=None, api_key="test", api_secret="secret", reserve_id="opaque+RID==", order_no="ORDER", qty=2)
             self.assertEqual(post.call_args.kwargs["tracker_data"], [{"reserve_id": "opaque+RID==", "order_no": "ORDER", "qty": 2,
                                                                    "purchase_id": None, "shipment_id": None, "tracking_number": None}])
+
+    def manual_body(self, order, allocations=None):
+        preview = routes.preview_order(self.group.id, order.id, self.db, self.user)
+        product = preview["products"][0]
+        return BfmrManualSubmitRequest(products=[{
+            "product_key": product["product_key"], "snapshot": product["snapshot"],
+            "allocations": allocations if allocations is not None else [{"reserve_id": "opaque+RID==", "qty": 2}],
+        }])
+
+    def test_countdown_deadline_and_costco_preview_without_tasks(self):
+        self.group.order_number_submit_enabled = False
+        order = self.order(sku="2040144")
+        order.imported_from_store = "costco"
+        self.db.commit()
+        self.fetch.return_value = [tracker(retailer="Costco", sku="2040144", qty=4, order_deadline=20130)]
+        with patch.object(settings, "group_submissions_enabled", False), patch.object(settings, "scheduled_jobs_enabled", False):
+            result = routes.preview_order(self.group.id, order.id, self.db, self.user)
+        product = result["products"][0]
+        self.assertTrue(product["candidates"][0]["eligible"])
+        self.assertTrue(product["candidates"][0]["exact_match"])
+        self.assertEqual(product["snapshot"]["quantity"], 2)
+        self.assertNotIn("account", product["snapshot"])
+        self.assertEqual(self.db.query(BfmrOrderTask).count(), 0)
+        self.create.assert_not_called()
+        for deadline in [0, "0", -1, "-10", "NaN", "Infinity"]:
+            self.assertFalse(service.active_reservation(tracker(order_deadline=deadline)))
+        for deadline in [None, "", 30, "30.5", "2999-01-01"]:
+            self.assertTrue(service.active_reservation(tracker(order_deadline=deadline)))
+
+    def test_manual_submission_without_automation_or_scheduler_is_idempotent(self):
+        self.group.order_number_submit_enabled = False
+        order = self.order()
+        self.fetch.return_value = [tracker(qty=4, order_deadline=20000)]
+        self.fulfill()
+        body = self.manual_body(order)
+        with patch.object(settings, "scheduled_jobs_enabled", False):
+            result = routes.submit_order(self.group.id, order.id, body, self.db, self.user)
+        self.assertEqual(result[0].status, "submitted")
+        self.assertEqual(order.items[0].status, ItemStatus.PURCHASED)
+        routes.submit_order(self.group.id, order.id, body, self.db, self.user)
+        routes.submit_order(self.group.id, order.id, self.manual_body(order, []), self.db, self.user)
+        self.assertEqual(self.create.call_count, 1)
+        self.assertFalse(self.group.order_number_submit_enabled)
+
+    def test_manual_submit_environment_and_ownership_checks(self):
+        order = self.order()
+        body = self.manual_body(order)
+        with patch.object(settings, "group_submissions_enabled", False):
+            with self.assertRaises(HTTPException) as error:
+                routes.submit_order(self.group.id, order.id, body, self.db, self.user)
+            self.assertEqual(error.exception.status_code, 403)
+        stranger = SimpleNamespace(id=self.user.id + 1, role="user")
+        with self.assertRaises(HTTPException):
+            routes.preview_order(self.group.id, order.id, self.db, stranger)
+        self.create.assert_not_called()
+
+    def test_manual_rejects_stale_preview_and_excludes_software(self):
+        order = self.order()
+        body = self.manual_body(order)
+        order.items[0].quantity = 3
+        self.db.commit()
+        with self.assertRaises(HTTPException) as error:
+            routes.submit_order(self.group.id, order.id, body, self.db, self.user)
+        self.assertEqual(error.exception.status_code, 409)
+        for status in [ItemStatus.NO_PAYMENT_NECESSARY, ItemStatus.CANCELED, ItemStatus.NEEDS_RETURN, ItemStatus.LOST_PACKAGE]:
+            order.items[0].status = status
+            self.db.commit()
+            self.assertEqual(routes.preview_order(self.group.id, order.id, self.db, self.user)["products"], [])
+        self.create.assert_not_called()
+
+    def test_manual_split_and_partial_failure_preserve_confirmed_purchase(self):
+        self.group.order_number_submit_enabled = False
+        order = self.order()
+        self.fetch.return_value = [tracker(qty=1), tracker(rid="second", qty=1)]
+        self.fulfill()
+        create = self.create.side_effect
+        def partial(**kwargs):
+            if kwargs["reserve_id"] == "second":
+                raise urllib.error.URLError("unavailable")
+            return create(**kwargs)
+        self.create.side_effect = partial
+        body = self.manual_body(order, [{"reserve_id": "opaque+RID==", "qty": 1}, {"reserve_id": "second", "qty": 1}])
+        result = routes.submit_order(self.group.id, order.id, body, self.db, self.user)
+        self.assertEqual(result[0].allocations[0]["status"], "submitted")
+        self.assertEqual(result[0].allocations[1]["status"], "sending")
+        calls = self.create.call_count
+        result = routes.submit_order(self.group.id, order.id, self.manual_body(order, []), self.db, self.user)
+        self.assertEqual(result[0].status, "review")
+        self.assertEqual(self.create.call_count, calls)
+
+    def test_manual_changed_commitment_does_not_send(self):
+        self.group.order_number_submit_enabled = False
+        order = self.order()
+        self.fetch.return_value = [tracker(qty=1)]
+        result = routes.submit_order(self.group.id, order.id, self.manual_body(order), self.db, self.user)
+        self.assertEqual(result[0].status, "review")
+        self.create.assert_not_called()
+
+    def test_manual_adopts_existing_purchase_even_on_another_reservation(self):
+        self.group.order_number_submit_enabled = False
+        order = self.order()
+        self.fetch.return_value = [tracker(), tracker(rid="old-reservation", pid="existing", qty=2,
+                                                     status="purchased", order_no="ORDER-1")]
+        result = routes.submit_order(self.group.id, order.id, self.manual_body(order), self.db, self.user)
+        self.assertEqual(result[0].status, "submitted")
+        self.assertEqual(result[0].allocations[0]["purchase_id"], "existing")
+        self.create.assert_not_called()
+
+    def test_manual_inactive_purchase_requires_review(self):
+        self.group.order_number_submit_enabled = False
+        order = self.order()
+        self.fetch.return_value = [tracker(), tracker(rid="old", pid="inactive", qty=2,
+                                                     status="returned", order_no="ORDER-1")]
+        result = routes.submit_order(self.group.id, order.id, self.manual_body(order), self.db, self.user)
+        self.assertEqual(result[0].status, "review")
+        self.create.assert_not_called()
 
     def test_unique_match_registers_without_changing_item_status(self):
         order = self.order()

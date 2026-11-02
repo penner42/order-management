@@ -7,6 +7,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { api, getStoredToken } from '../api/client'
 import { useGroupSubmissionsEnabled } from '../utils/capabilities'
+import { BfmrOrderNumber } from '../components/BfmrOrderNumber'
 import { AlertDialog } from '../components/AlertDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
@@ -1049,6 +1050,10 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
       setSavingTrackingId(null)
     }
   }
+
+  const canPreviewBfmrOrderNumber = (order: Order, item: Item) =>
+    groups.find(g => g.id === order.buying_group_id)?.api_framework === 'bfmr' &&
+    !['canceled', 'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded', 'lost_package', 'no_payment_necessary'].includes(item.status)
 
   const canSubmitTrackingToApi = (order: Order, item: Item, tracking: string) => {
     if (item.status !== 'shipped') return false
@@ -2957,6 +2962,9 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                           </a>
                                         )}
                                       </div>
+                                      {canPreviewBfmrOrderNumber(o, item) && o.buying_group_id &&
+                                        <BfmrOrderNumber orderId={o.id} groupId={o.buying_group_id} enabled={groupSubmissionsEnabled}
+                                          onSaved={() => setRefreshVersion(value => value + 1)} />}
                                       {canSubmitTrackingToApi(o, item, trackingRaw) && (
                                         <button
                                           type="button"
@@ -3234,6 +3242,9 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                             {reward.shared_order_count > 1 && ' · shared across orders'}
                                           </span>
                                         ))}
+                                        {canPreviewBfmrOrderNumber(o, item) && o.buying_group_id &&
+                                          <BfmrOrderNumber orderId={o.id} groupId={o.buying_group_id} enabled={groupSubmissionsEnabled}
+                                            onSaved={() => setRefreshVersion(value => value + 1)} />}
                                         {canSubmitTrackingToApi(o, item, trackingRaw) && (
                                           <button
                                             type="button"
