@@ -31,6 +31,7 @@ from app.models import (
 )
 from app.models.item import (
     ItemStatus,
+    RETURN_PROCESS_STATUSES,
     advance_item_to_shipped,
     item_locked_for_store_reimport,
 )
@@ -50,6 +51,7 @@ from app.utils.ignored_zip_codes import (
     shipping_postal_code_from_payload,
 )
 from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
+from app.utils.costco_software import bundled_software_names
 from app.bfmr_orders import capture_import_metadata, enqueue_order, import_identity, matching_import_upc
 
 router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
@@ -1349,6 +1351,12 @@ def _apply_items_and_shipments(
 
     normalized = _match_retitled_items(normalized, existing_items, existing_shipments)
     items = normalized.get("items") or []
+    software_names = bundled_software_names(store_name, items)
+    software_workflow_statuses = {
+        item.id: item.status for item in existing_items
+        if (item.description or "").strip() in software_names
+        and (item.status in RETURN_PROCESS_STATUSES or item.status == ItemStatus.CANCELED)
+    }
 
     existing_item_tracking_keys: set[tuple[str, str]] = set()
     for ei in existing_items:
@@ -2017,6 +2025,19 @@ def _apply_items_and_shipments(
     if existing_order:
         _sync_existing_item_quantities_and_prices(db, normalized, existing_items)
     _apply_canceled_statuses(existing_items, normalized, db=db)
+
+    # Apply after cancellation and shipment processing so those workflows cannot
+    # accidentally advance software back into the ordinary payout workflow.
+    for item in existing_items:
+        if (item.description or "").strip() not in software_names:
+            continue
+        if item.payment_line_items:
+            continue
+        item.price_sold = 0
+        if item.id in software_workflow_statuses:
+            item.status = software_workflow_statuses[item.id]
+        if item.status not in RETURN_PROCESS_STATUSES and item.status != ItemStatus.CANCELED:
+            item.status = ItemStatus.NO_PAYMENT_NECESSARY
 
 
 # ---------------------------------------------------------------------------

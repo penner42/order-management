@@ -99,7 +99,7 @@ def _validate_allocations(db, payment, allocations):
             raise HTTPException(400, "Choose a current receipt from this payment's buying group and provider.")
         if not item or item.order.buying_group_id != payment.buying_group_id:
             raise HTTPException(400, "Choose items from this payment's buying group.")
-        if item.status.value in {"purchased", "shipped", "submitted", "canceled", "needs_review"}:
+        if item.status.value in {"purchased", "shipped", "submitted", "canceled", "needs_review", "no_payment_necessary"}:
             raise HTTPException(400, "Allocated items must be received.")
         if a["quantity"] > item.quantity or Decimal(str(a["amount"])) <= 0:
             raise HTTPException(400, "Invalid item quantity or amount.")

@@ -72,6 +72,14 @@ class PaymentReviewTests(unittest.TestCase):
         return service.refresh(self.db, self.group.id,
             PaymentFetch(payments or [payment()], receipts or [receipt()], **kw), "parsefile")
 
+    def test_no_payment_necessary_items_are_excluded_from_allocation_choices(self):
+        self.item.status = ItemStatus.NO_PAYMENT_NECESSARY
+        self.item.price_sold = 0
+        self.db.flush()
+        view = self.load()
+        self.assertEqual(view["reviews"][0]["content"]["allocations"], [])
+        self.assertEqual(service.allocation_evidence(self.db, self.group.id)["items"], [])
+
     def confirm(self, review):
         return service.confirm_review(self.db, review["id"], review["version"], review["fingerprint"])
 

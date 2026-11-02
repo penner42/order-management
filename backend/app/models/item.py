@@ -11,6 +11,7 @@ class ItemStatus(str, enum.Enum):
     SHIPPED = "shipped"
     SUBMITTED = "submitted"
     SCANNED = "scanned"
+    NO_PAYMENT_NECESSARY = "no_payment_necessary"
     CANCELED = "canceled"
     NEEDS_REVIEW = "needs_review"
     NEEDS_RETURN = "needs_return"
@@ -40,6 +41,7 @@ STORE_REIMPORT_LOCKED_STATUSES: frozenset[ItemStatus] = frozenset(
         ItemStatus.SHIPPED,
         ItemStatus.SUBMITTED,
         ItemStatus.SCANNED,
+        ItemStatus.NO_PAYMENT_NECESSARY,
         *RETURN_PROCESS_STATUSES,
     }
 )

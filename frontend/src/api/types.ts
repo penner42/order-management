@@ -3,6 +3,7 @@ export type ItemStatus =
   | 'shipped'
   | 'submitted'
   | 'scanned'
+  | 'no_payment_necessary'
   | 'canceled'
   | 'needs_review'
   | 'needs_return'

@@ -270,6 +270,8 @@ def receipt_matches(db, source):
         and s.payload.get("external_id") == raw_id for s in group_sources(db, source.buying_group_id))
     out = []
     for item in items:
+        if item.status.value == "no_payment_necessary":
+            continue
         tokens = {(s or "").strip().casefold() for s in (item.receipt_id or "").replace(";", ",").split(",")}
         if raw_id.casefold() not in tokens:
             continue
@@ -459,7 +461,7 @@ def validate_content(db, review, content, outstanding, *, confirming=False, issu
                 continue
             if money(a["amount"]) <= 0 or a["quantity"] <= 0:
                 issues.append("Receipt allocations require positive amounts and quantities.")
-            if item.status.value in {"canceled", "purchased", "shipped", "submitted", "needs_review"}:
+            if item.status.value in {"canceled", "purchased", "shipped", "submitted", "needs_review", "no_payment_necessary"}:
                 issues.append(item_issue(item, "must be received before payment confirmation.", issue_links))
             used_quantities[(rid, item.id)] = a["quantity"]
             item_amounts[item.id] += money(a["amount"])
@@ -588,7 +590,7 @@ def allocation_evidence(db, group_id):
             for r in receipts],
         "items": [{"id": i.id, "label": item_label(i), "quantity": i.quantity,
             "order_id": i.order_id, "remaining": str(max(item_payable(i) - allocated[i.id], ZERO))}
-            for i in items],
+            for i in items if i.status.value != "no_payment_necessary"],
     }
 
 

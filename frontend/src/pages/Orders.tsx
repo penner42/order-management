@@ -58,6 +58,7 @@ const STATUS_LABELS: Record<string, string> = {
   payment_requested: 'Payment requested',
   payment_sent: 'Payment sent',
   payment_received: 'Paid',
+  no_payment_necessary: 'No payment necessary',
   canceled: 'Canceled',
   needs_review: 'Needs review',
   needs_return: 'Needs return',
@@ -103,6 +104,7 @@ function getStatusRowClass(status: string): string {
     case 'payment_sent':
       return 'bg-indigo-100/80 dark:bg-indigo-900/35'
     case 'payment_received':
+    case 'no_payment_necessary':
       return 'bg-emerald-100/80 dark:bg-emerald-900/30'
     case 'canceled':
     case 'needs_review':
@@ -131,6 +133,7 @@ function getStatusInputClass(status: string): string {
     case 'payment_sent':
       return 'bg-indigo-50/90 dark:bg-indigo-900/35'
     case 'payment_received':
+    case 'no_payment_necessary':
       return 'bg-emerald-50/90 dark:bg-emerald-900/30'
     case 'canceled':
     case 'needs_review':
@@ -173,7 +176,7 @@ function copyToClipboard(text: string): void {
 
 const DEFAULT_STATUSES: EffectiveItemStatus[] = [
   'purchased', 'shipped', 'submitted', 'scanned',
-  'payment_requested', 'payment_sent', 'payment_received',
+  'no_payment_necessary', 'payment_requested', 'payment_sent', 'payment_received',
   'needs_review',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
   'lost_package',
@@ -186,7 +189,7 @@ function isPaymentStatus(status: string | null): boolean {
 /** Payment statuses remain visible, but can only be changed on the Payments page. */
 const ITEM_STATUSES_FOR_EDIT: EffectiveItemStatus[] = [
   'purchased', 'shipped', 'submitted', 'scanned',
-  'payment_requested', 'payment_sent', 'payment_received', 'canceled',
+  'no_payment_necessary', 'payment_requested', 'payment_sent', 'payment_received', 'canceled',
   'needs_review',
   'needs_return', 'return_started', 'return_sent', 'return_received', 'return_refunded',
   'lost_package',
@@ -200,6 +203,7 @@ const STATUS_FILTER_OPTIONS: [string, string][] = [
   ['payment_requested', 'Payment requested'],
   ['payment_sent', 'Payment sent'],
   ['payment_received', 'Paid'],
+  ['no_payment_necessary', 'No payment necessary'],
   ['canceled', 'Canceled'],
   ['needs_review', 'Needs review'],
   ['needs_return', 'Needs return'],
