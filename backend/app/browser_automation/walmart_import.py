@@ -38,6 +38,7 @@ async def _ensure_orders_hook(page: Page) -> None:
 async def _ensure_normalize_lib(page: Page) -> None:
     has = await page.evaluate(
         """() => !!(globalThis.OrderManagerWalmart
+          && globalThis.OrderManagerProductUpc
           && typeof globalThis.OrderManagerWalmart.normalizeWalmartOrderDetailPayload === 'function')"""
     )
     if not has:
@@ -184,12 +185,13 @@ async def _wait_for_order_detail_payload(page: Page, order_number: str, timeout_
 async def _normalize_detail(page: Page, detail_payload: dict[str, Any], source_url: str) -> dict[str, Any]:
     await _ensure_normalize_lib(page)
     normalized = await page.evaluate(
-        """({ payload, sourceUrl }) => {
+        """async ({ payload, sourceUrl }) => {
           const wm = globalThis.OrderManagerWalmart;
           if (!wm || typeof wm.normalizeWalmartOrderDetailPayload !== 'function') {
             throw new Error('Walmart normalize helpers not loaded.');
           }
           const body = wm.normalizeWalmartOrderDetailPayload(payload, sourceUrl);
+          await globalThis.OrderManagerProductUpc.enrich([body], 'walmart');
           body.source = 'browser-automation';
           return body;
         }""",

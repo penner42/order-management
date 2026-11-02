@@ -8,6 +8,7 @@ const ORDER_MANAGER_DEV_API_BASE_URL_STORAGE_KEY = "orderManagerDevApiBaseUrl";
 const EXT_TOKEN_HASH_PREFIX = "#ext-token=";
 
 // Shared helpers (classic worker-compatible)
+try { importScripts("lib/product-upc.js"); } catch { /* Firefox uses background scripts. */ }
 try {
   // eslint-disable-next-line no-undef
   importScripts("lib/walmart.js");
@@ -2156,6 +2157,7 @@ function attachBulkPortHandlers(port) {
 
           const payloadObj = await waitForWalmartDetail(orderNumber, 35000, port);
           const body = normalizeWalmartOrderDetailPayloadSafe(payloadObj.payload, payloadObj.url);
+          await globalThis.OrderManagerProductUpc?.enrich([body], 'walmart');
 
           // The invoice HTML is captured a few seconds after the order detail
           // payload (the page needs to finish rendering; worst case the capture
@@ -2799,6 +2801,7 @@ function attachAmazonBulkPortHandlers(port) {
               detailUrl,
               accountEmail
             );
+            await globalThis.OrderManagerProductUpc?.enrich([body], 'amazon');
             const payloadOrderId =
               (body.externalOrder && body.externalOrder.id) ||
               (payload && payload.orderId ? String(payload.orderId) : null) ||

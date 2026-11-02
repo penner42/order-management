@@ -18,6 +18,15 @@ Missing pages, ambiguous variants, or failed lookups leave UPCs empty and do not
 stop the order import. Product lookups use two workers and a 15-second timeout.
 The extension requires access to `https://www.costco.com/*` for this lookup.
 
+Walmart and Amazon also save explicit product UPCs and look up missing barcodes
+in single-order, bulk extension, and automated imports. Walmart lookups read
+embedded product data at `/ip/<item-id>` and require the exact Walmart item ID.
+Amazon lookups read product information tables, detail bullets, or structured
+product data at `/dp/<ASIN>` and require the exact ASIN. Variant and conflicting
+barcodes are skipped. Lookups use two workers with a 12-second timeout per page;
+blocked or missing pages do not stop imports. Reimport an order to backfill
+missing UPCs; saved UPCs and warehouse receipt UPCs are preserved.
+
 ## Supported stores
 
 - `Amazon` (`https://www.amazon.com/*` — order history and order detail pages)

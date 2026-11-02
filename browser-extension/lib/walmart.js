@@ -237,6 +237,7 @@
         items.push({
           logicalItemId: item.id != null ? String(item.id) : item.usItemId || null,
           externalSku: productInfo.usItemId || null,
+          upc: globalThis.OrderManagerProductUpc?.explicit(item, productInfo) || null,
           externalOfferId: productInfo.offerId || null,
           name: productInfo.name || null,
           productUrl: productInfo.canonicalUrl || null,

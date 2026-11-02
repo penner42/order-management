@@ -12,6 +12,7 @@ from app.browser_automation.common import (
     OrderErrorCallback,
     inject_scripts_for_evaluate,
 )
+from app.utils.product_upc import product_upc
 from app.browser_automation.paths import amazon_script_paths
 from app.browser_automation.session_manager import (
     AMAZON_ORDERS_URL,
@@ -31,7 +32,8 @@ async def _inject_amazon_scripts(page: Page) -> None:
 
 async def _ensure_scripts(page: Page) -> None:
     has = await page.evaluate(
-        """() => !!(globalThis.OrderManagerAmazonDom && globalThis.OrderManagerAmazon)"""
+        """() => !!(globalThis.OrderManagerAmazonDom && globalThis.OrderManagerAmazon
+          && globalThis.OrderManagerProductUpc)"""
     )
     if not has:
         await _inject_amazon_scripts(page)
@@ -148,6 +150,22 @@ async def _fetch_account_email(page: Page) -> str | None:
         return None
 
 
+def _explicit_upc(item: dict[str, Any]) -> str | None:
+    values = {value for key in ("upc", "UPC", "upcCode", "upcNumber", "gtin8", "gtin12", "gtin13", "gtin14")
+              if (value := product_upc(item.get(key)))}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+async def _normalize_with_upcs(page: Page, raw: dict[str, Any], source_url: str,
+                               account_email: str | None) -> dict[str, Any]:
+    body = _normalize_order(raw, source_url, account_email)
+    await _ensure_scripts(page)
+    return await page.evaluate("""async body => {
+        await globalThis.OrderManagerProductUpc.enrich([body], 'amazon');
+        return body;
+    }""", body)
+
+
 def _normalize_order(raw: dict[str, Any], source_url: str, account_email: str | None) -> dict[str, Any]:
     """Mirror browser-extension/lib/amazon.js normalizeAmazonOrderPayload in Python."""
 
@@ -214,6 +232,7 @@ def _normalize_order(raw: dict[str, Any], source_url: str, account_email: str | 
             {
                 "logicalItemId": coerce(it.get("asin")),
                 "externalSku": coerce(it.get("asin")),
+                "upc": _explicit_upc(it),
                 "name": coerce(it.get("name")),
                 "productUrl": coerce(it.get("productUrl")),
                 "imageUrl": coerce(it.get("imageUrl")),
@@ -385,7 +404,7 @@ async def _capture_amazon_order_ids(
             if looks_like_amazon_signin(page.url):
                 raise LoginRequiredError("Amazon session requires login.")
             raw = await _parse_detail_page(page, skip_tracking=False)
-            body = _normalize_order(raw, page.url, account_email)
+            body = await _normalize_with_upcs(page, raw, page.url, account_email)
             orders.append(body)
             if on_order:
                 on_order(body)
@@ -522,7 +541,7 @@ async def run_amazon_import(
                 else:
                     raw = summary
                     source_url = detail_url or list_url
-                _emit_order(_normalize_order(raw, source_url, account_email))
+                _emit_order(await _normalize_with_upcs(page, raw, source_url, account_email))
             except LoginRequiredError:
                 raise
             except Exception as exc:
@@ -531,7 +550,7 @@ async def run_amazon_import(
                 try:
                     if summary.get("orderId"):
                         _emit_order(
-                            _normalize_order(summary, detail_url or list_url, account_email)
+                            await _normalize_with_upcs(page, summary, detail_url or list_url, account_email)
                         )
                         emitted = True
                 except Exception:

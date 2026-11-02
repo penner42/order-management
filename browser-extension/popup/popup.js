@@ -769,7 +769,7 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
               ? storedInvoice.html
               : null;
 
-          getOrderManagerApiBaseUrl((baseUrl) => {
+          getOrderManagerApiBaseUrl(async (baseUrl) => {
             if (!baseUrl) {
               resultsEl.innerHTML =
                 '<div class="error">Order Manager base URL is not configured.</div>' +
@@ -792,6 +792,8 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
             let body;
             try {
               body = normalizeWalmartOrderDetailPayload(current.payload, current.url);
+              resultsEl.innerHTML = '<div class="loading">Looking up product UPCs…</div>';
+              await globalThis.OrderManagerProductUpc.enrich([body], 'walmart');
             } catch (e) {
               resultsEl.innerHTML =
                 '<span class="error">Could not normalize Walmart order data: ' +
@@ -940,7 +942,7 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
         }
 
         function normalizeAndOpen(accountEmail) {
-          getOrderManagerApiBaseUrl((baseUrl) => {
+          getOrderManagerApiBaseUrl(async (baseUrl) => {
             if (!baseUrl) {
               resultsEl.innerHTML =
                 '<div class="error">Order Manager base URL is not configured.</div>';
@@ -960,6 +962,8 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
                 captured.url || pageUrl || url,
                 accountEmail
               );
+              resultsEl.innerHTML = '<div class="loading">Looking up product UPCs…</div>';
+              await globalThis.OrderManagerProductUpc.enrich([body], 'amazon');
             } catch (e) {
               resultsEl.innerHTML =
                 '<span class="error">Could not normalize Amazon order: ' +

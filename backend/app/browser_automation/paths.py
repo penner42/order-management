@@ -85,6 +85,7 @@ def amazon_script_paths() -> list[Path]:
     """Ordered scripts to inject into Amazon pages (extension sources)."""
     ext = _extension_root()
     files = [
+        ext / "lib" / "product-upc.js",
         ext / "lib" / "amazon.js",
         ext / "stores" / "amazon" / "selectors.js",
         ext / "stores" / "amazon" / "dom.js",
@@ -105,6 +106,7 @@ def walmart_orders_script_path() -> Path:
 def walmart_script_paths() -> list[Path]:
     """Scripts to inject for Walmart capture + normalize."""
     files = [
+        _extension_root() / "lib" / "product-upc.js",
         _extension_root() / "lib" / "walmart.js",
         walmart_orders_script_path(),
     ]

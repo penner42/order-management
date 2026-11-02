@@ -75,6 +75,7 @@
       items.push({
         logicalItemId: coerceString(it.asin) || null,
         externalSku: coerceString(it.asin) || null,
+        upc: globalThis.OrderManagerProductUpc?.explicit(it) || null,
         name: coerceString(it.name) || null,
         productUrl: coerceString(it.productUrl) || null,
         imageUrl: coerceString(it.imageUrl) || null,
