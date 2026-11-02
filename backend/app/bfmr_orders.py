@@ -17,6 +17,7 @@ from app.models import BfmrOrderTask, BuyingGroup, Item, Order
 from app.models.item import ItemStatus, RETURN_PROCESS_STATUSES
 from app.submission_policy import require_group_submissions_enabled
 from app.utils.buying_group_apis import bfmr
+from app.utils.product_upc import product_upc
 
 logger = logging.getLogger(__name__)
 INELIGIBLE = {ItemStatus.CANCELED, *RETURN_PROCESS_STATUSES, ItemStatus.LOST_PACKAGE}
@@ -63,7 +64,17 @@ def import_identity(raw, index):
     sku = str(raw.get("externalSku") or "").strip() or None
     logical = str(raw.get("logicalItemId") or "").strip()
     return {"import_line_key": (logical or sku or f"line:{index}")[:500],
-            "external_sku": sku, "product_url": raw.get("productUrl") or None}
+            "external_sku": sku, "product_url": raw.get("productUrl") or None,
+            "upc": product_upc(raw.get("upc"))}
+
+
+def matching_import_upc(item, matches):
+    """Resolve a barcode only when candidates for this line agree."""
+    candidates = [m for m in matches if m["import_line_key"] == item.import_line_key] if item.import_line_key else []
+    if not candidates and item.external_sku:
+        candidates = [m for m in matches if m["external_sku"] == item.external_sku]
+    values = {m["upc"] for m in (candidates or matches)}
+    return next(iter(values)) if len(values) == 1 and None not in values else None
 
 
 def capture_import_metadata(db, order, normalized, store):
@@ -79,8 +90,12 @@ def capture_import_metadata(db, order, normalized, store):
         if len(identities) == 1:
             match = matches[0]
             for field, value in match.items():
-                if value:
+                if value and field != "upc":
                     setattr(item, field, value)
+        # Only backfill a barcode when every candidate for this product agrees.
+        # Missing data never clears one, and a conflicting import never replaces it.
+        if not item.upc:
+            item.upc = matching_import_upc(item, matches)
 
 
 def product_key(item):

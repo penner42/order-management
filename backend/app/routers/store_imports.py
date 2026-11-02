@@ -50,7 +50,7 @@ from app.utils.ignored_zip_codes import (
     shipping_postal_code_from_payload,
 )
 from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
-from app.bfmr_orders import capture_import_metadata, enqueue_order, import_identity
+from app.bfmr_orders import capture_import_metadata, enqueue_order, import_identity, matching_import_upc
 
 router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
 
@@ -929,6 +929,9 @@ def _build_order_diff(
 
     incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
     order_is_canceled = _normalized_order_is_canceled(normalized)
+    incoming_identities: dict[str, list[dict[str, Any]]] = {}
+    for index, raw in enumerate(normalized.get("items") or []):
+        incoming_identities.setdefault((raw.get("name") or "").strip(), []).append(import_identity(raw, index))
     tracking_by_id = _items_have_tracking(db, existing_items)
     items_by_desc: dict[str, list[Item]] = {}
     for item in existing_items:
@@ -947,6 +950,15 @@ def _build_order_diff(
             existing = existing_by_desc.pop(name)
             changes: list[str] = []
             detailed_changes: list[dict[str, Any]] = []
+
+            upc_backfills = {
+                matching_import_upc(item, incoming_identities.get(name, []))
+                for item in items_by_desc.get(name, []) if not item.upc
+            } - {None}
+            if upc_backfills:
+                changes.append("upc")
+                detailed_changes.append({"field": "upc", "before": None,
+                                         "after": ", ".join(sorted(upc_backfills))})
 
             if _prices_differ_for_diff(existing["price_paid"], inc_price):
                 changes.append("price")
@@ -1511,6 +1523,7 @@ def _apply_items_and_shipments(
             import_line_key=item.import_line_key,
             external_sku=item.external_sku,
             product_url=item.product_url,
+            upc=item.upc,
             price_paid=item.price_paid,
             price_sold=item.price_sold,
             status=item.status,

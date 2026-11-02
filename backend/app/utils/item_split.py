@@ -32,6 +32,7 @@ def split_item_record(db: Session, item: Item, data: ItemSplitRequest) -> Item:
         import_line_key=item.import_line_key,
         external_sku=item.external_sku,
         product_url=item.product_url,
+        upc=item.upc,
         price_paid=item.price_paid,
         price_sold=item.price_sold,
         status=split_off_status,

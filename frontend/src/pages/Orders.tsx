@@ -2913,6 +2913,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                         disabled={savingItemId === item.id}
                                         className={`w-full h-9 rounded border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       />
+                                      {item.upc && <div className="mt-1 text-xs text-ink-muted select-text">UPC: {item.upc}</div>}
                                     </div>
 
                                     <div className="mt-2 flex items-center gap-2 min-w-0">
@@ -3188,6 +3189,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                         disabled={savingItemId === item.id}
                                         className={`w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       />
+                                      {item.upc && <div className="mt-1 text-xs text-ink-muted select-text">UPC: {item.upc}</div>}
                                     </td>
                                     <td className="py-1 px-2">
                                       <div className="flex items-center gap-1.5 min-w-0">

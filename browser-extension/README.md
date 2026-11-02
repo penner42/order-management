@@ -2,6 +2,22 @@
 
 A browser extension that integrates order data from store/account pages into the Order Manager app. Works in Chrome and Firefox.
 
+Costco imports save product UPCs when the captured order list or order detail
+response supplies an explicit string field (`upc`, `UPC`, `upcCode`, or
+`upcNumber`). Single-order, bulk extension, and automated imports share this
+support. Barcodes retain leading zeros and are stored separately from warehouse
+receipt UPCs. Costco item numbers are not treated as UPCs. Missing data does not
+erase a saved UPC; reimports backfill existing items when the product match is
+unambiguous. When order responses omit UPCs, imports fetch each unique item's
+Costco product page (`https://www.costco.com/p/-/<item-number>`) and read the
+embedded catalog data without executing scripts. They match the exact item
+number, validate the barcode check digit, and ignore recommendations and
+company-internal barcodes. A single-variant product can supply its manufacturer's
+UPC from the parent catalog record when the item has only an internal barcode.
+Missing pages, ambiguous variants, or failed lookups leave UPCs empty and do not
+stop the order import. Product lookups use two workers and a 15-second timeout.
+The extension requires access to `https://www.costco.com/*` for this lookup.
+
 ## Supported stores
 
 - `Amazon` (`https://www.amazon.com/*` — order history and order detail pages)

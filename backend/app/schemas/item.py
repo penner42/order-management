@@ -88,6 +88,7 @@ class ItemUpdate(BaseModel):
 
 
 class ItemRead(ItemBase, TimestampsMixin):
+    upc: str | None = None
     id: int
     order_id: int
     # From Payment when item is on a payment (read-only); payment_id for PATCH payment

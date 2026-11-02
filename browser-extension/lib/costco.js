@@ -16,6 +16,19 @@
     return s.trim()
   }
 
+  function costcoUpc(item) {
+    // Accept only explicit barcode fields; itemNumber is a Costco SKU.
+    // Keep strings intact so leading zeros survive capture and storage.
+    const values = new Set()
+    for (const key of ['upc', 'UPC', 'upcCode', 'upcNumber']) {
+      const raw = item && item[key]
+      if (typeof raw !== 'string') continue
+      const value = raw.trim()
+      if (/^(?:[0-9]{8}|[0-9]{12,14})$/.test(value)) values.add(value)
+    }
+    return values.size === 1 ? values.values().next().value : null
+  }
+
   function safeNumber(v) {
     if (typeof v === 'number' && Number.isFinite(v)) return v
     if (v && typeof v === 'object' && typeof v.parsedValue === 'number' && Number.isFinite(v.parsedValue)) {
@@ -231,6 +244,7 @@
       items.push({
         logicalItemId,
         externalSku: coerceString(it.itemNumber) || null,
+        upc: costcoUpc(it),
         name: coerceString(it.itemDescription) || coerceString(it.itemNumber) || null,
         productUrl: null,
         imageUrl: null,
@@ -339,6 +353,7 @@
         unitPrice: safeNumber(it.price),
         lineTotal: safeNumber(it.merchandiseTotalAmount),
         itemNumber: coerceString(it.itemNumber) || null,
+        upc: costcoUpc(it),
         itemDescription: coerceString(it.itemDescription) || null,
         shipmentSlices: collectShipmentsFromCostcoLineItem(it, shipmentsById, orderNumber),
       }
@@ -418,6 +433,8 @@
         const d = idx.byId[logicalItemId]
         if (!d) continue
 
+        if (!item.upc && d.upc) item.upc = d.upc
+
         if (!item.quantities || typeof item.quantities !== 'object') item.quantities = {}
         if (d.quantity != null) item.quantities.ordered = d.quantity
 
@@ -473,6 +490,7 @@
         itemsList.push({
           logicalItemId,
           externalSku: coerceString(item.itemNumber) || coerceString(item.itemId) || null,
+          upc: costcoUpc(item),
           name: itemName || null,
           productUrl: null,
           imageUrl: null,
@@ -531,7 +549,114 @@
     return normalized
   }
 
+  function jsonObjectAt(text, start) {
+    // Read JSON without executing the page's scripts (also works in a worker).
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (ch === '\\') escaped = true
+        else if (ch === '"') quoted = false
+      } else if (ch === '"') quoted = true
+      else if (ch === '{') depth++
+      else if (ch === '}' && --depth === 0) {
+        try { return JSON.parse(text.slice(start, i + 1)) } catch { return null }
+      }
+    }
+    return null
+  }
+
+  function catalogUpc(value) {
+    const upc = costcoUpc({ upc: value })
+    if (!upc) return null
+    // GS1 RCN-12 prefix 4 / RCN-13 prefix 04 is company-internal numbering.
+    if ((upc.length === 12 && upc[0] === '4') || (upc.length === 13 && upc.startsWith('04'))) return null
+    let sum = 0
+    for (let i = upc.length - 2, weight = 3; i >= 0; i--, weight = 4 - weight) {
+      sum += Number(upc[i]) * weight
+    }
+    return (10 - sum % 10) % 10 === Number(upc.at(-1)) ? upc : null
+  }
+
+  function extractCostcoProductUpc(html, sku) {
+    if (typeof html !== 'string' || !/^[0-9]{1,20}$/.test(String(sku))) return null
+    // Costco embeds catalog data in Next.js Flight chunks, sometimes split
+    // across scripts. Product pages also contain unrelated recommended products.
+    const chunks = []
+    for (const script of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
+      const push = /^\s*self\.__next_f\.push\(([\s\S]*)\)\s*;?\s*$/.exec(script[1])
+      if (!push) continue
+      try {
+        const part = JSON.parse(push[1])
+        if (part[0] === 1 && typeof part[1] === 'string') chunks.push(part[1])
+      } catch { /* Ignore scripts that are not plain Flight JSON. */ }
+    }
+    const text = chunks.join('')
+    const values = new Set()
+    for (const match of text.matchAll(/"productData"\s*:\s*\{/g)) {
+      const product = jsonObjectAt(text, match.index + match[0].length - 1)
+      if (!product) continue
+      const children = Array.isArray(product.childCatalogData) ? product.childCatalogData : []
+      const exact = children.filter(child => String(child.id) === String(sku))
+      for (const child of exact) {
+        let upc = catalogUpc(child.upc)
+        // A single-item product may expose the manufacturer's barcode only
+        // on its parent. Never borrow a parent's UPC across multiple variants.
+        const internal = typeof child.upc === 'string' && /^(?:4[0-9]{11}|04[0-9]{11})$/.test(child.upc)
+        if (!upc && children.length === 1 && internal) upc = catalogUpc(product.upc)
+        if (upc) values.add(upc)
+      }
+      if (String(product.id) === String(sku)) {
+        const upc = catalogUpc(product.upc)
+        if (upc) values.add(upc)
+      }
+    }
+    return values.size === 1 ? values.values().next().value : null
+  }
+
+  async function fetchCostcoProductHtml(sku) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15000)
+    try {
+      const response = await fetch('https://www.costco.com/p/-/' + sku, { signal: controller.signal })
+      if (!response.ok) return null
+      // Refuse off-site redirects, error pages and non-HTML responses.
+      if (new URL(response.url).origin !== 'https://www.costco.com') return null
+      if (!(response.headers.get('content-type') || '').includes('text/html')) return null
+      return await response.text()
+    } finally { clearTimeout(timer) }
+  }
+
+  async function enrichCostcoOrdersWithProductUpcs(orders, loadHtml = fetchCostcoProductHtml) {
+    const bySku = new Map()
+    for (const order of orders) {
+      for (const item of order.items || []) {
+        const sku = String(item.externalSku || '')
+        if (item.upc || !/^[0-9]{1,20}$/.test(sku)) continue
+        if (!bySku.has(sku)) bySku.set(sku, [])
+        bySku.get(sku).push(item)
+      }
+    }
+    const pending = [...bySku.entries()]
+    async function worker() {
+      while (pending.length) {
+        const [sku, items] = pending.shift()
+        try {
+          const upc = extractCostcoProductUpc(await loadHtml(sku), sku)
+          if (upc) for (const item of items) item.upc = upc
+        } catch { /* Missing/discontinued/blocked products must not stop imports. */ }
+      }
+    }
+    await Promise.all([worker(), worker()])
+    return orders
+  }
+
   const api = {
+    extractCostcoProductUpc,
+    enrichCostcoOrdersWithProductUpcs,
     normalizeCostcoOrdersGraphqlPayload,
     normalizeCostcoOrderDetailsGraphqlPayload,
     mergeCostcoOrderDetailsIntoNormalizedOrders,

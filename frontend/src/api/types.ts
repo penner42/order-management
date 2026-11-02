@@ -126,6 +126,7 @@ export interface Item {
   submission_api_id: string | null
   receipt_tracking_number: string | null
   receipt_upc?: string | null
+  upc?: string | null
   receipt_id: string | null
   created_at: string
   updated_at?: string

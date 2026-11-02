@@ -85,6 +85,7 @@ class Item(Base):
     import_line_key = Column(String(500), nullable=True)
     external_sku = Column(String(255), nullable=True)
     product_url = Column(Text, nullable=True)
+    upc = Column(String(14), nullable=True)
     shipping = Column(Numeric(12, 2), nullable=True)
     sales_tax = Column(Numeric(12, 2), nullable=True)
     submission_id = Column(String(255), nullable=True)

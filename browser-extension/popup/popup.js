@@ -1354,7 +1354,10 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
           }
 
           try {
-            openBulkReviewForOrders([body], resultsEl);
+            appendRow("Looking up product barcodes…", "pending");
+            globalThis.OrderManagerCostco.enrichCostcoOrdersWithProductUpcs([body])
+              .then(() => openBulkReviewForOrders([body], resultsEl))
+              .catch((e) => { resultsEl.textContent = String(e && e.message ? e.message : e); });
           } catch (e) {
             resultsEl.innerHTML =
               '<span class="error">Could not start bulk import review: ' +

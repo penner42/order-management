@@ -12,6 +12,7 @@
     "scripting"
   ],
   "host_permissions": [
+    "https://www.costco.com/*",
     "https://www.walmart.com/*",
     "https://ecom-api.costco.com/*",
     "https://api.usabuying.group/*",

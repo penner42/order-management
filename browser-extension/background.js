@@ -2524,6 +2524,9 @@ function attachCostcoBulkPortHandlers(port) {
         // ignore
       }
 
+      if (globalThis.OrderManagerCostco?.enrichCostcoOrdersWithProductUpcs) {
+        await globalThis.OrderManagerCostco.enrichCostcoOrdersWithProductUpcs(orders);
+      }
       port.postMessage({ type: "creatingSession", total: orders.length });
 
       const { appBase, token } = await postBulkSession(baseUrl, orders);

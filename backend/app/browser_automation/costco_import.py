@@ -913,6 +913,12 @@ async def run_costco_import(
             if str((o.get("externalOrder") or {}).get("id") or "").strip() in wanted_numbers
         ]
 
+        progress(phase="detail", message="Looking up Costco product barcodes…")
+        orders = await page.evaluate(
+            "orders => globalThis.OrderManagerCostco.enrichCostcoOrdersWithProductUpcs(orders)",
+            orders,
+        )
+
         if on_order:
             for body in orders:
                 on_order(body)
