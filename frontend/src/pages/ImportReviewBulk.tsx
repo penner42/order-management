@@ -403,7 +403,7 @@ export default function ImportReviewBulk() {
               return [
                 orderIdx,
                 items.map((item) => {
-                  const payout = getDefaultItemPayout(item)
+                  const payout = getDefaultItemPayout(item, order)
                   return payout != null ? formatImportDefaultAmount(payout) : ''
                 }),
               ]

@@ -18,6 +18,10 @@ test('Costco bundled software imports at zero payout and filters as no payment n
   }
   await app.goto(`/import-review#${Buffer.from(JSON.stringify(payload)).toString('base64')}`)
   await expect(app.getByText(payload.items[1].name, { exact: true })).toBeVisible()
+  for (const item of payload.items.slice(1)) {
+    await expect(app.getByRole('textbox', { name: `Unit payout for ${item.name.slice(0, 30)}`, exact: true })).toHaveValue('0.00')
+  }
+  await expect(app.getByRole('textbox', { name: `Unit payout for ${payload.items[0].name.slice(0, 30)}`, exact: true })).toHaveValue('1000.00')
   const applied = app.waitForResponse(response => new URL(response.url()).pathname === '/api/integrations/stores/orders/apply' && response.request().method() === 'POST')
   await app.getByRole('button', { name: 'Import order', exact: true }).click()
   const response = await applied

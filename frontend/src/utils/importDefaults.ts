@@ -1,4 +1,5 @@
 type ImportItem = {
+  name?: string | null
   quantities?: { ordered?: number | null }
   pricing?: {
     unitPrice?: number | null
@@ -8,6 +9,7 @@ type ImportItem = {
 }
 
 type ImportPayload = {
+  store?: string
   items?: ImportItem[]
   orderDiscount?: unknown
   totals?: Record<string, unknown>
@@ -48,7 +50,18 @@ function getFirstNumber(obj: unknown, paths: string[]): number | null {
 }
 
 /** Default per-unit payout from imported item pricing (unit price, or line total / qty). */
-export function getDefaultItemPayout(item: ImportItem): number | null {
+export function getDefaultItemPayout(item: ImportItem, payload?: ImportPayload): number | null {
+  // Keep review defaults consistent with the backend's Costco bundle handling.
+  const softwareTitle = /^(?:microsoft\s+(?:office\b|365\b)|mcafee\b|norton\b|adobe\s+(?:acrobat\b|creative\b|photoshop\b)|(?:antivirus|security)\s+software\b)/i
+  if (
+    payload?.store?.trim().toLowerCase() === 'costco' &&
+    softwareTitle.test(item.name?.trim() ?? '') &&
+    payload.items?.some(other => {
+      const name = other.name?.trim() ?? ''
+      return name !== '' && !softwareTitle.test(name)
+    })
+  ) return 0
+
   const qtyRaw = item.quantities?.ordered ?? 1
   const qty = typeof qtyRaw === 'number' && Number.isFinite(qtyRaw) ? qtyRaw : 1
   const unitPrice = coerceNumber(item.pricing?.unitPrice)

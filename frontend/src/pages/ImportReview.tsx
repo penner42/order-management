@@ -235,7 +235,7 @@ export default function ImportReview() {
         const items = payload.items ?? []
         setItemPayouts(
           items.map((item) => {
-            const payout = getDefaultItemPayout(item)
+            const payout = getDefaultItemPayout(item, payload)
             return payout != null ? formatImportDefaultAmount(payout) : ''
           })
         )
