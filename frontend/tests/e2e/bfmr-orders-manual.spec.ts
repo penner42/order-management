@@ -141,3 +141,57 @@ test('Older submitted BFMR lines show registration beside tracking on desktop an
     await expect(card.getByRole('link', { name: /^BFMR order:/ })).toHaveCount(0)
   }
 })
+
+for (const automatic of [true, false]) {
+  test(`Orders ${automatic ? 'automatically recognizes matching order numbers' : 'links a manually selected existing commitment'} with submissions disabled`, async ({ app, data }) => {
+    const { group, order_id, snapshot, base } = await importedOrder(data)
+    let task: BfmrOrderTask | null = null
+    let links = 0
+    let submissions = 0
+    app.on('request', request => { if (request.url().endsWith(`${base}/submit`)) submissions++ })
+    await app.route('**/api/orders/paged?*', async route => {
+      const response = await route.fetch()
+      const page = await response.json()
+      for (const order of page.items) {
+        if (order.id === order_id && task) {
+          order.bfmr_order_tasks = [task]
+          order.bfmr_submitted_item_ids = order.items.map((item: { id: number }) => item.id)
+        }
+      }
+      await route.fulfill({ response, json: page })
+    })
+    await app.route(`**${base}/preview`, route => route.fulfill({ json: { order_no: snapshot.order_no, products: [{
+      product_key: 'sku:2040144', snapshot, task, candidates: [], existing_match: automatic,
+      purchases: [{ purchase_id: 'P-existing', title: 'Existing ASUS commitment', order_no: automatic ? snapshot.order_no : 'Different number', qty: 2 }],
+    }] } }))
+    await app.route(`**${base}/reconcile`, async route => {
+      const body = route.request().postDataJSON()
+      expect(body.products).toHaveLength(1)
+      expect(body.products[0].purchase_ids ?? []).toEqual(automatic ? [] : ['P-existing'])
+      expect(body.products[0].allocations ?? []).toEqual([])
+      links++
+      task = { id: 1, order_id, buying_group_id: group.id, product_key: 'sku:2040144', snapshot,
+        allocations: [{ reserve_id: 'R-existing', qty: 2, status: 'submitted', purchase_id: 'P-existing' }],
+        status: 'submitted', message: 'Existing BFMR submission linked.', attempts: 0, next_attempt_at: null }
+      await route.fulfill({ json: [task] })
+    })
+    await app.goto(`/?order_id=${order_id}`)
+    const card = app.getByLabel(`Order ${order_id}`, { exact: true })
+    await card.getByRole('button', { name: 'BFMR order number', exact: true }).click()
+    const dialog = app.getByRole('dialog', { name: 'BFMR order number', exact: true })
+    if (!automatic) {
+      await dialog.getByRole('checkbox').check()
+      const link = dialog.getByRole('button', { name: 'Link selected commitment' })
+      await expect(link).toBeDisabled()
+      await dialog.getByRole('listbox', { name: 'Existing BFMR purchases for ASUS manual registration laptop' }).selectOption('P-existing')
+      await link.click()
+    }
+    await expect(dialog.getByText(automatic ? '1/1 products automatically linked' : '1/1 products linked', { exact: false })).toBeVisible()
+    await expect(dialog.getByRole('checkbox')).toBeDisabled()
+    await expect(dialog.getByRole('button', { name: 'Submit order number', exact: true })).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(card.getByText('BFMR order number submitted', { exact: true }).filter({ visible: true })).toBeVisible()
+    expect(links).toBe(1)
+    expect(submissions).toBe(0)
+  })
+}

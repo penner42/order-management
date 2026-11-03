@@ -235,6 +235,153 @@ class BfmrOrderNumberTests(unittest.TestCase):
             routes.preview_order(self.group.id, order.id, self.db, stranger)
         self.create.assert_not_called()
 
+    def test_link_existing_without_commitments_tasks_or_submission_permission(self):
+        self.group.order_number_submit_enabled = False
+        order = self.order()
+        self.fetch.return_value = [tracker(pid="existing", qty=2, status="purchased", order_no="ORDER-1")]
+        body = self.manual_body(order, [])
+        with patch.object(settings, "group_submissions_enabled", False), patch.object(settings, "scheduled_jobs_enabled", False):
+            for _ in range(2):
+                result = routes.reconcile_order(self.group.id, order.id, body, self.db, self.user)
+                self.assertEqual(result[0].status, "submitted")
+        self.assertEqual(self.db.query(BfmrOrderTask).count(), 1)
+        self.assertEqual(result[0].allocations[0]["purchase_id"], "existing")
+        self.db.expire(order, ["bfmr_order_tasks"])
+        self.assertEqual(OrderRead.model_validate(order).bfmr_submitted_item_ids, [order.items[0].id])
+        self.assertEqual(order.items[0].status, ItemStatus.PURCHASED)
+        self.create.assert_not_called()
+
+    def test_link_requires_matching_active_order_product_and_quantity(self):
+        order = self.order()
+        body = self.manual_body(order, [])
+        for row in [tracker(pid="p", qty=2, status="purchased", order_no="OTHER"),
+                    tracker(pid="p", qty=2, status="purchased", order_no="ORDER-1", sku="OTHER"),
+                    tracker(pid="p", qty=2, status="purchased", order_no="ORDER-1", retailer="Costco"),
+                    tracker(pid="p", qty=2, status="returned", order_no="ORDER-1"),
+                    tracker(pid="p", qty=1, status="purchased", order_no="ORDER-1")]:
+            with self.subTest(row=row):
+                self.fetch.return_value = [row]
+                result = routes.reconcile_order(self.group.id, order.id, body, self.db, self.user)
+                self.assertEqual(result[0].status, "review")
+                self.assertEqual(result[0].allocations, [])
+        self.create.assert_not_called()
+
+    def test_link_preserves_uncertain_journal_until_confirmed(self):
+        order = self.order()
+        task = self.task(order)
+        journal = [{"reserve_id": "opaque+RID==", "qty": 2, "status": "sending", "before_purchase_ids": []}]
+        task.allocations = journal
+        self.db.commit()
+        body = self.manual_body(order, [])
+        routes.reconcile_order(self.group.id, order.id, body, self.db, self.user)
+        self.assertEqual(task.allocations, journal)
+        self.fetch.return_value = [tracker(pid="recovered", qty=2, status="purchased", order_no="ORDER-1")]
+        routes.reconcile_order(self.group.id, order.id, body, self.db, self.user)
+        self.assertEqual(task.status, "submitted")
+        self.create.assert_not_called()
+
+    def test_link_rejects_stale_details_ownership_and_new_allocations(self):
+        order = self.order()
+        body = self.manual_body(order, [])
+        stranger = SimpleNamespace(id=self.user.id + 1, role="user")
+        with self.assertRaises(HTTPException) as error:
+            routes.reconcile_order(self.group.id, order.id, body, self.db, stranger)
+        self.assertEqual(error.exception.status_code, 404)
+        with self.assertRaises(HTTPException) as error:
+            routes.reconcile_order(self.group.id, order.id, self.manual_body(order), self.db, self.user)
+        self.assertEqual(error.exception.status_code, 400)
+        order.items[0].quantity = 3
+        self.db.commit()
+        with self.assertRaises(HTTPException) as error:
+            routes.reconcile_order(self.group.id, order.id, body, self.db, self.user)
+        self.assertEqual(error.exception.status_code, 409)
+        self.create.assert_not_called()
+
+    def test_link_does_not_discard_confirmed_purchase_on_conflict(self):
+        order = self.order()
+        task = self.task(order)
+        task.allocations = [{"reserve_id": "old", "purchase_id": "confirmed", "qty": 1, "status": "submitted"}]
+        self.db.commit()
+        self.fetch.return_value = [tracker(pid="different", qty=2, status="purchased", order_no="ORDER-1")]
+        routes.reconcile_order(self.group.id, order.id, self.manual_body(order, []), self.db, self.user)
+        self.assertEqual(task.status, "review")
+        self.assertEqual(task.allocations[0]["purchase_id"], "confirmed")
+        self.create.assert_not_called()
+
+    def test_preview_detects_existing_purchase_and_single_product_missing_sku(self):
+        order = self.order(sku=None)
+        self.fetch.return_value = [tracker(pid="existing", qty=2, status="purchased", order_no=" order-1 ")]
+        preview = routes.preview_order(self.group.id, order.id, self.db, self.user)
+        self.assertTrue(preview["products"][0]["existing_match"])
+        body = self.manual_body(order, [])
+        result = routes.reconcile_order(self.group.id, order.id, body, self.db, self.user)
+        self.assertEqual(result[0].status, "submitted")
+        self.create.assert_not_called()
+
+    def test_multiple_products_without_identity_require_manual_selection(self):
+        order = self.order(sku=None)
+        self.db.add(Item(order_id=order.id, description="Other product", quantity=2,
+                         import_line_key="other", status=ItemStatus.PURCHASED, price_sold=0))
+        self.db.commit()
+        self.db.expire(order, ["items"])
+        self.fetch.return_value = [tracker(pid="existing", qty=2, status="purchased", order_no="ORDER-1")]
+        preview = routes.preview_order(self.group.id, order.id, self.db, self.user)
+        self.assertEqual(len(preview["products"]), 2)
+        self.assertTrue(all(not p["existing_match"] for p in preview["products"]))
+
+    def test_manual_link_can_select_existing_commitment_with_different_order_number(self):
+        order = self.order()
+        self.fetch.return_value = [tracker(pid="chosen", qty=2, sku="OTHER", status="purchased", order_no="BFMR-OTHER")]
+        preview = routes.preview_order(self.group.id, order.id, self.db, self.user)
+        self.assertFalse(preview["products"][0]["existing_match"])
+        self.assertEqual(preview["products"][0]["purchases"][0]["order_no"], "BFMR-OTHER")
+        body = self.manual_body(order, [])
+        body.products[0].purchase_ids = ["chosen"]
+        with patch.object(settings, "group_submissions_enabled", False):
+            result = routes.reconcile_order(self.group.id, order.id, body, self.db, self.user)
+        self.assertEqual(result[0].status, "submitted")
+        self.assertEqual(result[0].allocations[0]["purchase_id"], "chosen")
+        self.assertEqual(result[0].allocations[0]["order_no"], "BFMR-OTHER")
+        item = order.items[0]
+        item.status = ItemStatus.SHIPPED
+        shipment = Shipment(tracking_number="LINKED-TRACKING")
+        self.db.add(shipment)
+        self.db.flush()
+        self.db.add(ShipmentItem(item_id=item.id, shipment_id=shipment.id))
+        self.db.commit()
+        with patch.object(bfmr, "submit_trackings", return_value=bfmr.BfmrSubmitResult(
+                success=True, message="OK", succeeded=["LINKED-TRACKING"])) as send:
+            tracking_result = service.submit_tracking(self.db, self.group, [(item, order, "LINKED-TRACKING")])
+        self.assertEqual(tracking_result.item_ids, [item.id])
+        self.assertEqual(self.fetch.call_args.kwargs, {"orders": ["ORDER-1", "BFMR-OTHER"]})
+        self.assertEqual(send.call_args.kwargs["trackings"][0].order_no, "BFMR-OTHER")
+        self.create.assert_not_called()
+
+    def test_manual_link_rejects_purchase_already_linked_to_another_order(self):
+        first = self.order()
+        self.fetch.return_value = [tracker(pid="shared", qty=2, status="purchased", order_no="ORDER-1")]
+        routes.reconcile_order(self.group.id, first.id, self.manual_body(first, []), self.db, self.user)
+        second = self.order(order_no="ORDER-2")
+        body = self.manual_body(second, [])
+        body.products[0].purchase_ids = ["shared"]
+        result = routes.reconcile_order(self.group.id, second.id, body, self.db, self.user)
+        self.assertEqual(result[0].status, "review")
+        self.assertIn("already linked", result[0].message)
+        self.assertEqual(result[0].allocations, [])
+        self.create.assert_not_called()
+
+    def test_manual_link_rechecks_selected_purchase_availability_and_quantity(self):
+        order = self.order()
+        body = self.manual_body(order, [])
+        body.products[0].purchase_ids = ["chosen"]
+        for rows in [[], [tracker(pid="chosen", qty=2, status="returned", order_no="OTHER")],
+                     [tracker(pid="chosen", qty=1, status="purchased", order_no="OTHER")]]:
+            self.fetch.return_value = rows
+            result = routes.reconcile_order(self.group.id, order.id, body, self.db, self.user)
+            self.assertEqual(result[0].status, "review")
+            self.assertEqual(result[0].allocations, [])
+        self.create.assert_not_called()
+
     def test_manual_rejects_stale_preview_and_excludes_software(self):
         order = self.order()
         body = self.manual_body(order)

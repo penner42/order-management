@@ -40,6 +40,7 @@ class BfmrManualProduct(BaseModel):
     product_key: str = Field(min_length=1, max_length=500)
     snapshot: dict[str, Any]
     allocations: list[BfmrAllocation] = Field(default_factory=list, max_length=100)
+    purchase_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class BfmrManualSubmitRequest(BaseModel):

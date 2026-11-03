@@ -213,19 +213,24 @@ def http_status(exc):
     return exc.code if isinstance(exc, urllib.error.HTTPError) else None
 
 
-def remote_purchases(rows, task, allocation=None):
-    excluded = {"reserved", "cancelled", "deadline", "closed", "return", "returned"}
+def remote_purchases(rows, task, allocation=None, *, order_only=False, purchase_ids=None):
+    excluded = {"reserved", "canceled", "cancelled", "expired", "deadline", "closed", "return", "returned"}
     found = {}
     seen = set()
     for row in rows:
-        if not row.purchase_id or not row.order_id or row.order_id.strip().casefold() != task.snapshot["order_no"].casefold():
+        if not row.purchase_id or not row.order_id:
             continue
-        if (row.status or "").casefold() in excluded:
+        if purchase_ids is not None:
+            if row.purchase_id not in purchase_ids:
+                continue
+        elif row.order_id.strip().casefold() != task.snapshot["order_no"].casefold():
+            continue
+        if (row.status or "").strip().casefold() in excluded:
             continue
         if allocation is not None:
             identity_match = row.reserve_id == allocation["reserve_id"]
         else:
-            identity_match = matches_product(row, task.snapshot)
+            identity_match = purchase_ids is not None or order_only or matches_product(row, task.snapshot)
         if not identity_match:
             continue
         key = (row.purchase_id, row.shipment_id, row.tracking_number)
@@ -237,6 +242,28 @@ def remote_purchases(rows, task, allocation=None):
                                                    "qty": 0, "status": "submitted"})
         entry["qty"] += max(int(row.qty or 0), 0)
     return list(found.values())
+
+
+def existing_order_purchases(rows, snapshot, *, single_product=False):
+    """Use order number alone only when missing product metadata is unambiguous."""
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(snapshot=snapshot)
+    exact = remote_purchases(rows, task)
+    if exact or not single_product:
+        return exact
+    purchases = remote_purchases(rows, task, order_only=True)
+    purchase_ids = {p["purchase_id"] for p in purchases}
+    matching_rows = [row for row in rows if row.purchase_id in purchase_ids]
+    # Known, conflicting product IDs require the user's explicit commitment choice.
+    if snapshot.get("sku") and any(bfmr.retailer_identifiers(row) for row in matching_rows):
+        return []
+    if any(bfmr.retailer_identifiers(row) and not any(retailer(name) == snapshot["retailer"]
+           for name, _ in bfmr.retailer_identifiers(row)) for row in matching_rows):
+        return []
+    identities = {tuple(sorted(bfmr.retailer_identifiers(row))) or (row.reserve_id,)
+                  for row in matching_rows}
+    return purchases if len(identities) == 1 else []
 
 
 def validate_task(db, task, group):
@@ -461,6 +488,12 @@ def submit_tracking(db, group, pending):
         order_numbers = list(dict.fromkeys((order.store_order_number or "").strip()
                                           for _item, order, _tracking in pending
                                           if (order.store_order_number or "").strip()))
+        order_ids = {order.id for _item, order, _tracking in pending}
+        linked_tasks = db.query(BfmrOrderTask).filter(BfmrOrderTask.order_id.in_(order_ids),
+                                                    BfmrOrderTask.buying_group_id == group.id,
+                                                    BfmrOrderTask.status == "submitted").all()
+        order_numbers = list(dict.fromkeys(order_numbers + [a["order_no"] for task in linked_tasks
+                                          for a in task.allocations if a.get("order_no")]))
         rows = fetch_rows(group, orders=order_numbers) if order_numbers else []
         capacities = defaultdict(int)
         shipped = defaultdict(int)
@@ -491,11 +524,14 @@ def submit_tracking(db, group, pending):
         for item, order, tracking in sorted(pending, key=lambda pair: pair[0].id):
             tasks = db.query(BfmrOrderTask).filter_by(order_id=order.id, buying_group_id=group.id).all()
             task = next((task for task in tasks if task.product_key == product_key(item)), None)
+            linked_order_numbers = {}
             if tasks:
                 if task is None or task.status != "submitted" or not validate_task(db, task, group):
                     notes.append(f"Item {item.id}: review order-number registration first.")
                     continue
                 pids = list(dict.fromkeys(a["purchase_id"] for a in task.allocations if a.get("purchase_id")))
+                linked_order_numbers = {a["purchase_id"]: a["order_no"].strip().casefold()
+                                        for a in task.allocations if a.get("purchase_id") and a.get("order_no")}
             else:
                 # Legacy manual registrations are safe only with one purchase for the order.
                 pids = list(dict.fromkeys(row.purchase_id for row in rows if row.order_id
@@ -508,7 +544,8 @@ def submit_tracking(db, group, pending):
             portions = []
             for pid in pids:
                 row = purchase_rows.get(pid)
-                if row is None or not row.order_id or row.order_id.strip().casefold() != (order.store_order_number or "").strip().casefold():
+                expected_order = linked_order_numbers.get(pid, (order.store_order_number or "").strip().casefold())
+                if row is None or not row.order_id or row.order_id.strip().casefold() != expected_order:
                     continue
                 already = min(needed, shipped[(pid, tracking.casefold())])
                 needed -= already

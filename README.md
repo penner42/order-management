@@ -522,7 +522,16 @@ tracking controls to preview live commitments and register selected products wit
 tracking numbers. Choose the products explicitly and allocate their remaining
 quantities across commitments, then click **Submit order number**. This manual
 flow works independently of automatic submission settings and scheduled jobs.
-Development remains preview-only; remote writes require environment group
+Opening or refreshing this dialog automatically links existing BFMR purchases when
+the saved order number, product, and total quantity match. A single-product order
+can also match by order number when product identifiers are missing and BFMR has
+only one unambiguous product. If no match is found, select the product and its
+existing BFMR purchase, then click **Link selected commitment**. This explicitly
+confirms the purchase even if BFMR has a different order number. Linking records
+confirmed registration locally without changing BFMR or marking tracking submitted,
+and works with environment submissions disabled. Purchases already linked to
+another product or order cannot be reused.
+Development allows preview and local linking; remote writes require environment group
 submissions to be enabled. Bundled software marked **No payment necessary**,
 canceled, returning, and lost items are excluded. Uncertain submissions can be
 reconciled in the same dialog without blindly sending another purchase.
