@@ -8,6 +8,37 @@ const line = { lineItemId: 'L1', itemNumber: '1234567', itemDescription: 'Produc
 const list = item => ({ data: { getOnlineOrders: [{ bcOrders: [{ orderNumber: 'O1', orderLineItems: [item] }] }] } })
 const details = item => ({ data: { getOrderDetails: { orderNumber: 'O1', shipToAddress: [{ orderLineItems: [item] }] } } })
 
+test('returned and delivered snapshots count as one purchase in list, detail and merged capture', () => {
+  const purchase = { ...line, price: 599.97, merchandiseTotalAmount: 1199.94,
+    status: 'Delivered', shipment: [{ shipmentId: 'S1', trackingNumber: 'TRACK1' }] }
+  const returned = { ...purchase, status: 'Returned' }
+  for (const raw of [[returned, purchase], [purchase, returned]]) {
+    const orders = list(purchase)
+    orders.data.getOnlineOrders[0].bcOrders[0].orderLineItems = raw
+    const detail = details(purchase)
+    detail.data.getOrderDetails.shipToAddress[0].orderLineItems = raw
+    const normalized = c.normalizeCostcoOrdersGraphqlPayload(orders)
+    assert.equal(normalized[0].items.length, 1)
+    assert.equal(normalized[0].items[0].status.rawStatusCode, 'Delivered')
+    assert.equal(c.normalizeCostcoOrderDetailsGraphqlPayload(detail).items.length, 1)
+    c.mergeCostcoOrderDetailsIntoNormalizedOrders(normalized, { O1: detail })
+    assert.equal(normalized[0].items.length, 1)
+    assert.equal(normalized[0].items[0].quantities.ordered, 2)
+    assert.equal(normalized[0].items[0].pricing.lineTotal, 1199.94)
+  }
+})
+
+test('matching SKUs with distinct line IDs or shipment allocations remain separate', () => {
+  const purchase = { ...line, shipment: [{ shipmentId: 'S1', trackingNumber: 'TRACK1' }] }
+  for (const other of [{ ...purchase, lineItemId: 'L2' },
+    { ...purchase, shipment: [{ shipmentId: 'S2', trackingNumber: 'TRACK2' }] },
+    { ...purchase, lineItemId: null }]) {
+    const raw = list(purchase)
+    raw.data.getOnlineOrders[0].bcOrders[0].orderLineItems.push(other)
+    assert.equal(c.normalizeCostcoOrdersGraphqlPayload(raw)[0].items.length, 2)
+  }
+})
+
 test('list, single-order, and bulk detail capture preserve leading zeros', () => {
   for (const key of ['upc', 'UPC', 'upcCode', 'upcNumber']) {
     const item = { ...line, [key]: ' 000012345678 ' }

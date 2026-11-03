@@ -53,6 +53,7 @@ from app.utils.ignored_zip_codes import (
 from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
 from app.utils.costco_software import bundled_software_names
 from app.bfmr_orders import capture_import_metadata, enqueue_order, import_identity, matching_import_upc
+from app.utils.costco_import import deduplicate_costco_items
 
 router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
 
@@ -300,8 +301,10 @@ def _strip_ignored_walmart_import_slices(normalized: dict[str, Any]) -> dict[str
 
 
 def _sanitize_store_import_payload_dict(payload: StoreOrderImportPayload) -> dict[str, Any]:
-    """Dump a payload to a dict and strip ignored Walmart email-delivery slices."""
-    return _strip_ignored_walmart_import_slices(payload.model_dump(mode="json"))
+    """Normalize retailer duplicate lines and ignored email-delivery slices."""
+    return deduplicate_costco_items(
+        _strip_ignored_walmart_import_slices(payload.model_dump(mode="json"))
+    )
 
 
 def _sanitize_store_import_payload(
@@ -2180,6 +2183,19 @@ def apply_store_order_payload(
     """
     external_order_id, _ = _parse_external_order_fields(payload)
     normalized: dict[str, Any] = _sanitize_store_import_payload_dict(payload)
+
+    if (
+        payload.store.strip().lower() == "costco"
+        and item_payouts is not None
+        and len(normalized.get("items") or []) != len(payload.items or [])
+    ):
+        # Pending review pages may still send the repeated status rows. Keep
+        # payouts aligned with the retained rows rather than shifting later ones.
+        source_payouts = item_payouts
+        item_payouts = []
+        for item in normalized.get("items") or []:
+            index = next(i for i, raw in enumerate(payload.items or []) if raw == item)
+            item_payouts.append(source_payouts[index] if index < len(source_payouts) else None)
 
     if store_account_id is not None:
         account = db.query(StoreAccount).filter(StoreAccount.id == store_account_id).first()

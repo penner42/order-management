@@ -127,6 +127,34 @@
     return shipmentsList
   }
 
+  function deduplicateCostcoPurchaseLines(items, shipments) {
+    // Returned and Delivered can be two snapshots of the same purchase line.
+    // Only collapse matching identities and allocations, never just matching SKUs.
+    const sources = new Map(shipments.map(s => [s.shipmentId, s]))
+    const positions = new Map()
+    const result = []
+    for (const item of items) {
+      const identity = coerceString(item.logicalItemId)
+      if (!identity || !identity.trim()) {
+        result.push(item)
+        continue
+      }
+      const slices = (item.shipments || []).map(s => [
+        String((sources.get(s.shipmentId) || {}).trackingNumber || s.shipmentId || ''),
+        s.quantity || 1,
+      ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+      const key = JSON.stringify([identity.trim(), item.externalSku, item.name,
+        (item.quantities || {}).ordered, (item.pricing || {}).unitPrice, slices])
+      if (!positions.has(key)) {
+        positions.set(key, result.length)
+        result.push(item)
+      } else if (/return|refund/i.test((result[positions.get(key)].status || {}).rawStatusCode || '')) {
+        result[positions.get(key)] = item
+      }
+    }
+    return result
+  }
+
   function extractOrdersFromCostcoGraphql(graphqlPayload) {
     if (!graphqlPayload || typeof graphqlPayload !== 'object') return []
     const go = graphqlPayload.data && graphqlPayload.data.getOnlineOrders
@@ -288,7 +316,7 @@
       shippingAddress,
       shipments: shipmentsListFromMap(shipmentsById),
       paymentMethods,
-      items,
+      items: deduplicateCostcoPurchaseLines(items, shipmentsListFromMap(shipmentsById)),
       cancellations: {
         orderLevel: [],
         itemLevelReasons: [],
@@ -449,6 +477,7 @@
           item.shipments = d.shipmentSlices
         }
       }
+      order.items = deduplicateCostcoPurchaseLines(items, order.shipments)
     }
 
     return list
@@ -535,7 +564,7 @@
         shippingAddress: null,
         shipments: shipmentsList,
         paymentMethods: [],
-        items: itemsList,
+        items: deduplicateCostcoPurchaseLines(itemsList, shipmentsList),
         cancellations: {
           orderLevel: [],
           itemLevelReasons: [],

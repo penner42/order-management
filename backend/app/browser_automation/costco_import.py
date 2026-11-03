@@ -771,6 +771,17 @@ async def run_costco_import(
         if not await establish_costco_session(page):
             raise LoginRequiredError("Costco session requires login.")
 
+        # The SPA can briefly expose an app route before its SSO callback and
+        # account loading finish. Navigating or refreshing then restarts the
+        # slow load instead of letting Costco finish.
+        progress(phase="list", message="Waiting for Costco account to finish loading…", page=1)
+        await page.wait_for_function(
+            r"""() => /#\/app\/[^/]+\//.test(window.location.hash)
+                && document.body
+                && !/Loading\.{3}|Loading…/.test(document.body.innerText)""",
+            timeout=300_000,
+        )
+
         progress(phase="list", message="Opening Costco Orders & Purchases…", page=1)
         await _ensure_orders_and_purchases_route(page)
 
@@ -778,7 +789,7 @@ async def run_costco_import(
             raise LoginRequiredError("Costco session requires login.")
 
         try:
-            orders_payload, orders_url = await capture.wait_for_orders(timeout_ms=12_000)
+            orders_payload, orders_url = await capture.wait_for_orders(timeout_ms=300_000)
         except TimeoutError:
             progress(phase="list", message="Refreshing Costco orders list…")
             await capture.clear_orders()
