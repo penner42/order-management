@@ -49,19 +49,7 @@ function getFirstNumber(obj: unknown, paths: string[]): number | null {
   return null
 }
 
-/** Default per-unit payout from imported item pricing (unit price, or line total / qty). */
-export function getDefaultItemPayout(item: ImportItem, payload?: ImportPayload): number | null {
-  // Keep review defaults consistent with the backend's Costco bundle handling.
-  const softwareTitle = /^(?:microsoft\s+(?:office\b|365\b)|mcafee\b|norton\b|adobe\s+(?:acrobat\b|creative\b|photoshop\b)|(?:antivirus|security)\s+software\b)/i
-  if (
-    payload?.store?.trim().toLowerCase() === 'costco' &&
-    softwareTitle.test(item.name?.trim() ?? '') &&
-    payload.items?.some(other => {
-      const name = other.name?.trim() ?? ''
-      return name !== '' && !softwareTitle.test(name)
-    })
-  ) return 0
-
+function getItemUnitPrice(item: ImportItem): number | null {
   const qtyRaw = item.quantities?.ordered ?? 1
   const qty = typeof qtyRaw === 'number' && Number.isFinite(qtyRaw) ? qtyRaw : 1
   const unitPrice = coerceNumber(item.pricing?.unitPrice)
@@ -71,6 +59,35 @@ export function getDefaultItemPayout(item: ImportItem, payload?: ImportPayload):
     coerceNumber(item.pricing?.lineTotal) ?? coerceNumber(item.pricing?.linePrice)
   if (lineTotal != null && qty > 0) return lineTotal / qty
   return null
+}
+
+/** Default per-unit payout, including Costco's order discount and bundle credit. */
+export function getDefaultItemPayout(item: ImportItem, payload?: ImportPayload): number | null {
+  const unitPrice = getItemUnitPrice(item)
+  if (payload?.store?.trim().toLowerCase() !== 'costco') return unitPrice
+
+  // Keep this calculation consistent with default_costco_payouts on the backend.
+  const softwareTitle = /^(?:microsoft\s+(?:office\b|365\b)|mcafee\b|norton\b|adobe\s+(?:acrobat\b|creative\b|photoshop\b)|(?:antivirus|security)\s+software\b)/i
+  const items = payload.items ?? []
+  const hasHardware = items.some(other => {
+    const name = other.name?.trim() ?? ''
+    return name !== '' && !softwareTitle.test(name)
+  })
+  const isSoftware = (other: ImportItem) => hasHardware && softwareTitle.test(other.name?.trim() ?? '')
+  if (isSoftware(item)) return 0
+  if (unitPrice == null) return null
+
+  let softwareCost = 0
+  let subtotal = 0
+  for (const other of items) {
+    const qty = Math.max(0, coerceNumber(other.quantities?.ordered) || 1)
+    const cost = Math.max(0, getItemUnitPrice(other) ?? 0) * qty
+    if (isSoftware(other)) softwareCost += cost
+    else subtotal += cost
+  }
+  const discount = Math.min(subtotal, Math.max(0, (coerceNumber(payload.orderDiscount) ?? 0) - softwareCost))
+  const payout = subtotal > 0 && unitPrice > 0 ? unitPrice * (1 - discount / subtotal) : unitPrice
+  return Math.round((payout + Number.EPSILON) * 100) / 100
 }
 
 /** Order total for payment method default (items + shipping + tax − discount). */

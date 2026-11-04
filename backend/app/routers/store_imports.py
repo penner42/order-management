@@ -51,7 +51,7 @@ from app.utils.ignored_zip_codes import (
     shipping_postal_code_from_payload,
 )
 from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
-from app.utils.costco_software import bundled_software_names
+from app.utils.costco_software import bundled_software_names, default_costco_payouts
 from app.bfmr_orders import capture_import_metadata, enqueue_order, import_identity, matching_import_upc
 from app.utils.costco_import import deduplicate_costco_items
 
@@ -1337,6 +1337,11 @@ def _apply_items_and_shipments(
     if existing_items:
         existing_order = True
 
+    if not existing_order and store_name.strip().lower() == "costco":
+        defaults = default_costco_payouts(normalized)
+        payouts = [payouts[i] if i < len(payouts) and payouts[i] is not None else default
+                   for i, default in enumerate(defaults)]
+
     existing_shipment_ids: set[int] = set()
     for ei in existing_items:
         for si in ei.shipment_items:
@@ -2029,16 +2034,18 @@ def _apply_items_and_shipments(
         _sync_existing_item_quantities_and_prices(db, normalized, existing_items)
     _apply_canceled_statuses(existing_items, normalized, db=db)
 
-    # Apply after cancellation and shipment processing so those workflows cannot
-    # accidentally advance software back into the ordinary payout workflow.
+    # Settle new software after cancellation and shipment processing. Reimports
+    # preserve the payouts already saved on existing lines.
     for item in existing_items:
+        if item.id in software_workflow_statuses:
+            item.status = software_workflow_statuses[item.id]
+        if item.id in pre_existing_item_ids:
+            continue
         if (item.description or "").strip() not in software_names:
             continue
         if item.payment_line_items:
             continue
         item.price_sold = 0
-        if item.id in software_workflow_statuses:
-            item.status = software_workflow_statuses[item.id]
         if item.status not in RETURN_PROCESS_STATUSES and item.status != ItemStatus.CANCELED:
             item.status = ItemStatus.NO_PAYMENT_NECESSARY
 

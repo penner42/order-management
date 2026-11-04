@@ -10,6 +10,7 @@ from app.models import Item, Order, Payment, PaymentLineItem
 from app.models.item import ItemStatus
 from app.routers.store_imports import _apply_items_and_shipments
 from app.routers.orders import _effective_item_status
+from app.utils.costco_software import default_costco_payouts
 
 
 class CostcoSoftwarePayoutTests(unittest.TestCase):
@@ -69,16 +70,16 @@ class CostcoSoftwarePayoutTests(unittest.TestCase):
         items = self.apply(self.payload(), store="amazon", payouts=[1100, 50, 25])
         self.assertEqual([i.price_sold for i in items], [1100, 50, 25])
 
-    def test_reimport_corrects_received_software_and_is_idempotent(self):
+    def test_reimport_preserves_existing_payouts_and_is_idempotent(self):
         items = self.apply(self.payload(), store="amazon", payouts=[1100, 50, 25])
         for item in items[1:]:
             item.status = ItemStatus.SCANNED
         self.apply(self.payload())
         self.apply(self.payload(tracked=True))
         self.assertEqual(self.db.query(Item).count(), 3)
+        self.assertEqual([float(item.price_sold) for item in items], [1100, 50, 25])
         for item in items[1:]:
-            self.assertEqual(item.status, ItemStatus.NO_PAYMENT_NECESSARY)
-            self.assertEqual(item.price_sold, 0)
+            self.assertEqual(item.status, ItemStatus.SCANNED)
 
     def test_reimport_preserves_canceled_returned_and_payment_linked_statuses(self):
         hardware, office, mcafee = self.apply(self.payload(), store="amazon", payouts=[1100, 50, 25])
@@ -87,7 +88,7 @@ class CostcoSoftwarePayoutTests(unittest.TestCase):
         self.apply(self.payload())
         self.assertEqual(office.status, ItemStatus.CANCELED)
         self.assertEqual(mcafee.status, ItemStatus.RETURN_STARTED)
-        self.assertEqual(office.price_sold, 0)
+        self.assertEqual(office.price_sold, 50)
         office.status = ItemStatus.SCANNED
         office.price_sold = 50
         payment = Payment(buying_group_id=1, payment_requested_at=datetime.now(timezone.utc))
@@ -104,3 +105,37 @@ class CostcoSoftwarePayoutTests(unittest.TestCase):
         items = self.apply(payload, payouts=[1100, 50, 25])
         self.assertTrue(all(i.status == ItemStatus.CANCELED for i in items))
         self.assertTrue(all(i.price_sold == 0 for i in items[1:]))
+
+    def test_future_import_discounts_hardware_after_software_credit(self):
+        for tracked in (False, True):
+            with self.subTest(tracked=tracked):
+                self.db.query(Item).delete()
+                self.db.flush()
+                payload = self.payload(tracked=tracked)
+                payload["orderDiscount"] = 100.04
+                hardware, *software = self.apply(payload)
+                self.assertEqual(hardware.price_sold, 950)
+                self.assertTrue(all(item.price_sold == 0 for item in software))
+                self.assertEqual(hardware.price_paid, 1000)
+
+    def test_discount_uses_price_and_quantity_and_supports_line_totals(self):
+        payload = {"orderDiscount": 100.03, "items": [
+            {"name": "Laptop", "quantities": {"ordered": 2}, "pricing": {"unitPrice": 300}},
+            {"name": "Monitor", "quantities": {"ordered": 1}, "pricing": {"lineTotal": 400}},
+            {"name": "Microsoft 365", "quantities": {"ordered": 3}, "pricing": {"unitPrice": .01}},
+        ]}
+        self.assertEqual(default_costco_payouts(payload), [270, 360, 0])
+        payload["orderDiscount"] = 0
+        self.assertEqual(default_costco_payouts(payload), [300, 400, 0])
+        payload["orderDiscount"] = 2000
+        self.assertEqual(default_costco_payouts(payload), [0, 0, 0])
+
+    def test_non_bundle_discounts_and_cent_rounding(self):
+        payload = {"orderDiscount": .03, "items": [
+            {"name": "Laptop", "pricing": {"unitPrice": 10}},
+            {"name": "Monitor", "pricing": {"unitPrice": 20}},
+        ]}
+        self.assertEqual(default_costco_payouts(payload), [9.99, 19.98])
+        payload["items"] = [{"name": "Microsoft 365", "pricing": {"unitPrice": 100}}]
+        payload["orderDiscount"] = 10
+        self.assertEqual(default_costco_payouts(payload), [90])

@@ -9,11 +9,11 @@ test('Costco bundled software imports at zero payout and filters as no payment n
   const payload = {
     store: 'costco',
     externalOrder: { id: data.name('costco-software'), orderDate: new Date().toISOString() },
-    orderDiscount: 100,
+    orderDiscount: 100.03,
     items: [
       { name: 'Microsoft Surface Pro PC Bundle', quantities: { ordered: 1 }, pricing: { unitPrice: 1000 } },
       { name: 'Microsoft 365 Personal Subscription (e-delivery)', quantities: { ordered: 1 }, pricing: { unitPrice: 0.01 } },
-      { name: 'McAfee Total Protection, 1 Device, (E-Delivery)', quantities: { ordered: 1 }, pricing: { unitPrice: 0.01 } },
+      { name: 'McAfee Total Protection, 1 Device, (E-Delivery)', quantities: { ordered: 2 }, pricing: { unitPrice: 0.01 } },
     ],
   }
   await app.goto(`/import-review#${Buffer.from(JSON.stringify(payload)).toString('base64')}`)
@@ -21,7 +21,7 @@ test('Costco bundled software imports at zero payout and filters as no payment n
   for (const item of payload.items.slice(1)) {
     await expect(app.getByRole('textbox', { name: `Unit payout for ${item.name.slice(0, 30)}`, exact: true })).toHaveValue('0.00')
   }
-  await expect(app.getByRole('textbox', { name: `Unit payout for ${payload.items[0].name.slice(0, 30)}`, exact: true })).toHaveValue('1000.00')
+  await expect(app.getByRole('textbox', { name: `Unit payout for ${payload.items[0].name.slice(0, 30)}`, exact: true })).toHaveValue('900.00')
   const applied = app.waitForResponse(response => new URL(response.url()).pathname === '/api/integrations/stores/orders/apply' && response.request().method() === 'POST')
   await app.getByRole('button', { name: 'Import order', exact: true }).click()
   const response = await applied
@@ -30,6 +30,7 @@ test('Costco bundled software imports at zero payout and filters as no payment n
   data.track('/orders', order_id)
   const order = await data.get<Order>(`/orders/${order_id}`)
   expect(order.items).toHaveLength(3)
+  expect(Number(order.items.find(item => item.description === payload.items[0].name)?.price_sold)).toBe(900)
   const software = order.items.filter(item => item.description !== payload.items[0].name)
   for (const item of software) {
     expect(item.status).toBe('no_payment_necessary')

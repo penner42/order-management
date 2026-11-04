@@ -1,6 +1,32 @@
 import { test, expect } from '@playwright/test'
 import { parseDecimal } from '../../src/utils/decimal'
 import { stripIgnoredWalmartImportSlices } from '../../src/utils/stripIgnoredWalmartImport'
+import { getDefaultItemPayout, getDefaultOrderTotal } from '../../src/utils/importDefaults'
+
+test('Costco payouts allocate the discount by value after covering all software units', () => {
+  const payload = { store: 'costco', orderDiscount: 100.03, items: [
+    { name: 'Laptop', quantities: { ordered: 2 }, pricing: { unitPrice: 300 } },
+    { name: 'Monitor', quantities: { ordered: 1 }, pricing: { lineTotal: 400 } },
+    { name: 'Microsoft 365', quantities: { ordered: 3 }, pricing: { unitPrice: .01 } },
+  ] }
+  expect(payload.items.map(item => getDefaultItemPayout(item, payload))).toEqual([270, 360, 0])
+  expect(getDefaultOrderTotal(payload)).toBeCloseTo(900)
+  expect(getDefaultItemPayout(payload.items[0], { ...payload, store: 'amazon' })).toBe(300)
+  expect(getDefaultItemPayout(payload.items[0], { ...payload, orderDiscount: 0 })).toBe(300)
+  expect(getDefaultItemPayout(payload.items[0], { ...payload, orderDiscount: 2000 })).toBe(0)
+})
+
+test('Costco discount supports normal purchases, standalone software and cent rounding', () => {
+  const payload = { store: 'costco', orderDiscount: .03, items: [
+    { name: 'Laptop', pricing: { unitPrice: 10 } },
+    { name: 'Monitor', pricing: { unitPrice: 20 } },
+  ] }
+  expect(payload.items.map(item => getDefaultItemPayout(item, payload))).toEqual([9.99, 19.98])
+  const standalone = { store: 'costco', orderDiscount: 10, items: [
+    { name: 'Microsoft 365', pricing: { unitPrice: 100 } },
+  ] }
+  expect(getDefaultItemPayout(standalone.items[0], standalone)).toBe(90)
+})
 
 test('decimal amounts accept API strings, numbers, commas and empty values', () => {
   for (const [input, expected] of [
