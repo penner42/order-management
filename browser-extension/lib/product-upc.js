@@ -47,7 +47,8 @@
     }
     if (store === 'amazon') {
       // Read only product information tables/bullets, never recommendations or variants.
-      const sections = [...html.matchAll(/<(table|ul)\b[^>]*\bid=["'](?:productDetails_[^"']*|detailBullets_feature_div)["'][^>]*>([\s\S]*?)<\/\1\s*>/gi)]
+      // Newer expandable Item details use anonymous prodDetTable tables.
+      const sections = [...html.matchAll(/<(table|ul)\b(?=[^>]*(?:\bid=["'](?:productDetails_[^"']*|detailBullets_feature_div)["']|\bclass=["'][^"']*\bprodDetTable\b[^"']*["']))[^>]*>([\s\S]*?)<\/\1\s*>/gi)]
       // detailBullets_feature_div is usually a div containing a ul.
       const bullets = /<div\b[^>]*\bid=["']detailBullets_feature_div["'][^>]*>([\s\S]*?)<\/ul\s*>/i.exec(html)
       if (bullets) sections.push([null, null, bullets[1]])

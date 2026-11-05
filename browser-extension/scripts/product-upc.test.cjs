@@ -43,6 +43,22 @@ test('Amazon lookup requires matching ASIN and scoped UPC labels', () => {
   assert.equal(u.extract(jsonld + amazonPage(asin, '999999999999'), asin, 'amazon'), null)
 })
 
+test('Amazon expandable Item details tables expose UPCs without table IDs', () => {
+  const page = (id, value) => `<div id="productDetails_expanderTables_depthRightSections">
+    <div class="a-expander-content" style="display:none"><table class="a-keyvalue prodDetTable">
+      <tbody><tr><th>Brand Name</th><td>Nilight</td></tr>
+      <tr><th>UPC</th><td>${value}</td></tr>
+      <tr><th>ASIN</th><td>${id}</td></tr></tbody>
+    </table></div></div>`
+  assert.equal(u.extract(page('B0748F1JK4', '600537013346'), 'B0748F1JK4', 'amazon'), '600537013346')
+  assert.equal(u.extract(page('B0748F1JK4', '600537013346'), asin, 'amazon'), null)
+  // Some listings associate several barcodes with one ASIN; do not choose one.
+  assert.equal(u.extract(page('B074NBSF9N', '196188048030 740617268324'), 'B074NBSF9N', 'amazon'), null)
+  assert.equal(u.extract(page(asin, upc) + page(asin, '999999999999'), asin, 'amazon'), null)
+  assert.equal(u.extract(`<table class="comparisonTable"><tr><th>UPC</th><td>${upc}</td></tr>
+    <tr><th>ASIN</th><td>${asin}</td></tr></table>`, asin, 'amazon'), null)
+})
+
 for (const store of ['amazon', 'walmart']) {
   test(`${store} lookup deduplicates products, preserves saved values and tolerates failures`, async () => {
     const sku = store === 'amazon' ? asin : '123'
