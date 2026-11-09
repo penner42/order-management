@@ -114,6 +114,10 @@ Output: `windows/installer/output/OrderManager-Setup-x64.exe`. The GitHub Action
 **Windows installer** workflow uploads the same executable as a downloadable
 artifact; it can also be run manually. The installer is currently unsigned.
 
+The workflow pins the host runner to Ubuntu 24.04 to retain the legacy syscall
+support used by Wine's 32-bit Inno Setup packaging tools. Those tools package the
+self-contained x64 tray application; they do not change its architecture.
+
 Run the deployment checks against a disposable database and unique Compose project:
 
 ```sh
