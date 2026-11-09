@@ -281,6 +281,7 @@ export interface BrowserExtensionStatus {
   status: string
   error?: string | null
   available: boolean
+  build_enabled?: boolean
   meta?: BrowserExtensionMeta | null
 }
 

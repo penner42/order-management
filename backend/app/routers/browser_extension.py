@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
 
 from app.auth import get_current_user
+from app.config import settings
 from app.models import User
 from app.schemas.browser_extension import BrowserExtensionStatus
 from app.utils import browser_extension as ext
@@ -18,6 +19,8 @@ def get_extension_status(response: Response, _: User = Depends(get_current_user)
 
 @router.post("/rebuild", response_model=BrowserExtensionStatus)
 def rebuild_extension(_: User = Depends(get_current_user)):
+    if not settings.browser_extension_build_enabled:
+        raise HTTPException(status_code=403, detail="Extension builds are only enabled on the development server")
     status = ext.get_status()
     if not status["available"]:
         raise HTTPException(status_code=503, detail="Browser extension directory not available")

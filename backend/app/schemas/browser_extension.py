@@ -20,4 +20,5 @@ class BrowserExtensionStatus(BaseModel):
     status: str
     error: str | None = None
     available: bool
+    build_enabled: bool = False
     meta: BrowserExtensionMeta | None = None

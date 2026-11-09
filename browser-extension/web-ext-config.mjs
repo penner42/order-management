@@ -15,6 +15,8 @@ export default {
     "scripts/**",
     "dist",
     "dist/**",
+    "release",
+    "release/**",
     ".keys",
     ".keys/**",
     "*.crx",

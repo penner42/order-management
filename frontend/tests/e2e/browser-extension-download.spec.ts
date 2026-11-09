@@ -5,7 +5,7 @@ test('extension download requests the displayed release and build', async ({ app
   const fingerprint = 'current-release-source'
   await app.route('**/api/browser-extension', route => route.fulfill({
     json: {
-      status: 'ready', error: null, available: true,
+      status: 'ready', error: null, available: true, build_enabled: false,
       meta: {
         version: '9.8.7', fingerprint, built_at: '2026-11-09T18:00:00Z',
         chrome: null, firefox: { filename, size_bytes: 32, updated_at: '2026-11-09T18:00:00Z' },
@@ -22,6 +22,7 @@ test('extension download requests the displayed release and build', async ({ app
     })
   })
   await app.goto('/settings/extension')
+  await expect(app.getByRole('button', { name: 'Rebuild now', exact: true })).toHaveCount(0)
   const downloaded = app.waitForEvent('download')
   await app.getByRole('button', { name: 'Download for Firefox', exact: true }).click()
   const download = await downloaded

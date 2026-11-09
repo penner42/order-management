@@ -23,7 +23,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_SKIP_DIR_NAMES = {".git", "node_modules", "dist", ".keys"}
+_SKIP_DIR_NAMES = {".git", "node_modules", "dist", "release", ".keys"}
 _SKIP_FILE_NAMES = {
     ".build-meta.json",
     ".env",
@@ -146,7 +146,46 @@ def _write_meta(ext_dir: Path, fingerprint: str, chrome_file: str | None, firefo
     legacy = _legacy_meta_path(ext_dir)
     if legacy.is_file():
         legacy.unlink()
+    _publish_release(ext_dir, meta)
     return meta
+
+
+def _publish_release(ext_dir: Path, meta: dict[str, Any]) -> None:
+    """Keep only the current signed packages in the repository release directory."""
+    release = ext_dir / "release"
+    release.mkdir(parents=True, exist_ok=True)
+    filenames = {meta.get("chrome_filename"), meta.get("firefox_filename")}
+    for filename in filenames - {None}:
+        shutil.copy2(ext_dir / "dist" / filename, release / filename)
+    for path in release.iterdir():
+        if path.suffix in {".crx", ".xpi"} and path.name not in filenames:
+            path.unlink()
+    (release / "release.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+
+def _packaged_status(ext_dir: Path | None) -> dict[str, Any]:
+    """Read committed packages without signing, fingerprinting sources, or writing files."""
+    meta = None
+    error = None
+    try:
+        release = ext_dir / "release" if ext_dir else None
+        stored = json.loads((release / "release.json").read_text(encoding="utf-8")) if release else None
+        if stored:
+            artifacts = {}
+            for browser in ("chrome", "firefox"):
+                filename = stored.get(f"{browser}_filename")
+                if not filename or Path(filename).name != filename:
+                    raise ValueError(f"Missing or invalid {browser} release filename")
+                path = release / filename
+                stat = path.stat()
+                artifacts[browser] = {"filename": filename, "size_bytes": stat.st_size,
+                                      "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()}
+            meta = {"version": stored["version"], "fingerprint": stored["fingerprint"],
+                    "built_at": stored["built_at"], **artifacts}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        error = f"Packaged extension unavailable. Build and commit the release on the development server: {exc}"
+    return {"status": "ready" if meta else "unavailable", "error": error,
+            "available": meta is not None, "build_enabled": False, "meta": meta}
 
 
 def _public_meta(ext_dir: Path, *, current: bool, meta: dict[str, Any] | None) -> dict[str, Any]:
@@ -164,6 +203,8 @@ def _public_meta(ext_dir: Path, *, current: bool, meta: dict[str, Any] | None) -
 
 def get_status() -> dict[str, Any]:
     ext_dir = extension_dir()
+    if not settings.browser_extension_build_enabled:
+        return _packaged_status(ext_dir)
     with _lock:
         status = _state["status"]
         error = _state["error"]
@@ -184,6 +225,7 @@ def get_status() -> dict[str, Any]:
         "status": status,
         "error": error,
         "available": ext_dir is not None,
+        "build_enabled": True,
         "meta": _public_meta(ext_dir, current=current, meta=disk_meta) if ext_dir else None,
     }
 
@@ -537,7 +579,8 @@ def _build_is_current(ext_dir: Path) -> tuple[bool, dict[str, Any] | None]:
     if meta and (meta.get("version") != version or meta.get("fingerprint") != fingerprint):
         return False, meta
 
-    meta = _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
+    if not meta:
+        meta = _write_meta(ext_dir, fingerprint, chrome_file, firefox_file)
     return True, meta
 
 
@@ -605,6 +648,8 @@ def _sign_extension(ext_dir: Path, *, force: bool = False) -> dict[str, Any]:
 
 
 def ensure_signed(*, force: bool = False) -> None:
+    if not settings.browser_extension_build_enabled:
+        return
     ext_dir = extension_dir()
     if ext_dir is None:
         with _lock:
@@ -615,6 +660,7 @@ def ensure_signed(*, force: bool = False) -> None:
     if not force:
         current, existing = _build_is_current(ext_dir)
         if current and existing:
+            _publish_release(ext_dir, existing)
             with _lock:
                 _state["status"] = "ready"
                 _state["meta"] = existing
@@ -644,6 +690,8 @@ def ensure_signed(*, force: bool = False) -> None:
 
 
 def ensure_signed_async(*, force: bool = False) -> None:
+    if not settings.browser_extension_build_enabled:
+        return
     thread = threading.Thread(
         target=ensure_signed,
         kwargs={"force": force},
@@ -657,6 +705,10 @@ def artifact_path(browser: str) -> Path | None:
     ext_dir = extension_dir()
     if ext_dir is None:
         return None
+    if not settings.browser_extension_build_enabled:
+        status = _packaged_status(ext_dir)
+        artifact = (status["meta"] or {}).get(browser)
+        return ext_dir / "release" / artifact["filename"] if artifact else None
     current, _ = _build_is_current(ext_dir)
     if not current:
         return None

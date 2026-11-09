@@ -45,6 +45,7 @@ class Settings(BaseSettings):
 
     # Browser extension signing (optional; auto-detects repo browser-extension/ if unset)
     browser_extension_dir: str = ""
+    browser_extension_build_enabled: bool = False
     web_ext_api_key: str = ""
     web_ext_api_secret: str = ""
 

@@ -51,7 +51,13 @@ missing UPCs; saved UPCs and warehouse receipt UPCs are preserved.
 
 For personal use without loading unpacked every session, build signed packages once and install them.
 
-**From the app:** open the **Extension** tab to download the latest signed Chrome/Firefox builds. The server rebuilds automatically on startup when extension source files change.
+**From the app:** open **Settings → Browser extension** to download signed Chrome/Firefox builds. The development server rebuilds on startup when extension source files change and supports **Rebuild now**. Successful builds also copy the current packages and build metadata into `browser-extension/release/` for distribution with the repository.
+
+Commit `browser-extension/release/` along with extension source changes. Only the current Chrome and Firefox packages are kept there; local build history remains in the ignored `dist/` directory. To package or rebuild from the development server, use **Rebuild now** and wait until both downloads are ready before committing the release.
+
+Production (`docker-compose.yml` plus `docker-compose.prod.yml`) serves the committed release from a read-only extension mount. It never builds or signs extensions, including on startup, status requests, or rebuild requests. Production needs neither `WEB_EXT_API_KEY`, `WEB_EXT_API_SECRET`, nor the Chrome private signing key. Keep those credentials on the development server. Downloading either package still requires an application login.
+
+`BROWSER_EXTENSION_BUILD_ENABLED` defaults to `false`; the development Compose configuration enables it and the production override disables it. If a production release is missing, build and commit it in development, then deploy the updated repository.
 
 ### One-time setup
 

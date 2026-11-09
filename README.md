@@ -228,6 +228,8 @@ OpenAPI docs: http://localhost:8000/docs (available on host loopback in the deve
 
 The **browser-extension** folder contains a Chrome/Firefox extension that can read order numbers from store order pages (e.g. Walmart). Use it to paste order numbers into the app for import/preview. See `browser-extension/README.md` for installation and usage.
 
+Signed packages are committed in `browser-extension/release/`. Development builds and signs them; production only serves the committed packages and does not require extension signing credentials. After rebuilding in development, commit the updated release directory with the source changes before deployment.
+
 ## Buying group payment imports
 
 Open **Payments**, select a buying group, and choose **Sync now**. Payments are

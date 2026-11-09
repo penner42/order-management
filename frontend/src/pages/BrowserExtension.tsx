@@ -96,7 +96,7 @@ export default function BrowserExtension() {
         : info?.status === 'error'
           ? 'Build failed'
           : info?.status === 'unavailable'
-            ? 'Extension source not available on this server'
+            ? 'Extension not available on this server'
             : 'Checking…'
 
   return (
@@ -108,14 +108,14 @@ export default function BrowserExtension() {
             Download signed builds for Chrome and Firefox (personal use).
           </p>
         </div>
-        <button
+        {info?.build_enabled && <button
           type="button"
           onClick={onRebuild}
           disabled={rebuilding || info?.status === 'signing' || !info?.available}
           className="px-4 py-2 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {rebuilding || info?.status === 'signing' ? 'Building…' : 'Rebuild now'}
-        </button>
+        </button>}
       </div>
 
       {loading && !info ? (
@@ -179,8 +179,7 @@ export default function BrowserExtension() {
                 </div>
               ) : (
                 <p className="mt-4 text-sm text-ink-muted dark:text-gray-400">
-                  No Firefox build yet. Set <span className="font-mono">WEB_EXT_API_KEY</span> and{' '}
-                  <span className="font-mono">WEB_EXT_API_SECRET</span> on the server to enable Firefox signing.
+                  No Firefox build available. Build and package the extension on the development server.
                 </p>
               )}
               <button
