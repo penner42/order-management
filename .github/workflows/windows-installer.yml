@@ -27,3 +27,38 @@ jobs:
           name: OrderManager-Setup-x64
           path: windows/installer/output/OrderManager-Setup-x64.exe
           if-no-files-found: error
+  release:
+    needs: installer
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: OrderManager-Setup-x64
+          path: installer
+      - name: Publish Windows installer release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: windows-installer-${{ github.run_number }}-${{ github.run_attempt }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<EOF
+          Windows 11 x64 installer built from commit ${SOURCE_COMMIT}.
+
+          Download OrderManager-Setup-x64.exe below. The installer is unsigned.
+          Installation requires internet access and Docker Desktop with WSL 2.
+
+          Build: ${RUN_URL}
+          EOF
+          gh release create "$RELEASE_TAG" installer/OrderManager-Setup-x64.exe \
+            --target "$SOURCE_COMMIT" \
+            --title "Windows installer ${RELEASE_TAG#windows-installer-}" \
+            --notes-file release-notes.md \
+            --latest

@@ -1,5 +1,13 @@
 # Order Manager for Windows
 
+Download **OrderManager-Setup-x64.exe** from the
+[latest release](https://github.com/penner42/order-management/releases/latest).
+Release downloads from this public repository do not require a GitHub sign-in.
+The **Windows installer** workflow publishes a release after each successful
+installer build on `master`, including manual runs on `master`. Each release
+records the source commit and build link. Pull requests and other branches only
+produce workflow artifacts, whose downloads require sign-in.
+
 The installer supports Windows 11 x64 and uses Docker Desktop's Linux containers
 with WSL 2. It installs for the current Windows user. Git, Node, Python, and .NET
 are not required on the PC. Internet access is needed for installation and updates.
@@ -112,7 +120,9 @@ This runs the isolated launcher tests in the .NET SDK container, cross-compiles 
 self-contained Windows executable, and packages it with Inno Setup under Wine.
 Output: `windows/installer/output/OrderManager-Setup-x64.exe`. The GitHub Actions
 **Windows installer** workflow uploads the same executable as a downloadable
-artifact; it can also be run manually. The installer is currently unsigned.
+artifact and publishes a release when run on `master`; it can also be run manually.
+Release tags use `windows-installer-<run number>-<attempt>` so each published build
+has its own download. The installer is currently unsigned.
 
 The workflow pins the host runner to Ubuntu 24.04 to retain the legacy syscall
 support used by Wine's 32-bit Inno Setup packaging tools. Those tools package the

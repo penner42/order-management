@@ -16,7 +16,9 @@ A full-stack order management system for reselling: track orders (with store and
 For a Windows 11 x64 installation with Docker setup, tray controls, updates, and
 browser extension reminders, see [the Windows guide](windows/README.md).
 Build the installer with `sh windows/build.sh` in Docker, or download the artifact
-from the GitHub Actions **Windows installer** workflow.
+from the [latest GitHub Release](https://github.com/penner42/order-management/releases/latest)
+without signing in. Successful **Windows installer** workflow builds on `master`
+publish the installer automatically.
 
 ## Development (Docker only)
 
