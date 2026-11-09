@@ -7,6 +7,8 @@ import { matchStoreAccountIdForImport } from '../utils/storeAccountMatch'
 import {
   formatImportDefaultAmount,
   getDefaultItemPayout,
+  getDefaultItemSalesTax,
+  getImportOrderTax,
   getDefaultOrderTotal,
 } from '../utils/importDefaults'
 import { stripIgnoredWalmartImportSlices } from '../utils/stripIgnoredWalmartImport'
@@ -1187,6 +1189,7 @@ export default function ImportReviewBulk() {
                                   'shippingTotal',
                                 ]) ?? null
 
+                              const unitTaxShare = getDefaultItemSalesTax(item, p)
                               const itemTax =
                                 getFirstNumber(item as any, [
                                   'pricing.tax',
@@ -1196,7 +1199,7 @@ export default function ImportReviewBulk() {
                                   'salesTax',
                                   'tax',
                                   'taxTotal',
-                                ]) ?? null
+                                ]) ?? (unitTaxShare == null ? null : unitTaxShare * qty)
 
                               const lineTotal =
                                 item.pricing?.lineTotal ??
@@ -1415,16 +1418,7 @@ export default function ImportReviewBulk() {
                                   'externalOrder.shippingTotal',
                                 ]) ?? 0
 
-                              const orderTax =
-                                getFirstNumber(p as any, [
-                                  'totals.tax',
-                                  'totals.salesTax',
-                                  'totals.taxTotal',
-                                  'totals.totalTax',
-                                  'externalOrder.tax',
-                                  'externalOrder.salesTax',
-                                  'externalOrder.taxTotal',
-                                ]) ?? 0
+                              const orderTax = getImportOrderTax(p)
 
                               const orderDiscount =
                                 Math.max(
@@ -1438,7 +1432,7 @@ export default function ImportReviewBulk() {
                                   ]) ?? 0
                                 ) || 0
 
-                              const orderTotal = itemsSubtotal + orderShipping + orderTax - orderDiscount
+                              const orderTotal = itemsSubtotal + orderShipping + (orderTax ?? 0) - orderDiscount
 
                               const payoutsTotal = items.reduce((sum, it, i) => {
                                 const u = (itemPayoutsByIndex[idx]?.[i] ?? '').trim()
@@ -1469,6 +1463,16 @@ export default function ImportReviewBulk() {
                                     </td>
                                     <td className="py-2 px-2 text-right font-mono text-xs md:text-sm tabular-nums whitespace-nowrap">
                                       {orderDiscount > 0 ? `−${fmtMoney(orderDiscount)}` : '—'}
+                                    </td>
+                                    <td />
+                                    <td />
+                                  </tr>
+                                  <tr className={rowClass}>
+                                    <td colSpan={7} className="py-2 px-2 text-right text-xs text-ink-muted dark:text-gray-400">
+                                      Sales tax
+                                    </td>
+                                    <td className="py-2 px-2 text-right font-mono text-xs md:text-sm tabular-nums whitespace-nowrap">
+                                      {fmtMoney(orderTax)}
                                     </td>
                                     <td />
                                     <td />

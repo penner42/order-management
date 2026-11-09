@@ -1,6 +1,59 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+for (const reloadBetweenBatches of [false, true]) {
+  test(`receiving two items then the third preserves exactly three lines (reload: ${reloadBetweenBatches})`, async ({ app, data }) => {
+    const store = await data.create('/stores', { name: data.name('batch-store') })
+    const groupName = data.name('batch-group')
+    const group = await data.create('/buying-groups', { name: groupName })
+    const orderNumber = data.name('batch-order')
+    const order = await data.create<{ id: number; items: Item[] }>('/orders', {
+      store_id: store.id, buying_group_id: group.id, store_order_number: orderNumber,
+      items: Array.from({ length: 3 }, (_, index) => ({
+        description: `Batch iPad ${index + 1}`, quantity: 1, status: 'submitted',
+        price_paid: '599.00', price_sold: '612.00',
+      })),
+    })
+    const matches = order.items.map((item, index) => ({
+      item_id: item.id, order_id: order.id, store_order_number: orderNumber,
+      description: item.description, quantity: 1, tracking_number: `BATCH-TRACK-${index}`,
+      price_sold: '612.00', expected_amount: '612.00', received_ext_total: '612.00',
+      receipt_id: `BATCH-RECEIPT-${index}`, scanned_at: '2026-11-05T12:00:00Z',
+      selected: true, amount_discrepancy: false,
+    }))
+    const prunedIds = new Set<number>()
+    // Mock only the external warehouse queue; item updates use the real API.
+    await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
+      buying_group_id: group.id, buying_group_name: groupName,
+      matches: matches.filter(match => !prunedIds.has(match.item_id)), unknown_receipts: [],
+    }] }))
+    await app.route('**/api/buying-groups/receiving-review/prune', async route => {
+      for (const id of route.request().postDataJSON().item_ids) prunedIds.add(id)
+      await route.fulfill({ json: { deleted: false } })
+    })
+    await app.goto('/receiving-review')
+    await app.getByRole('checkbox', { name: 'Select item Batch iPad 3', exact: true }).uncheck()
+    await app.getByRole('button', { name: 'Apply 2 selected', exact: true }).click()
+    await expect.poll(() => data.get<{ items: Item[] }>(`/orders/${order.id}`).then(saved =>
+      [...saved.items].sort((a, b) => a.id - b.id).map(item => item.status))).toEqual(['scanned', 'scanned', 'submitted'])
+    if (reloadBetweenBatches) await app.reload()
+    await app.getByRole('checkbox', { name: 'Select item Batch iPad 3', exact: true }).check()
+    await app.getByRole('button', { name: 'Apply 1 selected', exact: true }).click()
+    await expect(app.getByText('All listed rows were applied.')).toBeVisible()
+    const saved = await data.get<{ items: Item[] }>(`/orders/${order.id}`)
+    expect(saved.items).toHaveLength(3)
+    expect([...saved.items].sort((a, b) => a.id - b.id).map(item => ({ id: item.id, description: item.description, status: item.status,
+      quantity: item.quantity, receipt_id: item.receipt_id }))).toEqual(order.items.map((item, index) => ({
+      id: item.id, description: item.description, status: 'scanned', quantity: 1,
+      receipt_id: `BATCH-RECEIPT-${index}`,
+    })))
+    await app.goto(`/?q=${encodeURIComponent(orderNumber)}`)
+    await expect(app.locator('input[placeholder="Description"]:visible')).toHaveCount(3)
+    await app.reload()
+    await expect(app.locator('input[placeholder="Description"]:visible')).toHaveCount(3)
+  })
+}
+
 test('receipt search opens another-group order and refreshes after correction', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('cross-group-store') })
   const groupName = data.name('receipt-group')

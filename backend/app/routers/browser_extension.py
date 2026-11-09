@@ -1,5 +1,5 @@
 """Browser extension download API."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
 
 from app.auth import get_current_user
@@ -11,7 +11,8 @@ router = APIRouter(prefix="/browser-extension", tags=["browser-extension"])
 
 
 @router.get("", response_model=BrowserExtensionStatus)
-def get_extension_status(_: User = Depends(get_current_user)):
+def get_extension_status(response: Response, _: User = Depends(get_current_user)):
+    response.headers["Cache-Control"] = "no-store"
     return ext.get_status()
 
 
@@ -27,7 +28,7 @@ def rebuild_extension(_: User = Depends(get_current_user)):
 
 
 @router.get("/download/{browser}")
-def download_extension(browser: str, _: User = Depends(get_current_user)):
+def download_extension(browser: str, filename: str | None = None, _: User = Depends(get_current_user)):
     if browser not in {"chrome", "firefox"}:
         raise HTTPException(status_code=404, detail="Unknown browser target")
     path = ext.artifact_path(browser)
@@ -36,5 +37,7 @@ def download_extension(browser: str, _: User = Depends(get_current_user)):
             status_code=404,
             detail=f"No signed {browser} extension available yet",
         )
+    if filename is not None and filename != path.name:
+        raise HTTPException(status_code=409, detail="Extension build changed. Refresh this page and download again.")
     media = "application/x-chrome-extension" if browser == "chrome" else "application/x-xpinstall"
-    return FileResponse(path, media_type=media, filename=path.name)
+    return FileResponse(path, media_type=media, filename=path.name, headers={"Cache-Control": "no-store"})

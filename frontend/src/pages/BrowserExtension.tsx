@@ -13,9 +13,11 @@ function formatWhen(iso: string | undefined): string {
   return new Date(iso).toLocaleString()
 }
 
-async function downloadArtifact(browser: 'chrome' | 'firefox', filename: string) {
+async function downloadArtifact(browser: 'chrome' | 'firefox', filename: string, fingerprint: string) {
   const token = getStoredToken()
-  const res = await fetch(`/api/browser-extension/download/${browser}`, {
+  const query = new URLSearchParams({ filename, build: fingerprint })
+  const res = await fetch(`/api/browser-extension/download/${browser}?${query}`, {
+    cache: 'no-store',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   })
   if (!res.ok) {
@@ -65,7 +67,7 @@ export default function BrowserExtension() {
     if (!artifact) return
     setDownloading(browser)
     try {
-      await downloadArtifact(browser, artifact.filename)
+      await downloadArtifact(browser, artifact.filename, info?.meta?.fingerprint ?? '')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Download failed')
     } finally {

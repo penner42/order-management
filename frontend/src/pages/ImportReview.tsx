@@ -12,6 +12,7 @@ import { matchStoreAccountIdForImport } from '../utils/storeAccountMatch'
 import {
   formatImportDefaultAmount,
   getDefaultItemPayout,
+  getImportOrderTax,
   getDefaultOrderTotal,
 } from '../utils/importDefaults'
 import { stripIgnoredWalmartImportSlices } from '../utils/stripIgnoredWalmartImport'
@@ -918,6 +919,15 @@ export default function ImportReview() {
             </tbody>
             {items.length > 0 && (p.totals?.subtotal != null || items.length > 0) && (
               <tfoot>
+                <tr className="border-t border-brand-200 dark:border-gray-600 bg-brand-100/30 dark:bg-gray-700/40">
+                  <td className="py-1.5 px-2 text-right font-medium text-ink-muted" colSpan={4}>
+                    Sales tax
+                  </td>
+                  <td className="py-1.5 px-2 text-right font-mono text-sm tabular-nums">
+                    {fmtMoney(getImportOrderTax(p))}
+                  </td>
+                  <td colSpan={3} />
+                </tr>
                 <tr className="border-t border-brand-200 dark:border-gray-600 bg-brand-100/30 dark:bg-gray-700/40">
                   <td className="py-1.5 px-2 text-right font-medium text-ink-muted" colSpan={5}>
                     Subtotal

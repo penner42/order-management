@@ -1,30 +1,52 @@
-"""Identify separate software lines supplied with Costco product bundles."""
+"""Identify software and Allstate plans included with Costco product bundles."""
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
 # Match software titles, not hardware titles such as Microsoft Surface bundles.
-_SOFTWARE_TITLE = re.compile(
+_INCLUDED_ITEM_TITLE = re.compile(
     r"^(?:microsoft\s+(?:office\b|365\b)|mcafee\b|norton\b|"
     r"adobe\s+(?:acrobat\b|creative\b|photoshop\b)|"
-    r"(?:antivirus|security)\s+software\b)",
+    r"(?:antivirus|security)\s+software\b|allstate\b)",
     re.IGNORECASE,
 )
 
 
-def bundled_software_names(store_name: str, items: list[dict]) -> set[str]:
+def bundled_no_payment_names(store_name: str, items: list[dict]) -> set[str]:
     if store_name.strip().lower() != "costco":
         return set()
     names = {(item.get("name") or "").strip() for item in items}
-    software = {name for name in names if _SOFTWARE_TITLE.search(name)}
-    # A software-only order does not establish a product bundle.
-    return software if names - software - {""} else set()
+    included = {name for name in names if _INCLUDED_ITEM_TITLE.search(name)}
+    # Software and protection plans alone do not establish a product bundle.
+    return included if names - included - {""} else set()
+
+
+def costco_sales_tax(normalized: dict) -> Decimal | None:
+    """Read captured order tax, preserving an explicit zero and missing values."""
+    for source in (normalized.get("totals") or {}, normalized.get("externalOrder") or {}):
+        for key in ("tax", "salesTax", "taxTotal", "totalTax"):
+            try:
+                value = Decimal(str(source.get(key)))
+            except (InvalidOperation, ValueError):
+                continue
+            if value.is_finite() and value >= 0:
+                return value
+    return None
 
 
 def default_costco_payouts(normalized: dict) -> list[float | None]:
-    """Per-unit payouts after the bundle credit and proportional order discount."""
+    """Per-unit payouts including bundle credits, order discount, and sales tax."""
+    return _costco_default_amounts(normalized)[0]
+
+
+def default_costco_item_taxes(normalized: dict) -> list[Decimal | None]:
+    """Per-unit tax shares for the item's purchase-cost display."""
+    return _costco_default_amounts(normalized)[1]
+
+
+def _costco_default_amounts(normalized: dict) -> tuple[list[float | None], list[Decimal | None]]:
     items = normalized.get("items") or []
-    software = bundled_software_names("costco", items)
+    included = bundled_no_payment_names("costco", items)
 
     def number(value):
         try:
@@ -45,14 +67,21 @@ def default_costco_payouts(normalized: dict) -> list[float | None]:
                 line = number(pricing.get("linePrice"))
             unit = line / qty if line is not None and qty > 0 else None
         units.append(unit)
-    is_software = [(item.get("name") or "").strip() in software for item in items]
-    software_cost = sum((unit or Decimal(0)) * qty for unit, qty, sw
-                        in zip(units, quantities, is_software) if sw)
+    is_included = [(item.get("name") or "").strip() in included for item in items]
+    included_cost = sum((unit or Decimal(0)) * qty for unit, qty, inc
+                        in zip(units, quantities, is_included) if inc)
     subtotal = sum(max(Decimal(0), unit or Decimal(0)) * max(Decimal(0), qty)
-                   for unit, qty, sw in zip(units, quantities, is_software) if not sw)
-    discount = max(Decimal(0), (number(normalized.get("orderDiscount")) or Decimal(0)) - software_cost)
+                   for unit, qty, inc in zip(units, quantities, is_included) if not inc)
+    discount = max(Decimal(0), (number(normalized.get("orderDiscount")) or Decimal(0)) - included_cost)
     discount = min(discount, subtotal)
-    return [0.0 if sw else None if unit is None else float(
-        (unit * (1 - discount / subtotal) if subtotal > 0 and unit > 0 else unit)
+    captured_tax = costco_sales_tax(normalized)
+    tax = captured_tax or Decimal(0)
+    payouts = [0.0 if inc else None if unit is None else float(
+        (unit * (1 + (tax - discount) / subtotal) if subtotal > 0 and unit > 0 else unit)
         .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    ) for unit, sw in zip(units, is_software)]
+    ) for unit, inc in zip(units, is_included)]
+    taxes = [None if captured_tax is None or unit is None else (
+        unit * tax / subtotal if not inc and subtotal > 0 and unit > 0 else Decimal(0)
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        for unit, inc in zip(units, is_included)]
+    return payouts, taxes

@@ -8,6 +8,47 @@ const line = { lineItemId: 'L1', itemNumber: '1234567', itemDescription: 'Produc
 const list = item => ({ data: { getOnlineOrders: [{ bcOrders: [{ orderNumber: 'O1', orderLineItems: [item] }] }] } })
 const details = item => ({ data: { getOrderDetails: { orderNumber: 'O1', shipToAddress: [{ orderLineItems: [item] }] } } })
 
+test('Firefox manifest loads the Costco normalizer in the background without importScripts', () => {
+  const vm = require('node:vm')
+  const root = join(__dirname, '..')
+  const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'))
+  const event = { addListener() {} }
+  const context = vm.createContext({
+    chrome: { tabs: { onUpdated: event, onRemoved: event }, runtime: { onConnect: event, onMessage: event } },
+    URL, console, setTimeout, clearTimeout,
+  })
+  for (const script of manifest.background.scripts) {
+    vm.runInContext(readFileSync(join(root, script), 'utf8'), context, { filename: script })
+  }
+  const raw = list(line)
+  raw.data.getOnlineOrders[0].bcOrders[0].uSTaxTotal1 = 66.5
+  const orders = context.normalizeCostcoOrdersGraphqlPayloadSafe(raw)
+  assert.equal(orders[0].totals.tax, 66.5)
+  const detail = details({ ...line, price: 269.99 })
+  detail.data.getOrderDetails.uSTaxTotal1 = 70
+  context.OrderManagerCostco.mergeCostcoOrderDetailsIntoNormalizedOrders(orders, { O1: detail })
+  assert.equal(orders[0].totals.tax, 70)
+  assert.equal(orders[0].items[0].pricing.unitPrice, 269.99)
+})
+
+test('captures sales tax for single-order, list and bulk detail imports', () => {
+  for (const tax of [34.99, '34.99', { source: '34.99', parsedValue: 34.99 }, { parsedValue: 34.99 }, 0]) {
+    const expected = tax === 0 ? 0 : 34.99
+    const detail = details(line)
+    detail.data.getOrderDetails.uSTaxTotal1 = tax
+    assert.equal(c.normalizeCostcoOrderDetailsGraphqlPayload(detail).totals.tax, expected)
+    const rawList = list(line)
+    rawList.data.getOnlineOrders[0].bcOrders[0].uSTaxTotal1 = tax
+    assert.equal(c.normalizeCostcoOrdersGraphqlPayload(rawList)[0].totals.tax, expected)
+    const orders = c.normalizeCostcoOrdersGraphqlPayload(list(line))
+    c.mergeCostcoOrderDetailsIntoNormalizedOrders(orders, { O1: detail })
+    assert.equal(orders[0].totals.tax, expected)
+    c.mergeCostcoOrderDetailsIntoNormalizedOrders(orders, { O1: details(line) })
+    assert.equal(orders[0].totals.tax, expected)
+  }
+  assert.equal(c.normalizeCostcoOrderDetailsGraphqlPayload(details(line)).totals.tax, null)
+})
+
 test('returned and delivered snapshots count as one purchase in list, detail and merged capture', () => {
   const purchase = { ...line, price: 599.97, merchandiseTotalAmount: 1199.94,
     status: 'Delivered', shipment: [{ shipmentId: 'S1', trackingNumber: 'TRACK1' }] }

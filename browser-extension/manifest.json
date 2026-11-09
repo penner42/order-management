@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Order Manager Browser Integration",
-  "version": "0.1.37",
+  "version": "0.1.39",
   "description": "Integrate order data from store order pages into Order Manager.",
   "permissions": [
     "activeTab",
@@ -34,6 +34,7 @@
     "scripts": [
       "lib/product-upc.js",
       "lib/walmart.js",
+      "lib/costco.js",
       "lib/amazon.js",
       "background.js"
     ],

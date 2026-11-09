@@ -182,6 +182,11 @@
     return safeNumber(discountObj)
   }
 
+  function extractCostcoSalesTax(details) {
+    const tax = details && details.uSTaxTotal1
+    return safeNumber(tax && typeof tax === 'object' && tax.source != null ? tax.source : tax)
+  }
+
   function primaryShipToFromDetails(details) {
     const shipTo = Array.isArray(details && details.shipToAddress) ? details.shipToAddress : []
     return shipTo.length > 0 ? shipTo[0] || {} : null
@@ -322,6 +327,7 @@
         itemLevelReasons: [],
       },
       totals: {
+        tax: extractCostcoSalesTax(details),
         grandTotal: orderTotal != null ? orderTotal : null,
       },
     }
@@ -394,6 +400,7 @@
       orderNumber: String(orderNumber).trim(),
       byId,
       orderDiscount,
+      salesTax: extractCostcoSalesTax(details),
       shipmentsById,
     }
   }
@@ -436,6 +443,10 @@
       // Enrich order-level discount (if present in the order details payload).
       if (idx.orderDiscount != null) {
         order.orderDiscount = idx.orderDiscount
+      }
+      if (idx.salesTax != null) {
+        if (!order.totals || typeof order.totals !== 'object') order.totals = {}
+        order.totals.tax = idx.salesTax
       }
 
       const orderShipmentsById = {}
@@ -570,6 +581,7 @@
           itemLevelReasons: [],
         },
         totals: {
+          tax: extractCostcoSalesTax(o),
           grandTotal: orderTotal,
         },
       })

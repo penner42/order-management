@@ -51,7 +51,9 @@ from app.utils.ignored_zip_codes import (
     shipping_postal_code_from_payload,
 )
 from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
-from app.utils.costco_software import bundled_software_names, default_costco_payouts
+from app.utils.costco_software import (
+    bundled_no_payment_names, costco_sales_tax, default_costco_item_taxes, default_costco_payouts,
+)
 from app.bfmr_orders import capture_import_metadata, enqueue_order, import_identity, matching_import_upc
 from app.utils.costco_import import deduplicate_costco_items
 
@@ -1298,7 +1300,7 @@ def _create_or_find_order(
         status="imported",
         purchase_date=purchase_date,
         shipping=None,
-        sales_tax=None,
+        sales_tax=costco_sales_tax(normalized) if store_name.strip().lower() == "costco" else None,
         order_discount=order_discount,
         notes="Imported from external store payload.",
     )
@@ -1359,10 +1361,10 @@ def _apply_items_and_shipments(
 
     normalized = _match_retitled_items(normalized, existing_items, existing_shipments)
     items = normalized.get("items") or []
-    software_names = bundled_software_names(store_name, items)
-    software_workflow_statuses = {
+    included_names = bundled_no_payment_names(store_name, items)
+    included_workflow_statuses = {
         item.id: item.status for item in existing_items
-        if (item.description or "").strip() in software_names
+        if (item.description or "").strip() in included_names
         and (item.status in RETURN_PROCESS_STATUSES or item.status == ItemStatus.CANCELED)
     }
 
@@ -1780,6 +1782,9 @@ def _apply_items_and_shipments(
             existing_shipments_by_lookup_key[reg_key] = shipment
         return shipment
 
+    item_taxes = (default_costco_item_taxes(normalized)
+                  if not existing_order and store_name.strip().lower() == "costco"
+                  else [None] * len(items))
     for item_index, item_data in enumerate(items):
         name = (item_data.get("name") or "").strip()
 
@@ -1823,7 +1828,7 @@ def _apply_items_and_shipments(
                 quantity=quantity,
                 description=name,
                 shipping=None,
-                sales_tax=None,
+                sales_tax=item_taxes[item_index],
             )
             db.add(item)
             existing_items.append(item)
@@ -1960,7 +1965,7 @@ def _apply_items_and_shipments(
                     quantity=remaining,
                     description=name,
                     shipping=None,
-                    sales_tax=None,
+                    sales_tax=item_taxes[item_index],
                 )
                 db.add(item)
                 db.flush()
@@ -2034,14 +2039,14 @@ def _apply_items_and_shipments(
         _sync_existing_item_quantities_and_prices(db, normalized, existing_items)
     _apply_canceled_statuses(existing_items, normalized, db=db)
 
-    # Settle new software after cancellation and shipment processing. Reimports
+    # Settle new included items after cancellation and shipment processing. Reimports
     # preserve the payouts already saved on existing lines.
     for item in existing_items:
-        if item.id in software_workflow_statuses:
-            item.status = software_workflow_statuses[item.id]
+        if item.id in included_workflow_statuses:
+            item.status = included_workflow_statuses[item.id]
         if item.id in pre_existing_item_ids:
             continue
-        if (item.description or "").strip() not in software_names:
+        if (item.description or "").strip() not in included_names:
             continue
         if item.payment_line_items:
             continue

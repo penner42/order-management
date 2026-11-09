@@ -37,7 +37,7 @@ class CostcoImportUpcTests(unittest.IsolatedAsyncioTestCase):
         line = {'lineItemId': 'L1', 'itemNumber': '1234567', 'itemDescription': 'Product', 'quantity': 1}
         orders = {'data': {'getOnlineOrders': [{'bcOrders': [
             {'orderNumber': 'O1', 'orderLineItems': [line]}]}]}}
-        details = {'O1': {'data': {'getOrderDetails': {'orderNumber': 'O1',
+        details = {'O1': {'data': {'getOrderDetails': {'orderNumber': 'O1', 'uSTaxTotal1': 12.34,
                    'shipToAddress': [{'orderLineItems': [{**line, 'upc': '000012345678'}]}]}}}}
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -52,6 +52,7 @@ class CostcoImportUpcTests(unittest.IsolatedAsyncioTestCase):
                 }''', {'orders': orders, 'details': details})
                 self.assertEqual(automated[0]['source'], 'browser-automation')
                 self.assertEqual(automated[0]['items'], extension[0]['items'])
+                self.assertEqual(automated[0]['totals']['tax'], 12.34)
                 self.assertEqual(automated[0]['items'][0]['upc'], '000012345678')
             finally:
                 await browser.close()

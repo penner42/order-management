@@ -67,6 +67,7 @@ class TrackingRewardRead(BaseModel):
 
 class OrderRead(OrderBase, TimestampsMixin):
     id: int
+    sales_tax: Decimal | None = None
     user_id: int | None = None
     store_id: int
     store_account_id: int | None = None

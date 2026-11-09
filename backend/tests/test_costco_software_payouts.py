@@ -6,9 +6,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Item, Order, Payment, PaymentLineItem
+from app.models import Item, Order, Payment, PaymentLineItem, User
 from app.models.item import ItemStatus
-from app.routers.store_imports import _apply_items_and_shipments
+from app.routers.store_imports import _apply_items_and_shipments, apply_store_order_payload
+from app.schemas.store_import import StoreOrderImportPayload
 from app.routers.orders import _effective_item_status
 from app.utils.costco_software import default_costco_payouts
 
@@ -139,3 +140,83 @@ class CostcoSoftwarePayoutTests(unittest.TestCase):
         payload["items"] = [{"name": "Microsoft 365", "pricing": {"unitPrice": 100}}]
         payload["orderDiscount"] = 10
         self.assertEqual(default_costco_payouts(payload), [90])
+
+    def test_allstate_bundle_uses_actual_price_quantity_and_remaining_discount(self):
+        for price in (34.99, 49.99):
+            with self.subTest(price=price):
+                self.db.query(Item).delete()
+                self.db.flush()
+                payload = {"orderDiscount": round(100 + 2 * price, 2), "items": [
+                    {"name": "Samsung TV", "quantities": {"ordered": 2}, "pricing": {"unitPrice": 300}},
+                    {"name": "Soundbar", "pricing": {"unitPrice": 400}},
+                    {"name": "Allstate 3 Years (For TVs $100 to $500)",
+                     "quantities": {"ordered": 2}, "pricing": {"unitPrice": price}},
+                ]}
+                tv, soundbar, plan = self.apply(payload)
+                self.assertEqual([tv.price_sold, soundbar.price_sold, plan.price_sold], [270, 360, 0])
+                self.assertAlmostEqual(float(plan.price_paid), price)
+                self.assertEqual(plan.quantity, 2)
+                self.assertEqual(_effective_item_status(plan), "no_payment_necessary")
+                self.assertEqual(plan.payment_line_items, [])
+                self.assertEqual(self.db.query(Payment).count(), 0)
+                payload["items"][-1]["pricing"] = {"lineTotal": 2 * price}
+                self.assertEqual(default_costco_payouts(payload), [270, 360, 0])
+                payload["orderDiscount"] = 0
+                self.assertEqual(default_costco_payouts(payload), [300, 400, 0])
+
+    def test_sales_tax_is_saved_and_allocated_after_bundle_credit_and_discount(self):
+        payload = {"store": "costco", "externalOrder": {"id": "tax-bundle"},
+                   "orderDiscount": 169.99, "totals": {"tax": 90}, "items": [
+            {"name": "TV", "quantities": {"ordered": 2}, "pricing": {"unitPrice": 300}},
+            {"name": "Soundbar", "pricing": {"unitPrice": 400}},
+            {"name": "Allstate Protection Plan", "quantities": {"ordered": 2}, "pricing": {"unitPrice": 34.99}},
+            {"name": "Microsoft 365", "pricing": {"unitPrice": .01}},
+        ]}
+        order_id = apply_store_order_payload(
+            self.db, StoreOrderImportPayload.model_validate(payload), User(id=1, username="test"))
+        order = self.db.get(Order, order_id)
+        self.assertEqual(float(order.sales_tax), 90)
+        self.assertEqual(float(order.order_discount), 169.99)
+        items = self.db.query(Item).filter_by(order_id=order_id).order_by(Item.id).all()
+        self.assertEqual([float(item.price_sold) for item in items], [297, 396, 0, 0])
+        self.assertEqual([float(item.sales_tax) for item in items], [27, 36, 0, 0])
+        self.assertTrue(all(item.status == ItemStatus.NO_PAYMENT_NECESSARY for item in items[2:]))
+
+    def test_sales_tax_without_discount_and_tax_free_orders(self):
+        payload = {"items": [{"name": "TV", "pricing": {"unitPrice": 100}}]}
+        for tax, expected in ((8.25, 108.25), (0, 100), (None, 100), ("NaN", 100)):
+            with self.subTest(tax=tax):
+                payload["totals"] = {"tax": tax}
+                self.assertEqual(default_costco_payouts(payload), [expected])
+
+    def test_tracked_import_saves_per_unit_tax_and_reimport_preserves_it(self):
+        payload = self.payload(tracked=True)
+        payload.update(orderDiscount=100.04, totals={"tax": 160})
+        hardware, *included = self.apply(payload)
+        self.assertEqual(hardware.sales_tax, 80)
+        self.assertEqual(hardware.price_sold, 1030)
+        self.assertTrue(all(item.sales_tax == 0 for item in included))
+        payload["totals"]["tax"] = 200
+        self.apply(payload)
+        self.assertEqual(hardware.sales_tax, 80)
+        self.assertEqual(hardware.price_sold, 1030)
+
+    def test_allstate_supplied_payout_is_overridden_only_for_costco_bundles(self):
+        plan = {"name": "ALLSTATE Protection Plan", "pricing": {"unitPrice": 34.99}}
+        payload = {"orderDiscount": 134.99, "items": [
+            {"name": "LG OLED TV", "pricing": {"unitPrice": 1000}}, plan,
+        ]}
+        tv, included = self.apply(payload, payouts=[900, 34.99])
+        self.assertEqual(included.price_sold, 0)
+        self.assertEqual(_effective_item_status(included), "no_payment_necessary")
+        self.assertEqual(tv.price_sold, 900)
+        self.db.query(Item).delete()
+        self.db.flush()
+        standalone, = self.apply({"items": [plan]})
+        self.assertEqual(float(standalone.price_sold), 34.99)
+        self.assertEqual(standalone.status, ItemStatus.PURCHASED)
+        self.db.query(Item).delete()
+        self.db.flush()
+        _, other_store = self.apply(payload, store="amazon", payouts=[900, 34.99])
+        self.assertEqual(float(other_store.price_sold), 34.99)
+        self.assertEqual(other_store.status, ItemStatus.PURCHASED)

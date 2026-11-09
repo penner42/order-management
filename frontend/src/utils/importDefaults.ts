@@ -61,32 +61,57 @@ function getItemUnitPrice(item: ImportItem): number | null {
   return null
 }
 
-/** Default per-unit payout, including Costco's order discount and bundle credit. */
+function costcoBundleAllocation(payload: ImportPayload) {
+  const includedTitle = /^(?:microsoft\s+(?:office\b|365\b)|mcafee\b|norton\b|adobe\s+(?:acrobat\b|creative\b|photoshop\b)|(?:antivirus|security)\s+software\b|allstate\b)/i
+  const items = payload.items ?? []
+  const hasProduct = items.some(other => {
+    const name = other.name?.trim() ?? ''
+    return name !== '' && !includedTitle.test(name)
+  })
+  const isIncluded = (other: ImportItem) => hasProduct && includedTitle.test(other.name?.trim() ?? '')
+  let includedCost = 0
+  let subtotal = 0
+  for (const other of items) {
+    const qty = Math.max(0, coerceNumber(other.quantities?.ordered) || 1)
+    const cost = Math.max(0, getItemUnitPrice(other) ?? 0) * qty
+    if (isIncluded(other)) includedCost += cost
+    else subtotal += cost
+  }
+  return { isIncluded, includedCost, subtotal }
+}
+
+export function getImportOrderTax(payload: ImportPayload): number | null {
+  const tax = getFirstNumber(payload, [
+    'totals.tax', 'totals.salesTax', 'totals.taxTotal', 'totals.totalTax',
+    'externalOrder.tax', 'externalOrder.salesTax', 'externalOrder.taxTotal',
+  ])
+  return tax == null ? null : Math.max(0, tax)
+}
+
+/** Per-unit Costco tax share, matching the saved purchase cost. */
+export function getDefaultItemSalesTax(item: ImportItem, payload: ImportPayload): number | null {
+  const tax = getImportOrderTax(payload)
+  if (payload.store?.trim().toLowerCase() !== 'costco' || tax == null) return null
+  const { isIncluded, subtotal } = costcoBundleAllocation(payload)
+  if (isIncluded(item)) return 0
+  const unitPrice = getItemUnitPrice(item)
+  if (unitPrice == null) return null
+  const share = subtotal > 0 && unitPrice > 0 ? unitPrice * tax / subtotal : 0
+  return Math.round((share + Number.EPSILON) * 100) / 100
+}
+
+/** Default per-unit payout, including Costco's order discount, bundle credit, and tax. */
 export function getDefaultItemPayout(item: ImportItem, payload?: ImportPayload): number | null {
   const unitPrice = getItemUnitPrice(item)
   if (payload?.store?.trim().toLowerCase() !== 'costco') return unitPrice
 
   // Keep this calculation consistent with default_costco_payouts on the backend.
-  const softwareTitle = /^(?:microsoft\s+(?:office\b|365\b)|mcafee\b|norton\b|adobe\s+(?:acrobat\b|creative\b|photoshop\b)|(?:antivirus|security)\s+software\b)/i
-  const items = payload.items ?? []
-  const hasHardware = items.some(other => {
-    const name = other.name?.trim() ?? ''
-    return name !== '' && !softwareTitle.test(name)
-  })
-  const isSoftware = (other: ImportItem) => hasHardware && softwareTitle.test(other.name?.trim() ?? '')
-  if (isSoftware(item)) return 0
+  const { isIncluded, includedCost, subtotal } = costcoBundleAllocation(payload)
+  if (isIncluded(item)) return 0
   if (unitPrice == null) return null
-
-  let softwareCost = 0
-  let subtotal = 0
-  for (const other of items) {
-    const qty = Math.max(0, coerceNumber(other.quantities?.ordered) || 1)
-    const cost = Math.max(0, getItemUnitPrice(other) ?? 0) * qty
-    if (isSoftware(other)) softwareCost += cost
-    else subtotal += cost
-  }
-  const discount = Math.min(subtotal, Math.max(0, (coerceNumber(payload.orderDiscount) ?? 0) - softwareCost))
-  const payout = subtotal > 0 && unitPrice > 0 ? unitPrice * (1 - discount / subtotal) : unitPrice
+  const discount = Math.min(subtotal, Math.max(0, (coerceNumber(payload.orderDiscount) ?? 0) - includedCost))
+  const tax = getImportOrderTax(payload) ?? 0
+  const payout = subtotal > 0 && unitPrice > 0 ? unitPrice * (1 + (tax - discount) / subtotal) : unitPrice
   return Math.round((payout + Number.EPSILON) * 100) / 100
 }
 
@@ -113,16 +138,7 @@ export function getDefaultOrderTotal(payload: ImportPayload): number | null {
         'externalOrder.shippingTotal',
       ]) ?? 0
 
-    const orderTax =
-      getFirstNumber(payload, [
-        'totals.tax',
-        'totals.salesTax',
-        'totals.taxTotal',
-        'totals.totalTax',
-        'externalOrder.tax',
-        'externalOrder.salesTax',
-        'externalOrder.taxTotal',
-      ]) ?? 0
+    const orderTax = getImportOrderTax(payload) ?? 0
 
     const orderDiscount =
       Math.max(
