@@ -1,0 +1,27 @@
+name: Windows installer
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-installer.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-installer.yml'
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test, cross-compile and package inside Docker
+        run: sh windows/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OrderManager-Setup-x64
+          path: windows/installer/output/OrderManager-Setup-x64.exe
+          if-no-files-found: error

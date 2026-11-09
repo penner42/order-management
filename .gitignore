@@ -37,6 +37,10 @@ Thumbs.db
 *.log
 data/logs/
 backend/data/logs/
+windows/**/bin/
+windows/**/obj/
+windows/installer/launcher/
+windows/installer/output/
 browser-extension/stores/walmart/sample.json
 browser-extension/order.json
 .cursor/graphqldata
@@ -53,6 +57,8 @@ browser-extension/dist/
 browser-extension/.build-meta.json
 browser-extension/.keys/
 browser-extension/.env
+browser-extension/.amo-upload-uuid
+browser-extension/.web-extension-id
 browser-extension/*.crx
 browser-extension/*.xpi
 

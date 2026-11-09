@@ -91,9 +91,16 @@ npm run sign:firefox   # → dist/order_manager_browser_integration-<version>.xp
 
 **Chrome**
 
-1. Open `chrome://extensions/`
-2. Turn on **Developer mode**
-3. Drag `dist/order-manager-<version>.crx` onto the page (or use **Pack extension** flow)
+Windows Chrome restricts self-hosted CRX installation outside enterprise
+management. Use **Load unpacked** instead:
+
+1. Open `chrome://extensions/` and turn on **Developer mode**.
+2. For the Windows installer, choose **Load unpacked** and select
+   `%LOCALAPPDATA%\OrderManager\extensions\chrome` (the tray opens this folder).
+3. After a Windows app update, click **Reload** on the extension.
+
+For repository development, use the unpacked instructions below. The signed CRX
+remains available for environments that support it.
 
 Keep `browser-extension/.keys/chrome.pem` backed up — the same key keeps the same extension ID and stored data across updates.
 
@@ -102,6 +109,12 @@ Keep `browser-extension/.keys/chrome.pem` backed up — the same key keeps the s
 1. Open `about:addons`
 2. Click the gear icon → **Install Add-on From File…**
 3. Select `dist/order_manager_browser_integration-<version>.xpi`
+
+Install the first update-enabled package manually once. Its manifest points to
+the public GitHub `browser-extension/release/firefox-updates.json` feed; later
+versions update through Firefox automatically. **Check for Updates** in
+`about:addons` can request a check. Commit the generated feed and signed packages
+together after rebuilding in development; Windows clients need no signing keys.
 
 Firefox requires Mozilla-signed extensions even for personal use; the `unlisted` channel signs without publishing to AMO.
 

@@ -157,10 +157,45 @@ def _publish_release(ext_dir: Path, meta: dict[str, Any]) -> None:
     filenames = {meta.get("chrome_filename"), meta.get("firefox_filename")}
     for filename in filenames - {None}:
         shutil.copy2(ext_dir / "dist" / filename, release / filename)
+    _publish_firefox_updates(ext_dir, release, meta)
     for path in release.iterdir():
         if path.suffix in {".crx", ".xpi"} and path.name not in filenames:
             path.unlink()
     (release / "release.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+
+def _publish_firefox_updates(ext_dir: Path, release: Path, meta: dict[str, Any]) -> None:
+    """Public browser-readable feed; installed desktops need no signing credentials."""
+    manifest_path = ext_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    gecko = manifest.get("browser_specific_settings", {}).get("gecko", {})
+    filename = meta.get("firefox_filename")
+    if not filename or not gecko.get("update_url"):
+        return  # Preserve the last published Firefox feed if signing is unavailable.
+    artifact = release / filename
+    if not _firefox_xpi_is_signed(artifact) or not _firefox_xpi_matches_version(artifact, meta["version"]):
+        raise ValueError("Firefox update feed requires a signed XPI matching the release version")
+    import zipfile
+    with zipfile.ZipFile(artifact) as package:
+        packaged = json.loads(package.read("manifest.json"))
+    packaged_gecko = packaged.get("browser_specific_settings", {}).get("gecko", {})
+    if packaged.get("version") != meta["version"] or packaged_gecko.get("id") != gecko["id"]:
+        raise ValueError("Firefox package version or ID does not match the release")
+    if packaged_gecko.get("update_url") != gecko["update_url"]:
+        raise ValueError("Firefox package must be rebuilt with the automatic update URL")
+    update = {
+        "version": meta["version"],
+        "update_link": "https://raw.githubusercontent.com/penner42/order-management/master/browser-extension/release/" + filename,
+        "update_hash": "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "applications": {"gecko": {"strict_min_version": gecko.get("strict_min_version", "109.0")}},
+    }
+    feed = {"addons": {gecko["id"]: {"updates": [update]}}}
+    path = release / "firefox-updates.json"
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(feed, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def _packaged_status(ext_dir: Path | None) -> dict[str, Any]:

@@ -42,9 +42,10 @@ def upgrade() -> None:
     )
     op.create_index(op.f("ix_store_accounts_id"), "store_accounts", ["id"], unique=False)
 
-    # Insert default store for existing orders
+    # This new table's first generated ID is 1. Advance the serial sequence as
+    # well, so the first store created after a fresh install does not collide.
     op.execute(
-        "INSERT INTO stores (id, name, created_at) VALUES (1, 'Default', now())"
+        "INSERT INTO stores (name, created_at) VALUES ('Default', now())"
     )
 
     # Add store_id and store_account_id to orders

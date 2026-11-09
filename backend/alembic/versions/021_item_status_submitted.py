@@ -18,7 +18,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TYPE itemstatus ADD VALUE IF NOT EXISTS 'submitted'")
+    # A fresh install runs all revisions in one invocation. PostgreSQL must
+    # commit an enum addition before later revisions can use the new value.
+    with op.get_context().autocommit_block():
+        op.execute("ALTER TYPE itemstatus ADD VALUE IF NOT EXISTS 'submitted'")
     op.add_column(
         "items",
         sa.Column("submitted_at", sa.DateTime(timezone=True), nullable=True),

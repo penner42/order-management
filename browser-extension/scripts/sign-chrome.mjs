@@ -54,4 +54,4 @@ try {
 }
 
 console.log(`Signed Chrome extension: ${crxPath}`)
-console.log('Install: chrome://extensions → Developer mode → drag the .crx onto the page.')
+console.log('Windows: use the installer’s stable Chrome folder with Load Unpacked, then Reload after updates. Self-hosted CRX installation is restricted.')

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Order Manager Browser Integration",
-  "version": "0.1.39",
+  "version": "0.1.40",
   "description": "Integrate order data from store order pages into Order Manager.",
   "permissions": [
     "activeTab",
@@ -163,6 +163,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "order-manager@order-management.local",
+      "update_url": "https://raw.githubusercontent.com/penner42/order-management/master/browser-extension/release/firefox-updates.json",
       "strict_min_version": "109.0"
     }
   },

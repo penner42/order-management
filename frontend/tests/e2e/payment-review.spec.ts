@@ -111,11 +111,12 @@ test('An oversized selection opens explicit amount editing without truncation', 
 
 test('Evidence loading can be retried and unrelated receipts can be explicitly added', async ({app}) => {
   const w = await mock(app)
-  let calls = 0
-  await app.route('**/api/payments/99/linking-workspace', r => ++calls <= 2
+  let fail = true
+  await app.route('**/api/payments/99/linking-workspace', r => fail
     ? r.fulfill({status: 503, json: {detail: 'Evidence temporarily unavailable'}}) : r.fulfill({json: w}))
   await app.goto('/payments/99/link')
   await expect(app.getByRole('alert')).toContainText('Evidence temporarily unavailable')
+  fail = false
   await app.getByRole('button', {name: 'Retry loading payment'}).click()
   await expect(app.getByRole('heading', {name: 'Payment payment-1', exact: true})).toBeVisible()
   await expect(app.getByRole('radio', {name: 'Select receipt receipt-extra', exact: true})).toHaveCount(0)

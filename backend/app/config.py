@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     # Admin user (from env; created/updated on startup)
     admin_username: str = "admin"
     admin_password: str = "admin"
+    # Desktop installs bootstrap once; existing deployments retain env password sync.
+    admin_password_sync_enabled: bool = True
 
     # Directory where imported store invoice PDFs are stored
     invoice_dir: str = "data/invoices"

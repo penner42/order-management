@@ -1,0 +1,10 @@
+**
+!windows/
+!windows/Core/
+!windows/Core/**
+!windows/Tray/
+!windows/Tray/**
+!windows/Tests/
+!windows/Tests/**
+**/bin
+**/obj

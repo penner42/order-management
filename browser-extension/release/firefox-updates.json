@@ -1,0 +1,18 @@
+{
+  "addons": {
+    "order-manager@order-management.local": {
+      "updates": [
+        {
+          "version": "0.1.40",
+          "update_link": "https://raw.githubusercontent.com/penner42/order-management/master/browser-extension/release/order_manager_browser_integration-0.1.40.xpi",
+          "update_hash": "sha256:7b7b086805e76c3766016ee352ec4902b8cf1cf3346aa426c9b9afa26ba2be63",
+          "applications": {
+            "gecko": {
+              "strict_min_version": "109.0"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -149,7 +149,7 @@ export default function BrowserExtension() {
             <section className="rounded-xl border border-brand-200/80 dark:border-gray-700 bg-white dark:bg-gray-900 p-4 sm:p-5">
               <h2 className="text-lg font-medium text-ink dark:text-gray-100">Chrome</h2>
               <p className="mt-2 text-sm text-ink-muted dark:text-gray-400">
-                Install via <span className="font-mono">chrome://extensions</span> → Developer mode → drag the .crx file onto the page.
+                On Windows, open the tray’s Browser Extensions folder, then use <span className="font-mono">chrome://extensions</span> → Developer mode → Load unpacked → select the chrome folder. Click Reload after updates. Windows Chrome restricts self-hosted CRX installation.
               </p>
               {info?.meta?.chrome ? (
                 <div className="mt-4 text-sm text-ink-muted dark:text-gray-400">
@@ -171,7 +171,7 @@ export default function BrowserExtension() {
             <section className="rounded-xl border border-brand-200/80 dark:border-gray-700 bg-white dark:bg-gray-900 p-4 sm:p-5">
               <h2 className="text-lg font-medium text-ink dark:text-gray-100">Firefox</h2>
               <p className="mt-2 text-sm text-ink-muted dark:text-gray-400">
-                Install via <span className="font-mono">about:addons</span> → gear icon → Install Add-on From File…
+                Install via <span className="font-mono">about:addons</span> → gear icon → Install Add-on From File… Install the first update-enabled package manually; later versions update automatically from GitHub. You can also choose Check for Updates.
               </p>
               {info?.meta?.firefox ? (
                 <div className="mt-4 text-sm text-ink-muted dark:text-gray-400">

@@ -11,6 +11,13 @@ A full-stack order management system for reselling: track orders (with store and
 - **Frontend:** React 18, TypeScript, Vite, Tailwind CSS
 - **Database:** PostgreSQL (multi-user ready; `user_id` on orders, stores, etc.)
 
+## Windows installer
+
+For a Windows 11 x64 installation with Docker setup, tray controls, updates, and
+browser extension reminders, see [the Windows guide](windows/README.md).
+Build the installer with `sh windows/build.sh` in Docker, or download the artifact
+from the GitHub Actions **Windows installer** workflow.
+
 ## Development (Docker only)
 
 The current Compose stack is the development environment. The host only needs

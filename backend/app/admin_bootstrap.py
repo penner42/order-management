@@ -10,18 +10,18 @@ USER_ROLE_ADMIN = "admin"
 
 def ensure_admin_user(db: Session) -> None:
     admin = db.query(User).filter(User.username == settings.admin_username).first()
-    hashed = hash_password(settings.admin_password)
     if admin:
-        admin.hashed_password = hashed
-        admin.role = USER_ROLE_ADMIN
-        db.commit()
+        if settings.admin_password_sync_enabled:
+            admin.hashed_password = hash_password(settings.admin_password)
+            admin.role = USER_ROLE_ADMIN
+            db.commit()
         return
     admin = User(
         username=settings.admin_username,
         email=None,
         name="Admin",
         role=USER_ROLE_ADMIN,
-        hashed_password=hashed,
+        hashed_password=hash_password(settings.admin_password),
     )
     db.add(admin)
     db.commit()
