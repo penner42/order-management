@@ -3,6 +3,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 project_root=$PWD
+# Match the owner of the bind-mounted checkout (GitHub runners may use UID 1001).
+export LOCAL_UID="${LOCAL_UID:-$(id -u)}"
+export LOCAL_GID="${LOCAL_GID:-$(id -g)}"
 [ "$(docker info --format '{{.Architecture}}')" = aarch64 ] || [ "$(docker info --format '{{.Architecture}}')" = arm64 ] || { echo "Run Mac deployment checks on a native ARM64 Docker host." >&2; exit 1; }
 test_directory=$(mktemp -d)
 test_project="order-manager-maccheck-$$"

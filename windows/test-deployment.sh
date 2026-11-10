@@ -3,6 +3,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 project_root=$PWD
+# Match the owner of the bind-mounted checkout (GitHub runners may use UID 1001).
+export LOCAL_UID="${LOCAL_UID:-$(id -u)}"
+export LOCAL_GID="${LOCAL_GID:-$(id -g)}"
 test_directory=$(mktemp -d)
 test_project="order-manager-wincheck-$$"
 compose() {
