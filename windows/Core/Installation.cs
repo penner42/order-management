@@ -17,6 +17,7 @@ public sealed class InstallationState
     public string? ExtensionFingerprint { get; set; }
     public string? AcknowledgedExtension { get; set; }
     public bool AutoStart { get; set; } = true;
+    public string? PrerequisiteRebootBootTime { get; set; }
     public bool RecoveryRequired => MigrationStarted && ActiveSha != null;
 }
 

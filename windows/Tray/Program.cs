@@ -69,11 +69,13 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ICommandRunner runner;
     private bool active;
     private bool polling;
+    private bool awaitingReboot;
+    private SetupProgressForm? progressWindow;
     private int ticks;
     private string? notifiedExtension;
     public ServiceManager Manager { get; }
     private const string PrerequisiteHelp = "Docker Desktop must use Linux containers and the WSL 2 backend.\n\n" +
-        "If WSL is missing, open an Administrator terminal and run:\nwsl --install --no-distribution\nwsl --update\n\n" +
+        "Choose Start to check and automatically set up missing Windows features and WSL. Accept the Windows administrator prompt when shown.\n\n" +
         "Restart Windows if prompted, enable virtualization in BIOS/UEFI if required, then launch Docker Desktop and retry Start. " +
         "Setup is saved and will resume at Windows sign-in.";
 
@@ -90,6 +92,7 @@ internal sealed class TrayContext : ApplicationContext
         stateItem.Enabled = false;
         menu.Items.Add(stateItem);
         menu.Items.Add("Open Order Manager", null, (_, _) => Open("http://localhost:5173"));
+        menu.Items.Add("Show setup progress", null, (_, _) => ShowProgress());
         AddAction(menu, "Start", async () => { await EnsureDocker(); await Manager.Start(); await OfferLauncherReplacement(); });
         AddAction(menu, "Stop", Manager.Stop);
         AddAction(menu, "Restart", async () => { await EnsureDocker(); await Manager.Restart(); });
@@ -116,12 +119,12 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add(startupItem);
         menu.Items.Add("Exit Tray", null, (_, _) => { if (!active) ExitThread(); });
         icon.ContextMenuStrip = menu;
-        icon.DoubleClick += (_, _) => Open("http://localhost:5173");
+        icon.DoubleClick += (_, _) => { if (active || awaitingReboot) ShowProgress(); else Open("http://localhost:5173"); };
         ConfigureStartup(install.Load().AutoStart);
         timer.Tick += async (_, _) =>
         {
             if (!active && shutdown.WaitOne(0)) { ExitThread(); return; }
-            if (++ticks % 15 != 1 || polling || active) return;
+            if (++ticks % 15 != 1 || polling || active || awaitingReboot) return;
             polling = true;
             try { SetStatus(await Manager.GetStatus()); UpdateNotice(); }
             catch (Exception ex) { Log(ex.Message); SetStatus("Error"); }
@@ -149,6 +152,11 @@ internal sealed class TrayContext : ApplicationContext
     {
         if (active) return;
         active = true;
+        awaitingReboot = false;
+        progressWindow?.Dispose();
+        progressWindow = new SetupProgressForm();
+        progressWindow.SetStep("Preparing Order Manager");
+        progressWindow.Show();
         foreach (var item in actions) item.Enabled = false;
         startupItem.Enabled = false;
         try
@@ -156,13 +164,19 @@ internal sealed class TrayContext : ApplicationContext
             while (polling) await Task.Delay(50);
             await action();
             UpdateNotice();
+            progressWindow.Complete("Complete", "Order Manager: " + stateItem.Text + ". You can close this window; the tray remains available.");
+        }
+        catch (WindowsRebootRequiredException ex)
+        {
+            awaitingReboot = true;
+            SetStatus("Restart Windows required");
+            progressWindow.Complete("Restart Windows required", ex.Message);
         }
         catch (Exception ex)
         {
             Log(ex.ToString()); SetStatus("Error");
-            MessageBox.Show(ex.Message + "\n\nLogs: " + install.Logs +
-                (install.Load().RecoveryRequired ? "\nAn interrupted update requires recovery. Open Recovery instructions in the tray menu." : ""),
-                "Order Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            progressWindow.Complete("Setup could not finish", ex.Message + "\n\nLogs: " + install.Logs +
+                (install.Load().RecoveryRequired ? "\nAn interrupted update requires recovery. Open Recovery instructions in the tray menu." : ""));
         }
         finally
         {
@@ -173,17 +187,26 @@ internal sealed class TrayContext : ApplicationContext
     }
     private void SetStatus(string status)
     {
+        if (active) progressWindow?.SetStep(status);
         stateItem.Text = status;
         icon.Text = ("Order Manager: " + status)[..Math.Min(63, 15 + status.Length)];
         icon.Icon = status == "Running" ? SystemIcons.Application : status.Contains("Error") || status.Contains("Recovery") ? SystemIcons.Error : SystemIcons.Information;
     }
     private void Log(string line)
     {
+        progressWindow?.AppendActivity(line);
         // Serialize writes: stdout and stderr are drained concurrently.
         lock (install)
             File.AppendAllText(Path.Combine(install.Logs, $"launcher-{DateTime.UtcNow:yyyy-MM-dd}.log"), $"{DateTime.UtcNow:O} {line}\n");
     }
     private static void Open(string target) => Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+    private void ShowProgress()
+    {
+        if (progressWindow == null || progressWindow.IsDisposed) return;
+        progressWindow.Show();
+        progressWindow.WindowState = FormWindowState.Normal;
+        progressWindow.Activate();
+    }
     private static string? DesktopPath()
     {
         var candidates = new List<string>
@@ -206,6 +229,10 @@ internal sealed class TrayContext : ApplicationContext
     }
     private async Task EnsureDocker()
     {
+        SetStatus("Checking Windows prerequisites");
+        var probeRunner = new ProcessRunner(line => { if (!line.TrimStart().StartsWith('{')) Log(line); });
+        var prerequisites = new WindowsPrerequisites(install, probeRunner, SetupWindowsPrerequisites);
+        await prerequisites.Ensure();
         SetStatus("Starting Docker");
         try { await Manager.CheckDocker(); return; } catch { }
         var desktop = DesktopPath();
@@ -217,12 +244,8 @@ internal sealed class TrayContext : ApplicationContext
                 throw new InvalidOperationException("Install Docker Desktop, then retry Start.\n\n" + PrerequisiteHelp);
             var installer = Path.Combine(install.Root, "DockerDesktopInstaller.exe");
             SetStatus("Downloading Docker Desktop");
-            using (var download = new DownloadProgressForm())
-            {
-                download.Show();
-                await download.DownloadAsync(http,
-                    "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe", installer);
-            }
+            await progressWindow!.DownloadAsync(http,
+                "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe", installer);
             SetStatus("Verifying Docker Desktop installer");
             // Pass the path through an environment variable, never interpolate it as PowerShell code.
             var verify = await runner.Run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
@@ -234,11 +257,14 @@ internal sealed class TrayContext : ApplicationContext
             SetStatus("Installing Docker Desktop");
             using var process = Process.Start(new ProcessStartInfo(installer) { UseShellExecute = true })!;
             await process.WaitForExitAsync();
-            if (process.ExitCode != 0 && process.ExitCode != 3010)
+            if (process.ExitCode is 3010 or 1641)
+                prerequisites.RequireReboot((await prerequisites.Inspect()).BootTime);
+            if (process.ExitCode != 0)
                 throw new InvalidOperationException($"Docker Desktop installer exited with code {process.ExitCode}.\n\n{PrerequisiteHelp}");
             desktop = DesktopPath();
         }
         if (desktop == null) throw new InvalidOperationException(PrerequisiteHelp);
+        SetStatus("Waiting for Docker Desktop to start");
         Open(desktop);
         // Manager was constructed before Docker installation; recreate the process lookup via PATH.
         Environment.SetEnvironmentVariable("PATH", Path.Combine(Path.GetDirectoryName(desktop)!, "resources", "bin") + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH"));
@@ -248,6 +274,25 @@ internal sealed class TrayContext : ApplicationContext
             try { await Manager.CheckDocker(); return; } catch { await Task.Delay(3000); }
         }
         throw new InvalidOperationException("Docker Desktop is not ready.\n\n" + PrerequisiteHelp);
+    }
+
+    private async Task<int> SetupWindowsPrerequisites()
+    {
+        SetStatus("Setting up Windows features and WSL — administrator access required");
+        var info = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory,
+            @"WindowsPowerShell\v1.0\powershell.exe")) { UseShellExecute = true, Verb = "runas" };
+        foreach (var arg in WindowsPrerequisites.PowerShellArguments(WindowsPrerequisites.SetupScript)) info.ArgumentList.Add(arg);
+        try
+        {
+            using var process = Process.Start(info) ?? throw new IOException("Could not start Windows prerequisite setup.");
+            await process.WaitForExitAsync();
+            Log($"Windows prerequisite helper exited with code {process.ExitCode}.");
+            return process.ExitCode;
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            throw new InvalidOperationException("Windows prerequisite setup was cancelled at the administrator prompt. Choose Start to retry.", ex);
+        }
     }
     private static void ConfigureStartup(bool enabled)
     {
@@ -338,7 +383,7 @@ internal sealed class TrayContext : ApplicationContext
     }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { timer.Dispose(); icon.Visible = false; icon.Dispose(); http.Dispose(); }
+        if (disposing) { timer.Dispose(); progressWindow?.Dispose(); icon.Visible = false; icon.Dispose(); http.Dispose(); }
         base.Dispose(disposing);
     }
 }

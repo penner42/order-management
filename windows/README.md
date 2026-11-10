@@ -13,13 +13,25 @@ with WSL 2. It installs for the current Windows user. Git, Node, Python, and .NE
 are not required on the PC. Internet access is needed for installation and updates.
 
 Run `OrderManager-Setup-x64.exe`, leave **Start Order Manager** selected, and follow
-the Docker Desktop installer if offered. Review Docker's license in its installer.
-While Docker Desktop downloads, a progress window shows the percentage and
-downloaded size. If the server does not provide a total size, it shows an animated
-bar and the downloaded size instead.
-If Windows needs WSL, the tray explains the commands and reboot requirements.
-Launch Docker Desktop and retry **Start** after a reboot; setup and credentials
-are retained. Hardware virtualization must be enabled. A first installation builds
+the setup progress window. It stays open during Windows prerequisite checks,
+Docker download/installation/startup, and application download/build/startup,
+showing the current step, elapsed time, and recent activity. You can minimize it
+while work continues and restore it using **Show setup progress** in the tray;
+close it when setup finishes. Download progress includes
+the percentage and size when the server supplies a total size.
+
+Setup checks **Virtual Machine Platform**, **Windows Subsystem for Linux**, and
+WSL. If anything is missing, Windows requests administrator access for a helper
+that enables the features and installs/updates WSL without a Linux distribution.
+The application itself remains installed for the current user. The helper never
+restarts Windows automatically. If a restart is required, the progress window
+explains how to continue; retrying before a restart keeps that message visible.
+Setup continues at Windows sign-in if **Start at Windows sign-in** is enabled;
+otherwise reopen Order Manager and choose **Start** after restarting.
+
+Follow the Docker Desktop installer if offered and review Docker's license there.
+Setup and credentials are retained across reboots. Hardware virtualization must
+be enabled in BIOS/UEFI. A first installation builds
 the application and downloads its browser automation dependencies, which can take
 several minutes and substantial disk space.
 
@@ -149,6 +161,16 @@ and volumes. It does not read the development `.env` or reset shared data.
 Run on an actual Windows 11 x64 PC; Linux cross-compilation does not validate the UI:
 
 - Clean install with no Docker; license, UAC, WSL, reboot, and retry paths.
+- Both Windows features disabled; accept the prerequisite UAC prompt, verify both
+  features are enabled, and verify the app waits for a reboot before Docker setup.
+- Retry Start before reboot (including exiting/reopening the tray); confirm no
+  repeated helper launch. Reboot and verify setup resumes without a Linux distro.
+- Features enabled but WSL missing; WSL already ready (no prerequisite UAC);
+  cancel UAC; failed WSL download/update; feature enablement blocked by policy.
+- Keep the progress window visible through prerequisite setup, slow Docker
+  download, Docker installer, daemon startup, source download, image builds, and
+  health checks. Verify elapsed time/activity, minimize/restore, completion,
+  error details, and retry. A failed step must not look like a successful install.
 - Existing Docker stopped/running, Linux/Windows-container mode, unavailable daemon.
 - A Windows account name/path containing spaces; duplicate launcher prevention.
 - Sign-in startup enabled/disabled; Start, Stop, Restart, Exit Tray, and log viewing.

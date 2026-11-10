@@ -6,6 +6,159 @@ using OrderManager.Core;
 // commands and GitHub downloads are faked; these tests cannot touch real volumes.
 var tests = new (string Name, Func<Task> Test)[]
 {
+    ("embedded PowerShell enables features and handles native WSL failures and reboots", async () =>
+    {
+        // The SDK Docker image includes pwsh. Substitute Windows servicing commands
+        // and a tiny native WSL executable; no host features or shared data are touched.
+        if (!OperatingSystem.IsLinux()) throw new Exception("Run these tests in the SDK Docker image.");
+        using var f = new Fixture();
+        Directory.CreateDirectory(Path.Combine(f.Install.Root, "System32"));
+        var wsl = Path.Combine(f.Install.Root, "System32", "wsl.exe");
+        File.WriteAllText(wsl, """
+            #!/bin/sh
+            echo "$*" >> "$PREREQUISITE_CALLS"
+            case "$1" in
+              --version) exit "${WSL_VERSION_CODE:-0}" ;;
+              --install) exit "${WSL_INSTALL_CODE:-0}" ;;
+              --update) exit "${WSL_UPDATE_CODE:-0}" ;;
+              *) exit 99 ;;
+            esac
+            """.Replace("\r", "") + "\n");
+        File.SetUnixFileMode(wsl, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        const string stubs = """
+            function Get-WindowsOptionalFeature {
+                param([switch]$Online, [string]$FeatureName)
+                if (-not $Online) { throw 'Online flag missing' }
+                $state = switch ($env:FEATURE_MODE) { 'ready' { 'Enabled' } 'pending' { 'EnablePending' } default { 'Disabled' } }
+                @{ State = $state }
+            }
+            function Enable-WindowsOptionalFeature {
+                param([switch]$Online, [string]$FeatureName, [switch]$All, [switch]$NoRestart)
+                if (-not ($Online -and $All -and $NoRestart)) { throw 'Required servicing flags missing' }
+                Add-Content -LiteralPath $env:PREREQUISITE_CALLS -Value "enable $FeatureName"
+                if ($env:FEATURE_MODE -eq 'blocked') { throw 'Policy blocked servicing' }
+                @{ RestartNeeded = ($env:FEATURE_MODE -eq 'restart') }
+            }
+
+            """;
+        var cases = new[]
+        {
+            (Mode: "ready", Version: 0, Install: 0, Update: 0, Code: 0, Enables: 0, Installs: 0, Updates: 1),
+            (Mode: "missing", Version: 1, Install: 0, Update: 0, Code: 0, Enables: 2, Installs: 1, Updates: 1),
+            (Mode: "restart", Version: 1, Install: 0, Update: 0, Code: 3010, Enables: 2, Installs: 0, Updates: 0),
+            (Mode: "pending", Version: 1, Install: 0, Update: 0, Code: 3010, Enables: 0, Installs: 0, Updates: 0),
+            (Mode: "blocked", Version: 1, Install: 0, Update: 0, Code: 10, Enables: 1, Installs: 0, Updates: 0),
+            (Mode: "ready", Version: 1, Install: 1, Update: 0, Code: 20, Enables: 0, Installs: 1, Updates: 0),
+            (Mode: "ready", Version: 0, Install: 0, Update: 1, Code: 21, Enables: 0, Installs: 0, Updates: 1),
+        };
+        foreach (var item in cases)
+        {
+            var callsPath = Path.Combine(f.Install.Root, "calls.txt");
+            File.WriteAllText(callsPath, "");
+            var result = await new ProcessRunner(_ => { }).Run("pwsh",
+                WindowsPrerequisites.PowerShellArguments(stubs + "\n" + WindowsPrerequisites.SetupScript),
+                new Dictionary<string, string>
+                {
+                    ["SystemRoot"] = f.Install.Root, ["PREREQUISITE_CALLS"] = callsPath,
+                    ["FEATURE_MODE"] = item.Mode, ["WSL_VERSION_CODE"] = item.Version.ToString(),
+                    ["WSL_INSTALL_CODE"] = item.Install.ToString(), ["WSL_UPDATE_CODE"] = item.Update.ToString(),
+                });
+            var calls = File.ReadAllLines(callsPath);
+            Check(result.ExitCode == item.Code % 256); // Unix process exit codes have eight bits.
+            Check(calls.Count(c => c.StartsWith("enable ")) == item.Enables);
+            Check(calls.Count(c => c.StartsWith("--install ")) == item.Installs);
+            Check(calls.Count(c => c.StartsWith("--update ")) == item.Updates);
+            Check(!calls.Any(c => c.StartsWith("--install ") && !c.Contains("--no-distribution")));
+        }
+        const string inspectionStubs = """
+            function Get-CimInstance {
+                param([string]$ClassName)
+                if ($ClassName -eq 'Win32_OperatingSystem') {
+                    return @{ LastBootUpTime = [DateTime]::Parse('2026-11-09T10:00:00Z').ToUniversalTime() }
+                }
+                [pscustomobject]@{ Name = 'VirtualMachinePlatform'; InstallState = 1 }
+                [pscustomobject]@{ Name = 'Microsoft-Windows-Subsystem-Linux'; InstallState = $(if ($env:FEATURE_MODE -eq 'ready') { 1 } else { 2 }) }
+            }
+
+            """;
+        foreach (var item in new[] { (Mode: "ready", Version: 0), (Mode: "missing", Version: 0), (Mode: "ready", Version: 1) })
+        {
+            var result = await new ProcessRunner(_ => { }).Run("pwsh",
+                WindowsPrerequisites.PowerShellArguments(inspectionStubs + "\n" + WindowsPrerequisites.InspectScript),
+                new Dictionary<string, string>
+                {
+                    ["SystemRoot"] = f.Install.Root, ["PREREQUISITE_CALLS"] = Path.Combine(f.Install.Root, "calls.txt"),
+                    ["FEATURE_MODE"] = item.Mode, ["WSL_VERSION_CODE"] = item.Version.ToString(),
+                });
+            Check(result.ExitCode == 0);
+            var status = JsonSerializer.Deserialize<WindowsPrerequisiteStatus>(result.Output)!;
+            Check(status.FeaturesEnabled == (item.Mode == "ready"));
+            Check(status.WslInstalled == (item.Version == 0));
+            Check(status.BootTime.StartsWith("2026-11-09T10:00:00"));
+        }
+    }),
+    ("ready Windows prerequisites do not request administrator access", async () =>
+    {
+        using var f = new Fixture();
+        var runner = new PrerequisiteRunner();
+        var prerequisites = new WindowsPrerequisites(f.Install, runner, () => throw new Exception("Unexpected elevation"));
+        await prerequisites.Ensure();
+        Check(runner.Calls == 1);
+    }),
+    ("missing Windows features or WSL trigger setup and verification", async () =>
+    {
+        foreach (var status in new[] { new WindowsPrerequisiteStatus("boot-1", false, true), new("boot-1", true, false), new("boot-1", false, false) })
+        {
+            using var f = new Fixture();
+            var runner = new PrerequisiteRunner { Status = status };
+            var elevated = 0;
+            var prerequisites = new WindowsPrerequisites(f.Install, runner, () =>
+            {
+                elevated++;
+                runner.Status = new("boot-1", true, true);
+                return Task.FromResult(0);
+            });
+            await prerequisites.Ensure();
+            Check(elevated == 1 && runner.Calls == 2);
+        }
+    }),
+    ("required reboot persists across retries and clears only after a new boot", async () =>
+    {
+        using var f = new Fixture();
+        f.Existing();
+        var runner = new PrerequisiteRunner { Status = new("boot-1", false, false) };
+        var elevated = 0;
+        var prerequisites = new WindowsPrerequisites(f.Install, runner, () => { elevated++; return Task.FromResult(3010); });
+        await Throws<WindowsRebootRequiredException>(prerequisites.Ensure);
+        Check(f.Install.Load().PrerequisiteRebootBootTime == "boot-1");
+        Check(f.Install.Load().ActiveSha == Fixture.Old);
+        runner.Status = new("boot-1", true, true);
+        var retry = new WindowsPrerequisites(f.Install, runner, () => throw new Exception("Unexpected elevation"));
+        await Throws<WindowsRebootRequiredException>(retry.Ensure);
+        Check(elevated == 1);
+        runner.Status = new("boot-2", true, true);
+        await retry.Ensure();
+        Check(f.Install.Load().PrerequisiteRebootBootTime == null);
+        Check(f.Install.Load().ActiveSha == Fixture.Old);
+    }),
+    ("prerequisite failures and cancelled elevation never report success", async () =>
+    {
+        using var f = new Fixture();
+        var runner = new PrerequisiteRunner { Status = new("boot-1", false, false) };
+        foreach (var code in new[] { 1, 10, 20, 21 })
+        {
+            var prerequisites = new WindowsPrerequisites(f.Install, runner, () => Task.FromResult(code));
+            await Throws<IOException>(prerequisites.Ensure);
+            Check(f.Install.Load().PrerequisiteRebootBootTime == null);
+        }
+        var cancelled = new WindowsPrerequisites(f.Install, runner, () => throw new OperationCanceledException());
+        await Throws<OperationCanceledException>(cancelled.Ensure);
+        var falseSuccess = new WindowsPrerequisites(f.Install, runner, () => Task.FromResult(0));
+        await Throws<IOException>(falseSuccess.Ensure);
+        runner.Fail = true;
+        var failedProbe = new WindowsPrerequisites(f.Install, runner, () => throw new Exception("Unexpected elevation"));
+        await Throws<IOException>(failedProbe.Ensure);
+    }),
     ("environment is minimal, random and preserved", async () =>
     {
         using var f = new Fixture();
@@ -243,5 +396,19 @@ sealed class FakeRunner : ICommandRunner
             if (args[index + 1].StartsWith("db:")) File.WriteAllText(args[index + 2], EmptyBackup ? "" : "dump");
         }
         return Task.FromResult(new CommandResult(0, args[0] == "info" ? Os : ""));
+    }
+}
+
+sealed class PrerequisiteRunner : ICommandRunner
+{
+    public WindowsPrerequisiteStatus Status { get; set; } = new("boot-1", true, true);
+    public bool Fail { get; set; }
+    public int Calls { get; private set; }
+    public Task<CommandResult> Run(string executable, IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string>? environment = null, TimeSpan? timeout = null)
+    {
+        Calls++;
+        if (executable != "powershell.exe" || arguments[^2] != "-EncodedCommand") throw new Exception("Unexpected prerequisite probe");
+        return Task.FromResult(new CommandResult(Fail ? 1 : 0, JsonSerializer.Serialize(Status)));
     }
 }

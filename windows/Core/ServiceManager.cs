@@ -99,10 +99,15 @@ public sealed class ServiceManager(Installation install, ICommandRunner runner, 
         GuardRecovery(state);
         await CheckDocker();
         install.EnsureEnvironment();
+        status("Checking latest application version");
         var sha = await source.Latest();
         if (state.ActiveSha == sha) { status("Already up to date"); return; }
         var directory = install.Source(sha);
-        if (!Directory.Exists(directory)) await source.Download(sha, directory);
+        if (!Directory.Exists(directory))
+        {
+            status("Downloading application source");
+            await source.Download(sha, directory);
+        }
         state.PendingSha = sha;
         state.MigrationStarted = false;
         install.Save(state);
@@ -110,7 +115,9 @@ public sealed class ServiceManager(Installation install, ICommandRunner runner, 
         try
         {
             // Build all candidates (including our replacement launcher) before downtime.
+            status("Building application images — this can take several minutes");
             await Compose(sha, "build");
+            status("Building updated Windows launcher");
             await Docker(["build", "--file", Path.Combine(directory, "windows", "Dockerfile"), "--target", "launcher",
                 "--output", $"type=local,dest={Path.Combine(directory, "launcher")}", directory]);
             if (!File.Exists(Path.Combine(directory, "launcher", "OrderManager.exe")))
@@ -119,6 +126,7 @@ public sealed class ServiceManager(Installation install, ICommandRunner runner, 
             {
                 // Set before stop: even a partially failed stop must resume the old app.
                 writersStopped = true;
+                status("Stopping services and backing up database");
                 await Compose(state.ActiveSha, "stop", "frontend", "backend", "package-tracking");
                 await Compose(state.ActiveSha, "up", "-d", "--wait", "db");
                 state.BackupPath = await Backup(state.ActiveSha);
@@ -126,6 +134,7 @@ public sealed class ServiceManager(Installation install, ICommandRunner runner, 
             // Persist before the command: startup applies migrations in the backend entrypoint.
             state.MigrationStarted = true;
             install.Save(state);
+            status("Starting services and waiting for health checks");
             await Compose(sha, "up", "-d", "--wait", "--wait-timeout", "600", "--remove-orphans");
             state.PreviousSha = state.ActiveSha;
             state.ActiveSha = sha;

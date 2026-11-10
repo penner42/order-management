@@ -33,7 +33,7 @@ Name: "{autodesktop}\Order Manager"; Filename: "{app}\OrderManager.exe"; Tasks: 
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Run]
-Filename: "{app}\OrderManager.exe"; Description: "Start Order Manager and complete Docker setup"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\OrderManager.exe"; Description: "Start Order Manager and complete Windows and Docker setup"; Flags: nowait postinstall skipifsilent
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OrderManager"; ValueData: """{app}\OrderManager.exe"" --startup"; Flags: createvalueifdoesntexist uninsdeletevalue
