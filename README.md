@@ -20,6 +20,15 @@ from the [latest GitHub Release](https://github.com/penner42/order-management/re
 without signing in. Successful **Windows installer** workflow builds on `master`
 publish the installer automatically.
 
+## Mac installer
+
+For Apple Silicon Macs with macOS 15 or later, see [the Mac guide](macos/README.md).
+The installer provides Docker Desktop setup, menu bar controls, release-based updates,
+and database recovery. The orders application stays entirely in Docker.
+Successful **Mac installer** workflow builds on `master` publish Mac releases
+without changing the Windows latest release. Native Apple tools are used only for
+launcher compilation, tests, signing, and installer packaging.
+
 ## Development (Docker only)
 
 The current Compose stack is the development environment. The host only needs

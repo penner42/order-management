@@ -1,0 +1,5 @@
+{
+  "dotnetMinimumMacOS": "15.0",
+  "dockerMinimumMacOS": "15.0",
+  "bundleIdentifier": "com.penner42.OrderManager"
+}

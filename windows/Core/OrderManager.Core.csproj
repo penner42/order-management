@@ -5,4 +5,5 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../desktop/Core/OrderManager.Desktop.csproj" /></ItemGroup>
 </Project>

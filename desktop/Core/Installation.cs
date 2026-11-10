@@ -17,12 +17,14 @@ public sealed class InstallationState
     public string? ExtensionFingerprint { get; set; }
     public string? AcknowledgedExtension { get; set; }
     public bool AutoStart { get; set; } = true;
+    public string? MacReleaseTag { get; set; }
     public string? PrerequisiteRebootBootTime { get; set; }
     public bool RecoveryRequired => MigrationStarted && ActiveSha != null;
 }
 
-public sealed class Installation(string root)
+public sealed class Installation(string root, DeploymentSettings? settings = null)
 {
+    public DeploymentSettings Settings { get; } = settings ?? DeploymentSettings.Windows;
     public string Root { get; } = Path.GetFullPath(root);
     public string Config => Path.Combine(Root, "config");
     public string EnvFile => Path.Combine(Config, ".env");
@@ -50,26 +52,44 @@ public sealed class Installation(string root)
     }
     public void Save(InstallationState state)
     {
-        Directory.CreateDirectory(Config);
-        File.WriteAllText(StateFile + ".tmp", JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
+        PrivateDirectory(Config);
+        PrivateWrite(StateFile + ".tmp", JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
         File.Move(StateFile + ".tmp", StateFile, true);
     }
     public void EnsureEnvironment()
     {
-        Directory.CreateDirectory(Config);
-        if (File.Exists(EnvFile)) return;
+        PrivateDirectory(Config);
+        if (File.Exists(EnvFile)) { ProtectFile(EnvFile); return; }
         var temporary = EnvFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllText(temporary, $"SECRET_KEY={Convert.ToHexString(RandomNumberGenerator.GetBytes(48))}\nADMIN_USERNAME=admin\nADMIN_PASSWORD=admin\n");
+            PrivateWrite(temporary, $"SECRET_KEY={Convert.ToHexString(RandomNumberGenerator.GetBytes(48))}\nADMIN_USERNAME=admin\nADMIN_PASSWORD=admin\n");
             File.Move(temporary, EnvFile); // Never overwrite a pre-existing secret.
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
+    public static void PrivateDirectory(string path)
+    {
+        Directory.CreateDirectory(path);
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+    public static void ProtectFile(string path)
+    {
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    }
+    public static void PrivateWrite(string path, string content)
+    {
+        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using (var stream = new FileStream(path, options))
+        using (var writer = new StreamWriter(stream)) writer.Write(content);
+        ProtectFile(path);
+    }
+
     // GitHub archives have one top-level directory. Reject traversal, links and
     // Windows special paths before opening any destination file.
-    public static void ExtractArchive(Stream archive, string destination)
+    public static void ExtractArchive(Stream archive, string destination, DeploymentSettings? settings = null)
     {
         using var zip = new ZipArchive(archive, ZipArchiveMode.Read, leaveOpen: true);
         string? prefix = null;
@@ -97,9 +117,7 @@ public sealed class Installation(string root)
                 entry.ExtractToFile(path, overwrite: false);
             }
         }
-        if (!File.Exists(Path.Combine(destination, "docker-compose.windows.yml")) ||
-            !File.Exists(Path.Combine(destination, "windows", "Dockerfile")))
-            throw new InvalidDataException("This commit does not contain the Windows deployment files.");
+        (settings ?? DeploymentSettings.Windows).ValidateSource(destination);
     }
 }
 
@@ -121,7 +139,11 @@ public sealed class ProcessRunner(Action<string> log) : ICommandRunner
             RedirectStandardOutput = true, RedirectStandardError = true
         };
         foreach (var arg in arguments) info.ArgumentList.Add(arg);
-        if (environment != null) foreach (var (key, value) in environment) info.Environment[key] = value;
+        if (environment != null) foreach (var (key, value) in environment)
+        {
+            if (value == null) info.Environment.Remove(key);
+            else info.Environment[key] = value;
+        }
         // Never log environment variables, Compose config output, or credentials.
         using var process = Process.Start(info) ?? throw new IOException($"Could not start {executable}.");
         var stdout = new System.Text.StringBuilder();
@@ -148,13 +170,18 @@ public sealed class ProcessRunner(Action<string> log) : ICommandRunner
     }
 }
 
+public interface IReleaseSource
+{
+    string? ReleaseTag { get; }
+}
+
 public interface ISourceProvider
 {
     Task<string> Latest();
     Task Download(string sha, string destination);
 }
 
-public sealed class GitHubSource(HttpClient http) : ISourceProvider
+public sealed class GitHubSource(HttpClient http, DeploymentSettings? settings = null) : ISourceProvider
 {
     public async Task<string> Latest()
     {
@@ -181,7 +208,7 @@ public sealed class GitHubSource(HttpClient http) : ISourceProvider
             {
                 await using (var file = File.Create(archive)) await response.Content.CopyToAsync(file);
                 using var input = File.OpenRead(archive);
-                Installation.ExtractArchive(input, temporary);
+                Installation.ExtractArchive(input, temporary, settings);
             }
             finally { if (File.Exists(archive)) File.Delete(archive); }
             Directory.Move(temporary, destination);

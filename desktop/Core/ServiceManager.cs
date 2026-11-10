@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace OrderManager.Core;
 
 public sealed class ServiceManager(Installation install, ICommandRunner runner, ISourceProvider source, Action<string> status,
-    string docker = "docker")
+    string docker = "docker", Func<string, Task>? prepareLauncher = null)
 {
     private readonly SemaphoreSlim operation = new(1, 1);
     public bool Busy => operation.CurrentCount == 0;
@@ -20,8 +20,8 @@ public sealed class ServiceManager(Installation install, ICommandRunner runner, 
         return result.Output;
     }
     private string[] ComposeArgs(string sha, params string[] args) =>
-        ["compose", "--project-name", "order-manager-windows", "--project-directory", install.Source(sha),
-         "--env-file", install.EnvFile, "-f", Path.Combine(install.Source(sha), "docker-compose.windows.yml"), ..args];
+        ["compose", "--project-name", install.Settings.ProjectName, "--project-directory", install.Source(sha),
+         "--env-file", install.EnvFile, "-f", Path.Combine(install.Source(sha), install.Settings.ComposeFile), ..args];
     private Task<string> Compose(string sha, params string[] args) => Docker(ComposeArgs(sha, args), sha);
     public async Task CheckDocker()
     {
@@ -117,11 +117,15 @@ public sealed class ServiceManager(Installation install, ICommandRunner runner, 
             // Build all candidates (including our replacement launcher) before downtime.
             status("Building application images — this can take several minutes");
             await Compose(sha, "build");
-            status("Building updated Windows launcher");
-            await Docker(["build", "--file", Path.Combine(directory, "windows", "Dockerfile"), "--target", "launcher",
-                "--output", $"type=local,dest={Path.Combine(directory, "launcher")}", directory]);
-            if (!File.Exists(Path.Combine(directory, "launcher", "OrderManager.exe")))
-                throw new IOException("Candidate launcher build did not produce OrderManager.exe.");
+            status("Preparing updated launcher");
+            if (prepareLauncher != null) await prepareLauncher(sha);
+            else
+            {
+                await Docker(["build", "--file", Path.Combine(directory, "windows", "Dockerfile"), "--target", "launcher",
+                    "--output", $"type=local,dest={Path.Combine(directory, "launcher")}", directory]);
+                if (!File.Exists(Path.Combine(directory, "launcher", "OrderManager.exe")))
+                    throw new IOException("Candidate launcher build did not produce OrderManager.exe.");
+            }
             if (state.ActiveSha != null)
             {
                 // Set before stop: even a partially failed stop must resume the old app.
@@ -138,6 +142,7 @@ public sealed class ServiceManager(Installation install, ICommandRunner runner, 
             await Compose(sha, "up", "-d", "--wait", "--wait-timeout", "600", "--remove-orphans");
             state.PreviousSha = state.ActiveSha;
             state.ActiveSha = sha;
+            if (source is IReleaseSource release) state.MacReleaseTag = release.ReleaseTag;
             state.PendingSha = null;
             state.MigrationStarted = false;
             install.Save(state);

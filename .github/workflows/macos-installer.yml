@@ -1,0 +1,92 @@
+name: Mac installer
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: mac-installer-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  helper:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test shared Windows and Mac logic and cross-publish helper inside Docker
+        run: sh macos/build-helper.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-helper-arm64
+          path: macos/build/helper/
+          if-no-files-found: error
+  arm-deployment:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native ARM64 isolated application, browser, PDF and backup checks
+        run: sh macos/test-deployment.sh
+  installer:
+    needs: helper
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-helper-arm64
+          path: macos/build/helper
+      - name: Restore helper executable permission lost by artifact transport
+        run: chmod +x macos/build/helper/OrderManager.Mac macos/build/helper/createdump
+      - name: Test launcher, assemble, ad hoc sign and package
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: mac-installer-${{ github.run_number }}-${{ github.run_attempt }}
+        run: bash macos/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OrderManager-Mac-arm64
+          path: macos/build/output/
+          if-no-files-found: error
+  release:
+    needs: [helper, arm-deployment, installer]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: OrderManager-Mac-arm64
+          path: installer
+      - name: Publish immutable Mac release without changing Windows latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: mac-installer-${{ github.run_number }}-${{ github.run_attempt }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<EOF_NOTES
+          Apple Silicon Mac installer built from commit ${SOURCE_COMMIT}.
+
+          Download OrderManager-Setup-arm64.dmg and open Order Manager, then choose Install and Open.
+          This release is ad hoc signed, without Developer ID signing or notarization.
+          If blocked, use System Settings → Privacy & Security → Open Anyway after attempting to open it.
+          Apple instructions: https://support.apple.com/en-us/102445
+
+          Requires macOS 15 or later and Docker Desktop. Setup guides Docker installation.
+          The orders application runs entirely in Docker; developer tools are not needed.
+          Updates follow successfully published Mac releases. Quit leaves services running.
+
+          Build: ${RUN_URL}
+          EOF_NOTES
+          gh release create "$RELEASE_TAG" installer/* --target "$SOURCE_COMMIT" \
+            --title "Mac installer ${RELEASE_TAG#mac-installer-}" \
+            --notes-file release-notes.md --latest=false

@@ -1,4 +1,7 @@
 **
+!desktop/
+!desktop/Core/
+!desktop/Core/**
 !windows/
 !windows/Core/
 !windows/Core/**

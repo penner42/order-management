@@ -5,10 +5,12 @@ on:
     branches: [master]
     paths:
       - 'windows/**'
+      - 'desktop/**'
       - '.github/workflows/windows-installer.yml'
   pull_request:
     paths:
       - 'windows/**'
+      - 'desktop/**'
       - '.github/workflows/windows-installer.yml'
 permissions:
   contents: read

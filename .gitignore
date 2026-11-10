@@ -65,3 +65,11 @@ browser-extension/*.xpi
 # Browser test artifacts
 frontend/playwright-report/
 frontend/test-results/
+
+# Desktop launcher build artifacts
+desktop/**/bin/
+desktop/**/obj/
+macos/**/bin/
+macos/**/obj/
+macos/build/
+macos/App/.build/

@@ -1,0 +1,93 @@
+name: order-manager-macos
+
+services:
+  db:
+    platform: linux/arm64
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: order_management
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  backend:
+    platform: linux/arm64
+    image: order-manager-macos-backend:${ORDER_MANAGER_VERSION:-local}
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/order_management
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      ADMIN_PASSWORD_SYNC_ENABLED: "false"
+      GROUP_SUBMISSIONS_ENABLED: "true"
+      SCHEDULED_JOBS_ENABLED: "true"
+      DATABASE_IMPORT_ENABLED: "false"
+      BROWSER_EXTENSION_BUILD_ENABLED: "false"
+      BROWSER_EXTENSION_DIR: /browser-extension
+      INVOICE_DIR: /data/invoices
+      APPLICATION_LOG_FILE: /data/logs/application.log
+      BROWSER_PROFILES_DIR: /data/browser_profiles
+      BROWSER_MAX_CONCURRENT: ${BROWSER_MAX_CONCURRENT:-2}
+      BROWSER_HEADLESS: ${BROWSER_HEADLESS:-false}
+      APP_PUBLIC_BASE_URL: http://localhost:5173
+    shm_size: 2gb
+    volumes:
+      - ./browser-extension:/browser-extension:ro
+      - invoice_data:/data/invoices
+      - application_logs:/data/logs
+      - browser_profiles_data:/data/browser_profiles
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8000/]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+
+  package-tracking:
+    platform: linux/arm64
+    image: order-manager-macos-tracking:${ORDER_MANAGER_VERSION:-local}
+    build: ./package-tracking
+    environment:
+      ORDER_MANAGEMENT_API_BASE: http://backend:8000
+      UPS_CLIENT: ${UPS_CLIENT:-}
+      UPS_SECRET: ${UPS_SECRET:-}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/health]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  frontend:
+    platform: linux/arm64
+    image: order-manager-macos-frontend:${ORDER_MANAGER_VERSION:-local}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.windows
+    ports:
+      - "127.0.0.1:5173:5173"
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:5173/]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      backend:
+        condition: service_healthy
+      package-tracking:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  invoice_data:
+  application_logs:
+  browser_profiles_data:

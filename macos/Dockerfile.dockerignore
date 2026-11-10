@@ -1,0 +1,13 @@
+**
+!desktop/
+!desktop/Core/
+!desktop/Core/**
+!macos/
+!macos/release.py
+!macos/release-settings.json
+!macos/Helper/
+!macos/Helper/**
+!macos/Tests/
+!macos/Tests/**
+**/bin
+**/obj

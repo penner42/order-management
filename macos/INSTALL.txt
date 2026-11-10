@@ -1,0 +1,21 @@
+Order Manager for Apple Silicon Macs
+
+1. Open Order Manager from this disk image, then choose Install and Open.
+   It installs to ~/Applications/Order Manager.app for your account.
+2. This release is ad hoc signed, without Developer ID signing or notarization.
+   If macOS blocks it, open System Settings > Privacy & Security > Open Anyway
+   after attempting to open it. You may need to repeat this for the installed copy.
+   Managed Macs may prohibit this exception. Do not disable Gatekeeper globally.
+   Apple instructions: https://support.apple.com/en-us/102445
+3. Follow setup progress. If Docker is missing, download it through the menu,
+   drag Docker to Applications, launch Docker, and review/accept its terms.
+   Then choose Start from the Order Manager menu bar icon.
+4. Open http://localhost:5173 and sign in with admin / admin. Change the password.
+
+Setup downloads and builds application containers, which can take several minutes
+and substantial disk space. No developer tools are needed.
+
+Quit leaves services running. Stop affects only Order Manager's containers.
+Uninstall through the menu stops services and retains all data and Docker.
+Updates follow successful Mac releases; no Apple developer tools are required.
+The Browser Extensions menu explains Chrome and Firefox setup. Safari is unsupported.
