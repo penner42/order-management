@@ -2,6 +2,7 @@
 import AppKit
 import ServiceManagement
 import Darwin
+import CFileLock
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var item: NSStatusItem!
@@ -74,7 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let lock = Darwin.open(config.appendingPathComponent("operation.lock").path, O_CREAT | O_RDWR, 0o600)
             guard lock >= 0 else { throw NSError(domain: "Installer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not open the installation lock."]) }
             defer { Darwin.close(lock) }
-            guard Darwin.flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw NSError(domain: "Installer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Another operation is running. Wait for it to finish before reinstalling."]) }
+            guard order_manager_try_lock(lock) == 0 else { throw NSError(domain: "Installer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Another operation is running. Wait for it to finish before reinstalling."]) }
             try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fileManager.createDirectory(at: stageRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             if fileManager.fileExists(atPath: stage.path) { try fileManager.removeItem(at: stage) }
