@@ -14,6 +14,9 @@ are not required on the PC. Internet access is needed for installation and updat
 
 Run `OrderManager-Setup-x64.exe`, leave **Start Order Manager** selected, and follow
 the Docker Desktop installer if offered. Review Docker's license in its installer.
+While Docker Desktop downloads, a progress window shows the percentage and
+downloaded size. If the server does not provide a total size, it shows an animated
+bar and the downloaded size instead.
 If Windows needs WSL, the tray explains the commands and reboot requirements.
 Launch Docker Desktop and retry **Start** after a reboot; setup and credentials
 are retained. Hardware virtualization must be enabled. A first installation builds

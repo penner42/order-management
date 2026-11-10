@@ -216,12 +216,14 @@ internal sealed class TrayContext : ApplicationContext
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 throw new InvalidOperationException("Install Docker Desktop, then retry Start.\n\n" + PrerequisiteHelp);
             var installer = Path.Combine(install.Root, "DockerDesktopInstaller.exe");
-            using (var response = await http.GetAsync("https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe", HttpCompletionOption.ResponseHeadersRead))
+            SetStatus("Downloading Docker Desktop");
+            using (var download = new DownloadProgressForm())
             {
-                response.EnsureSuccessStatusCode();
-                await using var file = File.Create(installer);
-                await response.Content.CopyToAsync(file);
+                download.Show();
+                await download.DownloadAsync(http,
+                    "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe", installer);
             }
+            SetStatus("Verifying Docker Desktop installer");
             // Pass the path through an environment variable, never interpolate it as PowerShell code.
             var verify = await runner.Run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
                 "$s = Get-AuthenticodeSignature -LiteralPath $env:ORDER_MANAGER_INSTALLER; " +
@@ -229,6 +231,7 @@ internal sealed class TrayContext : ApplicationContext
                 "[System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false) -notin @('Docker Inc','Docker Inc.')) { exit 1 }"],
                 new Dictionary<string, string> { ["ORDER_MANAGER_INSTALLER"] = installer });
             if (verify.ExitCode != 0) throw new InvalidDataException("Docker installer signature verification failed. The download was not executed.");
+            SetStatus("Installing Docker Desktop");
             using var process = Process.Start(new ProcessStartInfo(installer) { UseShellExecute = true })!;
             await process.WaitForExitAsync();
             if (process.ExitCode != 0 && process.ExitCode != 3010)
