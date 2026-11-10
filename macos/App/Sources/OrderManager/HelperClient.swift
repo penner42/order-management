@@ -41,7 +41,7 @@ protocol HelperRunning {
 }
 final class HelperClient: HelperRunning {
     let executable: URL
-    init(bundle: Bundle = .main) { executable = bundle.bundleURL.appendingPathComponent("Contents/Helpers/OrderManager.Mac") }
+    init(bundle: Bundle = .main) { executable = bundle.bundleURL.appendingPathComponent("Contents/Resources/helper/OrderManager.Mac") }
     func run(_ arguments: [String], event: @escaping (HelperEvent) -> Void, completion: @escaping (Int32) -> Void) {
         let process = Process(); process.executableURL = executable; process.arguments = arguments
         let output = Pipe(); process.standardOutput = output; process.standardError = FileHandle.nullDevice

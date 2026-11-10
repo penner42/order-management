@@ -6,7 +6,7 @@ using OrderManager.Mac;
 if (!OperatingSystem.IsMacOS()) { Console.Error.WriteLine("This helper requires macOS."); return 1; }
 if (args.FirstOrDefault() == "self-check")
 {
-    var bootstrap = ReleaseManifest.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../Resources/bootstrap.json")));
+    var bootstrap = ReleaseManifest.Read(MacBundle.BootstrapFromHelperDirectory(AppContext.BaseDirectory));
     var probe = new ProcessRunner(_ => { });
     bootstrap.Validate(await MacRunner.CheckPlatform(probe), bootstrap: true);
     Console.WriteLine("{\"type\":\"complete\",\"data\":true}");
@@ -45,7 +45,7 @@ try
         return 0;
     }
     using var operation = new OperationLock(install.Config);
-    var bundle = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../.."));
+    var bundle = MacBundle.FromHelperDirectory(AppContext.BaseDirectory);
     var bundled = ReleaseManifest.Read(Path.Combine(bundle, "Contents/Resources/bootstrap.json"));
     bundled.Validate(version, bootstrap: true);
     using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };

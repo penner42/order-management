@@ -6,6 +6,18 @@ using OrderManager.Core;
 using OrderManager.Mac;
 
 var tests = new (string Name, Func<Task> Run)[] {
+    ("resource-based helper resolves the application and bootstrap manifest", () => {
+        WithDirectory(root => {
+            var bundle = Path.Combine(root, "Order Manager.app");
+            var directory = Path.Combine(bundle, "Contents/Resources/helper");
+            Directory.CreateDirectory(directory);
+            var bootstrap = Path.Combine(bundle, "Contents/Resources/bootstrap.json");
+            File.WriteAllText(bootstrap, JsonSerializer.Serialize(Manifest(), ReleaseManifest.Json));
+            Check(Path.Combine(directory, "OrderManager.Mac") == Path.Combine(bundle, MacBundle.HelperPath));
+            Check(MacBundle.FromHelperDirectory(directory + Path.DirectorySeparatorChar) == bundle);
+            Check(ReleaseManifest.Read(MacBundle.BootstrapFromHelperDirectory(directory)).SourceSha == Manifest().SourceSha);
+        }); return Task.CompletedTask;
+    }),
     ("manifest compatibility and asset binding", () => {
         var manifest = Manifest(); manifest.Validate(new Version(15, 0));
         Reject(() => (manifest with { Architecture = "x64" }).Validate(new Version(15, 0)));
