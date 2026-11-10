@@ -29,8 +29,8 @@ done < <(find "$helper" -type f -print0)
 codesign --force --sign - "$bundle/Contents/MacOS/OrderManager"
 codesign --force --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"
-lipo -verify_arch arm64 "$bundle/Contents/MacOS/OrderManager"
-lipo -verify_arch arm64 "$helper/OrderManager.Mac"
+lipo "$bundle/Contents/MacOS/OrderManager" -verify_arch arm64
+lipo "$helper/OrderManager.Mac" -verify_arch arm64
 # The self-check command must launch and produce a structured completion. No Docker setup or services are started.
 helper_home=$(mktemp -d)
 trap 'rm -rf "$helper_home"' EXIT

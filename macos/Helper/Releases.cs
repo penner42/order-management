@@ -105,8 +105,8 @@ public sealed class MacReleases(HttpClient http, Installation install, ReleaseMa
         }
         if (await Check("/usr/libexec/PlistBuddy", "-c", "Print:CFBundleIdentifier", Path.Combine(bundle, "Contents/Info.plist")) != "com.penner42.OrderManager")
             throw new InvalidDataException("Unexpected application identity.");
-        await Check("/usr/bin/lipo", "-verify_arch", "arm64", Path.Combine(bundle, "Contents/MacOS/OrderManager"));
-        await Check("/usr/bin/lipo", "-verify_arch", "arm64", Path.Combine(bundle, MacBundle.HelperPath));
+        await Check("/usr/bin/lipo", Path.Combine(bundle, "Contents/MacOS/OrderManager"), "-verify_arch", "arm64");
+        await Check("/usr/bin/lipo", Path.Combine(bundle, MacBundle.HelperPath), "-verify_arch", "arm64");
         await Check("/usr/bin/codesign", "--verify", "--deep", "--strict", bundle);
         var manifest = ReleaseManifest.Read(Path.Combine(bundle, "Contents/Resources/bootstrap.json"));
         if (sha != null && manifest.SourceSha != sha) throw new InvalidDataException("Launcher source commit does not match services.");
