@@ -17,13 +17,23 @@ internal static class Program
         using var mutex = new Mutex(false, name);
         bool acquired;
         var uninstall = args.Contains("--uninstall");
-        if (uninstall) shutdown.Set();
-        try { acquired = mutex.WaitOne(uninstall ? 30000 : 0); }
+        var exitTray = args.Contains("--exit-tray");
+        var requestShutdown = uninstall || exitTray;
+        if (requestShutdown) shutdown.Set();
+        try { acquired = mutex.WaitOne(requestShutdown ? 30000 : 0); }
         catch (AbandonedMutexException) { acquired = true; }
-        if (!acquired) return uninstall ? 1 : 0;
+        if (!acquired)
+        {
+            // A failed installer attempt must not leave a shutdown queued for
+            // when the active setup/update eventually finishes.
+            if (exitTray) shutdown.Reset();
+            return requestShutdown ? 1 : 0;
+        }
         try
         {
             shutdown.Reset();
+            // Installer helper: no Docker, configuration, or startup changes.
+            if (exitTray) return 0;
             var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OrderManager");
             var installation = new Installation(root);
             if (uninstall)

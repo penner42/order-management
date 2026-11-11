@@ -23,6 +23,8 @@ UninstallDisplayIcon={app}\OrderManager.exe
 WizardStyle=modern
 
 [Files]
+; Use the new launcher as a helper, including when upgrading older tray versions.
+Source: "launcher\OrderManager.exe"; DestName: "OrderManager-SetupHelper.exe"; Flags: dontcopy noencryption
 Source: "launcher\OrderManager.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -39,6 +41,19 @@ Filename: "{app}\OrderManager.exe"; Description: "Start Order Manager and comple
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OrderManager"; ValueData: """{app}\OrderManager.exe"" --startup"; Flags: createvalueifdoesntexist uninsdeletevalue
 
 [Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ExitCode: Integer;
+begin
+  Result := '';
+  ExtractTemporaryFile('OrderManager-SetupHelper.exe');
+  if not Exec(ExpandConstant('{tmp}\OrderManager-SetupHelper.exe'), '--exit-tray', '',
+    SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+    Result := 'Setup could not request Order Manager to exit. Close Order Manager using Exit Tray and retry installation.'
+  else if ExitCode <> 0 then
+    Result := 'Order Manager is still running. Let any active setup or update finish, then retry installation. You can also choose Exit Tray when it is idle. Your containers and data have been retained.';
+end;
+
 function InitializeUninstall(): Boolean;
 var
   ExitCode: Integer;

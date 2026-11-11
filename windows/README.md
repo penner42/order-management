@@ -72,6 +72,12 @@ delete those volumes in Docker Desktop. Uninstall retains these volumes and all
 configuration, backups, extensions and downloaded source; reinstall reuses them.
 Only one Windows user should run this installation against the same Docker daemon.
 
+Running the installer again asks the current user's tray to exit before replacing
+it, leaving the containers running. Setup waits up to 30 seconds; if the tray is
+busy with setup or an update, installation stops with instructions to retry after
+that work finishes. The installer does not force termination. Leave **Start Order
+Manager** selected to reopen the tray after installation.
+
 ## Updating and recovery
 
 Click **Update** to resolve the latest `master` commit. Unchanged commits are
@@ -173,6 +179,9 @@ Run on an actual Windows 11 x64 PC; Linux cross-compilation does not validate th
   error details, and retry. A failed step must not look like a successful install.
 - Existing Docker stopped/running, Linux/Windows-container mode, unavailable daemon.
 - A Windows account name/path containing spaces; duplicate launcher prevention.
+- Reinstall with an older tray running: tray exits, executable is replaced, and
+  containers stay running. Repeat with no tray running and with setup/update busy;
+  a busy tray blocks replacement and installation can be retried when idle.
 - Sign-in startup enabled/disabled; Start, Stop, Restart, Exit Tray, and log viewing.
 - Change the admin password, restart, update, uninstall/reinstall, and sign in again.
 - Update while running/stopped; interrupted download/build, backup failure, migration
