@@ -134,6 +134,7 @@ function AppShell() {
             {navItems.map((item) => (
               <NavLink
                 key={item.to}
+                reloadDocument
                 end={item.to === "/"}
                 to={item.to}
                 className={({ isActive }) =>
@@ -198,6 +199,7 @@ function AppShell() {
                 {navItems.map((item) => (
                   <NavLink
                     key={item.to}
+                    reloadDocument
                     end={item.to === "/"}
                     to={item.to}
                     className={({ isActive }) =>
