@@ -5,6 +5,7 @@ import logging
 from typing import Any, Callable
 
 from playwright.async_api import Page
+from app.browser_automation.screenshots import capture_order_screenshot
 
 from app.browser_automation.common import (
     LoginRequiredError,
@@ -236,6 +237,7 @@ async def _capture_walmart_order_details(
     on_progress: ProgressCallback | None = None,
     on_order: OrderCallback | None = None,
     on_order_error: OrderErrorCallback | None = None,
+    profile_id: int | None = None,
 ) -> list[dict[str, Any]]:
     def progress(**kwargs: Any) -> None:
         if on_progress:
@@ -263,6 +265,7 @@ async def _capture_walmart_order_details(
                     body["invoiceHtml"] = invoice_html
             except Exception:
                 pass
+            await capture_order_screenshot(page, body, profile_id)
             captured.append(body)
             if on_order:
                 on_order(body)
@@ -373,6 +376,7 @@ async def run_walmart_import(
         on_progress=on_progress,
         on_order=on_order,
         on_order_error=on_order_error,
+        profile_id=profile_id,
     )
     progress(phase="done", message=f"Captured {len(captured)} order(s)", captured=len(captured))
     return captured

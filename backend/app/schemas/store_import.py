@@ -19,6 +19,7 @@ class StoreOrderImportPayload(BaseModel):
     )
 
     externalOrder: dict[str, Any]
+    screenshotToken: str | None = Field(default=None, max_length=32)
     customer: dict[str, Any] | None = None
     shippingAddress: dict[str, Any] | None = None
     shipments: list[dict[str, Any]] | None = None

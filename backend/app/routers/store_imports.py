@@ -2297,6 +2297,8 @@ def apply_store_order_payload(
             order.invoice_pdf_path = filename
 
     capture_import_metadata(db, order, normalized, payload.store)
+    from app.utils.order_screenshots import attach_screenshot
+    attach_screenshot(db, order, payload)
     enqueue_order(db, order)
     if commit:
         db.commit()

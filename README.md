@@ -456,6 +456,28 @@ location /api/ {
 }
 ```
 
+### Order screenshot history
+
+Amazon, Walmart, and Costco browser automation captures the first available order
+screenshot and saves another only when the imported order information changes.
+Layout changes, image changes, URLs, and barcode enrichment do not create versions.
+On Orders, choose the camera button (**Screenshot history**) to browse dated
+versions, see which information changed, or download a PNG.
+
+Captures use the retailer's actual order details, with navigation, recommendations,
+footers, and floating widgets excluded. The order number, purchase lines, and any
+known shipping address/payment digits must be visible in the selected region.
+If the page cannot be verified (including Costco API-only fallbacks), the capture
+is skipped and logged without failing the import; the next check tries again.
+Existing orders get their initial capture when automation next visits them.
+
+Images live under `INVOICE_DIR/screenshots/` on the existing invoice volume;
+include that volume when backing up or moving the application. Images attach to
+orders when imports are applied. Abandoned staging files and orphan images older
+than 24 hours are collected during subsequent captures. Saved versions are retained
+until the order is deleted. The database migration adds `order_screenshots` and
+must be applied in each deployment before using this feature.
+
 ## Project layout
 
 ```

@@ -13,6 +13,7 @@ from app.browser_automation.common import (
     inject_scripts_for_evaluate,
 )
 from app.utils.product_upc import product_upc
+from app.browser_automation.screenshots import capture_order_screenshot
 from app.browser_automation.paths import amazon_script_paths
 from app.browser_automation.session_manager import (
     AMAZON_ORDERS_URL,
@@ -385,6 +386,7 @@ async def _capture_amazon_order_ids(
     on_progress: ProgressCallback | None = None,
     on_order: OrderCallback | None = None,
     on_order_error: OrderErrorCallback | None = None,
+    profile_id: int | None = None,
 ) -> list[dict[str, Any]]:
     def progress(**kwargs: Any) -> None:
         if on_progress:
@@ -405,6 +407,7 @@ async def _capture_amazon_order_ids(
                 raise LoginRequiredError("Amazon session requires login.")
             raw = await _parse_detail_page(page, skip_tracking=False)
             body = await _normalize_with_upcs(page, raw, page.url, account_email)
+            await capture_order_screenshot(page, body, profile_id)
             orders.append(body)
             if on_order:
                 on_order(body)
@@ -476,6 +479,7 @@ async def run_amazon_import(
             on_progress=on_progress,
             on_order=on_order,
             on_order_error=on_order_error,
+            profile_id=profile_id,
         )
         progress(phase="done", message=f"Captured {len(orders)} order(s)", captured=len(orders))
         return orders
@@ -541,7 +545,10 @@ async def run_amazon_import(
                 else:
                     raw = summary
                     source_url = detail_url or list_url
-                _emit_order(await _normalize_with_upcs(page, raw, source_url, account_email))
+                body = await _normalize_with_upcs(page, raw, source_url, account_email)
+                if detail_url:
+                    await capture_order_screenshot(page, body, profile_id)
+                _emit_order(body)
             except LoginRequiredError:
                 raise
             except Exception as exc:

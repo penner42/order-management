@@ -26,6 +26,8 @@ from app.schemas.order import OrderRead, OrderCreate, OrderUpdate, OrderPaymentM
 from app.schemas.item import ItemCreateNested
 from app.utils.invoices import invoice_pdf_path
 from app.utils.duplicate_audit import find_duplicate_orders
+from app.models.order_screenshot import OrderScreenshot
+from app.utils.order_screenshots import screenshot_dir
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -520,6 +522,26 @@ def get_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(ge
     return order
 
 
+@router.get("/{order_id}/screenshots")
+def list_order_screenshots(order_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    if db.get(Order, order_id) is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    rows = db.query(OrderScreenshot).filter_by(order_id=order_id).order_by(OrderScreenshot.id.desc()).all()
+    return [{"id": row.id, "captured_at": row.captured_at, "summary": row.summary} for row in rows]
+
+
+@router.get("/{order_id}/screenshots/{screenshot_id}")
+def get_order_screenshot(order_id: int, screenshot_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    row = db.query(OrderScreenshot).filter_by(id=screenshot_id, order_id=order_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    path = screenshot_dir() / row.filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Screenshot file not found")
+    return FileResponse(path, media_type="image/png", filename=f"order-{order_id}-{screenshot_id}.png",
+                        headers={"Cache-Control": "private, no-store"})
+
+
 @router.get("/{order_id}/invoice")
 def get_order_invoice(order_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     """Download the saved store invoice PDF for an order."""
@@ -585,6 +607,15 @@ def delete_order(order_id: int, db: Session = Depends(get_db), _: User = Depends
         raise HTTPException(status_code=404, detail="Order not found")
     if any(item.payment_line_items for item in order.items):
         raise HTTPException(status_code=409, detail="Cannot delete an order with lines linked to a payment. Update the payment on the Payments page first.")
+    images = db.query(OrderScreenshot).filter_by(order_id=order_id).all()
+    filenames = [image.filename for image in images]
+    for image in images:
+        db.delete(image)
     db.delete(order)
     db.commit()
+    for filename in filenames:
+        try:
+            (screenshot_dir() / filename).unlink(missing_ok=True)
+        except OSError:
+            pass  # The periodic orphan collector retries removal.
     return None

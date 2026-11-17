@@ -16,6 +16,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from playwright.async_api import Page, Response
+from app.browser_automation.screenshots import capture_order_screenshot
 
 from app.browser_automation.common import (
     LoginRequiredError,
@@ -887,6 +888,7 @@ async def run_costco_import(
             return []
 
         details_by_order_number: dict[str, Any] = {}
+        screenshot_tokens: dict[str, str] = {}
         for idx, pair in enumerate(pairs):
             order_number = pair["orderNumber"]
             header_id = pair["orderHeaderId"]
@@ -904,6 +906,18 @@ async def run_costco_import(
                     header_id=header_id,
                 )
                 details_by_order_number[order_number] = detail_payload
+                # Capture now: the final bulk normalization runs after navigating
+                # away from all but the last order's details page.
+                current_orders = await _normalize_and_merge(
+                    page, orders_payload, orders_url or page.url, {order_number: detail_payload}
+                )
+                current = next((o for o in current_orders if str(
+                    (o.get("externalOrder") or {}).get("id") or ""
+                ).strip() == order_number), None)
+                if current is not None:
+                    await capture_order_screenshot(page, current, profile_id)
+                    if current.get("screenshotToken"):
+                        screenshot_tokens[order_number] = current["screenshotToken"]
             except LoginRequiredError:
                 raise
             except Exception as exc:
@@ -929,6 +943,11 @@ async def run_costco_import(
             "orders => globalThis.OrderManagerCostco.enrichCostcoOrdersWithProductUpcs(orders)",
             orders,
         )
+
+        for body in orders:
+            number = str((body.get("externalOrder") or {}).get("id") or "").strip()
+            if number in screenshot_tokens:
+                body["screenshotToken"] = screenshot_tokens[number]
 
         if on_order:
             for body in orders:

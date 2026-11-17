@@ -9,6 +9,7 @@ import { api, getStoredToken } from '../api/client'
 import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { BfmrOrderNumber } from '../components/BfmrOrderNumber'
 import { AlertDialog } from '../components/AlertDialog'
+import { OrderScreenshotHistory } from '../components/OrderScreenshotHistory'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
 import { DuplicateAuditDetails } from '../components/DuplicateAuditDetails'
@@ -294,6 +295,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
   const [copyingId, setCopyingId] = useState<number | null>(null)
   const [copiedAllTracking, setCopiedAllTracking] = useState(false)
   const [downloadingInvoiceId, setDownloadingInvoiceId] = useState<number | null>(null)
+  const [screenshotOrder, setScreenshotOrder] = useState<Order | null>(null)
   const [stores, setStores] = useState<Store[]>([])
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([])
   const [accountsByStore, setAccountsByStore] = useState<Record<number, StoreAccount[]>>({})
@@ -2794,6 +2796,14 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                             </svg>
                           </button>
+                          <button type="button" title="Screenshot history" aria-label="Screenshot history"
+                            onClick={() => setScreenshotOrder(o)}
+                            className="p-2 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7h4l2-3h6l2 3h4v13H3V7z" />
+                              <circle cx="12" cy="13" r="4" strokeWidth={2} />
+                            </svg>
+                          </button>
                           {o.has_invoice && (
                             <button
                               type="button"
@@ -3088,6 +3098,14 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                   >
                                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                    </svg>
+                                  </button>
+                                  <button type="button" title="Screenshot history" aria-label="Screenshot history"
+                                    onClick={() => setScreenshotOrder(o)}
+                                    className="p-1.5 rounded text-ink-muted hover:text-brand-600 hover:bg-brand-100 dark:hover:bg-gray-600">
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7h4l2-3h6l2 3h4v13H3V7z" />
+                                      <circle cx="12" cy="13" r="4" strokeWidth={2} />
                                     </svg>
                                   </button>
                                   {o.has_invoice && (
@@ -3600,6 +3618,10 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
           </div>
         </>
       )}
+
+      {screenshotOrder && <OrderScreenshotHistory key={screenshotOrder.id} orderId={screenshotOrder.id}
+        orderNumber={screenshotOrder.store_order_number || String(screenshotOrder.id)}
+        onClose={() => setScreenshotOrder(null)} />}
 
       <ConfirmDialog
         open={confirmDeleteItemId !== null}
