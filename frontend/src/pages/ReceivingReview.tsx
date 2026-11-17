@@ -581,7 +581,7 @@ function ReceivingGroupSection({
           {unknownReceipts.length > 0 && (
             <details className="mb-6">
               <summary className="cursor-pointer font-semibold text-ink dark:text-gray-100 mb-1">
-                {unknownReceipts.some(r => r.linkable === false) ? 'Unresolved receipt items' : 'Unknown tracking numbers'} ({unknownReceipts.length} {unknownReceipts.length === 1 ? 'receipt' : 'receipts'})
+                Unresolved receipt items ({unknownReceipts.length} {unknownReceipts.length === 1 ? 'receipt' : 'receipts'})
               </summary>
               <p className="text-sm text-ink-muted dark:text-gray-400 mb-3">
                 Unmatched warehouse receipt items appear here. Confirmed items can be linked to order lines; unconfirmed items and unavailable details remain for review.

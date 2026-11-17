@@ -181,6 +181,55 @@ class ReceiptDetailsTests(unittest.TestCase):
         self.assertEqual(result.matches, [])
         self.assertEqual(result.session_payload["unknown_receipts"][0]["receipt_upc"], "other")
 
+    def test_unmatched_product_on_known_tracking_survives_saved_review_and_refresh(self):
+        self.laptop()
+        result = self.check([self.product(name="Apple Pencil Pro", upc="other")])
+        receiving.save_receiving_review_pending(self.db, result.session_payload)
+        for _ in range(2):
+            payload, = receiving.list_receiving_review_pending_payloads(self.db)
+            self.assertEqual(payload["matches"], [])
+            receipt, = payload["unknown_receipts"]
+            self.assertEqual(receipt["tracking_number"], "TRACK")
+            self.assertEqual(receipt["receipt_upc"], "other")
+            self.assertTrue(receipt["linkable"])
+
+    def test_extra_product_on_matched_tracking_stays_available_for_manual_link(self):
+        self.laptop()
+        result = self.check([
+            self.product(qty=2),
+            self.product(name="Apple Pencil Pro", upc="other", price="90.00"),
+        ])
+        receiving.save_receiving_review_pending(self.db, result.session_payload)
+        payload, = receiving.list_receiving_review_pending_payloads(self.db)
+        match, = payload["matches"]
+        self.assertEqual(match["item_id"], self.item.id)
+        receipt, = payload["unknown_receipts"]
+        self.assertEqual(receipt["receipt_upc"], "other")
+        self.assertEqual(receipt["quantity"], 1)
+        self.assertEqual(receipt["received_ext_total"], "90.00")
+
+    def test_unresolved_product_disappears_when_local_edit_creates_match(self):
+        self.laptop()
+        result = self.check([self.product(name="Apple Pencil Pro", upc="other")])
+        receiving.save_receiving_review_pending(self.db, result.session_payload)
+        self.item.description = "Apple Pencil Pro"
+        self.item.quantity = 1
+        self.db.commit()
+        payload, = receiving.list_receiving_review_pending_payloads(self.db)
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertEqual(payload["unknown_receipts"], [])
+
+    def test_current_leftover_quantity_survives_when_same_product_is_matched(self):
+        self.laptop()
+        self.item.quantity = 1
+        self.db.commit()
+        result = self.check([self.product(qty=2)])
+        receiving.save_receiving_review_pending(self.db, result.session_payload)
+        payload, = receiving.list_receiving_review_pending_payloads(self.db)
+        self.assertEqual(payload["matches"][0]["quantity"], 1)
+        receipt, = payload["unknown_receipts"]
+        self.assertEqual(receipt["quantity"], 1)
+
     def test_other_product_on_applied_receipt_stays_available(self):
         self.item.receipt_id = "R1"
         self.item.receipt_tracking_number = "TRACK"

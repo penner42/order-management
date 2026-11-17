@@ -322,11 +322,13 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commi
     count = actionable_count_from_payload(payload)
     applied_pairs = applied_receipt_pairs(db, buying_group_id)
     known_trackings = _known_shipment_trackings(db)
+    is_buyinggroup = (group.api_framework or "").strip().casefold() == "buyinggroup"
+    current_unknown_keys = {receipt_key(r) for r in payload.get("unknown_receipts", [])}
     unknown_by_key = {}
     for receipt in [*(r for r in (previous.get("unknown_receipts") or []) if r.get("linkable") is not False), *(payload.get("unknown_receipts") or []), *released]:
         # Older BG snapshots used an empty tracking number. Normalize before
         # merging so the receipt-ID fallback replaces the same saved product.
-        if (group.api_framework or "").strip().casefold() == "buyinggroup":
+        if is_buyinggroup:
             trackings = [tn.strip() for tn in
                          [receipt.get("tracking_number") or "", *(receipt.get("tracking_numbers") or [])]
                          if tn and tn.strip()]
@@ -335,8 +337,19 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commi
                 receipt = {**receipt, "tracking_number": rid, "tracking_numbers": [rid]}
         if receipt_key(receipt) in manual_keys or receipt_is_applied(receipt, applied_pairs):
             continue
+        # A formerly unresolved BG product may now have an automatic match.
+        # Keep any current leftover quantity, but discard its stale queue copy.
+        if (is_buyinggroup and receipt_key(receipt) not in current_unknown_keys
+            and any(_is_actionable_match_dict(m) and match_includes_receipt(m, receipt)
+                    for m in payload["matches"])):
+            continue
         trackings = receipt.get("tracking_numbers") or [receipt["tracking_number"]]
-        if not receipt.get("manual_link_invalid") and any(tn.strip().casefold() in known_trackings for tn in trackings):
+        # BG emits remaining product quantities after allocation, including
+        # products that could not be matched on an otherwise known tracking.
+        # Knowing the shipment does not mean those products were received locally.
+        if (not is_buyinggroup
+            and not receipt.get("manual_link_invalid")
+            and any(tn.strip().casefold() in known_trackings for tn in trackings)):
             continue
         unknown_by_key[receipt_key(receipt)] = receipt
     payload = {**payload, "unknown_receipts": list(unknown_by_key.values())}
