@@ -90,6 +90,8 @@ class LiveSession:
     mouse_flush_task: asyncio.Task | None = None
     # Serialize move flush vs down/up so coalesced moves can't displace clicks.
     mouse_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Keep CDP sessions attached for the lifetime of each Chromium page.
+    passkey_ui_sessions: dict[Page, Any] = field(default_factory=dict)
 
 
 class SessionManager:
@@ -298,6 +300,7 @@ class SessionManager:
                     browser=engine,
                     retailer=retailer,
                 )
+                await self._configure_passkey_ui(session, page)
                 self._sessions[profile_id] = session
                 # close_session now owns this permit and will release it after
                 # the registered browser has shut down.
@@ -356,6 +359,19 @@ class SessionManager:
             logger.warning("Error closing browser context for profile %s: %s", profile_id, exc)
         self.release_slot()
 
+    async def _configure_passkey_ui(self, session: LiveSession, page: Page) -> None:
+        """Keep native passkey dialogs from blocking the page-only live view.
+
+        This browser has no access to the user's device passkeys. Intercept
+        WebAuthn without a virtual authenticator so password/MFA login remains
+        usable and Chrome cannot open a blocking native credential dialog.
+        """
+        if session.browser != "chromium" or page in session.passkey_ui_sessions:
+            return
+        cdp = await session.context.new_cdp_session(page)
+        await cdp.send("WebAuthn.enable", {"enableUI": False})
+        session.passkey_ui_sessions[page] = cdp
+
     def _attach_page_listeners(self, session: LiveSession) -> None:
         """Follow SSO popups / new tabs so live view isn't stuck on a dimmed opener."""
 
@@ -371,6 +387,7 @@ class SessionManager:
             logger.debug("context.on(page) failed: %s", exc)
 
     async def _adopt_page(self, session: LiveSession, page: Page) -> None:
+        await self._configure_passkey_ui(session, page)
         if session.page is page:
             return
         async with session.lock:

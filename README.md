@@ -438,6 +438,7 @@ Notes:
 - Automation browsers default to **headed Camoufox** (`BROWSER_HEADLESS=false`) under Xvfb in Docker. Login does **not** auto-navigate to the retailer — open the store from the live-view address bar. Invoice PDF rendering still uses headless Chromium separately.
 - Profile data lives under `camoufox-profile-<id>/`. If a profile is stuck on a block page, **Delete** it and create a new one.
 - Supported retailers: **Walmart**, **Amazon**, and **Costco**. Walmart uses Camoufox (Firefox); Amazon and Costco use Chromium (Costco’s Azure B2C login fails on Firefox via `SelfAsserted` XHR interrupt). The browser extension remains available for ad-hoc capture.
+- Embedded Chromium login supports passwords and verification codes. Device passkeys are unavailable inside Docker; native passkey dialogs are suppressed because the live view only streams webpage content.
 - Live view uses a WebSocket at `/api/browser-profiles/{id}/live` (same host/port as the site — no extra port). Behind a reverse proxy you must forward WebSocket upgrades for `/api`. If the upgrade is missing, backend logs show a plain `GET .../live` with **404/426** instead of a WebSocket accept.
 
 Nginx example (TLS terminator → Vite/frontend on 5173, or directly to backend on 8000 for `/api`):

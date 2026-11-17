@@ -100,6 +100,34 @@ class BrowserKeyboardTests(unittest.IsolatedAsyncioTestCase):
         await self.key("X")
         self.assertEqual(await self.page.locator('input[type=password]').input_value(), "X")
 
+    async def test_password_input_and_submit_work_during_a_passkey_request(self):
+        self.session.retailer = "amazon"
+        await self.manager._configure_passkey_ui(self.session, self.page)
+        await self.context.route("https://passkey.test/**", lambda route: route.fulfill(
+            status=200, content_type="text/html", body='''
+              <form><input type="password" required><button>Sign in</button></form>
+              <script>
+                window.submissions=0;
+                document.querySelector('form').onsubmit=e=>{e.preventDefault();window.submissions++};
+                window.authAbort=new AbortController();
+                navigator.credentials.get({publicKey: {
+                  challenge: new Uint8Array(32), rpId: 'passkey.test',
+                  allowCredentials: [{type: 'public-key', id: new Uint8Array(32), transports: ['internal']}],
+                  userVerification: 'required'
+                }, signal: window.authAbort.signal}).catch(()=>{});
+              </script>
+            '''))
+        await self.page.goto("https://passkey.test/")
+        box = await self.page.locator('input').bounding_box()
+        for event in ("down", "up"):
+            await self.manager.dispatch_input(self.session, {"type": "mouse", "event": event,
+                "x": box['x'] + box['width'] / 2, "y": box['y'] + box['height'] / 2})
+        await self.manager.dispatch_input(self.session, {"type": "paste", "text": "dummy-password"})
+        self.assertEqual(await self.page.locator('input').input_value(), "dummy-password")
+        await self.key("Enter")
+        self.assertEqual(await self.page.evaluate("window.submissions"), 1)
+        await self.page.evaluate("window.authAbort.abort()")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,17 @@ class _FakePage:
     url = "about:blank"
     viewport_size = {"width": 1024, "height": 720}
 
+    async def bring_to_front(self):
+        pass
+
+
+class _FakeCDP:
+    def __init__(self):
+        self.commands = []
+
+    async def send(self, method, params):
+        self.commands.append((method, params))
+
 
 class _FakeContext:
     def __init__(self) -> None:
@@ -21,6 +32,9 @@ class _FakeContext:
         page = _FakePage()
         self.pages.append(page)
         return page
+
+    async def new_cdp_session(self, page):
+        return _FakeCDP()
 
     def on(self, _event: str, _handler) -> None:
         return None
@@ -45,6 +59,26 @@ class _FakeSessionManager(SessionManager):
 
 
 class BrowserSessionManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chromium_initial_page_and_popup_disable_native_passkey_ui(self):
+        manager = _FakeSessionManager(capacity=1)
+        session = await manager.ensure_session(1, mode="login", retailer="amazon")
+        initial_cdp = session.passkey_ui_sessions[session.page]
+        self.assertEqual(initial_cdp.commands, [("WebAuthn.enable", {"enableUI": False})])
+        await manager._configure_passkey_ui(session, session.page)
+        self.assertIs(session.passkey_ui_sessions[session.page], initial_cdp)
+        popup = await session.context.new_page()
+        await manager._adopt_page(session, popup)
+        self.assertIs(session.page, popup)
+        self.assertEqual(session.passkey_ui_sessions[popup].commands,
+                         [("WebAuthn.enable", {"enableUI": False})])
+        await manager.close_session(1)
+
+    async def test_firefox_does_not_use_chromium_passkey_configuration(self):
+        manager = _FakeSessionManager(capacity=1)
+        session = await manager.ensure_session(1, mode="login", retailer="walmart")
+        self.assertEqual(session.passkey_ui_sessions, {})
+        await manager.close_session(1)
+
     async def test_waiting_open_does_not_block_close_that_releases_capacity(self) -> None:
         manager = _FakeSessionManager(capacity=1)
         existing_context = _FakeContext()
