@@ -899,9 +899,9 @@ async def establish_costco_session(page: Page, *, timeout_s: float = 25.0) -> bo
     """Home → myaccount so cookie SSO can hydrate before we judge login state.
 
     Return True on the account app route and False on the sign-in page.
-    Report navigation and redirect failures separately.
+    Retry My Account once if Costco returns to its homepage.
     """
-    for label, target in (("homepage", COSTCO_HOME_URL), ("account page", COSTCO_MYACCOUNT_URL)):
+    async def open_page(target: str, label: str) -> None:
         try:
             response = await page.goto(target, wait_until="domcontentloaded", timeout=60_000)
             if target == COSTCO_HOME_URL:
@@ -916,20 +916,38 @@ async def establish_costco_session(page: Page, *, timeout_s: float = 25.0) -> bo
         if "/blocked" in urlsplit(page.url).path.lower():
             raise CostcoSessionWarmupError(f"Costco showed a block page while opening the {label}.")
 
+    await open_page(COSTCO_HOME_URL, "homepage")
+    await open_page(COSTCO_MYACCOUNT_URL, "account page")
     deadline = time.monotonic() + timeout_s
+    homepage_since: float | None = None
+    retried_from_homepage = False
     while True:
         url = page.url
         location = urlsplit(url)
         path = location.path.lower()
+        on_costco = location.hostname in ("costco.com", "www.costco.com")
         if (
-            location.hostname in ("costco.com", "www.costco.com")
+            on_costco
             and path.rstrip("/") == "/myaccount"
             and location.fragment.startswith("/app/")
         ):
             return True
         if "/blocked" in path:
             raise CostcoSessionWarmupError("Costco showed a block page during the account redirect.")
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        on_homepage = on_costco and path in ("", "/")
+        if on_homepage and not retried_from_homepage:
+            if homepage_since is None:
+                homepage_since = now
+            # Let Costco finish a client-side redirect before navigating again.
+            if now - homepage_since >= 1.5 or now >= deadline:
+                retried_from_homepage = True
+                await open_page(COSTCO_MYACCOUNT_URL, "account page")
+                deadline = time.monotonic() + timeout_s
+                continue
+        else:
+            homepage_since = None
+        if now >= deadline:
             break
         await asyncio.sleep(0.4)
 
@@ -938,6 +956,8 @@ async def establish_costco_session(page: Page, *, timeout_s: float = 25.0) -> bo
         raise CostcoSessionWarmupError("Costco's sign-in redirect did not complete during session warm-up.")
     if signin:
         return False
+    if on_homepage:
+        raise CostcoSessionWarmupError("Costco returned to its homepage on both attempts to open My Account.")
     if path.rstrip("/") == "/myaccount":
         raise CostcoSessionWarmupError("Costco opened My Account, but the account app did not finish loading.")
     raise CostcoSessionWarmupError("Costco did not reach My Account during session warm-up.")

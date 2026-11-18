@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -19,15 +19,16 @@ from app.browser_automation.session_manager import (
 
 
 class CostcoSessionWarmupTests(unittest.IsolatedAsyncioTestCase):
-    def page(self, account_url, *, account_status=200):
+    def page(self, *account_urls, account_status=200):
         page = Mock(url="about:blank", wait_for_timeout=AsyncMock())
+        landing_pages = iter(account_urls)
 
         async def goto(url, **kwargs):
             if url == COSTCO_HOME_URL:
                 page.url = url
                 return Mock(status=200)
             self.assertEqual(url, COSTCO_MYACCOUNT_URL)
-            page.url = account_url
+            page.url = next(landing_pages)
             return Mock(status=account_status)
 
         page.goto = AsyncMock(side_effect=goto)
@@ -55,6 +56,25 @@ class CostcoSessionWarmupTests(unittest.IsolatedAsyncioTestCase):
 
         page.goto.side_effect = goto_then_redirect
         self.assertTrue(await establish_costco_session(page, timeout_s=3))
+
+    async def test_retries_my_account_after_returning_to_the_homepage(self):
+        page = self.page(
+            f"{COSTCO_HOME_URL}?from=account",
+            f"{COSTCO_MYACCOUNT_URL}#/app/sample/ordersandpurchases",
+        )
+        self.assertTrue(await establish_costco_session(page, timeout_s=4))
+        navigation = {"wait_until": "domcontentloaded", "timeout": 60_000}
+        self.assertEqual(page.goto.await_args_list, [
+            call(COSTCO_HOME_URL, **navigation),
+            call(COSTCO_MYACCOUNT_URL, **navigation),
+            call(COSTCO_MYACCOUNT_URL, **navigation),
+        ])
+
+    async def test_reports_returning_to_the_homepage_twice(self):
+        page = self.page(COSTCO_HOME_URL, COSTCO_HOME_URL)
+        with self.assertRaisesRegex(CostcoSessionWarmupError, "returned to its homepage on both attempts"):
+            await establish_costco_session(page, timeout_s=0)
+        self.assertEqual(page.goto.await_count, 3)
 
     async def test_reports_stalled_account_and_sign_in_redirects(self):
         for url, message in (
