@@ -15,7 +15,10 @@ from tests import test_buyinggroup_rewards as reward_tests
 
 
 class ReceiptDetailsTests(unittest.TestCase):
-    setUp = reward_tests.BuyingGroupRewardTests.setUp
+    def setUp(self):
+        reward_tests.BuyingGroupRewardTests.setUp(self)
+        self.item.description = "HP laptop"
+        self.db.commit()
 
     def test_receipt_without_tracking_can_be_linked_and_applied_using_receipt_id(self):
         self.item.quantity = 2
@@ -175,6 +178,96 @@ class ReceiptDetailsTests(unittest.TestCase):
         result = self.check([self.product(price="20.00"), self.product(name="Pencil", upc="other", price="20.00")])
         self.assertEqual(result.matches[0].receipt_upc, "199764359179")
 
+    def test_imported_upc_matches_brother_printer_despite_different_product_names(self):
+        self.item.description = (
+            "Brother Wireless MFC-L2760DW Compact Monochrome All-in-One Laser Printer "
+            "with Copy, Scan and Fax, Duplex and Mobile Printing"
+        )
+        self.item.upc = "012502672661"
+        self.item.quantity = 1
+        self.item.price_sold = Decimal("100.00")
+        self.db.commit()
+        match, = self.check([self.product(
+            name="Brother-Wireless-Printer-2661", upc="012502672661", price="99.00",
+        )]).matches
+        self.assertEqual(match.item_id, self.item.id)
+        self.assertEqual(match.receipt_upc, self.item.upc)
+        self.assertTrue(match.amount_discrepancy)
+        self.assertEqual(match.expected_amount, Decimal("100.00"))
+        self.assertEqual(match.received_ext_total, Decimal("99.00"))
+
+    def test_conflicting_imported_upc_rejects_same_name_and_price(self):
+        self.laptop()
+        self.item.upc = "012502672661"
+        self.db.commit()
+        self.assertEqual(self.check([self.product(qty=2)]).matches, [])
+
+    def test_missing_receipt_upc_still_requires_product_name_agreement(self):
+        self.laptop()
+        self.item.upc = "012502672661"
+        self.db.commit()
+        self.assertEqual(self.check([self.product(name="Apple Pencil Pro", upc=None)]).matches, [])
+
+    def test_name_fallback_matches_despite_large_price_discrepancy(self):
+        self.laptop()
+        match, = self.check([self.product(qty=2, upc=None, price="150.00")]).matches
+        self.assertTrue(match.amount_discrepancy)
+        self.assertEqual(match.received_ext_total, Decimal("300.00"))
+
+    def test_name_fallback_prefers_product_name_over_closer_price(self):
+        self.item.description = "Brother Wireless Printer MFC-L2760DW"
+        self.item.quantity = 1
+        self.item.price_sold = Decimal("99.00")
+        self.db.commit()
+        match, = self.check([
+            self.product(name=self.item.description, upc="012502672661", price="90.00"),
+            self.product(name="Brother Wireless Printer Scanner", upc="other", price="99.00"),
+        ]).matches
+        self.assertEqual(match.receipt_upc, "012502672661")
+        self.assertEqual(match.received_ext_total, Decimal("90.00"))
+        self.assertTrue(match.amount_discrepancy)
+
+    def test_ambiguous_name_fallback_is_not_resolved_by_price(self):
+        self.item.description = "Brother Wireless Printer"
+        self.item.quantity = 1
+        self.item.price_sold = Decimal("99.00")
+        self.db.commit()
+        result = self.check([
+            self.product(name=self.item.description, upc="012502672661", price="90.00"),
+            self.product(name=self.item.description, upc="other", price="99.00"),
+        ])
+        self.assertEqual(result.matches, [])
+
+    def test_price_alone_cannot_match_when_names_and_upcs_are_missing(self):
+        self.item.description = None
+        self.item.quantity = 1
+        self.item.price_sold = Decimal("199.00")
+        self.db.commit()
+        self.assertEqual(self.check([self.product(name=None, upc=None)]).matches, [])
+
+    def test_saved_receipt_upc_remains_authoritative_over_imported_upc(self):
+        self.laptop()
+        self.item.upc = "012502672661"
+        self.item.receipt_upc = "199764359179"
+        self.db.commit()
+        self.assertEqual(len(self.check([self.product(qty=2)]).matches), 1)
+        self.assertEqual(self.check([self.product(qty=2, upc=self.item.upc)]).matches, [])
+
+    def test_editing_imported_upc_rematches_cached_receipt_without_network(self):
+        self.laptop()
+        result = self.check([self.product(name="Brother-Wireless-Printer-2661", upc="012502672661")])
+        self.assertEqual(result.matches, [])
+        receiving.save_receiving_review_pending(self.db, result.session_payload)
+        self.item.upc = "012502672661"
+        self.item.quantity = 1
+        self.db.commit()
+        with patch.object(api, "get_receipt_details", side_effect=AssertionError("No network on refresh")):
+            payload, = receiving.list_receiving_review_pending_payloads(self.db)
+        match, = payload["matches"]
+        self.assertEqual(match["item_id"], self.item.id)
+        self.assertEqual(match["receipt_upc"], self.item.upc)
+        self.assertEqual(payload["unknown_receipts"], [])
+
     def test_same_price_different_product_is_not_received(self):
         self.laptop()
         result = self.check([self.product(name="Apple Pencil Pro", upc="other")])
@@ -243,7 +336,7 @@ class ReceiptDetailsTests(unittest.TestCase):
     def test_reward_rounding_preserves_tracking_total_across_three_lines(self):
         self.item.quantity = 1
         for _ in range(2):
-            self.db.add(Item(order_id=self.item.order_id, quantity=1, price_sold=20,
+            self.db.add(Item(order_id=self.item.order_id, description="HP laptop", quantity=1, price_sold=20,
                              status=ItemStatus.SUBMITTED, shipment_items=[ShipmentItem(
                                  shipment_id=self.item.shipment_items[0].shipment_id)]))
         self.db.commit()

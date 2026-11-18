@@ -832,11 +832,16 @@ def _meta_by_tn_from_lots(lots: list[dict[str, Any]]) -> dict[str, dict[str, Any
     return meta_by_tn
 
 
+def _item_matching_upc(item: Item) -> str | None:
+    """Prefer warehouse-confirmed identity, falling back to the imported product UPC."""
+    return getattr(item, "receipt_upc", None) or getattr(item, "upc", None)
+
+
 def _score_item_to_lot(
     item: Item, lot: dict[str, Any]
 ) -> tuple[float, float] | None:
     """Return (price_score, name_score) for ranking; higher is better. None = reject."""
-    local_upc = getattr(item, "receipt_upc", None)
+    local_upc = _item_matching_upc(item)
     lot_upc = lot.get("receipt_upc")
     if local_upc and lot_upc:
         if local_upc != lot_upc:
@@ -869,6 +874,19 @@ def _scores_ambiguous(
     if abs(best[0] - second[0]) > 1e-9:
         return False
     return abs(best[1] - second[1]) <= _LOT_AMBIGUITY_NAME_MARGIN
+
+
+def _score_bg_item_to_lot(item: Item, lot: dict[str, Any]) -> tuple[float, float] | None:
+    """BG product identity comes from UPC, then name; payout is reviewed separately."""
+    local_upc = _item_matching_upc(item)
+    if local_upc and lot.get("receipt_upc"):
+        return (1000.0, 1.0) if local_upc == lot["receipt_upc"] else None
+    similarity = _name_similarity(item.description, lot.get("received_item"))
+    if similarity < _LOT_NAME_ONLY_MIN:
+        return None
+    # Keep fallback name scores in the second position so the existing
+    # ambiguity margin applies to competing products with similar names.
+    return (0.0, similarity)
 
 
 def _assign_items_to_lots(
@@ -2830,10 +2848,7 @@ def _check_receiving_buyinggroup(
             if exact:
                 candidates = exact
         ranked = [(score, lot) for lot in candidates
-                  if not (item.description and lot.get("received_item")
-                          and not getattr(item, "receipt_upc", None)
-                          and _name_similarity(item.description, lot["received_item"]) < _LOT_NAME_ONLY_MIN)
-                  if (score := _score_item_to_lot(item, lot)) is not None]
+                  if (score := _score_bg_item_to_lot(item, lot)) is not None]
         if not ranked:
             return []
         # The Walmart order number spans packages/products. Use it only when

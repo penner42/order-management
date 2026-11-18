@@ -30,7 +30,7 @@ class BuyingGroupRewardTests(unittest.TestCase):
         order = Order(store_id=store.id, buying_group_id=self.group.id)
         self.db.add(order)
         self.db.flush()
-        self.item = Item(order_id=order.id, quantity=3, price_sold=20, status=ItemStatus.SUBMITTED)
+        self.item = Item(order_id=order.id, description="Test product", quantity=3, price_sold=20, status=ItemStatus.SUBMITTED)
         shipment = Shipment(tracking_number="TRACK")
         self.db.add_all([self.item, shipment])
         self.db.flush()
@@ -90,7 +90,7 @@ class BuyingGroupRewardTests(unittest.TestCase):
 
     def test_shared_tracking_reward_is_allocated_by_quantity(self):
         self.item.quantity = 1
-        self.db.add(Item(order_id=self.item.order_id, quantity=1, price_sold=20, status=ItemStatus.SUBMITTED,
+        self.db.add(Item(order_id=self.item.order_id, description="Test product", quantity=1, price_sold=20, status=ItemStatus.SUBMITTED,
                          shipment_items=[ShipmentItem(shipment_id=self.item.shipment_items[0].shipment_id)]))
         self.db.commit()
         result = self.check()
@@ -154,7 +154,7 @@ class BuyingGroupRewardTests(unittest.TestCase):
     def test_walmart_order_receipt_quantity_is_shared_across_packages(self):
         number = self.walmart()
         self.item.quantity = 1
-        other = Item(order=self.item.order, quantity=1, price_sold=20, status=ItemStatus.SUBMITTED,
+        other = Item(order=self.item.order, description="Test product", quantity=1, price_sold=20, status=ItemStatus.SUBMITTED,
                      shipment_items=[ShipmentItem(shipment=Shipment(tracking_number="TRACK-2"))])
         self.db.add(other)
         self.db.commit()
@@ -176,7 +176,7 @@ class BuyingGroupRewardTests(unittest.TestCase):
                 self.item.status = ItemStatus.SCANNED
                 self.item.receipt_id = "R1"
                 self.item.reward = Decimal("6.00")
-                other = Item(order=self.item.order, quantity=2, price_sold=20,
+                other = Item(order=self.item.order, description="Test product", quantity=2, price_sold=20,
                              status=ItemStatus.SUBMITTED, shipment_items=[ShipmentItem(
                                  shipment=Shipment(tracking_number="PACKAGE-2" if walmart else "TRACK"))])
                 self.db.add(other)
@@ -222,7 +222,7 @@ class BuyingGroupRewardTests(unittest.TestCase):
         self.item.receipt_id = "R1"
         self.item.receipt_tracking_number = "TRACK"
         self.item.reward = Decimal(0)
-        other = Item(order=self.item.order, quantity=1, price_sold=20,
+        other = Item(order=self.item.order, description="Test product", quantity=1, price_sold=20,
                      status=ItemStatus.SCANNED, receipt_id="R2", receipt_tracking_number=number,
                      reward=Decimal(0), shipment_items=[ShipmentItem(
                          shipment=Shipment(tracking_number=number))])
