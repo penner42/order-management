@@ -35,6 +35,10 @@ class StoreOrderImportPayload(BaseModel):
         default=None,
         description="Rendered HTML of the store's invoice page, converted to PDF on apply.",
     )
+    invoicePdfBase64: str | None = Field(
+        default=None,
+        description="Base64-encoded PDF supplied directly by the store.",
+    )
 
 
 class StoreOrderDiffResponse(BaseModel):

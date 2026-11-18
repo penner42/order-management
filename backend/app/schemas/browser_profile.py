@@ -1,8 +1,9 @@
 """Schemas for browser automation profiles and jobs."""
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 Retailer = Literal["amazon", "walmart", "costco"]
@@ -84,6 +85,23 @@ class ImportStartResponse(BaseModel):
     job_id: str
     profile_id: int
     status: str
+
+
+class SingleOrderImportRequest(BaseModel):
+    retailer: Retailer
+    order_number: str = Field(min_length=1, max_length=64)
+
+    @field_validator("order_number", mode="before")
+    @classmethod
+    def trim_order_number(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("order_number")
+    @classmethod
+    def validate_order_number(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", value):
+            raise ValueError("Enter a valid retailer order number.")
+        return value
 
 
 class BrowserJobRead(BaseModel):

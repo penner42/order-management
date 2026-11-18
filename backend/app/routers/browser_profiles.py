@@ -54,6 +54,7 @@ from app.schemas.browser_profile import (
     ImportStartRequest,
     ImportStartResponse,
     LoginStartResponse,
+    SingleOrderImportRequest,
 )
 from app.schemas.store_import import StoreOrderImportPayload
 from app.routers.store_imports import apply_store_order_payload
@@ -702,7 +703,7 @@ async def start_login(
 ):
     profile = _get_profile_or_404(db, profile_id)
     profile = db.query(BrowserProfile).filter_by(id=profile_id).with_for_update().populate_existing().one()
-    if profile.status in ("importing", "login_in_progress"):
+    if profile.status in ("importing", "login_in_progress") or profile_id in _import_tasks:
         raise HTTPException(status_code=409, detail="A check or login is already active.")
     if profile.retailer not in SUPPORTED_RETAILERS | {"monarch"}:
         raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
@@ -922,38 +923,62 @@ def _queue_import(
     max_pages: int,
     auto_apply: bool,
     scheduled: bool,
+    order_number: str | None = None,
+    expected_retailer: str | None = None,
 ) -> ImportStartResponse:
+    # Serialize the profile claim with login and any other import source.
+    profile_id = profile.id
+    profile = (
+        db.query(BrowserProfile)
+        .filter_by(id=profile_id)
+        .with_for_update()
+        .populate_existing()
+        .one_or_none()
+    )
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Browser profile not found.")
+    if expected_retailer is not None and profile.retailer != expected_retailer:
+        raise HTTPException(status_code=400, detail="The browser profile is for a different retailer.")
     if profile.retailer not in SUPPORTED_RETAILERS:
         raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
     if profile.status == "login_in_progress":
         raise HTTPException(status_code=400, detail="Finish or cancel login before importing.")
-    if profile.status == "importing":
+    if profile.status == "importing" or profile_id in _import_tasks:
         raise HTTPException(status_code=400, detail="An import is already running for this profile.")
     if profile.status not in ("ready", "login_required", "error", "logged_out"):
         raise HTTPException(status_code=400, detail=f"Profile is not ready to import (status={profile.status}).")
 
-    kind = "import" if mode == "full" else "unshipped"
-    job = create_job(profile.id, kind)
+    kind = "import" if mode == "full" else mode
+    retailer = profile.retailer
+    store_account_id = profile.store_account_id
+    store_id = profile.store_id
     profile.status = "importing"
     profile.last_error = None
     db.commit()
 
+    job = create_job(profile_id, kind)
     task = asyncio.create_task(
         _run_import_job(
             job.id,
-            profile.id,
-            profile.retailer,
+            profile_id,
+            retailer,
             mode=mode,
             max_pages=max_pages,
             auto_apply=auto_apply,
             scheduled=scheduled,
-            store_account_id=profile.store_account_id,
-            store_id=profile.store_id,
+            store_account_id=store_account_id,
+            store_id=store_id,
+            order_number=order_number,
         )
     )
-    _import_tasks[profile.id] = task
-    task.add_done_callback(lambda done: _import_tasks.pop(profile.id, None) if _import_tasks.get(profile.id) is done else None)
-    return ImportStartResponse(job_id=job.id, profile_id=profile.id, status="queued")
+    _import_tasks[profile_id] = task
+
+    def clear_task(done: asyncio.Task) -> None:
+        if _import_tasks.get(profile_id) is done:
+            _import_tasks.pop(profile_id)
+
+    task.add_done_callback(clear_task)
+    return ImportStartResponse(job_id=job.id, profile_id=profile_id, status="queued")
 
 
 @router.post("/{profile_id}/import", response_model=ImportStartResponse)
@@ -974,6 +999,26 @@ async def start_import(
         max_pages=body.max_pages,
         auto_apply=auto_apply,
         scheduled=False,
+    )
+
+
+@router.post("/{profile_id}/import-order", response_model=ImportStartResponse)
+async def start_single_order_import(
+    profile_id: int,
+    body: SingleOrderImportRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    profile = _get_profile_or_404(db, profile_id)
+    return _queue_import(
+        db,
+        profile,
+        mode="single",
+        max_pages=profile.full_check_max_pages,
+        auto_apply=False,
+        scheduled=False,
+        order_number=body.order_number,
+        expected_retailer=body.retailer,
     )
 
 
@@ -1076,9 +1121,10 @@ async def _run_import_job(
     scheduled: bool,
     store_account_id: int | None,
     store_id: int,
+    order_number: str | None = None,
 ) -> None:
     label = retailer.capitalize()
-    mode_label = "full check" if mode == "full" else "unshipped check"
+    mode_label = {"full": "full check", "unshipped": "unshipped check", "single": "single-order import"}[mode]
     update_job(job_id, status="running", message=f"Starting {label} {mode_label}…")
 
     def on_progress(data: dict) -> None:
@@ -1112,11 +1158,12 @@ async def _run_import_job(
                 level="info",
                 event_type="check_finished",
                 message=message,
+                store_order_number=order_number,
             )
             db.commit()
 
         try:
-            order_ids: list[str] | None = None
+            order_ids = [order_number] if order_number is not None else None
             if mode == "unshipped":
                 order_ids = _unshipped_store_order_numbers(db, store_account_id, store_id)
                 if not order_ids:
@@ -1153,6 +1200,7 @@ async def _run_import_job(
                 level="info",
                 event_type="check_started",
                 message=started_msg,
+                store_order_number=order_number,
             )
             db.commit()
 
@@ -1340,6 +1388,7 @@ async def _run_import_job(
                     profile_id,
                     max_pages=max_pages,
                     order_ids=order_ids,
+                    single_order=mode == "single",
                     on_progress=on_progress,
                     on_order=on_order,
                     on_order_error=on_order_error,
@@ -1358,8 +1407,26 @@ async def _run_import_job(
             run_kwargs: dict = {}
             if mode == "full":
                 run_kwargs["full_check_last_run_at"] = now
-            else:
+            elif mode == "unshipped":
                 run_kwargs["unshipped_check_last_run_at"] = now
+
+            if order_number is not None:
+                if orders and (
+                    len(orders) != 1
+                    or orders[0].get("store") != retailer
+                    or str((orders[0].get("externalOrder") or {}).get("id") or "").strip() != order_number
+                ):
+                    on_order_error(order_number, "The retailer returned a different order than requested.")
+                    orders = []
+                if not orders:
+                    error = errors[0] if errors else (
+                        f"Could not find order {order_number}. Check that the selected browser profile can access it."
+                    )
+                    _set_profile_status(db, profile_id, status="ready", last_error=error)
+                    update_job(job_id, status="failed", error=error, order_count=0)
+                    log_finished(f"Stopped: {error}")
+                    finished_ok = True
+                    return
 
             if auto_apply:
                 if not orders and not applied:

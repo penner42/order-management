@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Order Manager Browser Integration",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "description": "Integrate order data from store order pages into Order Manager.",
   "permissions": [
     "activeTab",
@@ -36,6 +36,7 @@
       "lib/walmart.js",
       "lib/costco.js",
       "lib/amazon.js",
+      "lib/automation-order.js",
       "background.js"
     ],
     "service_worker": "background.js"
@@ -53,6 +54,8 @@
         "https://www.costco.com/myaccount/*"
       ],
       "js": [
+        "lib/invoice-document.js",
+        "stores/costco/invoice.js",
         "stores/costco/bulk_capture.js"
       ],
       "run_at": "document_start"
@@ -135,6 +138,7 @@
       "js": [
         "lib/product-upc.js",
         "lib/amazon.js",
+        "lib/invoice-document.js",
         "stores/amazon/selectors.js",
         "stores/amazon/dom.js",
         "stores/amazon/capture.js"

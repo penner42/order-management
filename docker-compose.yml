@@ -123,6 +123,7 @@ services:
       TEST_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
     volumes:
       - ./frontend:/app
+      - ./browser-extension:/browser-extension:ro
       # Each one-off runner gets the dependencies from its freshly built image.
       - /app/node_modules
     depends_on:

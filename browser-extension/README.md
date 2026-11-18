@@ -47,6 +47,15 @@ missing UPCs; saved UPCs and warehouse receipt UPCs are preserved.
 - `Buying Group` (`https://buyinggroup.com/*` / `https://*.buyinggroup.com/*`)
   - Load Orders (prints the fetched data in the popup)
 
+On Amazon, Walmart, or Costco order detail pages, **Import with browser automation**
+uses the Order Manager server’s retailer session. Connect the extension to Order
+Manager and set up a signed-in browser profile under **Settings → Stores**.
+Confirm the store and subaccount in the popup. The new Order Manager tab shows
+progress and opens Import Review when capture finishes. You can leave the retailer
+page as soon as you start the job. A verified screenshot, when available, is saved
+with the order when you apply the import. **Import this order** still uses the
+extension’s capture.
+
 ## Installation (signed builds, recommended)
 
 For personal use without loading unpacked every session, build signed packages once and install them.

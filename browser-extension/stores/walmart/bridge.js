@@ -4,6 +4,7 @@
   const STORAGE_KEY = 'walmartOrderDetail'
   const INVOICE_STORAGE_KEY = 'walmartInvoiceHtml'
   const EXTENSION_SOURCE = 'order-manager-walmart-extension'
+  let automationOrderContext = null
 
   if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
     return
@@ -42,12 +43,19 @@
       const url = data.url || (typeof document !== 'undefined' ? document.location.href : null)
       if (!url) return
 
+      if (data.type === 'reset') automationOrderContext = null
+
       if (data.type === 'orderDetail') {
         const payload = data.payload
         if (!payload) return
         // Ignore empty shells so bulk waiters are not unblocked early.
         const order = payload.order
         if (!order || order.id == null) return
+        automationOrderContext = {
+          url,
+          orderNumber: String(order.id),
+          email: order.customer?.email || null,
+        }
         chrome.storage.local.set({
           [STORAGE_KEY]: { url, payload },
         })
@@ -80,6 +88,13 @@
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         if (!message || message.store !== 'walmart') {
+          return
+        }
+
+        if (message.type === 'getAutomationOrderContext') {
+          sendResponse(automationOrderContext?.url === window.location.href
+            ? automationOrderContext
+            : null)
           return
         }
 

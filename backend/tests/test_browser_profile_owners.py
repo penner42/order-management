@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -16,7 +17,7 @@ from app.routers.stores import delete_store, delete_store_account
 from app.routers.store_imports import apply_store_order_payload, get_bulk_import_session, _bulk_sessions, _bulk_session_owners
 from app.browser_automation.common import post_bulk_session
 from app.browser_automation.jobs import create_job, get_job
-from app.schemas.browser_profile import BrowserProfileCreate, BrowserProfileScheduleUpdate
+from app.schemas.browser_profile import BrowserProfileCreate, BrowserProfileScheduleUpdate, SingleOrderImportRequest
 from app.schemas.store_import import StoreOrderImportPayload
 
 
@@ -192,6 +193,63 @@ class BrowserProfileOwnerTests(unittest.TestCase):
                     log = self.db.query(BrowserImportLog).filter_by(job_id=job.id, event_type='check_finished').one()
                     self.assertEqual(log.store_name, 'Custom retailer name')
                     self.assertEqual(log.store_account_name, 'Subaccount' if owner_account is not None else None)
+
+    def test_single_order_job_stages_exact_capture_and_keeps_schedule(self):
+        store_id, account_id = self.store.id, self.account.id
+        profile_id = self.create(store_account_id=account_id).id
+        body = SingleOrderImportRequest(retailer='walmart', order_number=' ORDER-123 ')
+        expected = {
+            'store': 'walmart', 'externalOrder': {'id': 'ORDER-123'},
+            'items': [], 'screenshotToken': 'staged-image-token',
+        }
+        for raw, success in [(expected, True), ({**expected, 'externalOrder': {'id': 'OTHER'}}, False),
+                             ({**expected, 'store': 'costco'}, False), (None, False)]:
+            with self.subTest(raw=raw):
+                async def run():
+                    started = await profiles.start_single_order_import(profile_id, body, db=self.db, _=self.user)
+                    with self.assertRaisesRegex(HTTPException, 'already running'):
+                        await profiles.start_single_order_import(profile_id, body, db=self.db, _=self.user)
+                    await profiles._import_tasks[profile_id]
+                    return get_job(started.job_id)
+
+                with (
+                    patch.object(profiles, 'SessionLocal', return_value=self.db),
+                    patch.object(profiles, 'run_walmart_import', new_callable=AsyncMock) as capture,
+                    patch.object(profiles.session_manager, 'close_session', new_callable=AsyncMock),
+                ):
+                    capture.return_value = [raw] if raw else []
+                    job = asyncio.run(run())
+                    self.assertEqual(capture.await_args.kwargs['order_ids'], ['ORDER-123'])
+                self.assertEqual(job.status, 'succeeded' if success else 'failed')
+                self.assertEqual(self.db.query(Order).count(), 0)
+                profile = self.db.get(BrowserProfile, profile_id)
+                self.assertIsNone(profile.full_check_last_run_at)
+                self.assertIsNone(profile.unshipped_check_last_run_at)
+                self.assertEqual(profile.status, 'ready')
+                if success:
+                    try:
+                        session = get_bulk_import_session(job.token)
+                        self.assertEqual((session.store_id, session.store_account_id), (store_id, account_id))
+                        self.assertEqual(session.orders[0].screenshotToken, 'staged-image-token')
+                    finally:
+                        _bulk_sessions.pop(job.token, None)
+                        _bulk_session_owners.pop(job.token, None)
+                else:
+                    self.assertIsNone(job.token)
+                    self.assertIn('order', job.error)
+                log = self.db.query(BrowserImportLog).filter_by(job_id=job.id, event_type='check_finished').one()
+                self.assertEqual((log.mode, log.store_order_number), ('single', 'ORDER-123'))
+
+    def test_single_order_requires_valid_order_number_and_matching_profile(self):
+        profile_id = self.create(store_id=self.store.id).id
+        for order_number in ('', '../orders', 'A?orderID=B', 'A#B'):
+            with self.subTest(order_number=order_number), self.assertRaises(ValidationError):
+                SingleOrderImportRequest(retailer='walmart', order_number=order_number)
+        body = SingleOrderImportRequest(retailer='amazon', order_number='123-1234567-1234567')
+        with self.assertRaisesRegex(HTTPException, 'different retailer'):
+            asyncio.run(profiles.start_single_order_import(profile_id, body, db=self.db, _=self.user))
+        with self.assertRaisesRegex(HTTPException, 'profile not found'):
+            asyncio.run(profiles.start_single_order_import(9999, body, db=self.db, _=self.user))
 
     def test_store_with_orders_keeps_profile_and_cookies_when_deletion_is_rejected(self):
         profile = self.create(store_id=self.store.id)

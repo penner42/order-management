@@ -87,6 +87,7 @@ def amazon_script_paths() -> list[Path]:
     files = [
         ext / "lib" / "product-upc.js",
         ext / "lib" / "amazon.js",
+        ext / "lib" / "invoice-document.js",
         ext / "stores" / "amazon" / "selectors.js",
         ext / "stores" / "amazon" / "dom.js",
     ]
@@ -117,9 +118,12 @@ def walmart_script_paths() -> list[Path]:
 
 
 def costco_script_paths() -> list[Path]:
-    """Scripts to inject for Costco normalize (GraphQL capture is via Playwright responses)."""
+    """Scripts to inject for Costco normalization and print invoice capture."""
+    ext = _extension_root()
     files = [
-        _extension_root() / "lib" / "costco.js",
+        ext / "lib" / "costco.js",
+        ext / "lib" / "invoice-document.js",
+        ext / "stores" / "costco" / "invoice.js",
     ]
     missing = [str(p) for p in files if not p.is_file()]
     if missing:

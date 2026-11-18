@@ -16,6 +16,7 @@ import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
 import ImportReview from './pages/ImportReview'
 import ImportReviewBulk from './pages/ImportReviewBulk'
+import AutomationOrderImport from './pages/AutomationOrderImport'
 import ReceivingReview from './pages/ReceivingReview'
 import ReceivingAudit from './pages/ReceivingAudit'
 import Portals from './pages/Portals'
@@ -117,6 +118,9 @@ function AppShell() {
   }
 
   if (!user) {
+    if (/^\/import-review\/job\/[\w-]+$/.test(location.pathname)) {
+      return <Navigate to={`/login?redirect=${encodeURIComponent(location.pathname)}`} replace />
+    }
     return <Navigate to="/login" replace />
   }
 
@@ -242,6 +246,7 @@ function AppShell() {
           <Route path="/import-preview" element={<ImportPreview />} />
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
+          <Route path="/import-review/job/:jobId" element={<AutomationOrderImport />} />
           <Route path="/receiving-review" element={<ReceivingReview />} />
           <Route path="/bfmr-order-review" element={<BfmrOrderReview />} />
           <Route path="/receiving-audit" element={<ReceivingAudit />} />

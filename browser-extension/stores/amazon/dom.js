@@ -1540,7 +1540,7 @@
       (doc.defaultView && doc.defaultView.location ? doc.defaultView.location.href : window.location.href)
     const rootText = textOf(root)
 
-    const orderId = extractOrderIdFromText(textOf(queryFirst(root, sel.ORDER_ID))) ||
+    const orderId = readOrderNumberFromDetail(root) ||
       extractOrderIdFromText(rootText)
     const expectedOrderId = extractOrderIdFromUrl(pageUrl)
     if (orderId && expectedOrderId && orderId !== expectedOrderId) return null
@@ -1608,6 +1608,49 @@
       shipments,
       paymentMethods,
       totals,
+    }
+  }
+
+  function readOrderNumberFromDetail(root = document) {
+    return extractOrderIdFromText(textOf(queryFirst(root, getSelectors().ORDER_ID)))
+  }
+
+  async function capturePrintableOrderSummary(doc, pageUrl, orderId) {
+    try {
+      const page = new URL(pageUrl)
+      if (page.protocol !== 'https:' || !globalThis.OrderManagerAmazon.isAmazonPageUrl(page.href)) return null
+      const isSummary = (url) => /^\/gp\/css\/summary\/print(?:\.html)?(?:\/|$)/i.test(url.pathname)
+      const findLink = () => {
+        for (const link of doc.querySelectorAll('a[href]')) {
+          const url = new URL(link.href, page)
+          if (url.origin !== page.origin || (url.pathname === page.pathname && url.search === page.search)) continue
+          if (!/^printable order summary$/i.test(textOf(link)) && !isSummary(url)) continue
+          const linkedOrderId = extractOrderIdFromUrl(url.href)
+          if (linkedOrderId && linkedOrderId !== orderId) continue
+          if (!linkedOrderId && isSummary(url)) continue
+          return url
+        }
+        return null
+      }
+
+      let url = isSummary(page) ? page : findLink()
+      if (!url) {
+        // Some layouts populate the Invoice menu only after it opens.
+        const menu = Array.from(doc.querySelectorAll(
+          'button, [role="button"], a[aria-expanded], [aria-haspopup], [data-action~="a-popover"]',
+        ))
+          .find(el => /^invoice$/i.test(textOf(el)))
+        if (!menu) return null
+        menu.click()
+        await waitForDecryptedContentInDocument(doc, () => (url = findLink()), 2500)
+      }
+      return await globalThis.OrderManagerInvoiceDocument.fetchInvoiceDocument(url, orderId, finalUrl => {
+        const responseOrderId = extractOrderIdFromUrl(finalUrl.href)
+        return !/\/(?:ap\/)?signin(?:\/|$)/i.test(finalUrl.pathname) &&
+          (!responseOrderId || responseOrderId === orderId)
+      })
+    } catch {
+      return null
     }
   }
 
@@ -2539,6 +2582,8 @@
     parseEmailFromAccountHtml,
     parseEmailFromNavAccount,
     parseEmailFromLiveDocument,
+    readOrderNumberFromDetail,
+    capturePrintableOrderSummary,
     isPlausibleAccountEmail,
     isPlausibleShippingAddress,
     fetchAccountEmailFromIframe,

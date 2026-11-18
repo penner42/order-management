@@ -34,7 +34,7 @@ async def _inject_amazon_scripts(page: Page) -> None:
 async def _ensure_scripts(page: Page) -> None:
     has = await page.evaluate(
         """() => !!(globalThis.OrderManagerAmazonDom && globalThis.OrderManagerAmazon
-          && globalThis.OrderManagerProductUpc)"""
+          && globalThis.OrderManagerProductUpc && globalThis.OrderManagerInvoiceDocument)"""
     )
     if not has:
         await _inject_amazon_scripts(page)
@@ -378,6 +378,26 @@ async def _detail_url_for_order_id(page: Page, order_id: str) -> str:
     return f"{origin}/your-orders/order-details?orderID={order_id}&disableCsd=missing-library"
 
 
+async def _capture_amazon_detail(
+    page: Page, account_email: str | None, profile_id: int | None,
+) -> dict[str, Any]:
+    raw = await _parse_detail_page(page, skip_tracking=False)
+    body = await _normalize_with_upcs(page, raw, page.url, account_email)
+    await capture_order_screenshot(page, body, profile_id)
+    try:
+        invoice = await page.evaluate(
+            """orderId => globalThis.OrderManagerAmazonDom.capturePrintableOrderSummary(
+                document, window.location.href, orderId
+            )""",
+            raw["orderId"],
+        )
+        if invoice:
+            body.update(invoice)
+    except Exception:
+        logger.info("Could not capture the printable summary for Amazon order %s", raw["orderId"])
+    return body
+
+
 async def _capture_amazon_order_ids(
     page: Page,
     order_ids: list[str],
@@ -405,9 +425,7 @@ async def _capture_amazon_order_ids(
             await page.goto(detail_url, wait_until="domcontentloaded", timeout=60_000)
             if looks_like_amazon_signin(page.url):
                 raise LoginRequiredError("Amazon session requires login.")
-            raw = await _parse_detail_page(page, skip_tracking=False)
-            body = await _normalize_with_upcs(page, raw, page.url, account_email)
-            await capture_order_screenshot(page, body, profile_id)
+            body = await _capture_amazon_detail(page, account_email, profile_id)
             orders.append(body)
             if on_order:
                 on_order(body)
@@ -468,7 +486,7 @@ async def run_amazon_import(
             ids.append(s)
         progress(
             phase="list",
-            message=f"Refreshing {len(ids)} unshipped order(s)…",
+            message=f"Capturing details for {len(ids)} requested order(s)…",
             list_count=len(ids),
             account_email=account_email,
         )
@@ -540,14 +558,9 @@ async def run_amazon_import(
                     await page.goto(detail_url, wait_until="domcontentloaded", timeout=60_000)
                     if looks_like_amazon_signin(page.url):
                         raise LoginRequiredError("Amazon session requires login.")
-                    raw = await _parse_detail_page(page, skip_tracking=False)
-                    source_url = page.url
+                    body = await _capture_amazon_detail(page, account_email, profile_id)
                 else:
-                    raw = summary
-                    source_url = detail_url or list_url
-                body = await _normalize_with_upcs(page, raw, source_url, account_email)
-                if detail_url:
-                    await capture_order_screenshot(page, body, profile_id)
+                    body = await _normalize_with_upcs(page, summary, list_url, account_email)
                 _emit_order(body)
             except LoginRequiredError:
                 raise

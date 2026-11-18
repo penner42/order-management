@@ -9,6 +9,7 @@ const EXT_TOKEN_HASH_PREFIX = "#ext-token=";
 
 // Shared helpers (classic worker-compatible)
 try { importScripts("lib/product-upc.js"); } catch { /* Firefox uses background scripts. */ }
+try { importScripts("lib/automation-order.js"); } catch { /* Firefox uses background scripts. */ }
 try {
   // eslint-disable-next-line no-undef
   importScripts("lib/walmart.js");
@@ -119,6 +120,7 @@ const AMAZON_BULK_PORTS = new Set();
 const AMAZON_ORDER_DETAIL_STORAGE_KEY = "amazonOrderDetail";
 const AMAZON_CONTENT_SCRIPT_FILES = [
   "lib/amazon.js",
+  "lib/invoice-document.js",
   "stores/amazon/selectors.js",
   "stores/amazon/dom.js",
   "stores/amazon/capture.js",
@@ -549,6 +551,8 @@ function normalizeAmazonOrderPayloadFallback(raw, sourceUrl, accountEmail) {
   if (typeof totalsRaw.orderDiscount === "number" && totalsRaw.orderDiscount > 0) {
     payload.orderDiscount = totalsRaw.orderDiscount;
   }
+  if (raw.invoicePdfBase64) payload.invoicePdfBase64 = raw.invoicePdfBase64;
+  if (raw.invoiceHtml) payload.invoiceHtml = raw.invoiceHtml;
 
   return payload;
 }
@@ -1145,9 +1149,8 @@ async function clearCostcoDetailStorage() {
   });
 }
 
-async function waitForCostcoDetail(orderHeaderId, timeoutMs) {
+async function waitForCostcoDetail(orderNumber, timeoutMs) {
   const start = Date.now();
-  const target = String(orderHeaderId || "").trim();
   const t = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 25000;
 
   while (Date.now() - start < t) {
@@ -1161,14 +1164,12 @@ async function waitForCostcoDetail(orderHeaderId, timeoutMs) {
       }
     });
 
-    if (current && current.payload) {
-      const id = current.orderHeaderId != null ? String(current.orderHeaderId).trim() : "";
-      if (!target || id === target) return current;
-    }
+    const detail = current?.payload?.data?.getOrderDetails;
+    if (String(detail?.orderNumber || detail?.sourceOrderNumber || "").trim() === orderNumber) return current;
     await sleep(500);
   }
 
-  throw new Error("Timed out waiting for Costco order detail payload for " + String(orderHeaderId));
+  throw new Error("Timed out waiting for Costco order detail payload for " + orderNumber);
 }
 
 async function clearAmazonDetailStorage() {
@@ -1946,12 +1947,12 @@ async function navigateTab(tabId, url, options) {
   });
 }
 
-async function getCostcoOrderDetailsUrlFromTab(tabId, orderHeaderId) {
+async function getCostcoOrderDetailsUrlFromTab(tabId, orderNumber) {
   const resp = await new Promise((resolve) => {
     try {
       chrome.tabs.sendMessage(
         tabId,
-        { store: "costco", type: "costcoGetOrderDetailsUrl", orderHeaderId: String(orderHeaderId) },
+        { store: "costco", type: "costcoGetOrderDetailsUrl", orderNumber },
         (r) => {
           if (chrome.runtime && chrome.runtime.lastError) {
             resolve({ success: false, error: chrome.runtime.lastError.message || "Unknown communication error." });
@@ -2330,6 +2331,51 @@ if (chrome && chrome.runtime && chrome.runtime.onMessage) {
   });
 }
 
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== "startAutomationOrder" || sender.url !== chrome.runtime.getURL("popup/popup.html")) {
+    return;
+  }
+  (async () => {
+    try {
+      const keys = [
+        "orderManagerActiveServer", ORDER_MANAGER_EXTENSION_TOKEN_DEV_STORAGE_KEY,
+        ORDER_MANAGER_EXTENSION_TOKEN_PROD_STORAGE_KEY, ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY_LEGACY,
+      ];
+      const settings = await new Promise((resolve, reject) => chrome.storage.local.get(keys, (data) => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else resolve(data);
+      }));
+      const server = settings.orderManagerActiveServer === "dev" ? "dev" : "prod";
+      const token = server === "dev"
+        ? settings[ORDER_MANAGER_EXTENSION_TOKEN_DEV_STORAGE_KEY]
+        : settings[ORDER_MANAGER_EXTENSION_TOKEN_PROD_STORAGE_KEY] || settings[ORDER_MANAGER_EXTENSION_TOKEN_STORAGE_KEY_LEGACY];
+      const automation = globalThis.OrderManagerAutomationOrder;
+      const appBase = automation.appBaseUrl(await getOrderManagerApiBaseUrlAsync());
+      if (server !== message.server || appBase !== message.appBase) {
+        throw new Error("The selected Order Manager server changed. Reopen the popup and try again.");
+      }
+      if (!token) throw new Error("Connect Order Management in the extension to use browser automation.");
+      if (!Number.isInteger(message.profileId) || message.profileId <= 0) {
+        throw new Error("Choose a browser profile.");
+      }
+      const job = await automation.request(appBase, token, "/" + message.profileId + "/import-order", {
+        method: "POST",
+        body: JSON.stringify({ retailer: message.retailer, order_number: message.orderNumber }),
+      });
+      if (!job?.job_id) throw new Error("Order Manager did not return an import job.");
+      const url = appBase + "/import-review/job/" + encodeURIComponent(job.job_id);
+      chrome.tabs.create({ url, active: true }, () => {
+        if (chrome.runtime.lastError) sendResponse({ url });
+        else sendResponse({ success: true });
+      });
+    } catch (error) {
+      sendResponse({ error: error.message });
+    }
+  })();
+  return true;
+});
+
 // ---------------------------------------------------------------------------
 // Costco bulk import job controller (single-page GraphQL capture)
 // ---------------------------------------------------------------------------
@@ -2451,6 +2497,7 @@ function attachCostcoBulkPortHandlers(port) {
       // and monitoring the order-detail GraphQL response captured by the content script.
       const pairs = extractCostcoOrderHeaderIdsFromOrdersListGraphql(captured.payload);
       const detailsByOrderNumber = {};
+      const invoicesByOrderNumber = new Map();
 
       port.postMessage({ type: "enriching", total: pairs.length });
 
@@ -2488,16 +2535,18 @@ function attachCostcoBulkPortHandlers(port) {
             orderHeaderId: p.orderHeaderId,
           });
 
-          const detailUrl = await getCostcoOrderDetailsUrlFromTab(msg.sourceTabId, p.orderHeaderId);
+          const detailUrl = await getCostcoOrderDetailsUrlFromTab(msg.sourceTabId, p.orderNumber);
           await clearCostcoDetailStorage();
           if (scrapeTabId != null) {
             await navigateTab(scrapeTabId, detailUrl);
           } else {
             throw new Error("Costco scrape tab was not created.");
           }
-          const capturedDetail = await waitForCostcoDetail(p.orderHeaderId, 25000);
+          const capturedDetail = await waitForCostcoDetail(p.orderNumber, 25000);
           if (capturedDetail && capturedDetail.payload) {
             detailsByOrderNumber[p.orderNumber] = capturedDetail.payload;
+            const invoice = await globalThis.OrderManagerCostco?.captureCostcoInvoiceFromTab(scrapeTabId, p.orderNumber);
+            if (invoice) invoicesByOrderNumber.set(p.orderNumber, invoice);
           }
           port.postMessage({
             type: "orderDetailsStatus",
@@ -2528,6 +2577,9 @@ function attachCostcoBulkPortHandlers(port) {
 
       if (globalThis.OrderManagerCostco?.enrichCostcoOrdersWithProductUpcs) {
         await globalThis.OrderManagerCostco.enrichCostcoOrdersWithProductUpcs(orders);
+      }
+      for (const order of orders) {
+        Object.assign(order, invoicesByOrderNumber.get(order.externalOrder?.id));
       }
       port.postMessage({ type: "creatingSession", total: orders.length });
 

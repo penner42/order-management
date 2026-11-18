@@ -87,6 +87,8 @@ function modeLabel(mode: string): string {
       return 'Full check'
     case 'unshipped':
       return 'Unshipped check'
+    case 'single':
+      return 'Single-order import'
     case 'tracking_submit':
       return 'Tracking submit'
     case 'received_check':

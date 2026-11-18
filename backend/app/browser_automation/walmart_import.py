@@ -317,7 +317,7 @@ async def run_walmart_import(
             order_numbers.append(s)
         progress(
             phase="list",
-            message=f"Refreshing {len(order_numbers)} unshipped order(s)…",
+            message=f"Capturing details for {len(order_numbers)} requested order(s)…",
             list_count=len(order_numbers),
         )
     else:

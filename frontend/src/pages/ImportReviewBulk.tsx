@@ -49,6 +49,7 @@ interface NormalizedShipment {
 interface OrderDiff {
   is_existing_order: boolean
   has_changes?: boolean
+  invoice_to_save?: boolean
   current_order?: {
     buying_group_id: number | null
     store_account_id: number | null
@@ -301,6 +302,7 @@ function existingOrderHasActionableUpdates(
   selectedAccountId: number | null | undefined
 ): boolean {
   return (
+    diff?.invoice_to_save === true ||
     countActionableItemChanges(diff) > 0 ||
     countShipmentChanges(diff) > 0 ||
     selectionDiffersFromCurrent(diff?.current_order?.buying_group_id, selectedBuyingGroupId) ||
@@ -319,6 +321,7 @@ function getBulkImportSortGroup(
   if (isIgnoredZip) return 'ignored'
   if (
     !isExisting ||
+    diff?.invoice_to_save === true ||
     countActionableItemChanges(diff ?? null) > 0 ||
     countShipmentChanges(diff ?? null) > 0 ||
     orderNeedsCancelUpdate(diff ?? null, isCanceled)
@@ -897,6 +900,9 @@ export default function ImportReviewBulk() {
                     </div>
                     {hasActionableUpdates && isExisting && (
                       <div className="flex flex-wrap gap-3 text-[11px] mt-1">
+                        {diff?.invoice_to_save && (
+                          <span className="text-amber-700 dark:text-amber-300">Invoice available</span>
+                        )}
                         {itemChangesCount > 0 && (
                           <span className="text-amber-700 dark:text-amber-300">
                             {itemChangesCount} item change(s)

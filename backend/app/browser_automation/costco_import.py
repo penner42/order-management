@@ -74,7 +74,7 @@ def _looks_like_order_details_graphql(payload: Any) -> bool:
         od = data.get("getOrderDetails") if isinstance(data, dict) else None
         if not isinstance(od, dict):
             return False
-        if od.get("orderNumber"):
+        if od.get("orderNumber") or od.get("sourceOrderNumber"):
             return True
         ship = od.get("shipToAddress")
         return isinstance(ship, list) and len(ship) > 0
@@ -183,7 +183,7 @@ def _detail_order_number(payload: dict[str, Any] | None) -> str | None:
         od = (payload.get("data") or {}).get("getOrderDetails")
         if not isinstance(od, dict):
             return None
-        num = str(od.get("orderNumber") or "").strip()
+        num = str(od.get("orderNumber") or od.get("sourceOrderNumber") or "").strip()
         return num or None
     except Exception:
         return None
@@ -376,6 +376,7 @@ class _CostcoGraphqlCapture:
         *,
         order_number: str | None = None,
         timeout_ms: int = 35000,
+        require_order_number: bool = False,
     ) -> tuple[dict[str, Any], str | None]:
         target_header = str(order_header_id or "").strip()
         target_order = str(order_number or "").strip()
@@ -385,18 +386,18 @@ class _CostcoGraphqlCapture:
                 if self._details is not None:
                     got_header = (self._details_header_id or "").strip()
                     got_order = (self._details_order_number or "").strip()
-                    # SPA variables.orderNumbers is the order number; accept either match.
-                    if target_header and got_header == target_header:
-                        return self._details, self._details_url
                     if target_order and got_order == target_order:
                         return self._details, self._details_url
-                    if target_order and got_header == target_order:
-                        return self._details, self._details_url
-                    if not target_header and not target_order:
+                    # The batch path also accepts a matching request variable.
+                    if not require_order_number and (
+                        (target_header and got_header == target_header)
+                        or (target_order and got_header == target_order)
+                        or not (target_header or target_order)
+                    ):
                         return self._details, self._details_url
             await asyncio.sleep(0.25)
         raise TimeoutError(
-            f"Timed out waiting for Costco getOrderDetails GraphQL for {order_header_id}"
+            f"Timed out waiting for Costco getOrderDetails GraphQL for {target_order or target_header}"
         )
 
     async def fetch_order_details(self, order_number: str) -> dict[str, Any]:
@@ -524,6 +525,8 @@ class _CostcoGraphqlCapture:
 async def _inject_costco_lib(page: Page) -> None:
     has = await page.evaluate(
         """() => !!(globalThis.OrderManagerCostco
+          && globalThis.OrderManagerCostcoInvoice
+          && globalThis.OrderManagerInvoiceDocument
           && typeof globalThis.OrderManagerCostco.normalizeCostcoOrdersGraphqlPayload === 'function'
           && typeof globalThis.OrderManagerCostco.mergeCostcoOrderDetailsIntoNormalizedOrders === 'function')"""
     )
@@ -663,6 +666,7 @@ async def _capture_order_details(
     *,
     order_number: str,
     header_id: str,
+    require_order_number: bool = False,
 ) -> dict[str, Any]:
     """Open order details; Costco's GraphQL orderNumbers arg is the order number."""
 
@@ -677,6 +681,7 @@ async def _capture_order_details(
                 header_id,
                 order_number=order_number,
                 timeout_ms=25_000,
+                require_order_number=require_order_number,
             )
             return detail_payload
         except TimeoutError:
@@ -691,6 +696,7 @@ async def _capture_order_details(
                 header_id,
                 order_number=order_number,
                 timeout_ms=25_000,
+                require_order_number=require_order_number,
             )
             return detail_payload
         except TimeoutError:
@@ -701,6 +707,46 @@ async def _capture_order_details(
         return await capture.fetch_order_details(order_number)
 
     raise RuntimeError(f"Failed to capture Costco getOrderDetails for order {order_number}")
+
+
+async def _try_capture_invoice(page: Page, order_number: str) -> dict[str, str] | None:
+    try:
+        return await page.evaluate(
+            "number => globalThis.OrderManagerCostcoInvoice.captureCostcoInvoice(number)", order_number
+        )
+    except Exception:
+        logger.info("Could not capture the print invoice for Costco order %s", order_number)
+        return None
+
+
+async def _capture_single_order_direct(
+    page: Page, capture: _CostcoGraphqlCapture, profile_id: int, order_number: str
+) -> dict[str, Any]:
+    app_id = await _extract_app_id(page)
+    if not app_id:
+        raise RuntimeError("Could not determine the Costco account route.")
+    url = _order_details_path_url(app_id, order_number)
+    await capture.clear_details()
+    await _costco_spa_navigate(page, url)
+    details, _ = await capture.wait_for_details(
+        "", order_number=order_number, timeout_ms=25_000, require_order_number=True
+    )
+    await _inject_costco_lib(page)
+    body = await page.evaluate(
+        """({ payload, url }) =>
+            globalThis.OrderManagerCostco.normalizeCostcoOrderDetailsGraphqlPayload(payload, url)""",
+        {"payload": _reshape_order_details_payload(details), "url": url},
+    )
+    body["source"] = "browser-automation"
+    await capture_order_screenshot(page, body, profile_id)
+    invoice = await _try_capture_invoice(page, order_number)
+    if invoice:
+        body.update(invoice)
+    orders = await page.evaluate(
+        "orders => globalThis.OrderManagerCostco.enrichCostcoOrdersWithProductUpcs(orders)",
+        [body],
+    )
+    return orders[0]
 
 
 async def _normalize_and_merge(
@@ -743,6 +789,7 @@ async def run_costco_import(
     *,
     max_pages: int = 3,
     order_ids: list[str] | None = None,
+    single_order: bool = False,
     on_progress: ProgressCallback | None = None,
     on_order: OrderCallback | None = None,
     on_order_error: OrderErrorCallback | None = None,
@@ -783,6 +830,24 @@ async def run_costco_import(
             timeout=300_000,
         )
 
+        if single_order:
+            if order_ids is None or len(order_ids) != 1:
+                raise ValueError("A single-order Costco import requires one order number.")
+            order_number = order_ids[0]
+            progress(phase="detail", message=f"Opening Costco order {order_number}…")
+            try:
+                body = await _capture_single_order_direct(page, capture, profile_id, order_number)
+            except LoginRequiredError:
+                raise
+            except Exception as exc:
+                if looks_like_costco_signin(page.url) and "#/app/" not in page.url:
+                    raise LoginRequiredError("Costco session requires login.") from exc
+                logger.info("Costco direct capture failed for %s, trying order history: %s", order_number, exc)
+            else:
+                if on_order:
+                    on_order(body)
+                progress(phase="done", message="Captured 1 order", captured=1)
+                return [body]
         progress(phase="list", message="Opening Costco Orders & Purchases…", page=1)
         await _ensure_orders_and_purchases_route(page)
 
@@ -832,7 +897,7 @@ async def run_costco_import(
                     phase="list",
                     message=(
                         f"List page {page_num}: found {len(found)}/{len(wanted)} "
-                        f"unshipped order(s)…"
+                        f"requested order(s)…"
                     ),
                     page=page_num,
                     list_count=len(pairs),
@@ -865,7 +930,7 @@ async def run_costco_import(
             progress(
                 phase="list",
                 message=(
-                    f"Refreshing {len(pairs)} unshipped order(s) "
+                    f"Found {len(pairs)} requested order(s) "
                     f"(scanned {page_num} list page(s))…"
                 ),
                 page=page_num,
@@ -889,6 +954,7 @@ async def run_costco_import(
 
         details_by_order_number: dict[str, Any] = {}
         screenshot_tokens: dict[str, str] = {}
+        invoices_by_order_number: dict[str, dict[str, str]] = {}
         for idx, pair in enumerate(pairs):
             order_number = pair["orderNumber"]
             header_id = pair["orderHeaderId"]
@@ -904,7 +970,12 @@ async def run_costco_import(
                     capture,
                     order_number=order_number,
                     header_id=header_id,
+                    require_order_number=single_order,
                 )
+                if single_order and _detail_order_number(detail_payload) != order_number:
+                    raise RuntimeError(f"Costco returned a different order than {order_number}.")
+                if single_order:
+                    detail_payload = _reshape_order_details_payload(detail_payload)
                 details_by_order_number[order_number] = detail_payload
                 # Capture now: the final bulk normalization runs after navigating
                 # away from all but the last order's details page.
@@ -918,6 +989,9 @@ async def run_costco_import(
                     await capture_order_screenshot(page, current, profile_id)
                     if current.get("screenshotToken"):
                         screenshot_tokens[order_number] = current["screenshotToken"]
+                    invoice = await _try_capture_invoice(page, order_number)
+                    if invoice:
+                        invoices_by_order_number[order_number] = invoice
             except LoginRequiredError:
                 raise
             except Exception as exc:
@@ -932,6 +1006,8 @@ async def run_costco_import(
             page, orders_payload, orders_url or page.url, details_by_order_number
         )
         wanted_numbers = {p["orderNumber"] for p in pairs}
+        if single_order:
+            wanted_numbers.intersection_update(details_by_order_number)
         orders = [
             o
             for o in all_orders
@@ -948,6 +1024,8 @@ async def run_costco_import(
             number = str((body.get("externalOrder") or {}).get("id") or "").strip()
             if number in screenshot_tokens:
                 body["screenshotToken"] = screenshot_tokens[number]
+            if number in invoices_by_order_number:
+                body.update(invoices_by_order_number[number])
 
         if on_order:
             for body in orders:

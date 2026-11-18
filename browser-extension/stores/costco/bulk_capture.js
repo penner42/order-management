@@ -5,6 +5,7 @@
   const COSTCO_ORDER_DETAILS_GRAPHQL_TEMPLATE_STORAGE_KEY = 'costcoOrderDetailsGraphqlTemplate'
   const COSTCO_ORDER_DETAILS_CAPTURE_STORAGE_KEY = 'costcoOrderDetailsGraphqlCapture'
   const SOURCE = 'order-manager-costco'
+  let automationOrderContext = null
 
   if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
     return
@@ -50,7 +51,16 @@
 
   // Re-inject on SPA hash navigation (best-effort; injected hook is idempotent).
   window.addEventListener('hashchange', () => {
+    automationOrderContext = null
     if (isCostcoCaptureRoute()) injectPageScript()
+  })
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.store === 'costco' && message.type === 'getAutomationOrderContext') {
+      sendResponse(automationOrderContext?.url === window.location.href
+        ? automationOrderContext
+        : null)
+    }
   })
 
   // Persist captured payloads from the injected page script.
@@ -84,6 +94,15 @@
       // Capture order-details query template (query + operationName), so the background job can fetch
       // details for each orderHeaderId during bulk import.
       if (data.type === 'graphqlOrderDetails') {
+        const order = data.payload?.data?.getOrderDetails
+        const number = order?.orderNumber || order?.sourceOrderNumber
+        if (number && isCostcoOrderDetailsRoute()) {
+          automationOrderContext = {
+            url: window.location.href,
+            orderNumber: String(number).trim(),
+            email: order.emailAddress || null,
+          }
+        }
         const request = data.request && typeof data.request === 'object' ? data.request : null
         const query = request && typeof request.query === 'string' ? request.query : null
         if (!query || !query.trim()) return
@@ -176,47 +195,15 @@
     })
   }
 
-  function getOrderDetailsUrlForHeaderId(orderHeaderId) {
-    const target = orderHeaderId != null ? String(orderHeaderId).trim() : ''
-    if (!target) return null
-
-    // 1) Preferred: find the actual link Costco rendered (may be relative).
-    const anchors = Array.from(document.querySelectorAll('a[href]'))
-    for (let i = 0; i < anchors.length; i++) {
-      const el = anchors[i]
-      try {
-        const href = el.getAttribute('href') || ''
-        const lower = href.toLowerCase()
-        if (!lower.includes('orderdetails')) continue
-        if (!href.includes(target)) continue
-        return new URL(href, document.location.href).toString()
-      } catch {
-        // ignore
-      }
+  function getOrderDetailsUrl(orderNumber) {
+    const suffix = '/orderdetails/' + encodeURIComponent(orderNumber)
+    for (const link of document.querySelectorAll('a[href*="/orderdetails/" i]')) {
+      const url = new URL(link.getAttribute('href'), document.baseURI)
+      if (url.origin === location.origin && url.hash.split('?')[0].endsWith(suffix)) return url.href
     }
 
-    // 2) Fallback: construct the SPA route URL from the current app id in the hash.
-    // The orders list URL looks like: /myaccount/#/app/<graphQlClientId>/ordersandpurchases
-    let appId = null
-    try {
-      const h = window.location.hash || ''
-      const m = /#\/app\/([^/]+)\//.exec(h)
-      if (m && m[1]) appId = String(m[1]).trim()
-    } catch {
-      appId = null
-    }
-    if (!appId) return null
-
-    const base = 'https://www.costco.com/myaccount/#/app/' + encodeURIComponent(appId) + '/orderdetails'
-    const candidates = [
-      // Most likely: matches GraphQL variables.orderNumbers=["<orderHeaderId>"]
-      base + '?orderNumbers=' + encodeURIComponent(target),
-      // Alternate singular param
-      base + '?orderNumber=' + encodeURIComponent(target),
-      // Alternate path segment form
-      base + '/' + encodeURIComponent(target),
-    ]
-    return candidates[0]
+    const appId = /^#\/app\/([^/]+)\//.exec(location.hash)?.[1]
+    return appId ? new URL('/myaccount/#/app/' + appId + suffix, location.origin).href : null
   }
 
   // Allow the background/popup to request the cached capture.
@@ -224,6 +211,12 @@
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         if (!message || message.store !== 'costco') return
+        if (message.type === 'costcoCaptureInvoice') {
+          globalThis.OrderManagerCostcoInvoice.captureCostcoInvoice(message.orderNumber)
+            .then(sendResponse, () => sendResponse(null))
+          return true
+        }
+
         if (message.type === 'costcoGetOrdersGraphql') {
           ;(async () => {
             const cached = await loadCachedGraphql()
@@ -263,14 +256,14 @@
         }
 
         if (message.type === 'costcoGetOrderDetailsUrl') {
-          const headerId = message.orderHeaderId != null ? String(message.orderHeaderId).trim() : ''
-          if (!headerId) {
-            sendResponse({ success: false, error: 'Missing orderHeaderId.' })
+          const orderNumber = String(message.orderNumber || '').trim()
+          if (!orderNumber) {
+            sendResponse({ success: false, error: 'Missing order number.' })
             return true
           }
-          const url = getOrderDetailsUrlForHeaderId(headerId)
+          const url = getOrderDetailsUrl(orderNumber)
           if (!url) {
-            sendResponse({ success: false, error: 'Could not find order details link for orderHeaderId ' + headerId })
+            sendResponse({ success: false, error: 'Could not find order details link for order ' + orderNumber })
             return true
           }
           sendResponse({ success: true, url })

@@ -50,7 +50,7 @@ from app.utils.ignored_zip_codes import (
     is_ignored_postal_code,
     shipping_postal_code_from_payload,
 )
-from app.utils.invoices import prewarm_invoice_pdf, render_invoice_pdf
+from app.utils.invoices import invoice_pdf_needs_replacement, prewarm_invoice_pdf, render_invoice_pdf, save_invoice_pdf
 from app.utils.costco_software import (
     bundled_no_payment_names, costco_sales_tax, default_costco_item_taxes, default_costco_payouts,
 )
@@ -1228,8 +1228,13 @@ def _build_order_diff(
             "incoming": incoming_discount_num,
         }
 
+    invoice_to_save = bool(
+        (normalized.get("invoicePdfBase64") or normalized.get("invoiceHtml"))
+        and invoice_pdf_needs_replacement(linked_order.invoice_pdf_path)
+    )
     has_changes = bool(
-        order_changes
+        invoice_to_save
+        or order_changes
         or any(m["changes"] for m in matched_items)
         or added_items
         or unmatched_existing
@@ -1240,6 +1245,7 @@ def _build_order_diff(
     return {
         "is_existing_order": True,
         "has_changes": has_changes,
+        "invoice_to_save": invoice_to_save,
         "current_order": {
             "buying_group_id": linked_order.buying_group_id,
             "store_account_id": linked_order.store_account_id,
@@ -2291,10 +2297,13 @@ def apply_store_order_payload(
                 )
             )
 
-    if payload.invoiceHtml:
-        filename = render_invoice_pdf(payload.invoiceHtml, order.id)
-        if filename:
-            order.invoice_pdf_path = filename
+    filename = save_invoice_pdf(payload.invoicePdfBase64, order.id) if payload.invoicePdfBase64 else None
+    if not filename and payload.invoiceHtml:
+        filename = render_invoice_pdf(
+            payload.invoiceHtml, order.id, screen_layout=payload.store.strip().lower() == "costco"
+        )
+    if filename:
+        order.invoice_pdf_path = filename
 
     capture_import_metadata(db, order, normalized, payload.store)
     from app.utils.order_screenshots import attach_screenshot
@@ -2387,7 +2396,7 @@ def get_bulk_import_session(
 
     for payload in payloads:
         if payload.invoiceHtml:
-            prewarm_invoice_pdf(payload.invoiceHtml)
+            prewarm_invoice_pdf(payload.invoiceHtml, screen_layout=payload.store.strip().lower() == "costco")
 
     store_id, account_id = _bulk_session_owners.get(token, (None, None))
     return BulkImportSessionPayloads(orders=payloads, store_id=store_id, store_account_id=account_id)

@@ -1,7 +1,7 @@
 {
-  "version": "0.1.40",
-  "fingerprint": "0d7cda169bd552ea4a7897c79b256222fe6558901e4673eac4141d94a110500d",
-  "built_at": "2026-11-18T04:55:57.870808+00:00",
-  "chrome_filename": "order-manager-0.1.40.crx",
-  "firefox_filename": "order_manager_browser_integration-0.1.40.xpi"
+  "version": "0.1.41",
+  "fingerprint": "04eb81e1825aff98d2cda98ad89dfec657ce83f524eb1281fba50f9837f51fa1",
+  "built_at": "2026-11-18T21:22:27.007214+00:00",
+  "chrome_filename": "order-manager-0.1.41.crx",
+  "firefox_filename": "order_manager_browser_integration-0.1.41.xpi"
 }

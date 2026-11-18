@@ -1317,7 +1317,7 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
 
         appendRow("Preparing import review…", "pending");
 
-        getOrderManagerApiBaseUrl((baseUrl) => {
+        getOrderManagerApiBaseUrl(async (baseUrl) => {
           if (!baseUrl) {
             resultsEl.innerHTML =
               '<div class="error">Order Manager base URL is not configured.</div>' +
@@ -1358,6 +1358,8 @@ function normalizeWalmartOrderDetailPayload(payload, sourceUrl) {
           }
 
           try {
+            const invoice = await globalThis.OrderManagerCostco.captureCostcoInvoiceFromTab(tab?.id, body.externalOrder.id);
+            Object.assign(body, invoice);
             appendRow("Looking up product barcodes…", "pending");
             globalThis.OrderManagerCostco.enrichCostcoOrdersWithProductUpcs([body])
               .then(() => openBulkReviewForOrders([body], resultsEl))
@@ -1384,6 +1386,135 @@ function escapeHtml(text) {
   div.textContent = text;
   return div.innerHTML;
 }
+
+(async function setupAutomationOrder() {
+  const section = document.getElementById("automationOrderSection");
+  const profileLabel = document.getElementById("automationProfileLabel");
+  const select = document.getElementById("automationProfile");
+  const button = document.getElementById("automationOrderStart");
+  const status = document.getElementById("automationOrderStatus");
+  const automation = globalThis.OrderManagerAutomationOrder;
+  const [tab] = await new Promise((resolve) => chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (chrome.runtime.lastError) resolve([]);
+    else resolve(tabs || []);
+  }));
+  if (!tab?.url || tab.id == null) return;
+
+  const pageUrl = tab.url;
+  const retailer = [
+    ["amazon", isAmazonOrderDetailUrl],
+    ["walmart", isWalmartOrderDetailUrl],
+    ["costco", isCostcoOrderDetailsUrl],
+  ].find(([, matches]) => matches(pageUrl))?.[0];
+  if (!retailer) return;
+
+  document.getElementById(retailer + "OrderDetailSection").append(section);
+  section.hidden = false;
+  let loadVersion = 0;
+  let selection = null;
+  let submitting = false;
+
+  function setStatus(message, error = false) {
+    status.textContent = message;
+    status.classList.toggle("error", error);
+  }
+
+  async function loadProfiles() {
+    const version = ++loadVersion;
+    selection = null;
+    button.disabled = true;
+    select.hidden = true;
+    profileLabel.hidden = true;
+    setStatus("Loading browser profiles…");
+
+    try {
+      const server = await new Promise(getOrderManagerActiveServer);
+      const [baseUrl, token, pageData] = await Promise.all([
+        new Promise((resolve) => getOrderManagerApiBaseUrlForServer(server, resolve)),
+        new Promise((resolve) => getOrderManagerAuthTokenForServer(server, resolve)),
+        new Promise((resolve) => chrome.tabs.sendMessage(tab.id, {
+          store: retailer, type: "getAutomationOrderContext",
+        }, (data) => {
+          if (chrome.runtime.lastError) resolve(null);
+          else resolve(data);
+        })),
+      ]);
+      const context = automation.resolveOrderContext(retailer, pageUrl, pageData);
+      if (!context.orderNumber) throw new Error("Could not read the order number. Refresh the order page and try again.");
+      if (!baseUrl) throw new Error("Set the Order Manager server URL in extension settings.");
+      if (!token) throw new Error("Connect Order Management in the extension to use browser automation.");
+
+      const appBase = automation.appBaseUrl(baseUrl);
+      const rows = await automation.request(appBase, token, "");
+      const profiles = rows.filter((profile) => profile.retailer === retailer && profile.store_id != null);
+      if (!profiles.length) {
+        throw new Error("Add a browser profile for this retailer in Order Manager under Settings → Stores.");
+      }
+      if (version !== loadVersion) return;
+      select.replaceChildren(new Option("Choose a profile", ""));
+      for (const profile of profiles) {
+        const owner = profile.store_account_name || "Store-level profile";
+        select.add(new Option(profile.store_name + " — " + owner, String(profile.id)));
+      }
+      const suggested = automation.suggestedProfile(profiles, context.email);
+      select.value = suggested ? String(suggested.id) : "";
+      select.hidden = false;
+      profileLabel.hidden = false;
+      selection = { server, appBase, profiles, orderNumber: context.orderNumber };
+      showSelection();
+    } catch (error) {
+      if (version === loadVersion) setStatus(error.message, true);
+    }
+  }
+
+  function showSelection() {
+    if (!selection) return;
+    const profile = selection.profiles.find((candidate) => String(candidate.id) === select.value);
+    const busy = profile?.status === "importing" || profile?.status === "login_in_progress";
+    button.disabled = submitting || !profile || busy;
+    setStatus(busy ? "This profile is busy. Wait for its import or finish signing in, then reopen the popup." :
+      "Order " + selection.orderNumber, busy);
+  }
+
+  select.addEventListener("change", showSelection);
+  window.addEventListener("orderManagerActiveServerChanged", loadProfiles);
+  button.addEventListener("click", () => {
+    if (button.disabled || !selection) return;
+    submitting = true;
+    button.disabled = true;
+    select.disabled = true;
+    setStatus("Starting browser automation…");
+    chrome.runtime.sendMessage({
+      type: "startAutomationOrder",
+      retailer,
+      profileId: Number(select.value),
+      orderNumber: selection.orderNumber,
+      server: selection.server,
+      appBase: selection.appBase,
+    }, (response) => {
+      const error = chrome.runtime.lastError?.message || response?.error;
+      if (response?.url) {
+        setStatus("");
+        const link = document.createElement("a");
+        link.href = response.url;
+        link.target = "_blank";
+        link.textContent = "Open import progress";
+        status.replaceChildren("Import started. ", link);
+        return;
+      }
+      if (response?.success) {
+        setStatus("Import started.");
+        window.close();
+        return;
+      }
+      submitting = false;
+      select.disabled = false;
+      showSelection();
+      setStatus(error || "Could not start browser automation.", true);
+    });
+  });
+  loadProfiles();
+})();
 
 function openBulkReviewForOrders(orders, resultsEl) {
   if (!chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== "function") {

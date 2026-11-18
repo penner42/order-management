@@ -198,6 +198,8 @@
     if (typeof totalsRaw.orderDiscount === 'number' && totalsRaw.orderDiscount > 0) {
       payload.orderDiscount = totalsRaw.orderDiscount
     }
+    if (raw.invoicePdfBase64) payload.invoicePdfBase64 = raw.invoicePdfBase64
+    if (raw.invoiceHtml) payload.invoiceHtml = raw.invoiceHtml
 
     return payload
   }

@@ -23,6 +23,20 @@
     button:hover {
       background: #005ba8;
     }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    #automationProfile {
+      box-sizing: border-box;
+      width: 100%;
+      margin-bottom: 8px;
+      padding: 6px;
+      font: inherit;
+    }
+    #automationOrderSection [hidden] {
+      display: none;
+    }
     button.secondary {
       background: #f3f4f6;
       color: #111;
@@ -171,6 +185,12 @@
     </button>
     <div id="costcoOrderDetailResults" style="margin-top: 8px; font-size: 12px; max-height: 220px; overflow-y: auto; display: none;"></div>
   </div>
+  <section id="automationOrderSection" hidden style="margin-bottom: 14px; padding-bottom: 10px;">
+    <label for="automationProfile" hidden id="automationProfileLabel">Automation browser profile</label>
+    <select id="automationProfile" hidden></select>
+    <button id="automationOrderStart" type="button" class="secondary" disabled>Import with browser automation</button>
+    <div id="automationOrderStatus" role="status" style="margin-top: 6px; font-size: 12px;"></div>
+  </section>
   <div id="usabgSection" style="display: none;">
     <div id="usabgSectionTitle">USABG Buyer POs (app.usabuying.group only)</div>
     <button id="usabgLoadPos" style="margin-top: 4px;">
@@ -189,6 +209,7 @@
   <script src="../lib/walmart.js"></script>
   <script src="../lib/costco.js"></script>
   <script src="../lib/amazon.js"></script>
+  <script src="../lib/automation-order.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

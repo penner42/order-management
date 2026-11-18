@@ -695,7 +695,21 @@
     return orders
   }
 
+  async function captureCostcoInvoiceFromTab(tabId, orderNumber) {
+    if (typeof tabId !== 'number' || !orderNumber) return null
+    try {
+      return await new Promise(resolve => {
+        chrome.tabs.sendMessage(tabId, { store: 'costco', type: 'costcoCaptureInvoice', orderNumber }, invoice => {
+          resolve(chrome.runtime.lastError ? null : invoice)
+        })
+      })
+    } catch {
+      return null
+    }
+  }
+
   const api = {
+    captureCostcoInvoiceFromTab,
     extractCostcoProductUpc,
     enrichCostcoOrdersWithProductUpcs,
     normalizeCostcoOrdersGraphqlPayload,

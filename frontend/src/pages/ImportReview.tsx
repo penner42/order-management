@@ -77,6 +77,7 @@ interface NormalizedPayload {
 interface OrderDiff {
   is_existing_order: boolean
   has_changes?: boolean
+  invoice_to_save?: boolean
   order?: Record<string, { current: string | null; incoming: string | null }>
   items?: {
     matched: Array<{
@@ -514,6 +515,9 @@ export default function ImportReview() {
               </p>
               {diff?.has_changes && (
                 <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                  {diff.invoice_to_save && (
+                    <span className="text-amber-700 dark:text-amber-300">Invoice available</span>
+                  )}
                   {(diff.items?.matched.filter(m => m.changes.length > 0).length ?? 0) > 0 && (
                     <span className="text-amber-700 dark:text-amber-300">
                       {diff.items!.matched.filter(m => m.changes.length > 0).length} item(s) changed

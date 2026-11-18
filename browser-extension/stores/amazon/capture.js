@@ -87,6 +87,9 @@
     if (!skipTracking && typeof d.enrichShipmentsWithTracking === 'function') {
       await d.enrichShipmentsWithTracking(parsed.shipments, window.location.origin)
     }
+    if (opts.includeInvoice) {
+      Object.assign(parsed, await d.capturePrintableOrderSummary(document, window.location.href, parsed.orderId))
+    }
     await persistOrderDetail(parsed, window.location.href)
     return parsed
   }
@@ -219,8 +222,10 @@
               await d.enrichShipmentsWithTracking(parsed.shipments, window.location.origin)
             }
 
-            await persistOrderDetail(parsed, frameUrl)
+            if (settled) return
             clearTimeout(timeoutTimer)
+            Object.assign(parsed, await d.capturePrintableOrderSummary(frameDoc, frameUrl, parsed.orderId))
+            await persistOrderDetail(parsed, frameUrl)
             finish(() => resolve(parsed))
           } catch (e) {
             clearTimeout(timeoutTimer)
@@ -290,6 +295,7 @@
             const parsed = await captureCurrentDetailPage({
               skipTrackingEnrichment: !!message.skipTrackingEnrichment,
               pageAlreadyReady: !!message.pageAlreadyReady,
+              includeInvoice: true,
             })
             sendResponse({ success: true, order: parsed })
           } catch (e) {
@@ -399,6 +405,17 @@
           }
         })()
         return true
+      }
+
+      if (message.type === 'getAutomationOrderContext') {
+        const d = dom()
+        const url = window.location.href
+        sendResponse(d?.isAmazonOrderDetailPage() ? {
+          url,
+          orderNumber: d.extractOrderIdFromUrl(url) || d.readOrderNumberFromDetail(),
+          email: d.parseEmailFromLiveDocument(document),
+        } : null)
+        return
       }
 
       if (message.type === 'amazonPing') {
