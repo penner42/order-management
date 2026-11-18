@@ -407,12 +407,9 @@ export function LiveBrowserView({
     pasteText(e.clipboardData?.getData('text/plain') ?? '')
   }
   const onKeyDown = (e: React.KeyboardEvent<HTMLCanvasElement>) => {
-    // Ctrl/Cmd+V: send local clipboard text. Remote Ctrl+V has no access to your clipboard.
+    // Let the browser deliver its native paste event. Reading the clipboard
+    // programmatically can trigger an additional Paste permission prompt.
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      e.preventDefault()
-      if (navigator.clipboard?.readText) {
-        void navigator.clipboard.readText().then(pasteText).catch(() => {})
-      }
       return
     }
     e.preventDefault()
