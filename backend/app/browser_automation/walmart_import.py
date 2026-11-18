@@ -201,28 +201,14 @@ async def _normalize_detail(page: Page, detail_payload: dict[str, Any], source_u
     return normalized
 
 
-async def _try_capture_invoice_html(page: Page, timeout_ms: int = 8000) -> str | None:
-    """Best-effort: wait briefly for invoice-ish content, return serialized HTML."""
+async def _try_capture_invoice_html(page: Page, order_number: str, timeout_ms: int = 8000) -> str | None:
+    """Capture the document Walmart prepares for its Print Invoice button."""
     try:
+        await page.wait_for_function(
+            "number => !!window.__wmInvoice.findContentRoot(number)", arg=order_number, timeout=timeout_ms,
+        )
         html = await page.evaluate(
-            """async (timeoutMs) => {
-              const deadline = Date.now() + timeoutMs;
-              while (Date.now() < deadline) {
-                const text = (document.body && document.body.innerText) || '';
-                if (text && text.length > 500) {
-                  // Prefer a print-friendly root if present.
-                  const root =
-                    document.querySelector('[data-testid*="invoice" i], #invoice, .invoice') ||
-                    document.documentElement;
-                  return '<!DOCTYPE html><html><head><base href="https://www.walmart.com/"></head><body>'
-                    + (root ? root.outerHTML : document.documentElement.outerHTML)
-                    + '</body></html>';
-                }
-                await new Promise((r) => setTimeout(r, 400));
-              }
-              return null;
-            }""",
-            timeout_ms,
+            "number => window.__wmInvoice.captureHtml(number)", order_number,
         )
         return html if isinstance(html, str) and html.strip() else None
     except Exception as exc:
@@ -259,12 +245,9 @@ async def _capture_walmart_order_details(
             await _ensure_orders_hook(page)
             detail = await _wait_for_order_detail_payload(page, str(order_number))
             body = await _normalize_detail(page, detail, page.url)
-            try:
-                invoice_html = await _try_capture_invoice_html(page, timeout_ms=6000)
-                if invoice_html:
-                    body["invoiceHtml"] = invoice_html
-            except Exception:
-                pass
+            invoice_html = await _try_capture_invoice_html(page, str(body["externalOrder"]["id"]))
+            if invoice_html:
+                body["invoiceHtml"] = invoice_html
             await capture_order_screenshot(page, body, profile_id)
             captured.append(body)
             if on_order:

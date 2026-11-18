@@ -68,8 +68,6 @@
   // Invoice HTML capture (order detail page → rendered HTML for PDF conversion)
   // ---------------------------------------------------------------------------
 
-  // Fallback delay when we cannot verify render readiness via the order number.
-  const INVOICE_CAPTURE_DELAY_MS = 2500
   // Poll interval / cap while waiting for the order details to finish rendering.
   const INVOICE_RENDER_POLL_MS = 500
   const INVOICE_RENDER_WAIT_MAX_MS = 15000
@@ -159,8 +157,7 @@
   }
 
   function cleanInvoiceClone(clone) {
-    // Remove scripts, external resources we re-inline, and page chrome that has
-    // no place on an invoice.
+    // Remove executable markup and style resources that are inlined below.
     const removeSelectors = [
       'script',
       'noscript',
@@ -168,16 +165,6 @@
       'template',
       'link',
       'style',
-      'header',
-      'footer',
-      'nav',
-      '[role="navigation"]',
-      '[role="banner"]',
-      '[role="contentinfo"]',
-      '[data-testid="GlobalHeader"]',
-      '[data-testid="GlobalFooter"]',
-      '#omni-header',
-      '#omni-footer',
     ]
     for (let i = 0; i < removeSelectors.length; i++) {
       let els = []
@@ -222,20 +209,15 @@
     }
   }
 
-  function findInvoiceContentRoot() {
-    // Walmart's own order content lives inside the main content region; other
-    // extensions inject their UI directly into <body>, so scoping the capture
-    // to this element keeps the invoice free of third-party popups/overlays.
-    try {
-      return (
-        document.querySelector('#maincontent') ||
-        document.querySelector('main') ||
-        document.querySelector('[role="main"]') ||
-        null
-      )
-    } catch {
-      return null
+  function findInvoiceContentRoot(orderNumber) {
+    const wanted = String(orderNumber || '').replace(/\D/g, '')
+    if (!wanted) return null
+    // Print Invoice uses this document, which Walmart mounts in a hidden portal.
+    for (const root of document.querySelectorAll('[data-testid="print-invoice-layout"]')) {
+      const numbers = (root.textContent || '').match(/\b\d+(?:\s*[-\u2010-\u2015]\s*\d+)*\b/g) || []
+      if (numbers.some((number) => number.replace(/\D/g, '') === wanted)) return root
     }
+    return null
   }
 
   // Attributes commonly used by lazy-loading libraries to hold the real URL.
@@ -298,10 +280,10 @@
     return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
   }
 
-  async function captureInvoiceHtml() {
+  async function captureInvoiceHtml(orderNumber) {
     if (!isOrderDetailPage()) return null
 
-    const liveRoot = findInvoiceContentRoot() || document.body
+    const liveRoot = findInvoiceContentRoot(orderNumber)
     if (!liveRoot) return null
 
     // Images are NOT waited on here: the capture only resolves their URLs
@@ -412,31 +394,19 @@
       const elapsed = Date.now() - start
       let rendered = false
       try {
-        // Compare digits only: the page displays the order number with
-        // separators (e.g. "2000131-59543210") that the raw id lacks.
-        const root = findInvoiceContentRoot()
-        const wantedDigits = orderNumber ? String(orderNumber).replace(/\D+/g, '') : ''
-        rendered = !!(
-          wantedDigits &&
-          root &&
-          root.textContent &&
-          root.textContent.replace(/\D+/g, '').indexOf(wantedDigits) >= 0
-        )
+        rendered = !!(orderNumber && findInvoiceContentRoot(orderNumber))
       } catch {
         rendered = false
       }
 
-      const ready =
-        rendered ||
-        (!orderNumber && elapsed >= INVOICE_CAPTURE_DELAY_MS) ||
-        elapsed >= INVOICE_RENDER_WAIT_MAX_MS
-
-      if (!ready) {
-        invoiceCaptureTimer = setTimeout(attempt, INVOICE_RENDER_POLL_MS)
+      if (!rendered) {
+        if (elapsed < INVOICE_RENDER_WAIT_MAX_MS) {
+          invoiceCaptureTimer = setTimeout(attempt, INVOICE_RENDER_POLL_MS)
+        }
         return
       }
 
-      captureInvoiceHtml()
+      captureInvoiceHtml(orderNumber)
         .then((html) => {
           if (!html) return
           if (generation !== invoiceCaptureGeneration || urlAtSchedule !== currentUrl) return
@@ -1616,6 +1586,7 @@
   }
 
   // Network hooks first — this file runs at document_start.
+  window.__wmInvoice = { findContentRoot: findInvoiceContentRoot, captureHtml: captureInvoiceHtml }
   installNetworkHooks()
   installExtensionRpcListener()
 

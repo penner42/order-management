@@ -358,6 +358,81 @@ class ScreenshotBrowserTests(unittest.IsolatedAsyncioTestCase):
         await capture_order_screenshot(self.page, other, 2)
         self.assertIn("screenshotToken", other)
 
+    async def test_walmart_widens_the_order_panel_and_expands_every_shipment(self):
+        await self.show_order("walmart", "123456")
+        await self.page.set_content('''<main><section style="width:900px">
+            <div class="od-print-message-notification" style="height:120px">Account settings callout</div>
+            <div style="display:flex">
+            <aside id="account-sidebar" style="flex:0 0 336px">Account menu</aside>
+            <div class="print-bill-body" style="flex:1;min-width:0">
+            <h1>Order# 123-456</h1>
+            <div style="display:grid;grid-template-columns:2fr 1fr">
+              <div>
+                <article><button aria-expanded="false" aria-label="Show items">1 item</button>
+                  <p hidden style="height:300px">Example purchase</p></article>
+                <article><button aria-expanded="false" aria-label="Show items">1 item</button>
+                  <p hidden style="height:300px">Example purchase</p></article>
+              </div>
+              <aside>123 Test Street, 12345. Visa ending in 4321. Total $40
+                <button aria-expanded="false" aria-label="Show delivery instructions"></button></aside>
+            </div><aside aria-label="Recommendations" style="height:500px">Unrelated products</aside>
+            </div></div></section></main>
+            <script>
+              for (const button of document.querySelectorAll('[aria-label="Show items"]')) {
+                button.onclick = () => {
+                  button.setAttribute('aria-expanded', 'true');
+                  button.setAttribute('aria-label', 'Hide items');
+                  button.nextElementSibling.hidden = false;
+                };
+              }
+            </script>''')
+        payload = order_payload("walmart")
+        payload["externalOrder"]["id"] = "123456"
+        payload["shippingAddress"] = {"addressLine1": "123 Test Street", "postalCode": "12345"}
+        payload["paymentMethods"] = [{"last4": "4321"}]
+        snapshot = semantic_snapshot(payload)
+        (self.root / "previous.png").write_bytes(b"previous screenshot")
+        with Session(self.engine) as db:
+            db.get(Order, 1).store_order_number = "123456"
+            db.add(OrderScreenshot(
+                id=1, order_id=1, filename="previous.png", layout_version=4,
+                captured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                snapshot=snapshot, fingerprint=fingerprint(snapshot), summary="Initial capture",
+            ))
+            db.commit()
+
+        screenshot = self.page.screenshot
+        capture_layout = {}
+
+        async def measure_crop(**kwargs):
+            capture_layout.update(await self.page.evaluate("""() => ({
+                panelWidth: document.querySelector('.print-bill-body').getBoundingClientRect().width,
+                sidebarWidth: document.querySelector('#account-sidebar').getBoundingClientRect().width,
+                calloutHeight: document.querySelector('.od-print-message-notification').getBoundingClientRect().height,
+            })"""))
+            return await screenshot(**kwargs)
+
+        with patch.object(self.page, "screenshot", side_effect=measure_crop):
+            await capture_order_screenshot(self.page, payload, 1)
+
+        self.assertIn("screenshotToken", payload)
+        self.assertEqual(capture_layout, {"panelWidth": 900, "sidebarWidth": 0, "calloutHeight": 0})
+        self.assertTrue(await self.page.locator("#account-sidebar").is_visible())
+        self.assertTrue(await self.page.locator(".od-print-message-notification").is_visible())
+        self.assertEqual(await self.page.locator('article p:visible').count(), 2)
+        self.assertEqual(await self.page.get_by_role("button", name="Show delivery instructions")
+                         .get_attribute("aria-expanded"), "false")
+        png = (self.root / "staging" / f'{payload["screenshotToken"]}.png').read_bytes()
+        self.assertEqual(int.from_bytes(png[16:20], "big"), 948)
+        self.assertGreater(int.from_bytes(png[20:24], "big"), 600)
+        self.assertLess(int.from_bytes(png[20:24], "big"), 1000)
+        with Session(self.engine) as db:
+            attach_screenshot(db, db.get(Order, 1), StoreOrderImportPayload.model_validate(payload))
+            db.commit()
+            row = db.query(OrderScreenshot).one()
+            self.assertEqual(row.id, 1)
+            self.assertEqual((self.root / row.filename).read_bytes(), png)
+
     async def test_wrong_detail_route_and_missing_crop_do_not_capture(self):
         await self.show_order("costco", "different-order")
         payload = order_payload("costco")

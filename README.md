@@ -421,7 +421,7 @@ The app can run **Camoufox (anti-detect Firefox) on the API host** with one pers
 1. Use the store-level browser profile area, or add a subaccount and use its profile area (for Amazon, name subaccounts with the login email for import matching).
 2. Add a browser profile in that area and choose **Walmart**, **Amazon**, or **Costco**.
 3. Click **Log in** and complete sign-in (including MFA) in the embedded live view, then **Done**.
-4. Click **Import now** to walk order history; when finished, open **Import Review** to apply orders.
+4. Click **Import now** and choose **Save for review** to capture orders for **Import Review**, or **Skip review** to import directly using the same behavior as automated imports.
 5. Configure full/unshipped check schedules in the same profile area. Store profiles check orders without a subaccount; subaccount profiles check only their own orders. **Log** stays in the main navigation.
 
 Each profile can be moved to a store or account that has no profile, preserving its

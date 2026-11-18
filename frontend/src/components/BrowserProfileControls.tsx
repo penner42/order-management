@@ -586,6 +586,12 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
   const [editingAccountProfileId, setEditingAccountProfileId] = useState<number | null>(null)
   const [savingAccountProfileId, setSavingAccountProfileId] = useState<number | null>(null)
   const [jobsByProfile, setJobsByProfile] = useState<Record<number, BrowserJob>>({})
+  const [pendingImport, setPendingImport] = useState<{ profileId: number; maxPages: number } | null>(null)
+  const importDialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (pendingImport) importDialogRef.current?.showModal()
+    else importDialogRef.current?.close()
+  }, [pendingImport])
   const load = useCallback(() => {
     setError(null)
     return onChange()
@@ -966,9 +972,8 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
                       <button
                         type="button"
                         onClick={() =>
-                          startImport(p.id, {
-                            mode: 'full',
-                            autoApply: false,
+                          setPendingImport({
+                            profileId: p.id,
                             maxPages,
                           })
                         }
@@ -1102,8 +1107,8 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
                     <p className="text-[11px] text-ink-muted dark:text-gray-500">
                       Checks are automatically staggered across store profiles. Saving schedule changes rebuilds
                       the next run times for all profiles. Full checks repeat daily; unshipped checks repeat at
-                      their selected interval. Scheduled runs and Run buttons apply updates directly. Import now still opens Import Review
-                      for manual review.
+                      their selected interval. Scheduled runs and Run buttons apply updates directly. Import now lets you
+                      save orders for review or skip review and apply updates directly.
                     </p>
                   </div>
 
@@ -1132,6 +1137,36 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
             })}
           </ul>
       </section>
+
+      <dialog
+        ref={importDialogRef}
+        aria-label="Import now"
+        onCancel={() => setPendingImport(null)}
+        onClick={(e) => { if (e.target === e.currentTarget) setPendingImport(null) }}
+        className="rounded-xl shadow-xl p-6 max-w-md w-full border border-brand-200/80 dark:border-gray-700 bg-white dark:bg-gray-800 text-ink backdrop:bg-black/40"
+      >
+        <h3 className="text-lg font-semibold mb-3">Import now</h3>
+        <p className="text-sm mb-6">
+          Save captured orders for review before applying changes, or skip review and import them
+          directly using the same behavior as an automated import.
+        </p>
+        <div className="flex flex-wrap justify-end gap-2">
+          <button type="button" onClick={() => setPendingImport(null)} className="px-3 py-1.5 border border-brand-300 dark:border-gray-600 rounded-lg text-sm">Cancel</button>
+          {[{ label: 'Save for review', autoApply: false }, { label: 'Skip review', autoApply: true }].map(({ label, autoApply }) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => {
+                if (!pendingImport) return
+                const { profileId, maxPages } = pendingImport
+                setPendingImport(null)
+                void startImport(profileId, { mode: 'full', autoApply, maxPages })
+              }}
+              className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700"
+            >{label}</button>
+          ))}
+        </div>
+      </dialog>
 
       {loginProfileId != null && (
         <LiveBrowserView

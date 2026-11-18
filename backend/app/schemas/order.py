@@ -7,6 +7,7 @@ from app.schemas.item import ItemRead
 from app.schemas.payment_method import PaymentMethodRead
 from app.schemas.store import StoreRead, StoreAccountRead
 from app.schemas.buying_group import BuyingGroupSummary
+from app.utils.invoices import invoice_pdf_path
 
 
 class OrderPaymentMethodBase(BaseModel):
@@ -86,7 +87,7 @@ class OrderRead(OrderBase, TimestampsMixin):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def has_invoice(self) -> bool:
-        return bool(self.invoice_pdf_path)
+        return bool(self.invoice_pdf_path and invoice_pdf_path(self.invoice_pdf_path).is_file())
 
     model_config = ConfigDict(from_attributes=True)
 

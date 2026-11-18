@@ -47,7 +47,7 @@ def invoice_dir() -> Path:
 
 
 def invoice_pdf_path(filename: str) -> Path:
-    return invoice_dir() / filename
+    return Path(settings.invoice_dir) / filename
 
 
 def _prerender_dir() -> Path:
