@@ -21,11 +21,8 @@ class BrowserKeyboardTests(unittest.IsolatedAsyncioTestCase):
         await self.playwright.stop()
 
     async def key(self, key):
-        # These are the down/char/up messages emitted by the live-view canvas.
-        await self.manager.dispatch_input(self.session, {"type": "key", "event": "down", "key": key})
-        if len(key) == 1:
-            await self.manager.dispatch_input(self.session, {"type": "key", "event": "char", "key": key, "text": key})
-        await self.manager.dispatch_input(self.session, {"type": "key", "event": "up", "key": key})
+        event = "char" if len(key) == 1 else "press"
+        await self.manager.dispatch_input(self.session, {"type": "key", "event": event, "key": key})
 
     async def test_digits_advance_through_code_cells_and_navigation_still_works(self):
         await self.page.set_content("""
@@ -99,6 +96,20 @@ class BrowserKeyboardTests(unittest.IsolatedAsyncioTestCase):
         await self.key("Tab")
         await self.key("X")
         self.assertEqual(await self.page.locator('input[type=password]').input_value(), "X")
+
+        await self.manager.dispatch_input(
+            self.session, {"type": "key", "event": "press", "key": "Tab", "modifiers": 8}
+        )
+        await self.manager.dispatch_input(
+            self.session, {"type": "key", "event": "press", "key": "KeyA", "modifiers": 2}
+        )
+        await self.manager.dispatch_input(
+            self.session, {"type": "key", "event": "press", "key": "AudioVolumeUp", "modifiers": 2}
+        )
+        await self.key("z")
+        self.assertEqual(await self.page.locator('input').first.input_value(), "z")
+        await self.manager.dispatch_input(self.session, {"type": "paste", "text": "@example.test"})
+        self.assertEqual(await self.page.locator('input').first.input_value(), "z@example.test")
 
     async def test_password_input_and_submit_work_during_a_passkey_request(self):
         self.session.retailer = "amazon"

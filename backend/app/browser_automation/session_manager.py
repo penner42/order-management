@@ -6,6 +6,7 @@ import base64
 import logging
 import random
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -781,7 +782,21 @@ class SessionManager:
                             logger.debug("keyboard text insertion failed (%s)", type(exc2).__name__)
                 return
             try:
-                if event == "down":
+                if event == "press":
+                    modifiers = int(message.get("modifiers") or 0)
+                    shortcut = [
+                        name for mask, name in ((1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift"))
+                        if modifiers & mask
+                    ]
+                    try:
+                        await page.keyboard.press("+".join([*shortcut, key]))
+                    except Exception:
+                        # Playwright can fail after pressing the modifiers.
+                        for modifier in reversed(shortcut):
+                            with suppress(Exception):
+                                await page.keyboard.up(modifier)
+                        raise
+                elif event == "down":
                     # Printable keys are applied via the separate char/type event.
                     if len(key) == 1:
                         return
@@ -791,7 +806,7 @@ class SessionManager:
                         return
                     await page.keyboard.up(key)
             except Exception as exc:
-                logger.debug("keyboard %s %r failed: %s", event, key, exc)
+                logger.debug("keyboard action failed (%s)", type(exc).__name__)
         elif msg_type == "paste":
             text = str(message.get("text") or "")
             if not text:

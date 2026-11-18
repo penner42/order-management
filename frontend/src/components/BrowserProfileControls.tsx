@@ -95,6 +95,8 @@ export function LiveBrowserView({
   onCancel: () => void
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const composingRef = useRef(false)
   const viewportRef = useRef<HTMLDivElement>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -372,26 +374,17 @@ export function LiveBrowserView({
     if (x < 0 || y < 0) return
     send({ type: 'mouse', event: 'move', x, y })
   }
-  const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!e.isPrimary || e.button !== 0) return
     e.preventDefault()
-    canvasRef.current?.focus()
     const { x, y } = coords(e)
     if (x < 0 || y < 0) return
-    send({ type: 'mouse', event: 'move', x, y })
+    inputRef.current?.focus({ preventScroll: true })
+    e.currentTarget.setPointerCapture(e.pointerId)
     send({ type: 'mouse', event: 'down', x, y, button: 'left', clickCount: 1 })
   }
-  const onMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    e.preventDefault()
-    const { x, y } = coords(e)
-    // Always release the button (even in letterbox gutters) so focus isn't stuck.
-    send({
-      type: 'mouse',
-      event: 'up',
-      x: x < 0 ? 0 : x,
-      y: y < 0 ? 0 : y,
-      button: 'left',
-      clickCount: 1,
-    })
+  const onLostPointerCapture = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.isPrimary) send({ type: 'mouse', event: 'up', button: 'left' })
   }
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
@@ -402,54 +395,33 @@ export function LiveBrowserView({
   const pasteText = (text: string) => {
     if (text) send({ type: 'paste', text })
   }
-  const onPaste = (e: React.ClipboardEvent<HTMLCanvasElement>) => {
+  const forwardNativeText = (input: HTMLTextAreaElement) => {
+    pasteText(input.value)
+    input.value = ''
+  }
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     e.preventDefault()
     pasteText(e.clipboardData?.getData('text/plain') ?? '')
   }
-  const onKeyDown = (e: React.KeyboardEvent<HTMLCanvasElement>) => {
-    // Let the browser deliver its native paste event. Reading the clipboard
-    // programmatically can trigger an additional Paste permission prompt.
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // The textarea receives native paste without requesting clipboard permission.
+    if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') ||
+      (e.shiftKey && e.key === 'Insert')) return
+    if (composingRef.current || e.nativeEvent.isComposing || e.getModifierState('AltGraph') ||
+      ['Alt', 'AltGraph', 'Control', 'Meta', 'Shift', 'Dead', 'Process', 'Unidentified'].includes(e.key)) return
+
+    e.preventDefault()
+    const printable = Array.from(e.key).length === 1
+    if (printable && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      send({ type: 'key', event: 'char', key: e.key, text: e.key })
       return
     }
-    e.preventDefault()
     const modifiers =
-      (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0)
-    // keyDown must not include text when we also send char — that doubles every character.
+      (e.altKey ? 1 : 0) | (e.ctrlKey || e.metaKey ? 2 : 0) | (e.shiftKey ? 8 : 0)
     send({
       type: 'key',
-      event: 'down',
-      key: e.key,
-      code: e.code,
-      windowsVirtualKeyCode: e.keyCode,
-      nativeVirtualKeyCode: e.keyCode,
-      modifiers,
-    })
-    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      send({
-        type: 'key',
-        event: 'char',
-        key: e.key,
-        text: e.key,
-        unmodifiedText: e.key,
-        modifiers,
-      })
-    }
-  }
-  const onKeyUp = (e: React.KeyboardEvent<HTMLCanvasElement>) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      return
-    }
-    e.preventDefault()
-    const modifiers =
-      (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0)
-    send({
-      type: 'key',
-      event: 'up',
-      key: e.key,
-      code: e.code,
-      windowsVirtualKeyCode: e.keyCode,
-      nativeVirtualKeyCode: e.keyCode,
+      event: 'press',
+      key: printable ? e.code : e.key,
       modifiers,
     })
   }
@@ -538,17 +510,31 @@ export function LiveBrowserView({
           ref={viewportRef}
           className="relative flex-1 min-h-0 bg-neutral-200 dark:bg-gray-950 overflow-hidden"
         >
-          <canvas
-            ref={canvasRef}
-            tabIndex={0}
-            className="absolute cursor-default outline-none bg-white dark:bg-gray-950"
-            onMouseMove={onMouseMove}
-            onMouseDown={onMouseDown}
-            onMouseUp={onMouseUp}
-            onWheel={onWheel}
+          <textarea
+            ref={inputRef}
+            aria-label="Remote browser input"
+            autoComplete="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            className="sr-only"
             onPaste={onPaste}
             onKeyDown={onKeyDown}
-            onKeyUp={onKeyUp}
+            onChange={(e) => {
+              if (!composingRef.current) forwardNativeText(e.currentTarget)
+            }}
+            onCompositionStart={() => { composingRef.current = true }}
+            onCompositionEnd={(e) => {
+              composingRef.current = false
+              forwardNativeText(e.currentTarget)
+            }}
+          />
+          <canvas
+            ref={canvasRef}
+            className="absolute cursor-default outline-none bg-white dark:bg-gray-950"
+            onMouseMove={onMouseMove}
+            onPointerDown={onPointerDown}
+            onLostPointerCapture={onLostPointerCapture}
+            onWheel={onWheel}
           />
         </div>
         <div className="flex justify-end gap-2 px-4 py-2.5 bg-[#e8eaed] dark:bg-gray-800 border-t border-black/10 dark:border-gray-700 shrink-0">

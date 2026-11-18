@@ -12,6 +12,56 @@ function settings(): MonarchSettings {
   }
 }
 
+test('live browser forwards native paste and keeps typing after local focus changes', async ({ app }) => {
+  const profileId = settings().profile!.id
+  await app.route('**/api/integrations/monarch**', route => route.fulfill({ json: settings() }))
+  await app.route(`**/api/browser-profiles/${profileId}/login/start`, route => route.fulfill({ json: {
+    profile_id: profileId, login_url: 'https://app.monarch.com',
+  } }))
+  const inputMessages: object[] = []
+  await app.routeWebSocket(url => url.pathname === `/api/browser-profiles/${profileId}/live`, socket => {
+    socket.onMessage(raw => {
+      const message = JSON.parse(String(raw))
+      if (['key', 'paste'].includes(message.type) || message.event === 'up') inputMessages.push(message)
+    })
+  })
+
+  await app.goto('/settings/monarch')
+  await app.getByRole('button', { name: 'Log in to Monarch' }).click()
+  const address = app.getByLabel('Address bar')
+  await address.fill('dummy-login-text')
+  await address.selectText()
+  await app.keyboard.press('Control+c')
+
+  const canvas = app.locator('canvas')
+  await canvas.click()
+  await expect(app.getByLabel('Remote browser input')).toBeFocused()
+  await app.keyboard.press('Control+v')
+  await app.keyboard.press('Control+a')
+  await app.keyboard.down('Control')
+  await address.click()
+  await app.keyboard.up('Control')
+  await canvas.click()
+  await app.keyboard.press('z')
+
+  const box = (await canvas.boundingBox())!
+  const addressBox = (await address.boundingBox())!
+  await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await app.mouse.down()
+  await app.mouse.move(addressBox.x + addressBox.width / 2, addressBox.y + addressBox.height / 2)
+  await app.mouse.up()
+
+  const release = { type: 'mouse', event: 'up', button: 'left' }
+  await expect.poll(() => inputMessages).toEqual([
+    release,
+    { type: 'paste', text: 'dummy-login-text' },
+    { type: 'key', event: 'press', key: 'KeyA', modifiers: 2 },
+    release,
+    { type: 'key', event: 'char', key: 'z', text: 'z' },
+    release,
+  ])
+})
+
 test('Monarch settings saves accounts and keywords, logs in, and checks a backfill', async ({ app }) => {
   let state = settings()
   let saved: unknown = null
