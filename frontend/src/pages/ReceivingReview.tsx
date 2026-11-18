@@ -17,11 +17,14 @@ interface ReceivingMatch {
   expected_amount: string | null
   receipt_id: string | null
   scanned_at: string | null
+  saved_scanned_at?: string | null
   received_item: string | null
   received_qty: number | null
   received_price: string | null
   received_ext_total: string | null
   reward?: string | null
+  confirmed_reward?: string | null
+  tracking_reward_adjusted_price?: string | null
   received_status: string | null
   amount_discrepancy: boolean
   selected: boolean
@@ -132,10 +135,11 @@ function buildEdits(matches: ReceivingMatch[]): Record<string, RowEdit> {
   for (const m of matches) {
     const key = rowKey(m)
     const isNotReceived = m.match_kind === 'not_received'
+    const scanDate = m.scanned_at || m.saved_scanned_at
     next[key] = {
       selected: isNotReceived ? false : m.selected !== false,
       receipt_id: m.receipt_id ?? '',
-      scanned_date: m.update_receipt_only && !m.scanned_at ? '' : toYyyyMmDd(m.scanned_at),
+      scanned_date: m.update_receipt_only && !scanDate ? '' : toYyyyMmDd(scanDate),
       use_received_total: false,
     }
   }
@@ -237,6 +241,7 @@ function ReceivingGroupSection({
       scanned_at?: string
       price_sold?: string | null
       reward?: string | null
+      apply_tracking_reward_price_correction?: boolean
       receipt_tracking_number?: string | null
       receipt_upc?: string | null
       receiving_group_id?: number
@@ -279,10 +284,13 @@ function ReceivingGroupSection({
         if (!m.update_receipt_only) {
           entry.status = 'scanned'
           entry.scanned_at = dateInputToNoonUtcIso(edit.scanned_date)
-        } else if (edit.scanned_date) {
+        } else if (edit.scanned_date && (!m.saved_scanned_at || edit.scanned_date !== toYyyyMmDd(m.saved_scanned_at))) {
           entry.scanned_at = dateInputToNoonUtcIso(edit.scanned_date)
         }
-        if (edit.use_received_total && m.received_ext_total != null && m.quantity > 0) {
+        if (m.tracking_reward_adjusted_price != null) {
+          entry.price_sold = m.tracking_reward_adjusted_price
+          entry.apply_tracking_reward_price_correction = true
+        } else if (edit.use_received_total && m.received_ext_total != null && m.quantity > 0) {
           const total = parseMoney(m.received_ext_total)
           if (total != null) {
             entry.price_sold = (total / m.quantity).toFixed(2)
@@ -524,7 +532,7 @@ function ReceivingGroupSection({
                             {isNotReceived ? '—' : fmtMoney(m.received_ext_total)}
                           </td>
                           <td className="py-2 px-2 align-top text-right tabular-nums text-ink">
-                            {isNotReceived ? '—' : fmtMoney(m.reward)}
+                            {isNotReceived ? '—' : fmtMoney(m.reward ?? m.confirmed_reward)}
                           </td>
                           <td className="py-2 px-2 align-top">
                             {isNotReceived ? (
@@ -555,7 +563,9 @@ function ReceivingGroupSection({
                             )}
                           </td>
                           <td className="py-2 px-2 align-top">
-                            {!isNotReceived && m.amount_discrepancy && m.received_ext_total != null ? (
+                            {m.tracking_reward_adjusted_price != null ? (
+                              <span className="text-xs text-ink">Separate tracking reward from payout</span>
+                            ) : !isNotReceived && m.amount_discrepancy && m.received_ext_total != null ? (
                               <label className="inline-flex items-center gap-1.5 text-xs text-ink">
                                 <input
                                   type="checkbox"

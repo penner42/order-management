@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import re
 from dataclasses import asdict, dataclass, field
@@ -131,6 +132,9 @@ class ReceivingMatch:
     update_receipt_only: bool = False
     reward: Decimal | None = None
     receipt_upc: str | None = None
+    tracking_reward_adjusted_price: Decimal | None = None
+    confirmed_reward: Decimal | None = None
+    saved_scanned_at: str | None = None
 
 
 @dataclass
@@ -556,9 +560,12 @@ def match_to_dict(m: ReceivingMatch) -> dict[str, Any]:
         "tracking_number": m.tracking_number,
         "price_sold": str(m.price_sold if m.price_sold is not None else 0),
         "reward": str(m.reward) if m.reward is not None else None,
+        "confirmed_reward": str(m.confirmed_reward) if m.confirmed_reward is not None else None,
+        "tracking_reward_adjusted_price": str(m.tracking_reward_adjusted_price) if m.tracking_reward_adjusted_price is not None else None,
         "expected_amount": str(m.expected_amount) if m.expected_amount is not None else None,
         "receipt_id": m.receipt_id,
         "scanned_at": m.scanned_at,
+        "saved_scanned_at": m.saved_scanned_at,
         "received_item": m.received_item,
         "receipt_upc": m.receipt_upc,
         "received_qty": m.received_qty,
@@ -876,13 +883,15 @@ def _scores_ambiguous(
     return abs(best[1] - second[1]) <= _LOT_AMBIGUITY_NAME_MARGIN
 
 
-def _score_bg_item_to_lot(item: Item, lot: dict[str, Any]) -> tuple[float, float] | None:
+def _score_bg_item_to_lot(
+    item: Item, lot: dict[str, Any], *, single_line: bool = False,
+) -> tuple[float, float] | None:
     """BG product identity comes from UPC, then name; payout is reviewed separately."""
     local_upc = _item_matching_upc(item)
     if local_upc and lot.get("receipt_upc"):
         return (1000.0, 1.0) if local_upc == lot["receipt_upc"] else None
     similarity = _name_similarity(item.description, lot.get("received_item"))
-    if similarity < _LOT_NAME_ONLY_MIN:
+    if similarity < _LOT_NAME_ONLY_MIN and not (single_line and similarity > 0):
         return None
     # Keep fallback name scores in the second position so the existing
     # ambiguity margin applies to competing products with similar names.
@@ -1005,6 +1014,23 @@ def _unit_payout_from_meta(meta: dict[str, Any], *, allocated_qty: int) -> Decim
     return None
 
 
+def _tracking_reward_adjusted_price(item: Item, meta: dict[str, Any], qty: int) -> Decimal | None:
+    if qty != item.quantity:
+        return None
+    reward = meta.get("allocated_reward")
+    unit_payout = _unit_payout_from_meta(meta, allocated_qty=qty)
+    if reward is None or reward <= 0 or unit_payout is None:
+        return None
+    saved_receipts = _receipt_ids_on_item(item)
+    if saved_receipts and saved_receipts != set(meta["receipt_ids"]):
+        return None
+    base_total = (unit_payout * qty).quantize(Decimal("0.01"))
+    price = unit_payout.quantize(Decimal("0.01"))
+    if price * qty == base_total and _expected_amount(item) == base_total + reward:
+        return price
+    return None
+
+
 def _matches_for_tn_allocations(
     *,
     item: Item,
@@ -1028,7 +1054,10 @@ def _matches_for_tn_allocations(
             continue
         meta = meta_by_tn.get(tn_key) or {}
         receipt_id = _meta_receipt_id(meta)
-        if update_receipt_only and not (_receipt_needs_update(item, receipt_id) or _reward_needs_update(item, meta, qty) or _upc_needs_update(item, meta)):
+        if update_receipt_only and not (
+            meta.get("tracking_reward_adjusted_price") is not None or _receipt_needs_update(item, receipt_id)
+            or _reward_needs_update(item, meta, qty) or _upc_needs_update(item, meta)
+        ):
             continue
         display = (meta.get("display_tn") or "").strip() or _tn_display(trackings, tn_key)
         lines.append((display, qty, meta))
@@ -1060,11 +1089,16 @@ def _matches_for_tn_allocations(
         scanned_dt = meta.get("scanned_at") or fallback_scanned_at
         if scanned_dt is None:
             scanned_dt = to_date_only(datetime.now(timezone.utc))
+        tracking_reward_adjusted_price = meta.get("tracking_reward_adjusted_price")
+        if tracking_reward_adjusted_price is not None:
+            scanned_dt = None
         upc_only = (update_receipt_only and _upc_needs_update(item, meta)
+                    and tracking_reward_adjusted_price is None
                     and not _receipt_needs_update(item, receipt_id)
                     and not _reward_needs_update(item, meta, qty))
         if upc_only:
-            unit_payout = received_ext = None
+            if "allocated_reward" not in meta:
+                unit_payout = received_ext = None
             discrepancy = False
             scanned_dt = None
             receipt_id = item.receipt_id
@@ -1082,12 +1116,15 @@ def _matches_for_tn_allocations(
                 expected_amount=expected,
                 receipt_id=receipt_id,
                 scanned_at=_iso_date(scanned_dt),
+                saved_scanned_at=_iso_date(item.scanned_at) if update_receipt_only else None,
                 received_item=received_item,
                 receipt_upc=(getattr(item, "receipt_upc", None) or meta.get("receipt_upc")),
                 received_qty=qty,
                 received_price=unit_payout,
                 received_ext_total=received_ext,
                 reward=None if upc_only else _reward_from_meta(meta, qty),
+                confirmed_reward=meta.get("allocated_reward") if upc_only else None,
+                tracking_reward_adjusted_price=tracking_reward_adjusted_price,
                 received_status=_join_unique_strs(statuses),
                 amount_discrepancy=discrepancy,
                 selected=True,
@@ -2822,10 +2859,25 @@ def _check_receiving_buyinggroup(
     meta_by_lot = {lid: _lot_as_match_meta(lot) for lid, lot in lots_by_id.items()}
     supply = {lid: lot["qty"] for lid, lot in lots_by_id.items()}
 
+    # Include unconfirmed rows and unavailable details when checking for a lone line.
+    receipt_lines_by_tn = {}
+    for receipt in unknown_receipts:
+        for key in {tn.casefold() for tn in receipt["tracking_numbers"]}:
+            receipt_lines_by_tn.setdefault(key, []).append(receipt["_lot_id"])
+    # Weak name matches must never compete with another local item's claim.
+    claimant_count_by_lot = Counter(
+        lid for item, _order, trackings in pending + scanned_pending
+        if not _is_zero_payout(item)
+        for lid in {
+            lot["lot_id"] for tn in trackings for lot in lots_by_tn.get(tn.casefold(), [])
+        }
+    )
+
     def choices(item, trackings, received=False):
         candidates = []
         seen = set()
         shipment_lot_ids = set()
+        single_line_lot_ids = set()
         order = item.order
         walmart_order_number = (
             (order.store_order_number or "").strip().casefold()
@@ -2833,10 +2885,13 @@ def _check_receiving_buyinggroup(
             else ""
         )
         for tn in trackings:
-            for lot in lots_by_tn.get(tn.casefold(), []):
+            key = tn.casefold()
+            for lot in lots_by_tn.get(key, []):
                 lid = lot["lot_id"]
-                if tn.casefold() != walmart_order_number:
+                if key != walmart_order_number:
                     shipment_lot_ids.add(lid)
+                    if receipt_lines_by_tn.get(key) == [lid] and claimant_count_by_lot[lid] == 1:
+                        single_line_lot_ids.add(lid)
                 if lid not in seen:
                     seen.add(lid)
                     candidates.append(lot)
@@ -2847,8 +2902,12 @@ def _check_receiving_buyinggroup(
                      and (not saved or saved == lot["tn_key"])]
             if exact:
                 candidates = exact
-        ranked = [(score, lot) for lot in candidates
-                  if (score := _score_bg_item_to_lot(item, lot)) is not None]
+        ranked = []
+        for lot in candidates:
+            single_line = len(shipment_lot_ids) == 1 and lot["lot_id"] in single_line_lot_ids
+            score = _score_bg_item_to_lot(item, lot, single_line=single_line)
+            if score is not None:
+                ranked.append((score, lot))
         if not ranked:
             return []
         # The Walmart order number spans packages/products. Use it only when
@@ -2930,6 +2989,9 @@ def _check_receiving_buyinggroup(
         for lid, qty in item_allocations:
             if (item.id, lid) in reward_allocations:
                 item_meta[lid]["allocated_reward"] = reward_allocations[item.id, lid]
+        if received and len(item_allocations) == 1:
+            lid, qty = item_allocations[0]
+            item_meta[lid]["tracking_reward_adjusted_price"] = _tracking_reward_adjusted_price(item, item_meta[lid], qty)
         matches.extend(_matches_for_tn_allocations(
             item=item, order=order, trackings=trackings,
             tn_allocations=item_allocations, meta_by_tn=item_meta,

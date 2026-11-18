@@ -186,6 +186,7 @@ class BuyingGroupCheckReceivingResponse(BaseModel):
 class ReceivingReviewMatch(BaseModel):
     receipt_tracking_number: str | None = None
     manual_receipt_key: str | None = None
+    saved_scanned_at: str | None = None
     item_id: int
     order_id: int
     store_order_number: str | None = None
@@ -202,6 +203,8 @@ class ReceivingReviewMatch(BaseModel):
     received_price: str | None = None
     received_ext_total: str | None = None
     reward: str | None = None
+    confirmed_reward: str | None = None
+    tracking_reward_adjusted_price: str | None = None
     received_status: str | None = None
     amount_discrepancy: bool = False
     selected: bool = True

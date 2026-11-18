@@ -189,6 +189,56 @@ test('partial BG receipt stores UPC on received unit and splits missing unit for
   expect(linked.shipment_items.map(link => link.item_id).sort()).toEqual(saved.items.map(i => i.id).sort())
 })
 
+test('applying receiving review separates a tracking reward included in an existing scan price', async ({ app, data }) => {
+  const store = await data.create('/stores', { name: data.name('bonus-price-store') })
+  const group = await data.create('/buying-groups', { name: data.name('bonus-price-group') })
+  const order = await data.create<{ id: number; items: Item[] }>('/orders', {
+    store_id: store.id, buying_group_id: group.id,
+    items: [{ description: 'Tracking reward headphones', quantity: 2, status: 'scanned',
+      scanned_at: '2026-10-15T12:00:00Z', receipt_id: 'BONUS-RECEIPT', price_sold: '20.05' }],
+  })
+  const item = order.items[0]
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
+    buying_group_id: group.id, buying_group_name: data.name('bonus-price-group'), unknown_receipts: [],
+    matches: [{ item_id: item.id, order_id: order.id, description: item.description, quantity: 2,
+      tracking_number: 'BONUS-TRACK', price_sold: '20.05', expected_amount: '40.10',
+      received_ext_total: '40.00', reward: '0.10', receipt_id: 'BONUS-RECEIPT',
+      tracking_reward_adjusted_price: '20.00', scanned_at: null,
+      saved_scanned_at: '2026-10-15T00:00:00Z', update_receipt_only: true,
+      selected: true, amount_discrepancy: true }],
+  }] }))
+  await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
+  const before = await data.get<Item>(`/items/${item.id}`)
+  await app.goto('/receiving-review')
+  await expect(app.getByText('Separate tracking reward from payout')).toBeVisible()
+  await expect(app.getByLabel('Scan date')).toHaveValue('2026-10-15')
+  const posted = app.waitForRequest('**/api/items/bulk-update')
+  await app.getByRole('button', { name: 'Apply 1 selected', exact: true }).click()
+  expect((await posted).postDataJSON().updates[0]).not.toHaveProperty('scanned_at')
+  await expect(app.getByText('All listed rows were applied.')).toBeVisible()
+  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({
+    price_sold: '20.00', reward: '0.10', status: 'scanned',
+    scanned_at: before.scanned_at, receipt_id: before.receipt_id, quantity: 2,
+  })
+})
+
+test('UPC-only review shows the saved scan date, confirmed payout and tracking reward', async ({ app }) => {
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
+    buying_group_id: 1, buying_group_name: 'BuyingGroup.com', unknown_receipts: [],
+    matches: [{ item_id: 1, order_id: 1, description: 'ASUS Vivobook', quantity: 5,
+      tracking_number: 'ASUS-TRACK', price_sold: '300.00', expected_amount: '1500.00',
+      received_ext_total: '1500.00', confirmed_reward: '0.05', receipt_id: 'ASUS-RECEIPT',
+      receipt_upc: '199291148536', scanned_at: null,
+      saved_scanned_at: '2026-10-12T00:00:00Z', update_receipt_only: true,
+      selected: true, amount_discrepancy: false }],
+  }] }))
+  await app.goto('/receiving-review')
+  const row = app.getByRole('row').filter({ hasText: 'ASUS Vivobook' })
+  await expect(row.getByRole('cell', { name: '$1500.00', exact: true })).toHaveCount(2)
+  await expect(row.getByRole('cell', { name: '$0.05', exact: true })).toBeVisible()
+  await expect(row.getByLabel('Scan date')).toHaveValue('2026-10-12')
+})
+
 test('received reward is saved separately from unit payout', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('reward-store') })
   const group = await data.create('/buying-groups', { name: data.name('reward-group') })
@@ -202,22 +252,22 @@ test('received reward is saved separately from unit payout', async ({ app, data 
     buying_group_id: group.id, buying_group_name: data.name('reward-group'), unknown_receipts: [],
     matches: [{ item_id: item.id, order_id: order.id, description: item.description, quantity: 2,
       tracking_number: 'REWARD-TRACK', price_sold: '20.00', expected_amount: '40.00',
-      received_ext_total: '40.00', reward: '6.50', receipt_id: 'REWARD-RECEIPT',
+      received_ext_total: '40.00', reward: '0.05', receipt_id: 'REWARD-RECEIPT',
       scanned_at: '2026-10-15T12:00:00Z', selected: true, amount_discrepancy: false }],
   }] }))
   await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
   await app.goto('/receiving-review')
   await expect(app.getByRole('columnheader', { name: 'Reward', exact: true })).toBeVisible()
-  await expect(app.getByRole('cell', { name: '$6.50', exact: true })).toBeVisible()
+  await expect(app.getByRole('cell', { name: '$0.05', exact: true })).toBeVisible()
   await app.getByRole('button', { name: 'Apply 1 selected' }).click()
   await expect(app.getByText('All listed rows were applied.')).toBeVisible()
-  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ reward: '6.50', price_sold: '20.00', status: 'scanned' })
+  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ reward: '0.05', price_sold: '20.00', status: 'scanned' })
   await app.goto(`/?q=${encodeURIComponent(orderNumber)}`)
   await expect(app.getByRole('columnheader', { name: 'Reward', exact: true })).toHaveCount(0)
   await expect(app.getByLabel('Payout price')).toHaveValue('20.00')
   await app.reload()
   await expect(app.getByLabel('Payout price')).toHaveValue('20.00')
-  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ reward: '6.50', price_sold: '20.00' })
+  expect(await data.get<Item>(`/items/${item.id}`)).toMatchObject({ reward: '0.05', price_sold: '20.00' })
 })
 
 test('receipt candidates only hide lines with receipts and show dates and expected payouts', async ({ app, data }) => {

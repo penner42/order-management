@@ -1,4 +1,5 @@
 """BG confirmed products, rather than header quantities, drive receiving."""
+from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
 from unittest.mock import patch
@@ -7,7 +8,7 @@ from app.models import Item, ReceivingReviewPending, ShipmentItem
 from app.models.item import ItemStatus
 from app.routers.items import bulk_update_items
 from app.schemas.item import ItemBulkUpdateEntry, ItemBulkUpdateRequest, ItemRead, ItemSplitRequest
-from app.schemas.buying_group import ReceivingReceiptLinkRequest
+from app.schemas.buying_group import ReceivingReceiptLinkRequest, ReceivingReviewSession
 from app.utils.item_split import split_item_record
 from app.utils.receiving_links import applied_receipt_pairs, link_receipt, receipt_is_applied, receipt_key
 from app.utils.buying_group_apis import buyinggroup as api, check_receiving as receiving
@@ -156,6 +157,22 @@ class ReceiptDetailsTests(unittest.TestCase):
         self.assertTrue(match.amount_discrepancy)
         self.assertIsNone(match.split_keep_quantity)
 
+    def test_tracking_reward_correction_keeps_commission_in_confirmed_payout(self):
+        self.laptop()
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = "R1"
+        self.item.price_sold = Decimal("201.05")
+        self.db.commit()
+        product = {**self.product(qty=2), "total": "402.00"}
+        match, = self.check([product], reward="0.10").matches
+        self.assertEqual(match.tracking_reward_adjusted_price, Decimal("201.00"))
+        self.assertEqual(match.reward, Decimal("0.10"))
+
+        self.item.price_sold = Decimal("203.00")
+        self.db.commit()
+        match, = self.check([product], reward="0.10").matches
+        self.assertIsNone(match.tracking_reward_adjusted_price)
+
     def test_same_upc_at_two_prices_keeps_both_product_allocations(self):
         self.laptop()
         result = self.check([self.product(), self.product(price="198.00")])
@@ -207,6 +224,46 @@ class ReceiptDetailsTests(unittest.TestCase):
         self.item.upc = "012502672661"
         self.db.commit()
         self.assertEqual(self.check([self.product(name="Apple Pencil Pro", upc=None)]).matches, [])
+
+    def test_single_line_tracking_accepts_weak_name_overlap_on_check_and_refresh(self):
+        self.laptop()
+        self.item.description = (
+            'ASUS Vivobook X1404 14" FHD Laptop, Intel Core i3-1315U, 8GB RAM, '
+            "128GB SSD, Windows 11 Home, Blue"
+        )
+        self.db.commit()
+        result = self.check([self.product(name="Asus-Vivobook-14-Laptop-8536", qty=2, price="198.00")],
+                            alternate=True)
+        match, = result.matches
+        self.assertEqual(match.item_id, self.item.id)
+        self.assertEqual(match.quantity, 2)
+        self.assertTrue(match.amount_discrepancy)
+        receiving.save_receiving_review_pending(self.db, result.session_payload)
+        with patch.object(api, "get_receipt_details", side_effect=AssertionError("No network on refresh")):
+            payload, = receiving.list_receiving_review_pending_payloads(self.db)
+        self.assertEqual([m["item_id"] for m in payload["matches"]], [self.item.id])
+
+    def test_second_unconfirmed_line_keeps_normal_name_threshold(self):
+        self.laptop()
+        self.item.description = "HP 14 inch HD Windows laptop Intel processor 128GB"
+        self.db.commit()
+        result = self.check([
+            self.product(name="HP notebook ep2111wm", qty=2),
+            self.product(name="Apple Pencil Pro", upc="other", verified=False),
+        ])
+        self.assertEqual(result.matches, [])
+
+    def test_weak_name_match_cannot_take_supply_from_another_shipment_item(self):
+        self.laptop()
+        self.item.quantity = 1
+        self.item.description = "HP 14 inch HD Windows laptop Intel processor 128GB"
+        other = Item(order_id=self.item.order_id, description="HP notebook ep2111wm",
+                     price_sold=199, quantity=1, status=ItemStatus.SUBMITTED,
+                     shipment_items=[ShipmentItem(shipment_id=self.item.shipment_items[0].shipment_id)])
+        self.db.add(other)
+        self.db.commit()
+        match, = self.check([self.product(name=other.description)]).matches
+        self.assertEqual(match.item_id, other.id)
 
     def test_name_fallback_matches_despite_large_price_discrepancy(self):
         self.laptop()
@@ -371,6 +428,24 @@ class ReceiptDetailsTests(unittest.TestCase):
         self.assertTrue(match.update_receipt_only)
         # Backfills cannot offer a split on a received or payment-linked line.
         self.assertIsNone(match.split_keep_quantity)
+
+    def test_upc_only_review_shows_saved_scan_date_and_confirmed_amounts(self):
+        self.laptop()
+        self.item.status = ItemStatus.SCANNED
+        self.item.scanned_at = datetime(2026, 10, 12, tzinfo=timezone.utc)
+        self.item.receipt_id = "R1"
+        self.item.price_sold = Decimal("201.00")
+        self.item.reward = Decimal("0.05")
+        self.db.commit()
+        result = self.check([{**self.product(qty=2), "total": "402.00"}], reward="0.05")
+        match, = result.matches
+        self.assertEqual(match.received_ext_total, Decimal("402.00"))
+        self.assertEqual(match.confirmed_reward, Decimal("0.05"))
+        self.assertIsNone(match.reward)
+        self.assertIsNone(match.scanned_at)
+        self.assertIsNone(match.tracking_reward_adjusted_price)
+        review_match, = ReceivingReviewSession.model_validate(result.session_payload).matches
+        self.assertEqual(review_match.saved_scanned_at[:10], "2026-10-12")
 
 
 class ReceiptDetailsApiTests(unittest.TestCase):

@@ -144,6 +144,7 @@ class ItemBulkUpdateEntry(BaseModel):
     warehouse_tracking: str | None = None
     receiving_group_id: int | None = None
     receiving_row_id: str | None = None
+    apply_tracking_reward_price_correction: bool = False
 
     @field_validator("price_sold", mode="before")
     @classmethod

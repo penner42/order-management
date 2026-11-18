@@ -3,6 +3,7 @@ from decimal import Decimal
 import unittest
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -108,6 +109,56 @@ class BuyingGroupRewardTests(unittest.TestCase):
         self.assertEqual(ItemRead.model_validate(self.item).reward, Decimal("6.00"))
         self.assertEqual(self.item.price_sold, Decimal("20.00"))
         self.assertEqual(self.check().matches, [])
+
+    def test_existing_scan_with_tracking_reward_in_price_gets_a_correction_on_cached_review(self):
+        self.item.quantity = 2
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = "R1"
+        self.item.price_sold = Decimal("20.05")
+        self.item.reward = Decimal("0.10")
+        self.db.commit()
+        result = self.check(quantity=4, total="80.00", rewards={"track": Decimal("0.20")})
+        receiving.save_receiving_review_pending(self.db, result.session_payload)
+        payload, = receiving.list_receiving_review_pending_payloads(self.db)
+        match, = ReceivingReviewSession.model_validate(payload).matches
+        self.assertEqual(match.tracking_reward_adjusted_price, "20.00")
+        self.assertEqual(match.reward, "0.10")
+        self.assertTrue(match.update_receipt_only)
+        self.assertIsNone(match.scanned_at)
+
+        updates = ItemBulkUpdateRequest(updates=[ItemBulkUpdateEntry(
+            item_id=self.item.id, price_sold=match.tracking_reward_adjusted_price, reward=match.reward,
+            apply_tracking_reward_price_correction=True,
+        )])
+        for _ in range(2):
+            bulk_update_items(updates, db=self.db, _=None)
+        self.assertEqual(self.item.price_sold, Decimal("20.00"))
+        self.assertEqual(self.item.reward, Decimal("0.10"))
+        self.assertEqual(self.item.status, ItemStatus.SCANNED)
+        self.assertEqual(self.check(quantity=4, total="80.00", rewards={"track": Decimal("0.20")}).matches, [])
+
+    def test_tracking_reward_price_correction_requires_full_quantity_and_exact_amount(self):
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = "R1"
+        self.item.price_sold = Decimal("20.05")
+        self.db.commit()
+        rewards = {"track": Decimal("0.10")}
+        match, = self.check(rewards=rewards).matches
+        self.assertIsNone(match.tracking_reward_adjusted_price)
+        self.item.quantity = 2
+        self.item.price_sold = Decimal("20.06")
+        self.db.commit()
+        match, = self.check(rewards=rewards).matches
+        self.assertIsNone(match.tracking_reward_adjusted_price)
+
+        with self.assertRaises(HTTPException) as exc:
+            bulk_update_items(ItemBulkUpdateRequest(updates=[ItemBulkUpdateEntry(
+                item_id=self.item.id, price_sold="20.00", reward="0.10",
+                apply_tracking_reward_price_correction=True,
+            )]), db=self.db, _=None)
+        self.assertEqual(exc.exception.status_code, 409)
+        self.assertEqual(self.item.price_sold, Decimal("20.06"))
+        self.assertIsNone(self.item.reward)
 
     def test_unknown_receipt_manual_link_and_apply_preserve_reward(self):
         receipt = self.check(tracking_id="UNKNOWN", quantity=3, total="60.00").session_payload["unknown_receipts"][0]

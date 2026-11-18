@@ -95,21 +95,31 @@ def bulk_update_items(
     newly_submitted: list[Item] = []
     validate_manual_link_batch(db, data.updates)
     for entry in data.updates:
-        item = (
+        query = (
             db.query(Item)
             .filter(Item.id == entry.item_id)
             .options(
                 selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
                 joinedload(Item.order).joinedload(Order.buying_group),
             )
-            .first()
         )
+        if entry.apply_tracking_reward_price_correction:
+            query = query.populate_existing().with_for_update(of=Item)
+        item = query.first()
         if not item:
             raise HTTPException(status_code=404, detail=f"Item {entry.item_id} not found")
+        if entry.apply_tracking_reward_price_correction:
+            if entry.price_sold is None or entry.reward is None or entry.reward <= 0:
+                raise HTTPException(400, "A tracking reward correction requires a payout and a positive reward.")
+            already_applied = item.price_sold == entry.price_sold and item.reward == entry.reward
+            includes_reward = (item.price_sold - entry.price_sold) * item.quantity == entry.reward
+            if not (already_applied or includes_reward):
+                raise HTTPException(409, "The saved payout changed. Refresh Receiving Review before applying the tracking reward correction.")
         prev_status = item.status
         payload = entry.model_dump(
             exclude_unset=True,
-            exclude={"item_id", "delivered_at", "warehouse_tracking", "receiving_group_id", "receiving_row_id"},
+            exclude={"item_id", "delivered_at", "warehouse_tracking", "receiving_group_id",
+                     "receiving_row_id", "apply_tracking_reward_price_correction"},
         )
         if entry.receiving_row_id or entry.receiving_group_id is not None:
             payload = apply_manual_link(db, item, entry, payload)
