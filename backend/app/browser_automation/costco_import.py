@@ -770,7 +770,7 @@ async def run_costco_import(
         await capture.clear_orders()
         progress(phase="list", message="Warming Costco session (home → account)…", page=1)
         if not await establish_costco_session(page):
-            raise LoginRequiredError("Costco session requires login.")
+            raise LoginRequiredError("Costco stayed on the sign-in page while opening My Account.")
 
         # The SPA can briefly expose an app route before its SSO callback and
         # account loading finish. Navigating or refreshing then restarts the

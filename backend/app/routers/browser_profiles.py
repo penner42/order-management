@@ -20,6 +20,7 @@ from app.browser_automation.jobs import create_job, get_job, update_job, latest_
 from sqlalchemy.exc import IntegrityError
 from app.browser_automation.paths import all_profile_data_dirs, clear_profile_browser_locks
 from app.browser_automation.session_manager import (
+    CostcoSessionWarmupError,
     login_home_url_for_retailer,
     retailer_session_logged_in,
     session_manager,
@@ -752,16 +753,18 @@ async def finish_login(
     retailer_label = profile.retailer.capitalize()
     try:
         logged_in = await retailer_session_logged_in(session.page, profile.retailer)
-    except Exception as exc:
-        logged_in = False
+    except CostcoSessionWarmupError as exc:
+        profile.status = "error"
         profile.last_error = str(exc)
-
-    if logged_in:
-        profile.status = "ready"
-        profile.last_error = None
-    else:
+    except Exception as exc:
         profile.status = "login_required"
-        if not profile.last_error:
+        profile.last_error = str(exc)
+    else:
+        if logged_in:
+            profile.status = "ready"
+            profile.last_error = None
+        else:
+            profile.status = "login_required"
             profile.last_error = (
                 f"Still on {retailer_label} sign-in. Complete login in the live view, then click Done."
             )

@@ -9,8 +9,10 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
-from playwright.async_api import BrowserContext, Page
+from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.browser_automation.paths import browser_engine_for_retailer, profile_user_data_dir
 from app.config import settings
@@ -880,51 +882,65 @@ async def walmart_session_logged_in(page: Page) -> bool:
 
 def looks_like_costco_signin(url: str) -> bool:
     """True only when the browser is on Costco's real SSO UI — not OAuth callbacks."""
-    u = (url or "").lower()
-    if any(host in u for host in COSTCO_SIGNIN_HOST_HINTS):
-        return True
-    # OAuthLogonCmd is the success redirect; never treat it as signed-out.
-    if "oauthlogon" in u:
+    location = urlsplit(url or "")
+    path = location.path.lower()
+    if "oauthlogon" in path:
         return False
-    return any(path in u for path in COSTCO_SIGNIN_PATH_HINTS)
+    return location.hostname in COSTCO_SIGNIN_HOST_HINTS or any(
+        hint in path for hint in COSTCO_SIGNIN_PATH_HINTS
+    )
+
+
+class CostcoSessionWarmupError(RuntimeError):
+    """Costco's login state could not be verified during warm-up."""
 
 
 async def establish_costco_session(page: Page, *, timeout_s: float = 25.0) -> bool:
     """Home → myaccount so cookie SSO can hydrate before we judge login state.
 
-    Costco often still paints a Sign In affordance on first paint; going home
-    first then myaccount lets the session establish. Returns True when the SPA
-    lands on /myaccount/#/app/... .
+    Return True on the account app route and False on the sign-in page.
+    Report navigation and redirect failures separately.
     """
-    try:
-        await page.goto(COSTCO_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
-        await page.wait_for_timeout(1500)
-        await page.goto(COSTCO_MYACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            url = page.url or ""
-            lower = url.lower()
-            # Logged-in SPA
-            if "/myaccount" in lower and "#/app/" in url:
-                return True
-            # Still on silent SSO / OAuth callback — keep waiting.
-            if "oauthlogon" in lower or (
-                looks_like_costco_signin(url) and "authorize" in lower
-            ):
-                await asyncio.sleep(0.4)
-                continue
-            # Settled on interactive SSO (email/password) → not logged in.
-            if looks_like_costco_signin(url):
-                # Give redirects a moment; only fail if we stay on SSO.
-                await asyncio.sleep(0.8)
-                if looks_like_costco_signin(page.url or "") and "#/app/" not in (page.url or ""):
-                    return False
-                continue
-            await asyncio.sleep(0.4)
-        url = page.url or ""
-        return "/myaccount" in url.lower() and "#/app/" in url
-    except Exception:
+    for label, target in (("homepage", COSTCO_HOME_URL), ("account page", COSTCO_MYACCOUNT_URL)):
+        try:
+            response = await page.goto(target, wait_until="domcontentloaded", timeout=60_000)
+            if target == COSTCO_HOME_URL:
+                await page.wait_for_timeout(1500)
+        except PlaywrightTimeoutError:
+            raise CostcoSessionWarmupError(f"Timed out loading the Costco {label} during session warm-up.") from None
+        except PlaywrightError:
+            raise CostcoSessionWarmupError(f"Could not load the Costco {label} during session warm-up.") from None
+
+        if response is not None and response.status >= 400:
+            raise CostcoSessionWarmupError(f"Costco returned HTTP {response.status} while opening the {label}.")
+        if "/blocked" in urlsplit(page.url).path.lower():
+            raise CostcoSessionWarmupError(f"Costco showed a block page while opening the {label}.")
+
+    deadline = time.monotonic() + timeout_s
+    while True:
+        url = page.url
+        location = urlsplit(url)
+        path = location.path.lower()
+        if (
+            location.hostname in ("costco.com", "www.costco.com")
+            and path.rstrip("/") == "/myaccount"
+            and location.fragment.startswith("/app/")
+        ):
+            return True
+        if "/blocked" in path:
+            raise CostcoSessionWarmupError("Costco showed a block page during the account redirect.")
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(0.4)
+
+    signin = looks_like_costco_signin(url)
+    if "oauthlogon" in path or (signin and "authorize" in path):
+        raise CostcoSessionWarmupError("Costco's sign-in redirect did not complete during session warm-up.")
+    if signin:
         return False
+    if path.rstrip("/") == "/myaccount":
+        raise CostcoSessionWarmupError("Costco opened My Account, but the account app did not finish loading.")
+    raise CostcoSessionWarmupError("Costco did not reach My Account during session warm-up.")
 
 
 async def costco_session_logged_in(page: Page) -> bool:
