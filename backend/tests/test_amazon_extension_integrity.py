@@ -57,6 +57,31 @@ class AmazonExtensionIntegrityTests(unittest.IsolatedAsyncioTestCase):
                                     'Purchased item</a></div></div></main>')
         self.assertEqual([i['name'] for i in (await self.parse())['items']], ['Purchased item'])
 
+    async def test_grouped_usd_prices_keep_all_digits_and_cents(self):
+        for price in ('$1,234.56', 'USD 1,234.56', '1,234.56 USD'):
+            with self.subTest(price=price):
+                await self.page.set_content(f'''
+                    <div id="orderDetails">
+                        <span data-component="orderId">{ORDER_ID}</span>
+                        <div class="yohtmlc-item">
+                            <a href="https://www.amazon.com/dp/B000000001">Purchased item</a>
+                            <span data-component="itemQuantity">2</span>
+                            <span data-component="unitPrice">{price}</span>
+                        </div>
+                        <div data-component="orderSubtotals">
+                            <div class="a-row">Item(s) Subtotal: $2,469.12</div>
+                            <div class="a-row">Grand Total: $2,469.12</div>
+                        </div>
+                    </div>
+                ''')
+                parsed = await self.parse()
+                item = parsed['items'][0]
+                self.assertEqual(item['quantity'], 2)
+                self.assertEqual(item['unitPrice'], 1234.56)
+                self.assertEqual(item['lineTotal'], 2469.12)
+                self.assertEqual(parsed['totals']['subtotal'], 2469.12)
+                self.assertEqual(parsed['totals']['grandTotal'], 2469.12)
+
     async def test_recommendations_and_generic_product_grids_are_not_items(self):
         for wrapper in ('<section aria-label="Recommendations">{}</section>',
                         '<div class="a-fixed-left-grid">{}</div>',

@@ -14,6 +14,13 @@
   const ORDER_DATE_RE =
     /(?:ordered on|order placed|placed on)\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})/i
 
+  const USD_AMOUNT = String.raw`([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{2})?)`
+  const PRICE_PATTERNS = [
+    new RegExp(String.raw`\$\s*${USD_AMOUNT}`),
+    new RegExp(String.raw`${USD_AMOUNT}\s*USD\b`, 'i'),
+    new RegExp(String.raw`\bUSD\s*${USD_AMOUNT}`, 'i'),
+  ]
+
   const AD_PATTERNS = [
     /amazon\s*visa/i,
     /amazon\s*business.*card/i,
@@ -152,13 +159,8 @@
 
   function extractPriceFromText(text) {
     const s = coerceString(text) || ''
-    const patterns = [
-      /\$\s*([0-9]+(?:[.,][0-9]{2})?)/,
-      /([0-9]+(?:[.,][0-9]{2})?)\s*USD/i,
-      /USD\s*([0-9]+(?:[.,][0-9]{2})?)/i,
-    ]
-    for (let i = 0; i < patterns.length; i++) {
-      const m = patterns[i].exec(s)
+    for (const pattern of PRICE_PATTERNS) {
+      const m = pattern.exec(s)
       if (m && m[1]) {
         const p = parsePrice(m[1])
         if (p != null) return p
