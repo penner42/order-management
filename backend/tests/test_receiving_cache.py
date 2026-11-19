@@ -17,6 +17,7 @@ from app.database import Base
 from app.config import settings
 from app.models import BuyingGroup, Item, Order, ReceivingReceiptCache, ReceivingReviewPending, Shipment, ShipmentItem, Store
 from app.models.item import ItemStatus
+from app.routers.buying_groups import has_pending_receiving_matches
 from app.utils.buying_group_apis import check_receiving as receiving
 from app.utils.buying_group_apis import bfmr, buyinggroup, dealandrunner, parsefile, usabg
 from app.utils.receiving_cache import ReceiptSource, decode, encode
@@ -168,9 +169,11 @@ class ReceivingCacheTests(unittest.TestCase):
     def test_deleted_items_and_changed_provider_are_not_shown(self):
         self.shipment.tracking_number = "NEW"
         self.check("parsefile")
+        self.assertTrue(has_pending_receiving_matches(db=self.db, _=None))
         self.group.base_url = "https://other.example.com"
         self.db.commit()
         self.assertEqual(self.rematch(), [])
+        self.assertFalse(has_pending_receiving_matches(db=self.db, _=None))
         self.group.base_url = "https://example.com"
         self.db.delete(self.item)
         self.db.commit()

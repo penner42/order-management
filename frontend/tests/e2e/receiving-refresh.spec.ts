@@ -10,6 +10,36 @@ function session(receiptId: string) {
   }]
 }
 
+test('Receiving tab shows a dot until the last match is applied', async ({ app }) => {
+  let pending = true
+  await app.route('**/api/buying-groups/receiving-review/has-pending', route => route.fulfill({ json: pending }))
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: session('SAVED') }))
+  await app.route('**/api/items/bulk-update', route => route.fulfill({ json: { items: [] } }))
+  await app.route('**/api/buying-groups/receiving-review/prune', route => {
+    pending = false
+    return route.fulfill({ json: { deleted: true } })
+  })
+
+  await app.goto('/')
+  const receivingTab = app.getByRole('link', { name: 'Receiving', exact: true })
+  const dot = receivingTab.locator('[aria-hidden="true"]')
+  await expect(receivingTab).toHaveAccessibleDescription('Pending matches to approve')
+  await expect(dot).toBeVisible()
+  await receivingTab.click()
+
+  const desktopViewport = app.viewportSize()!
+  await app.setViewportSize({ width: 390, height: 844 })
+  await app.getByRole('button', { name: 'Open navigation menu' }).click()
+  await expect(receivingTab).toHaveAccessibleDescription('Pending matches to approve')
+  await expect(dot).toBeVisible()
+  await app.keyboard.press('Escape')
+  await app.setViewportSize(desktopViewport)
+
+  await app.getByRole('button', { name: 'Apply 1 selected', exact: true }).click()
+  await expect(receivingTab).toHaveAccessibleDescription('')
+  await expect(dot).toHaveCount(0)
+})
+
 test('Receiving reloads on navigation and deduplicates tab-return events', async ({ app }) => {
   let receipt = 'FIRST'
   let requests = 0

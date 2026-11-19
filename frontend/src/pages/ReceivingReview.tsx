@@ -688,7 +688,7 @@ function ReceivingGroupSection({
   )
 }
 
-export default function ReceivingReview() {
+export default function ReceivingReview({ onPendingMatchesChange }: { onPendingMatchesChange: () => void }) {
   const [searchParams] = useSearchParams()
   const highlightRaw = (searchParams.get('highlight') || '').trim()
   const highlightGroupId = highlightRaw ? parseInt(highlightRaw, 10) : NaN
@@ -736,6 +736,7 @@ export default function ReceivingReview() {
     try {
       const data = await api.get<ReceivingSession[]>('/buying-groups/receiving-review')
       if (version !== requestVersion.current) return
+      onPendingMatchesChange()
       if (background && (Object.values(busyRef.current).some(Boolean) || editRevision.current !== revision)) {
         setRefreshDeferred(true)
         return
@@ -761,7 +762,7 @@ export default function ReceivingReview() {
         setLoading(false)
       }
     }
-  }, [])
+  }, [onPendingMatchesChange])
 
   useEffect(() => {
     loadSessions()
@@ -863,6 +864,7 @@ export default function ReceivingReview() {
               onBusyChange={onBusyChange}
               session={session}
               onSessionChange={(next) => {
+                onPendingMatchesChange()
                 editRevision.current++
                 setAppliedByGroup(prev => ({ ...prev, [next.buying_group_id]: new Set() }))
                 setSessions(prev => prev.map(s => s.buying_group_id === next.buying_group_id ? next : s))
@@ -887,6 +889,7 @@ export default function ReceivingReview() {
               }}
               appliedIds={appliedByGroup[session.buying_group_id] ?? new Set()}
               setAppliedIds={(updater) => {
+                onPendingMatchesChange()
                 editRevision.current++
                 setAppliedByGroup((prev) => {
                   const current = prev[session.buying_group_id] ?? new Set<string>()

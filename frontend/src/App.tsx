@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createBrowserRouter, RouterProvider, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { api } from './api/client'
 import Orders from './pages/Orders'
 import BuyingGroups from './pages/BuyingGroups'
 import BfmrOrderReview from './pages/BfmrOrderReview'
@@ -65,8 +66,41 @@ function AppShell() {
   const { user, loading, logout } = useAuth()
   const location = useLocation()
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [hasPendingReceivingMatches, setHasPendingReceivingMatches] = useState(false)
+  const [receivingStatusVersion, setReceivingStatusVersion] = useState(0)
   const isPublic =
     location.pathname === '/login' || location.pathname === '/extension-auth'
+  const receivingUserId = !isPublic && user?.role !== 'admin' ? user?.id : undefined
+
+  const refreshReceivingStatus = useCallback(() => {
+    setReceivingStatusVersion(version => version + 1)
+  }, [])
+
+  useEffect(() => {
+    if (receivingUserId === undefined) {
+      setHasPendingReceivingMatches(false)
+      return
+    }
+    let requestVersion = 0
+    const refresh = async () => {
+      if (document.visibilityState !== 'visible') return
+      const version = ++requestVersion
+      try {
+        const pending = await api.get<boolean>('/buying-groups/receiving-review/has-pending')
+        if (version === requestVersion) setHasPendingReceivingMatches(pending)
+      } catch {
+        // Keep the last known state if the status request fails.
+      }
+    }
+    void refresh()
+    window.addEventListener('focus', refresh)
+    const timer = window.setInterval(refresh, 60_000)
+    return () => {
+      requestVersion++
+      window.removeEventListener('focus', refresh)
+      window.clearInterval(timer)
+    }
+  }, [receivingUserId, location.pathname, receivingStatusVersion])
 
   useEffect(() => {
     setMobileNavOpen(false)
@@ -124,8 +158,17 @@ function AppShell() {
     return <Navigate to="/login" replace />
   }
 
+  const receivingPendingDescription = hasPendingReceivingMatches ? 'receiving-pending-description' : undefined
+  const receivingLabel = hasPendingReceivingMatches && (
+    <span className="inline-flex items-center gap-1.5">
+      Receiving
+      <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-orange-600 dark:bg-orange-400" />
+    </span>
+  )
+
   return (
     <div className="min-h-screen flex flex-col">
+      {receivingPendingDescription && <span id={receivingPendingDescription} hidden>Pending matches to approve</span>}
       <header className="bg-white dark:bg-gray-900 border-b border-brand-200/80 dark:border-gray-700 sticky top-0 z-10">
         <div className="max-w-[1920px] mx-auto px-4 h-14 flex items-center gap-3 sm:gap-6 w-full">
           <NavLink
@@ -141,11 +184,12 @@ function AppShell() {
                 reloadDocument
                 end={item.to === "/"}
                 to={item.to}
+                aria-describedby={item.to === '/receiving-review' ? receivingPendingDescription : undefined}
                 className={({ isActive }) =>
                   `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
                 }
               >
-                {item.label}
+                {item.to === '/receiving-review' && receivingLabel ? receivingLabel : item.label}
               </NavLink>
             ))}
           </nav>
@@ -206,11 +250,12 @@ function AppShell() {
                     reloadDocument
                     end={item.to === "/"}
                     to={item.to}
+                    aria-describedby={item.to === '/receiving-review' ? receivingPendingDescription : undefined}
                     className={({ isActive }) =>
                       `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
                     }
                   >
-                    {item.label}
+                    {item.to === '/receiving-review' && receivingLabel ? receivingLabel : item.label}
                   </NavLink>
                 ))}
               </nav>
@@ -247,7 +292,7 @@ function AppShell() {
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
           <Route path="/import-review/job/:jobId" element={<AutomationOrderImport />} />
-          <Route path="/receiving-review" element={<ReceivingReview />} />
+          <Route path="/receiving-review" element={<ReceivingReview onPendingMatchesChange={refreshReceivingStatus} />} />
           <Route path="/bfmr-order-review" element={<BfmrOrderReview />} />
           <Route path="/receiving-audit" element={<ReceivingAudit />} />
           <Route path="/buying-groups" element={<LegacyRedirect to="/settings/buying-groups" />} />

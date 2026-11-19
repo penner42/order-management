@@ -14,7 +14,7 @@ from app.buying_group_schedules import SCHEDULE_FIELDS, rebuild_schedules, claim
 from app.submission_policy import require_group_submissions_enabled
 from app.auth import get_current_user
 from app.database import SessionLocal, get_db
-from app.models import BrowserImportLog, BuyingGroup, ReceivingReviewPending, User
+from app.models import BrowserImportLog, BuyingGroup, ReceivingReceiptCache, ReceivingReviewPending, User
 from app.models.user import get_default_app_user_id
 from app.schemas.buying_group import (
     BuyingGroupCheckReceivingResponse,
@@ -46,6 +46,7 @@ from app.utils.receiving_links import (
     applied_receipt_pairs, candidate_lines, link_receipt, receipt_is_applied, unlink_receipt,
 )
 from app.utils.receiving_audit import build_receiving_audit
+from app.utils.receiving_cache import provider_identity
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,28 @@ def list_receiving_review(
     """All buying groups with pending warehouse matches awaiting apply."""
     payloads = list_receiving_review_pending_payloads(db)
     return [ReceivingReviewSession.model_validate(p) for p in payloads]
+
+
+@router.get("/receiving-review/has-pending", response_model=bool)
+def has_pending_receiving_matches(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Check the saved match count without rematching warehouse receipts."""
+    pending_groups = (
+        db.query(
+            BuyingGroup.api_framework, BuyingGroup.base_url, BuyingGroup.api_username,
+            BuyingGroup.api_user_id, BuyingGroup.api_email, ReceivingReceiptCache.provider_identity,
+        )
+        .select_from(BuyingGroup)
+        .join(ReceivingReviewPending, ReceivingReviewPending.buying_group_id == BuyingGroup.id)
+        .outerjoin(ReceivingReceiptCache, ReceivingReceiptCache.buying_group_id == BuyingGroup.id)
+        .filter(ReceivingReviewPending.matched_count > 0)
+    )
+    return any(
+        group.provider_identity is None or group.provider_identity == provider_identity(group)
+        for group in pending_groups
+    )
 
 
 @router.post("/receiving-review/prune", response_model=ReceivingReviewPruneResponse)

@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, Store
-from app.routers.buying_groups import _execute_received_check, check_buying_group_receiving
+from app.routers.buying_groups import _execute_received_check, check_buying_group_receiving, has_pending_receiving_matches
 from app.schemas.buying_group import ReceivingReviewSession
 from app.utils.buying_group_apis import check_receiving as receiving
 from app.utils.buying_group_apis.dealandrunner import DealandrunnerReceivedRow, DealandrunnerRunnerTransactionsResult
@@ -112,9 +112,11 @@ class UnknownReceivingReviewTests(unittest.TestCase):
         receiving.save_receiving_review_pending(
             self.db, self.payload(matches=[{"item_id": 1}, {"item_id": 1, "match_kind": "not_received"}])
         )
+        self.assertTrue(has_pending_receiving_matches(db=self.db, _=None))
         self.assertEqual(receiving.prune_receiving_review_pending(
             self.db, buying_group_id=self.group.id, item_ids=[1]
         ), (0, False))
+        self.assertFalse(has_pending_receiving_matches(db=self.db, _=None))
         pending = receiving.list_receiving_review_pending_payloads(self.db)[0]
         self.assertEqual(pending["matches"], [])
         self.assertEqual(pending["unknown_receipts"], [self.receipt()])
