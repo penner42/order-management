@@ -269,8 +269,7 @@ function ReceivingGroupSection({
             split_off: { id: number }
           }>(`/items/${itemId}/split`, {
             keep_quantity: m.split_keep_quantity,
-            // Under-received remainder keeps the same tracking and needs review;
-            // full receiving checks skip needs_review so they don't overwrite it.
+            // Keep the tracking so a later warehouse scan can match the remainder.
             copy_tracking: true,
             split_off_status: 'needs_review',
           })

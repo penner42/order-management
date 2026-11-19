@@ -1,7 +1,7 @@
 """Receipt matching follows local edits without fetching warehouse data again."""
 from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from dataclasses import fields, MISSING
+from dataclasses import fields, MISSING, replace
 from decimal import Decimal
 from datetime import datetime, timezone
 import json
@@ -18,8 +18,11 @@ from app.config import settings
 from app.models import BuyingGroup, Item, Order, ReceivingReceiptCache, ReceivingReviewPending, Shipment, ShipmentItem, Store
 from app.models.item import ItemStatus
 from app.routers.buying_groups import has_pending_receiving_matches
+from app.routers.items import bulk_update_items
+from app.schemas.item import ItemBulkUpdateEntry, ItemBulkUpdateRequest, ItemSplitRequest
 from app.utils.buying_group_apis import check_receiving as receiving
 from app.utils.buying_group_apis import bfmr, buyinggroup, dealandrunner, parsefile, usabg
+from app.utils.item_split import split_item_record
 from app.utils.receiving_cache import ReceiptSource, decode, encode
 from app.utils.receiving_links import link_receipt, receipt_key
 from app.schemas.buying_group import ReceivingReceiptLinkRequest
@@ -76,15 +79,16 @@ class ReceivingCacheTests(unittest.TestCase):
             "usabg": (usabg, "list_received_po_rows", usabg.UsabgReceivedListResult([us] * count, 1, 1)),
         }
 
-    def check(self, provider, *, count=1, error=None):
+    def check(self, provider, *, count=1, error=None, details=None):
         self.group.api_framework = provider
         self.db.commit()
         module, method, value = self.responses(count=count)[provider]
         with ExitStack() as stack:
             stack.enter_context(patch.object(module, method, return_value=value, side_effect=error))
             stack.enter_context(patch.object(buyinggroup, "list_tracking_rewards", return_value={"new": Decimal("1.23")}))
-            stack.enter_context(patch.object(buyinggroup, "get_receipt_details", return_value={"receipt_id": "R1", "received_items": [
-                {"item_id": "Headphones", "upc": "123", "qty": 1, "price": "20", "total": "20", "verified": True}]}))
+            stack.enter_context(patch.object(buyinggroup, "get_receipt_details", side_effect=details,
+                return_value={"receipt_id": "R1", "received_items": [
+                    {"item_id": "Headphones", "upc": "123", "qty": 1, "price": "20", "total": "20", "verified": True}]}))
             result = receiving.check_receiving_for_group(self.db, buying_group_id=self.group.id)
         if not result.error:
             receiving.save_receiving_review_pending(self.db, result.session_payload)
@@ -214,6 +218,104 @@ class ReceivingCacheTests(unittest.TestCase):
         self.item.receipt_tracking_number = "NEW"
         self.db.commit()
         self.assertEqual(self.rematch(), [])
+
+    def test_needs_review_matches_later_scan_without_reusing_applied_units(self):
+        self.shipment.tracking_number = "NEW"
+        remainder = Item(order_id=self.order.id, description=self.item.description, quantity=1,
+                         price_sold=self.item.price_sold, status=ItemStatus.NEEDS_REVIEW)
+        self.shipment.shipment_items.append(ShipmentItem(item=remainder))
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = "R1"
+        self.item.receipt_tracking_number = "NEW"
+        self.item.receipt_upc = "123"
+        self.item.reward = Decimal("1.23")
+        self.db.commit()
+
+        def details(receipt_key, **kwargs):
+            return {"receipt_id": "R1" if receipt_key == "key" else "R2", "received_items": [
+                {"item_id": "Headphones", "upc": "123", "qty": 1, "price": "20", "total": "20", "verified": True}
+            ]}
+
+        fields_by_provider = {
+            "parsefile": {"receipt_id": "R2"},
+            "buyinggroup": {"receipt_id": "R2", "raw": {"key": "second"}},
+            "bfmr": {"my_tracker_id": "R2"},
+            "dealandrunner": {"system_transaction_id": "R2"},
+            "usabg": {"po_number": "R2"},
+        }
+        for provider, changes in fields_by_provider.items():
+            with self.subTest(provider=provider):
+                remainder.status = ItemStatus.NEEDS_REVIEW
+                remainder.receipt_id = remainder.receipt_tracking_number = None
+                remainder.receipt_upc = remainder.scanned_at = None
+                self.assertFalse(self.check(provider).matches)
+                self.assertFalse(any(session["matches"] for session in self.rematch()))
+
+                responses = self.responses()
+                response = responses[provider][2]
+                rows = response if provider == "buyinggroup" else response.rows
+                rows.append(replace(rows[0], **changes))
+                with patch.object(self, "responses", return_value=responses):
+                    match, = self.check(provider, details=details).matches
+                self.assertEqual((match.item_id, match.receipt_id, match.quantity), (remainder.id, "R2", 1))
+                self.assertFalse(match.update_receipt_only)
+                session, = self.rematch()
+                cached_match, = session["matches"]
+                self.assertEqual(cached_match["receipt_id"], "R2")
+
+                bulk_update_items(ItemBulkUpdateRequest(updates=[ItemBulkUpdateEntry(
+                    item_id=remainder.id, status=ItemStatus.SCANNED, receipt_id=match.receipt_id,
+                    receipt_tracking_number=match.tracking_number, receipt_upc=match.receipt_upc, reward=match.reward,
+                )]), db=self.db, _=None)
+                self.assertEqual(remainder.status, ItemStatus.SCANNED)
+                self.assertFalse(any(session["matches"] for session in self.rematch()))
+
+    def test_needs_review_matches_only_new_units_on_an_existing_receipt(self):
+        self.shipment.tracking_number = "NEW"
+        self.item.quantity = 3
+        received, missing = self.check("parsefile").matches
+        self.assertEqual((received.quantity, missing.quantity), (1, 2))
+        remainder = split_item_record(self.db, self.item, ItemSplitRequest(
+            keep_quantity=received.split_keep_quantity, copy_tracking=True, split_off_status=ItemStatus.NEEDS_REVIEW,
+        ))
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = received.receipt_id
+        self.db.commit()
+        self.assertEqual(self.rematch(), [])
+
+        responses = self.responses()
+        receipt, = responses["parsefile"][2].rows
+        receipt.qty = 2
+        receipt.ext_total = Decimal("40")
+        with patch.object(self, "responses", return_value=responses):
+            received, missing = self.check("parsefile").matches
+        self.assertEqual(received.item_id, remainder.id)
+        self.assertEqual(received.split_keep_quantity, 1)
+        self.assertEqual(received.received_ext_total, Decimal("20"))
+        self.assertEqual((missing.match_kind, missing.quantity), ("not_received", 1))
+
+    def test_dealandrunner_does_not_reuse_applied_walmart_scans_on_other_trackings(self):
+        self.order.store.name = "Walmart"
+        self.item.quantity = 3
+        responses = self.responses("035414608074526836")
+        rows = responses["dealandrunner"][2].rows
+        rows.append(replace(rows[0], tracking_numbers=["056781234567890123"], system_transaction_id="R2"))
+        with patch.object(self, "responses", return_value=responses):
+            received, missing = self.check("dealandrunner").matches
+        self.assertEqual((received.quantity, missing.quantity), (2, 1))
+        remainder = split_item_record(self.db, self.item, ItemSplitRequest(
+            keep_quantity=2, copy_tracking=True, split_off_status=ItemStatus.NEEDS_REVIEW,
+        ))
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = received.receipt_id
+        self.item.receipt_tracking_number = received.tracking_number
+        self.db.commit()
+        self.assertFalse(any(session["matches"] for session in self.rematch()))
+
+        rows.append(replace(rows[0], tracking_numbers=["012341234567890123"], system_transaction_id="R3"))
+        with patch.object(self, "responses", return_value=responses):
+            match, = self.check("dealandrunner").matches
+        self.assertEqual((match.item_id, match.receipt_id, match.quantity), (remainder.id, "R3", 1))
 
     def test_cached_missing_details_never_fetches_on_replay(self):
         source = ReceiptSource()
