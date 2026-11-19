@@ -69,7 +69,7 @@ class BuyingGroupScheduleTests(unittest.TestCase):
         buying_groups._stamp_received_check_last_run(self.db, self.a.id)
         self.assertEqual(self.a.schedule_next_run_at, before)
 
-    def test_gobuyme_credentials_save_without_enabling_automation(self):
+    def test_gobuyme_credentials_allow_tracking_schedule_only(self):
         self.rebuild()
         data = BuyingGroupUpdate(
             api_framework="GoBuyMe", api_username="buyer@example.com", api_password="test-password",
@@ -82,10 +82,10 @@ class BuyingGroupScheduleTests(unittest.TestCase):
         self.assertEqual(saved.api_username, "buyer@example.com")
         self.assertEqual(saved.api_password, "test-password")
         self.assertEqual(saved.bearer_token, "test-api-key")
-        self.assertFalse(saved.tracking_submit_enabled)
+        self.assertTrue(saved.tracking_submit_enabled)
         self.assertFalse(saved.received_check_enabled)
         self.assertFalse(saved.payment_sync_enabled)
-        self.assertIsNone(saved.schedule_next_run_at)
+        self.assertIsNotNone(saved.schedule_next_run_at)
         summary = BuyingGroupSummary.model_validate(group).model_dump()
         self.assertNotIn("api_password", summary)
         self.assertNotIn("bearer_token", summary)

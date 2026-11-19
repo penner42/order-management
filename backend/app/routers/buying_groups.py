@@ -52,7 +52,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/buying-groups", tags=["buying-groups"])
 GOBUYME_AUTOMATION_DISABLED = {
-    "tracking_submit_enabled": False,
     "received_check_enabled": False,
     "payment_sync_enabled": False,
 }

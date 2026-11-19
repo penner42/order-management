@@ -40,6 +40,7 @@ function supportsTrackingSubmit(framework: string | null | undefined): boolean {
   return (
     framework === 'parsefile' ||
     framework === 'usabg' ||
+    framework === 'gobuyme' ||
     framework === 'buyinggroup' ||
     framework === 'dealandrunner' ||
     framework === 'bfmr'
@@ -78,7 +79,8 @@ function canSubmitTrackings(g: BuyingGroup): boolean {
   }
   if (usesUsernamePassword(g.api_framework)) {
     // Blank base_url uses the framework default.
-    return Boolean(g.api_username?.trim()) && Boolean(g.api_password?.trim())
+    return Boolean(g.api_username?.trim()) && Boolean(g.api_password?.trim()) &&
+      (g.api_framework !== 'gobuyme' || Boolean(g.bearer_token?.trim()))
   }
   return false
 }
@@ -564,7 +566,7 @@ export default function BuyingGroups() {
                       </label>
                       {draft.api_framework === 'gobuyme' ? (
                         <p className="text-xs text-ink-muted">
-                          Tracking submission, receiving checks, and payment sync are pending integration.{' '}
+                          Tracking submission matches the item UPC to a GoBuyMe Tracker reservation.{' '}
                           <a href={GOBUYME_SIGN_IN_URL} target="_blank" rel="noreferrer" className="underline">
                             Open GoBuyMe sign-in
                           </a>

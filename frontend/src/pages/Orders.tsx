@@ -1062,6 +1062,9 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
     if (!tracking.trim()) return false
     const bg = groups.find((g) => g.id === order.buying_group_id)
     if (!bg) return false
+    if (bg.api_framework === 'gobuyme') {
+      return Boolean(bg.api_username?.trim() && bg.api_password?.trim() && bg.bearer_token?.trim())
+    }
     if (bg.api_framework === 'parsefile') {
       // Blank api_url uses the Parsefile framework default.
       return Boolean(bg.bearer_token?.trim()) && Boolean(bg.base_url?.trim())

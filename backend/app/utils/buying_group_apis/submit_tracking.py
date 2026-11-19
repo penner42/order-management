@@ -16,6 +16,7 @@ from app.models.item import ItemStatus
 from app.utils.buying_group_apis import bfmr as bfmr_api
 from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
 from app.utils.buying_group_apis import dealandrunner as dealandrunner_api
+from app.utils.buying_group_apis import gobuyme as gobuyme_api
 from app.utils.buying_group_apis import parsefile as parsefile_api
 from app.utils.buying_group_apis import usabg as usabg_api
 from app.utils.dates import to_date_only
@@ -111,6 +112,10 @@ def group_ready(group: BuyingGroup | None) -> tuple[bool, str | None]:
         return parsefile_group_ready(group)
     if framework == "usabg":
         return usabg_group_ready(group)
+    if framework == "gobuyme":
+        if not all((value or "").strip() for value in (group.api_username, group.api_password, group.bearer_token)):
+            return False, "Buying group is missing its GoBuyMe email, password, or API key"
+        return True, None
     if framework == "buyinggroup":
         return buyinggroup_group_ready(group)
     if framework == "dealandrunner":
@@ -255,6 +260,23 @@ class SubmitResult:
     # tracking number -> (display_id, api_id)
     submission_ids_by_tracking: dict[str, tuple[str | None, str | None]] = field(
         default_factory=dict
+    )
+
+
+def _gobuyme_tracker(group: BuyingGroup) -> gobuyme_api.BuyerTracker:
+    return gobuyme_api.BuyerTracker(
+        email=str(group.api_username), password=str(group.api_password), api_key=str(group.bearer_token),
+    )
+
+
+def _submit_gobuyme_box(
+    tracker: gobuyme_api.BuyerTracker, pairs: Sequence[tuple[Item, Order]], tracking: str,
+) -> str:
+    order_numbers = {(order.store_order_number or "").strip() for _, order in pairs}
+    return tracker.submit_tracking(
+        tracking=tracking,
+        items=[(item.upc, item.quantity) for item, _ in pairs],
+        order_number=next(iter(order_numbers)) if len(order_numbers) == 1 else None,
     )
 
 
@@ -466,6 +488,7 @@ def find_shipped_items_sharing_tracking(
     *,
     buying_group_id: int,
     tracking: str,
+    gobuyme: bool = False,
 ) -> list[Item]:
     """All SHIPPED items on this buying group that share the tracking number."""
     from app.models import Shipment
@@ -474,6 +497,10 @@ def find_shipped_items_sharing_tracking(
     tn = (tracking or "").strip()
     if not tn:
         return []
+    stored_tracking = func.trim(Shipment.tracking_number)
+    if gobuyme:
+        tn = gobuyme_api.normalize_tracking(tn)
+        stored_tracking = func.upper(func.replace(stored_tracking, " ", ""))
 
     rows = (
         db.query(Item)
@@ -485,7 +512,7 @@ def find_shipped_items_sharing_tracking(
         .filter(Order.status != "personal")
         .filter(Shipment.tracking_number.isnot(None))
         .filter(Shipment.tracking_number != "")
-        .filter(func.trim(Shipment.tracking_number) == tn)
+        .filter(stored_tracking == tn)
         .options(
             joinedload(Item.order),
             selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
@@ -528,6 +555,12 @@ def submit_item_tracking_to_group(
         pairs = [(item, order)]
 
     framework = (group.api_framework or "").strip().casefold()
+    if framework == "gobuyme":
+        box_id = _submit_gobuyme_box(_gobuyme_tracker(group), pairs, tracking)
+        return SubmitResult(
+            message="GoBuyMe Tracker link verified.", affected=1, item_ids=item_ids,
+            submission_ids_by_tracking={tracking: (box_id, box_id)},
+        )
     if framework == "parsefile":
         entry = build_parsefile_entry_from_items(pairs, tracking)
         result = submit_parsefile_trackings(group, [entry])
@@ -1004,6 +1037,27 @@ def batch_submit_pending_trackings(
                 message = (
                     f"{message}\n{parsefile_id_err}" if message else parsefile_id_err
                 )
+        elif framework == "gobuyme":
+            tracker = _gobuyme_tracker(group)
+            boxes: dict[str, list[tuple[Item, Order]]] = {}
+            for item, order, tracking in pending:
+                normalized = gobuyme_api.normalize_tracking(tracking)
+                boxes.setdefault(normalized, []).append((item, order))
+                item_tracking[item.id] = normalized
+            item_ids = []
+            failures = []
+            for tracking, pairs in boxes.items():
+                try:
+                    box_id = _submit_gobuyme_box(tracker, pairs, tracking)
+                except (ValueError, RuntimeError) as exc:
+                    failures.append(f"{tracking}: {exc}")
+                    continue
+                item_ids.extend(item.id for item, _ in pairs)
+                submission_ids_by_tracking[tracking] = (box_id, box_id)
+            tracking_numbers = list(submission_ids_by_tracking)
+            message = f"Verified {len(tracking_numbers)} GoBuyMe Tracker link(s)."
+            if failures:
+                message += " Skipped: " + "; ".join(failures)
         elif framework == "usabg":
             base_url = group.base_url
             username = str(group.api_username)

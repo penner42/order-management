@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from app.config import Settings
 from app.routers import buying_groups, items
 from app.submission_policy import require_group_submissions_enabled
-from app.utils.buying_group_apis import bfmr, buyinggroup, dealandrunner, parsefile, submit_tracking, usabg
+from app.utils.buying_group_apis import bfmr, buyinggroup, dealandrunner, gobuyme, parsefile, submit_tracking, usabg
 
 
 class SubmissionPolicyTests(unittest.TestCase):
@@ -26,6 +26,7 @@ class SubmissionPolicyTests(unittest.TestCase):
             submit_tracking.batch_submit_pending_trackings,
             bfmr.submit_trackings, buyinggroup.submit_trackings,
             dealandrunner.submit_trackings, parsefile.submit_trackings,
+            gobuyme.BuyerTracker.submit_tracking,
             usabg.submit_trackings, usabg.upsert_tracking_note,
         ]
         with patch("urllib.request.urlopen") as network:

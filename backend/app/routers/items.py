@@ -297,6 +297,7 @@ def submit_item_tracking(
         db,
         buying_group_id=int(order.buying_group_id),
         tracking=tracking,
+        gobuyme=group.api_framework == "gobuyme",
     )
     if not any(s.id == item.id for s in siblings):
         siblings = [item, *siblings]
