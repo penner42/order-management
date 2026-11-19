@@ -11,7 +11,7 @@ from app.database import Base
 from app.models import BuyingGroup
 from app.buying_group_schedules import claim_group_job, list_due_group_ids, rebuild_schedules, utc
 from app.routers import buying_groups
-from app.schemas.buying_group import BuyingGroupCreate, BuyingGroupUpdate
+from app.schemas.buying_group import BuyingGroupCreate, BuyingGroupRead, BuyingGroupSummary, BuyingGroupUpdate
 
 
 class BuyingGroupScheduleTests(unittest.TestCase):
@@ -68,6 +68,27 @@ class BuyingGroupScheduleTests(unittest.TestCase):
         before = self.a.schedule_next_run_at
         buying_groups._stamp_received_check_last_run(self.db, self.a.id)
         self.assertEqual(self.a.schedule_next_run_at, before)
+
+    def test_gobuyme_credentials_save_without_enabling_automation(self):
+        self.rebuild()
+        data = BuyingGroupUpdate(
+            api_framework="GoBuyMe", api_username="buyer@example.com", api_password="test-password",
+            bearer_token="test-api-key",
+            tracking_submit_enabled=True, received_check_enabled=True, payment_sync_enabled=True,
+        )
+        group = buying_groups.update_buying_group(self.a.id, data, self.db, None)
+        saved = BuyingGroupRead.model_validate(group)
+        self.assertEqual(saved.api_framework, "gobuyme")
+        self.assertEqual(saved.api_username, "buyer@example.com")
+        self.assertEqual(saved.api_password, "test-password")
+        self.assertEqual(saved.bearer_token, "test-api-key")
+        self.assertFalse(saved.tracking_submit_enabled)
+        self.assertFalse(saved.received_check_enabled)
+        self.assertFalse(saved.payment_sync_enabled)
+        self.assertIsNone(saved.schedule_next_run_at)
+        summary = BuyingGroupSummary.model_validate(group).model_dump()
+        self.assertNotIn("api_password", summary)
+        self.assertNotIn("bearer_token", summary)
 
     def test_enabled_actions_run_in_order_even_after_submission_failure(self):
         self.rebuild()

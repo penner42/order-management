@@ -10,6 +10,7 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
   { value: '', label: 'None' },
   { value: 'parsefile', label: 'Parsefile' },
   { value: 'usabg', label: 'USABG' },
+  { value: 'gobuyme', label: 'GoBuyMe' },
   { value: 'buyinggroup', label: 'BuyingGroup.com' },
   { value: 'dealandrunner', label: 'Deal & Runner' },
   { value: 'bfmr', label: 'BFMR' },
@@ -17,6 +18,8 @@ const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: strin
 
 const PARSEFILE_DEFAULT_API_URL = '/p/it@api@order-management'
 const USABG_DEFAULT_BASE_URL = 'https://api.usabuying.group/buyers'
+const GOBUYME_SIGN_IN_URL = 'https://gobuyme.com/auth'
+const GOBUYME_API_KEYS_URL = 'https://gobuyme.com/app/profile?step=api-keys'
 const BUYINGGROUP_DEFAULT_BASE_URL = 'https://api.prod.buyinggroup.com'
 const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH = '/v1/order/add_trackings'
 const DEALANDRUNNER_DEFAULT_BASE_URL = 'https://api.dealandrunner.com'
@@ -26,6 +29,7 @@ const DEFAULT_INTERVAL_MINUTES = 360
 function usesUsernamePassword(framework: string | null | undefined): boolean {
   return (
     framework === 'usabg' ||
+    framework === 'gobuyme' ||
     framework === 'buyinggroup' ||
     framework === 'dealandrunner' ||
     framework === 'bfmr'
@@ -108,6 +112,7 @@ function effectiveApiUrl(g: BuyingGroup): string {
 }
 
 function endpointSummary(g: BuyingGroup): string | null {
+  if (g.api_framework === 'gobuyme') return GOBUYME_SIGN_IN_URL
   const base = effectiveBaseUrl(g)
   if (!base && g.api_framework !== 'buyinggroup') return null
   if (g.api_framework === 'buyinggroup') {
@@ -285,6 +290,8 @@ export default function BuyingGroups() {
   const [submitAlert, setSubmitAlert] = useState<string | null>(null)
   const [paymentCapabilities, setPaymentCapabilities] = useState<PaymentCapability[]>([])
   const [checkingPayments, setCheckingPayments] = useState<number | null>(null)
+  const isGoBuyMe = draft.api_framework === 'gobuyme'
+  const usesEmailLogin = draft.api_framework === 'dealandrunner' || isGoBuyMe
 
   useEffect(() => {
     api.get<PaymentCapability[]>('/payment-review/capabilities').then(setPaymentCapabilities).catch(console.error)
@@ -333,13 +340,13 @@ export default function BuyingGroups() {
       await api.patch<BuyingGroup>(`/buying-groups/${editing}`, {
         name: draft.name.trim(),
         api_framework: draft.api_framework || null,
-        base_url: draft.base_url.trim() || null,
+        base_url: draft.api_framework === 'gobuyme' ? null : draft.base_url.trim() || null,
         api_url: usesUsernamePassword(draft.api_framework)
           ? draft.api_framework === 'buyinggroup'
             ? draft.api_url.trim() || null
             : null
           : draft.api_url.trim() || null,
-        bearer_token: usesUsernamePassword(draft.api_framework)
+        bearer_token: !isGoBuyMe && usesUsernamePassword(draft.api_framework)
           ? null
           : draft.bearer_token.trim() || null,
         api_user_id: draft.api_framework === 'parsefile' ? apiUserId : null,
@@ -358,7 +365,7 @@ export default function BuyingGroups() {
         order_number_submit_enabled: draft.api_framework === 'bfmr' && draft.order_number_submit_enabled,
         schedule_interval_minutes: draft.schedule_interval_minutes,
         received_check_enabled: supportsCheckReceiving(draft.api_framework) && draft.received_check_enabled,
-        payment_sync_enabled: draft.payment_sync_enabled,
+        payment_sync_enabled: draft.api_framework !== 'gobuyme' && draft.payment_sync_enabled,
       })
       setGroups(sortGroupsByName(await api.get<BuyingGroup[]>('/buying-groups')))
       setEditing(null)
@@ -536,12 +543,16 @@ export default function BuyingGroups() {
                         <select
                           className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
                           value={draft.api_framework}
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            const framework = e.target.value as EditDraft['api_framework']
                             setDraft((d) => ({
                               ...d,
-                              api_framework: e.target.value as '' | BuyingGroupApiFramework,
+                              api_framework: framework,
+                              ...((framework === 'gobuyme' || d.api_framework === 'gobuyme') && {
+                                base_url: '', api_username: '', api_password: '', bearer_token: '',
+                              }),
                             }))
-                          }
+                          }}
                           disabled={saving}
                         >
                           {API_FRAMEWORK_OPTIONS.map((opt) => (
@@ -551,37 +562,46 @@ export default function BuyingGroups() {
                           ))}
                         </select>
                       </label>
-                      <label className="block">
-                        <span className="text-xs text-ink-muted">
-                          {draft.api_framework === 'usabg'
-                            ? 'Base URL (optional; blank uses USABG default)'
-                            : draft.api_framework === 'buyinggroup'
-                              ? 'Base URL (optional; blank uses BuyingGroup.com default)'
-                              : draft.api_framework === 'dealandrunner'
-                                ? 'Base URL (optional; blank uses Deal & Runner default)'
-                                : draft.api_framework === 'bfmr'
-                                  ? 'Base URL (optional; blank uses BFMR default)'
-                                  : 'Base URL'}
-                        </span>
-                        <input
-                          type="url"
-                          className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                          placeholder={
-                            draft.api_framework === 'usabg'
-                              ? USABG_DEFAULT_BASE_URL
+                      {draft.api_framework === 'gobuyme' ? (
+                        <p className="text-xs text-ink-muted">
+                          Tracking submission, receiving checks, and payment sync are pending integration.{' '}
+                          <a href={GOBUYME_SIGN_IN_URL} target="_blank" rel="noreferrer" className="underline">
+                            Open GoBuyMe sign-in
+                          </a>
+                        </p>
+                      ) : (
+                        <label className="block">
+                          <span className="text-xs text-ink-muted">
+                            {draft.api_framework === 'usabg'
+                              ? 'Base URL (optional; blank uses USABG default)'
                               : draft.api_framework === 'buyinggroup'
-                                ? BUYINGGROUP_DEFAULT_BASE_URL
+                                ? 'Base URL (optional; blank uses BuyingGroup.com default)'
                                 : draft.api_framework === 'dealandrunner'
-                                  ? DEALANDRUNNER_DEFAULT_BASE_URL
+                                  ? 'Base URL (optional; blank uses Deal & Runner default)'
                                   : draft.api_framework === 'bfmr'
-                                    ? BFMR_DEFAULT_BASE_URL
-                                    : 'https://www.powerbuynetwork.com'
-                          }
-                          value={draft.base_url}
-                          onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
-                          disabled={saving}
-                        />
-                      </label>
+                                    ? 'Base URL (optional; blank uses BFMR default)'
+                                    : 'Base URL'}
+                          </span>
+                          <input
+                            type="url"
+                            className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                            placeholder={
+                              draft.api_framework === 'usabg'
+                                ? USABG_DEFAULT_BASE_URL
+                                : draft.api_framework === 'buyinggroup'
+                                  ? BUYINGGROUP_DEFAULT_BASE_URL
+                                  : draft.api_framework === 'dealandrunner'
+                                    ? DEALANDRUNNER_DEFAULT_BASE_URL
+                                    : draft.api_framework === 'bfmr'
+                                      ? BFMR_DEFAULT_BASE_URL
+                                      : 'https://www.powerbuynetwork.com'
+                            }
+                            value={draft.base_url}
+                            onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
+                            disabled={saving}
+                          />
+                        </label>
+                      )}
                       {draft.api_framework === 'buyinggroup' && (
                         <label className="block">
                           <span className="text-xs text-ink-muted">
@@ -618,18 +638,23 @@ export default function BuyingGroups() {
                           />
                         </label>
                       )}
-                      {!usesUsernamePassword(draft.api_framework) && (
+                      {(isGoBuyMe || !usesUsernamePassword(draft.api_framework)) && (
                         <label className="block">
-                          <span className="text-xs text-ink-muted">Bearer token</span>
+                          <span className="text-xs text-ink-muted">{isGoBuyMe ? 'GoBuyMe API key' : 'Bearer token'}</span>
                           <input
                             type="password"
                             className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                            placeholder="Token"
+                            placeholder={isGoBuyMe ? 'gbm_bk_…' : 'Token'}
                             value={draft.bearer_token}
                             onChange={(e) => setDraft((d) => ({ ...d, bearer_token: e.target.value }))}
                             disabled={saving}
                             autoComplete="off"
                           />
+                          {isGoBuyMe && (
+                            <a href={GOBUYME_API_KEYS_URL} target="_blank" rel="noreferrer" className="text-xs text-ink-muted underline">
+                              Open GoBuyMe API keys and docs
+                            </a>
+                          )}
                         </label>
                       )}
                       {draft.api_framework === 'parsefile' && (
@@ -678,17 +703,17 @@ export default function BuyingGroups() {
                             <span className="text-xs text-ink-muted">
                               {draft.api_framework === 'bfmr'
                                 ? 'API Key'
-                                : draft.api_framework === 'dealandrunner'
+                                : usesEmailLogin
                                   ? 'Email'
                                   : 'Username'}
                             </span>
                             <input
-                              type={draft.api_framework === 'dealandrunner' ? 'email' : 'text'}
+                              type={usesEmailLogin ? 'email' : 'text'}
                               className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
                               placeholder={
                                 draft.api_framework === 'buyinggroup'
                                   ? 'BuyingGroup.com username'
-                                  : draft.api_framework === 'dealandrunner'
+                                  : usesEmailLogin
                                     ? 'you@example.com'
                                     : draft.api_framework === 'bfmr'
                                       ? 'BFMR API-KEY'
@@ -714,7 +739,7 @@ export default function BuyingGroups() {
                                     ? 'Deal & Runner password'
                                     : draft.api_framework === 'bfmr'
                                       ? 'BFMR API-SECRET'
-                                      : 'USABG password'
+                                      : `${frameworkLabel(draft.api_framework)} password`
                               }
                               value={draft.api_password}
                               onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}
@@ -793,7 +818,9 @@ export default function BuyingGroups() {
                         <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={draft.payment_sync_enabled} disabled={saving} onChange={e => setDraft(d => ({...d, payment_sync_enabled: e.target.checked}))} />Automatically sync payments</label>
                         <p className="text-xs text-ink-muted">Last payment sync: {formatLastRun(g.payment_sync_last_run_at)}{g.payment_sync_error ? ` · ${g.payment_sync_error}` : ''}</p>
                       </div>}
-                      <p className="text-xs text-ink-muted">Each run submits, checks receiving, then syncs payments, when enabled. Saving schedule changes rebuilds the staggered run times for all groups.</p>
+                      {draft.api_framework !== 'gobuyme' && (
+                        <p className="text-xs text-ink-muted">Each run submits, checks receiving, then syncs payments, when enabled. Saving schedule changes rebuilds the staggered run times for all groups.</p>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -809,6 +836,7 @@ export default function BuyingGroups() {
                             {[
                               frameworkLabel(g.api_framework),
                               endpointSummary(g),
+                              g.api_framework === 'gobuyme' && g.bearer_token && 'API key set',
                               usesUsernamePassword(g.api_framework)
                                 ? g.api_username
                                   ? 'credentials set'

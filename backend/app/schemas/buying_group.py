@@ -5,9 +5,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-ApiFramework = Literal["parsefile", "usabg", "buyinggroup", "dealandrunner", "bfmr"]
+ApiFramework = Literal["parsefile", "usabg", "gobuyme", "buyinggroup", "dealandrunner", "bfmr"]
 
-ALLOWED_API_FRAMEWORKS = frozenset({"parsefile", "usabg", "buyinggroup", "dealandrunner", "bfmr"})
+ALLOWED_API_FRAMEWORKS = frozenset({"parsefile", "usabg", "gobuyme", "buyinggroup", "dealandrunner", "bfmr"})
 
 DEFAULT_INTERVAL_MINUTES = 360
 

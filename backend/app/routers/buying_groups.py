@@ -51,6 +51,11 @@ from app.utils.receiving_cache import provider_identity
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/buying-groups", tags=["buying-groups"])
+GOBUYME_AUTOMATION_DISABLED = {
+    "tracking_submit_enabled": False,
+    "received_check_enabled": False,
+    "payment_sync_enabled": False,
+}
 
 
 @router.get("", response_model=list[BuyingGroupRead])
@@ -63,7 +68,10 @@ def create_buying_group(data: BuyingGroupCreate, db: Session = Depends(get_db), 
     if data.order_number_submit_enabled and data.api_framework != "bfmr":
         raise HTTPException(400, "Automatic order-number submission is available only for BFMR")
     user_id = (current_user.id if current_user.role != "admin" else None) or get_default_app_user_id(db)
-    group = BuyingGroup(**data.model_dump(exclude={"user_id"}), user_id=user_id)
+    values = data.model_dump(exclude={"user_id"})
+    if data.api_framework == "gobuyme":
+        values.update(GOBUYME_AUTOMATION_DISABLED)
+    group = BuyingGroup(**values, user_id=user_id)
     db.add(group)
     db.flush()
     rebuild_schedules(db)
@@ -183,6 +191,8 @@ def update_buying_group(group_id: int, data: BuyingGroupUpdate, db: Session = De
         raise HTTPException(400, "Automatic order-number submission is available only for BFMR")
     if framework != "bfmr":
         updates["order_number_submit_enabled"] = False
+    if framework == "gobuyme":
+        updates.update(GOBUYME_AUTOMATION_DISABLED)
     changed = any(k in SCHEDULE_FIELDS and getattr(group, k) != v for k, v in updates.items())
     for k, v in updates.items():
         setattr(group, k, v)
