@@ -5,6 +5,10 @@ const retailerUrl = 'https://www.walmart.com/orders/123-456'
 const popupPath = '/__extension-test/popup/popup.html'
 const jobPath = '/import-review/job/test-job'
 
+test.beforeEach(async ({ context }) => {
+  await context.route('**/api/buying-groups/receiving-review/has-pending', route => route.fulfill({ json: false }))
+})
+
 test('extension confirms the suggested profile and opens review after the retailer tab moves on', async ({ context, page, baseURL }) => {
   const appBase = baseURL!
   await context.route('https://www.walmart.com/**', route => route.fulfill({

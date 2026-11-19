@@ -53,6 +53,7 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+      - ./browser-extension:/browser-extension:ro
     depends_on:
       frontend:
         condition: service_healthy
