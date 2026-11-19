@@ -5,9 +5,10 @@ import base64
 import json
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from app.submission_policy import require_group_submissions_enabled
@@ -17,12 +18,39 @@ SITE = "https://gobuyme.com"
 PROJECT = "uuwytliqkfkpylruxhew"
 ORIGIN = f"https://{PROJECT}.supabase.co"
 TRACKABLE_STATUSES = {"pending", "confirmed", "in_progress"}
+PRODUCT_COLUMNS = (
+    "product:products(upc,name,asin,bestbuy_sku,product_links(retailer,url)),"
+    "links:deal_item_links(product_links(retailer,url))"
+)
 COMMITMENT_COLUMNS = (
     "id,status,tracking_deadline,units_committed,selected_deal_item_id,"
-    "selected_deal_item:deal_items!commitments_selected_deal_item_id_fkey(quantity,product:products(upc)),"
-    "deal:deals(deal_items!deal_items_deal_id_fkey(role,quantity,product:products(upc))),"
+    f"selected_deal_item:deal_items!commitments_selected_deal_item_id_fkey(quantity,{PRODUCT_COLUMNS}),"
+    f"deal:deals(title,deal_id,deal_items!deal_items_deal_id_fkey(role,quantity,{PRODUCT_COLUMNS})),"
     "shipment_commitments(units_in_shipment)"
 )
+RETAILER_URL_IDS = {
+    "amazon": r"/(?:dp|gp/product|gp/aw/d)/([a-z0-9]{10})(?:/|$)",
+    "walmart": r"/ip/(?:[^/]+/)?([0-9]+)(?:/|$)",
+    "costco": r"(?:\.product\.|/p/(?:[^/]+/)*)([0-9]+)(?:\.html|/|$)",
+    "bestbuy": r"/site/(?:[^/]+/)?([0-9]+)\.p(?:/|$)",
+}
+RETAILER_SKUS = {"amazon": r"[a-z0-9]{10}", "walmart": r"[0-9]+", "costco": r"[0-9]+", "bestbuy": r"[0-9]+"}
+
+
+@dataclass(frozen=True)
+class TrackingItem:
+    upc: str | None
+    quantity: int
+    retailer: str | None = None
+    sku: str | None = None
+    product_url: str | None = None
+
+
+class TrackerChoiceRequired(ValueError):
+    def __init__(self, message, *, tracking, units, choices):
+        super().__init__(message)
+        self.detail = {"code": "gobuyme_reservation_choice", "message": message,
+                       "tracking": tracking, "units": units, "choices": choices}
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -84,7 +112,7 @@ def normalize_tracking(value: str) -> str:
     return value.strip().replace(" ", "").upper()
 
 
-def _commitment_upc(row):
+def _deal_line(row):
     lines = (row.get("deal") or {}).get("deal_items") or []
     if any(line.get("role") == "bundle_component" for line in lines):
         return None
@@ -92,9 +120,87 @@ def _commitment_upc(row):
         line = row.get("selected_deal_item")
     else:
         line = lines[0] if len(lines) == 1 and lines[0].get("role") == "primary" else None
-    if line and line.get("quantity") == 1:
-        return _barcode((line.get("product") or {}).get("upc"))
-    return None
+    return line if line and line.get("quantity") == 1 else None
+
+
+def _retailer(value):
+    return (value or "").strip().casefold().removesuffix(".com").replace(" ", "")
+
+
+def _url_product_id(value, retailer):
+    if not value or retailer not in RETAILER_URL_IDS:
+        return None
+    try:
+        url = urlsplit(value)
+    except ValueError:
+        return None
+    domain = retailer + ".com"
+    if url.scheme not in {"http", "https"} or not url.hostname:
+        return None
+    if url.hostname != domain and not url.hostname.endswith("." + domain):
+        return None
+    match = re.search(RETAILER_URL_IDS[retailer], url.path.casefold())
+    return match[1] if match else None
+
+
+def _item_retailer_id(item):
+    retailer = _retailer(item.retailer)
+    sku = (item.sku or "").strip().casefold()
+    link_sku = _url_product_id(item.product_url, retailer)
+    if retailer not in RETAILER_SKUS or (sku and link_sku and sku != link_sku):
+        return None
+    sku = sku or link_sku
+    return (retailer, sku) if sku and re.fullmatch(RETAILER_SKUS[retailer], sku) else None
+
+
+def _line_identifiers(line):
+    product = line.get("product") or {}
+    deal_links = [link.get("product_links") for link in line.get("links") or []]
+    links = deal_links + (product.get("product_links") or [])
+    ids = set()
+    for retailer, field in (("amazon", "asin"), ("bestbuy", "bestbuy_sku")):
+        sku = str(product.get(field) or "").strip().casefold()
+        if re.fullmatch(RETAILER_SKUS[retailer], sku):
+            ids.add((retailer, sku))
+    for link in links:
+        if link:
+            retailer = _retailer(link.get("retailer"))
+            sku = _url_product_id(link.get("url"), retailer)
+            if sku:
+                ids.add((retailer, sku))
+    return _barcode(product.get("upc")), ids
+
+
+def _match_score(line, identities):
+    upc, product_ids = _line_identifiers(line)
+    exact_upc = False
+    exact_retailer_id = False
+    for item_upc, product_id in identities:
+        upc_matches = bool(item_upc and item_upc == upc)
+        sku_matches = product_id in product_ids
+        if (item_upc and upc and not upc_matches) or not (upc_matches or sku_matches):
+            return 0
+        exact_upc |= upc_matches
+        exact_retailer_id |= sku_matches
+    return 2 * exact_upc + exact_retailer_id
+
+
+def _matches_existing_order(existing, order_number, line, identities):
+    remote_order = (existing.get("order_id") or "").strip().casefold()
+    if not remote_order or not order_number or remote_order != order_number.strip().casefold():
+        return False
+    upc, product_ids = _line_identifiers(line)
+    for item_upc, product_id in identities:
+        if item_upc and upc and item_upc != upc:
+            return False
+        if product_id and product_id not in product_ids and any(key[0] == product_id[0] for key in product_ids):
+            return False
+    return True
+
+
+def _remaining_units(row):
+    allocated = sum(link.get("units_in_shipment") or 1 for link in row["shipment_commitments"])
+    return row["units_committed"] - allocated
 
 
 def _can_link(row, units, now):
@@ -103,8 +209,15 @@ def _can_link(row, units, now):
     deadline = row.get("tracking_deadline")
     if deadline and datetime.fromisoformat(deadline) < now:
         return False
-    allocated = sum(link.get("units_in_shipment") or 1 for link in row["shipment_commitments"])
-    return row["units_committed"] - allocated >= units
+    return _remaining_units(row) >= units
+
+
+def _choice(row, line, identities):
+    deal = row.get("deal") or {}
+    product = line.get("product") or {}
+    return {"id": row["id"], "title": product.get("name") or deal.get("title") or "GoBuyMe reservation",
+            "deal_number": deal.get("deal_id"), "upc": product.get("upc"),
+            "remaining_units": _remaining_units(row), "exact_match": bool(_match_score(line, identities))}
 
 
 class BuyerTracker:
@@ -148,27 +261,30 @@ class BuyerTracker:
         rows = self._read("shipments", {
             "user_id": f"eq.{self.user_id}",
             "tracking_number": f"eq.{tracking}",
-            "select": "id,shipment_commitments(commitment_id,units_in_shipment)",
+            "select": "id,order_id,shipment_commitments(commitment_id,units_in_shipment)",
             "limit": 2,
         })
         if len(rows) > 1:
             raise ValueError("Multiple GoBuyMe boxes already have this tracking number")
         return rows[0] if rows else None
 
-    def submit_tracking(self, *, tracking: str, items: Sequence[tuple[str | None, int]], order_number: str | None):
+    def submit_tracking(
+        self, *, tracking: str, items: Sequence[TrackingItem], order_number: str | None,
+        commitment_id: str | None = None,
+    ):
         require_group_submissions_enabled()
         tracking = normalize_tracking(tracking)
         if not re.fullmatch(r"[A-Z0-9-]+", tracking):
             raise ValueError("GoBuyMe requires a valid tracking number")
-        upcs = {_barcode(upc) for upc, _ in items}
-        if not upcs or None in upcs:
-            raise ValueError("Every item sharing this tracking needs a valid UPC for GoBuyMe")
-        if len(upcs) != 1:
-            raise ValueError("This box contains multiple UPCs. Link it to the correct lines in GoBuyMe Tracker.")
-        upc = next(iter(upcs))
-        units = sum(quantity for _, quantity in items)
-        if units <= 0 or any(quantity <= 0 for _, quantity in items):
+        if not items or any(item.quantity <= 0 for item in items):
             raise ValueError("GoBuyMe requires positive shipment quantities")
+        units = sum(item.quantity for item in items)
+        identities = [(_barcode(item.upc), _item_retailer_id(item)) for item in items]
+        upcs, skus = map(set, zip(*identities))
+        if len(upcs - {None}) > 1 or (len(items) > 1 and not (
+            len(upcs) == 1 and None not in upcs or len(skus) == 1 and None not in skus
+        )):
+            raise ValueError("This box has multiple UPCs or products. Link its lines in GoBuyMe Tracker.")
 
         existing = self._shipment(tracking)
         if existing is not None:
@@ -176,16 +292,38 @@ class BuyerTracker:
             if len(links) == 1 and links[0].get("units_in_shipment") == units:
                 linked_id = links[0]["commitment_id"]
                 linked = self._commitments(commitment_id=linked_id)
-                if len(linked) == 1 and _commitment_upc(linked[0]) == upc:
-                    return existing["id"]
-            raise ValueError("Tracking already exists in GoBuyMe without the expected UPC and units. Review it in Tracker.")
+                line = _deal_line(linked[0]) if len(linked) == 1 else None
+                if line:
+                    if commitment_id == linked_id or (commitment_id is None and (
+                        _match_score(line, identities) or _matches_existing_order(existing, order_number, line, identities)
+                    )):
+                        return existing["id"]
+                    if commitment_id is None:
+                        raise TrackerChoiceRequired(
+                            "Confirm the reservation already linked to this GoBuyMe box.", tracking=tracking, units=units,
+                            choices=[_choice(linked[0], line, identities)],
+                        )
+            raise ValueError("Tracking already exists in GoBuyMe with a different reservation or quantity. Review it in Tracker.")
 
         now = datetime.now(timezone.utc)
-        matches = [row for row in self._commitments() if _commitment_upc(row) == upc and _can_link(row, units, now)]
-        if len(matches) != 1:
-            reason = "Multiple matching reservations" if matches else "No matching reservation with enough units"
-            raise ValueError(f"{reason} for UPC {upc}; review the GoBuyMe Tracker")
-        commitment_id = matches[0]["id"]
+        rows = self._commitments(commitment_id=commitment_id) if commitment_id else self._commitments()
+        eligible = [(row, line) for row in rows if (line := _deal_line(row)) and _can_link(row, units, now)]
+        if commitment_id:
+            if len(eligible) != 1 or eligible[0][0]["id"] != commitment_id:
+                raise ValueError("The selected GoBuyMe reservation is no longer available for this quantity.")
+        else:
+            scored = [(row["id"], _match_score(line, identities)) for row, line in eligible]
+            highest = max((score for _, score in scored), default=0)
+            matches = [row_id for row_id, score in scored if score and score == highest]
+            if len(matches) != 1:
+                reason = "Multiple matching reservations." if matches else "No matching reservation with enough units."
+                if not eligible:
+                    raise ValueError(reason + " Review the GoBuyMe Tracker.")
+                raise TrackerChoiceRequired(
+                    reason + " Choose the correct GoBuyMe reservation.", tracking=tracking, units=units,
+                    choices=[_choice(row, line, identities) for row, line in eligible],
+                )
+            commitment_id = matches[0]
         payload = {"tracking_number": tracking, "units": units, "commitment_ids": [commitment_id]}
         if order_number:
             payload["order_id"] = order_number

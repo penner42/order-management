@@ -169,6 +169,16 @@ class ItemSplitResponse(BaseModel):
     split_off: ItemRead
 
 
+class GoBuyMeTrackingSelection(BaseModel):
+    commitment_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9-]+$")
+    tracking: str = Field(min_length=1, max_length=255)
+    units: int = Field(gt=0, strict=True)
+
+
+class ItemSubmitTrackingRequest(BaseModel):
+    gobuyme_selection: GoBuyMeTrackingSelection | None = None
+
+
 class ItemSubmitTrackingResponse(BaseModel):
     item: ItemRead
     """All items marked submitted (includes siblings that shared the tracking)."""

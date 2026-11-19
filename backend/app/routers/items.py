@@ -18,11 +18,13 @@ from app.schemas.item import (
     ItemRead,
     ItemSplitRequest,
     ItemSplitResponse,
+    ItemSubmitTrackingRequest,
     ItemSubmitTrackingResponse,
     ItemUpdate,
 )
 from app.utils.item_split import split_item_record
 from app.utils.receiving_links import apply_manual_link, validate_manual_link_batch
+from app.utils.buying_group_apis.gobuyme import TrackerChoiceRequired, normalize_tracking
 from app.utils.buying_group_apis.submit_tracking import (
     find_shipped_items_sharing_tracking,
     group_ready,
@@ -259,6 +261,7 @@ def submit_item_tracking(
     item_id: int,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    body: ItemSubmitTrackingRequest | None = None,
 ):
     """Submit this item's tracking number to the order's buying-group API."""
     require_group_submissions_enabled()
@@ -302,6 +305,14 @@ def submit_item_tracking(
     if not any(s.id == item.id for s in siblings):
         siblings = [item, *siblings]
 
+    selection = body.gobuyme_selection if body else None
+    if selection and (
+        group.api_framework != "gobuyme"
+        or selection.tracking != normalize_tracking(tracking)
+        or selection.units != sum(s.quantity for s in siblings)
+    ):
+        raise HTTPException(409, "The shipment changed. Review tracking again before choosing a GoBuyMe reservation.")
+
     try:
         result = submit_item_tracking_to_group(
             group,
@@ -309,7 +320,10 @@ def submit_item_tracking(
             order,
             tracking,
             sibling_items=siblings,
+            gobuyme_commitment_id=selection.commitment_id if selection else None,
         )
+    except TrackerChoiceRequired as e:
+        raise HTTPException(status_code=409, detail=e.detail) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=_http_detail(e, fallback="Invalid tracking submit request")) from e
     except RuntimeError as e:

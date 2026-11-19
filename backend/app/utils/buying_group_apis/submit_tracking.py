@@ -271,12 +271,17 @@ def _gobuyme_tracker(group: BuyingGroup) -> gobuyme_api.BuyerTracker:
 
 def _submit_gobuyme_box(
     tracker: gobuyme_api.BuyerTracker, pairs: Sequence[tuple[Item, Order]], tracking: str,
+    *, commitment_id: str | None = None,
 ) -> str:
     order_numbers = {(order.store_order_number or "").strip() for _, order in pairs}
     return tracker.submit_tracking(
         tracking=tracking,
-        items=[(item.upc, item.quantity) for item, _ in pairs],
+        items=[gobuyme_api.TrackingItem(
+            item.upc, item.quantity, order.imported_from_store or (order.store.name if order.store else None),
+            item.external_sku, item.product_url,
+        ) for item, order in pairs],
         order_number=next(iter(order_numbers)) if len(order_numbers) == 1 else None,
+        commitment_id=commitment_id,
     )
 
 
@@ -531,6 +536,7 @@ def submit_item_tracking_to_group(
     tracking: str,
     *,
     sibling_items: Sequence[Item] | None = None,
+    gobuyme_commitment_id: str | None = None,
 ) -> SubmitResult:
     """Submit tracking for an item, summing amounts across siblings that share it.
 
@@ -556,7 +562,9 @@ def submit_item_tracking_to_group(
 
     framework = (group.api_framework or "").strip().casefold()
     if framework == "gobuyme":
-        box_id = _submit_gobuyme_box(_gobuyme_tracker(group), pairs, tracking)
+        box_id = _submit_gobuyme_box(
+            _gobuyme_tracker(group), pairs, tracking, commitment_id=gobuyme_commitment_id,
+        )
         return SubmitResult(
             message="GoBuyMe Tracker link verified.", affected=1, item_ids=item_ids,
             submission_ids_by_tracking={tracking: (box_id, box_id)},

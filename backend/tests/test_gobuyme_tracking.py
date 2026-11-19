@@ -2,17 +2,21 @@
 import unittest
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import BuyingGroup, Item, Order, Shipment, ShipmentItem, Store
 from app.models.item import ItemStatus
+from app.routers.items import submit_item_tracking
+from app.schemas.item import GoBuyMeTrackingSelection, ItemSubmitTrackingRequest
 from app.utils.buying_group_apis import gobuyme
 from app.utils.buying_group_apis.submit_tracking import batch_submit_pending_trackings, submit_item_tracking_to_group
 
 UPC = "012345678905"
 OTHER_UPC = "012345678912"
+ASIN = "b012345678"
 
 
 def reservation(reservation_id, upc=UPC, *, units=3, allocated=0):
@@ -27,6 +31,13 @@ def box(reservation_id, units=2):
     return {"id": "box-id", "shipment_commitments": [{"commitment_id": reservation_id, "units_in_shipment": units}]}
 
 
+def amazon_reservation(reservation_id, upc=None, url=f"https://www.amazon.com/dp/{ASIN}"):
+    row = reservation(reservation_id, upc)
+    line = row["deal"]["deal_items"][0]
+    line["links"] = [{"product_links": {"retailer": "amazon", "url": url}}]
+    return row
+
+
 @patch("app.config.settings.group_submissions_enabled", True)
 class GoBuyMeTrackingTests(unittest.TestCase):
     def setUp(self):
@@ -34,9 +45,10 @@ class GoBuyMeTrackingTests(unittest.TestCase):
         self.tracker.api_key = "fixture-key"
         self.tracker.buyer_id = "buyer-id"
 
-    def submit(self, items=None):
+    def submit(self, items=None, *, commitment_id=None):
         return self.tracker.submit_tracking(
-            tracking="1z 12345", items=items or [(UPC, 2)], order_number="store-order",
+            tracking="1z 12345", items=items or [gobuyme.TrackingItem(UPC, 2)], order_number="store-order",
+            commitment_id=commitment_id,
         )
 
     def test_selected_deal_item_upc_wins_over_parent_and_writes_exact_link(self):
@@ -47,7 +59,7 @@ class GoBuyMeTrackingTests(unittest.TestCase):
             patch.object(self.tracker, "_commitments", return_value=[reservation("wrong", OTHER_UPC), selected]),
             patch.object(gobuyme, "_json_request", return_value={"status": "created", "box_id": "box-id"}) as request,
         ):
-            self.assertEqual(self.submit([("00" + UPC, 2)]), "box-id")
+            self.assertEqual(self.submit([gobuyme.TrackingItem("00" + UPC, 2)]), "box-id")
         request.assert_called_once_with(
             gobuyme.ORIGIN + "/functions/v1/buyer-api",
             headers={"x-api-key": "fixture-key", "Content-Type": "application/json"},
@@ -58,7 +70,7 @@ class GoBuyMeTrackingTests(unittest.TestCase):
 
     def test_skips_missing_ambiguous_and_insufficient_reservations(self):
         cases = [
-            ([(None, 2)], [], "valid UPC"),
+            ([(None, 2)], [], "No matching"),
             ([(UPC, 1), (OTHER_UPC, 1)], [], "multiple UPCs"),
             ([(UPC, 2)], [reservation("first"), reservation("second")], "Multiple matching"),
             ([(UPC, 2)], [reservation("full", allocated=2)], "No matching"),
@@ -71,8 +83,69 @@ class GoBuyMeTrackingTests(unittest.TestCase):
                 patch.object(gobuyme, "_json_request") as request,
             ):
                 with self.assertRaisesRegex(ValueError, error):
-                    self.submit(items)
+                    self.submit([gobuyme.TrackingItem(*item) for item in items])
                 request.assert_not_called()
+
+    def test_matching_retailer_id_submits_when_upc_is_missing(self):
+        cases = [
+            (gobuyme.TrackingItem(None, 2, "Amazon.com", ASIN.upper()), UPC),
+            (gobuyme.TrackingItem(UPC, 2, "amazon", product_url=f"https://amazon.com/gp/product/{ASIN}"), None),
+        ]
+        for item, remote_upc in cases:
+            with (
+                self.subTest(item=item),
+                patch.object(self.tracker, "_shipment", side_effect=[None, box("right")]),
+                patch.object(self.tracker, "_commitments", return_value=[
+                    amazon_reservation("wrong", remote_upc, f"https://amazon.com.example/dp/{ASIN}"),
+                    amazon_reservation("right", remote_upc),
+                ]),
+                patch.object(gobuyme, "_json_request", return_value={"status": "created"}) as request,
+            ):
+                self.assertEqual(self.submit([item]), "box-id")
+                self.assertEqual(request.call_args.kwargs["body"]["payload"]["commitment_ids"], ["right"])
+
+    def test_conflicting_upc_requires_a_manual_choice(self):
+        item = gobuyme.TrackingItem(UPC, 2, "Amazon", ASIN)
+        row = amazon_reservation("chosen", OTHER_UPC)
+        with (
+            patch.object(self.tracker, "_shipment", side_effect=[None, None, box("chosen")]),
+            patch.object(self.tracker, "_commitments", return_value=[row]) as commitments,
+            patch.object(gobuyme, "_json_request", return_value={"status": "created"}) as request,
+        ):
+            with self.assertRaises(gobuyme.TrackerChoiceRequired) as failed:
+                self.submit([item])
+            choice = failed.exception.detail["choices"][0]
+            self.assertEqual(choice["id"], "chosen")
+            self.assertFalse(choice["exact_match"])
+            request.assert_not_called()
+            self.assertEqual(self.submit([item], commitment_id="chosen"), "box-id")
+            commitments.assert_called_with(commitment_id="chosen")
+
+    def test_manual_selection_checks_current_capacity(self):
+        with (
+            patch.object(self.tracker, "_shipment", return_value=None),
+            patch.object(self.tracker, "_commitments", return_value=[reservation("chosen", units=1)]),
+            patch.object(gobuyme, "_json_request") as request,
+        ):
+            with self.assertRaisesRegex(ValueError, "no longer available"):
+                self.submit(commitment_id="chosen")
+            request.assert_not_called()
+
+    def test_walmart_and_costco_urls_yield_retailer_specific_ids(self):
+        links = {
+            "walmart": "https://www.walmart.com/ip/Product-Name/12345",
+            "costco": "https://www.costco.com/product-name.product.12345.html",
+        }
+        for retailer, url in links.items():
+            with self.subTest(retailer=retailer):
+                line = {"product": {"product_links": [{"retailer": retailer, "url": url}]}}
+                self.assertEqual(gobuyme._line_identifiers(line), (None, {(retailer, "12345")}))
+
+    def test_explicit_retailer_identifiers_work_without_resolving_short_links(self):
+        line = {"product": {"asin": ASIN.upper(), "bestbuy_sku": 12345, "product_links": [
+            {"retailer": "Amazon", "url": "https://ftc.cash/EXAMPLE"},
+        ]}}
+        self.assertEqual(gobuyme._line_identifiers(line), (None, {("amazon", ASIN), ("bestbuy", "12345")}))
 
     def test_retry_checks_existing_link_and_does_not_resubmit(self):
         with (
@@ -81,8 +154,19 @@ class GoBuyMeTrackingTests(unittest.TestCase):
             patch.object(gobuyme, "_json_request") as request,
         ):
             self.assertEqual(self.submit(), "box-id")
-            with self.assertRaisesRegex(ValueError, "without the expected UPC and units"):
-                self.submit([(OTHER_UPC, 2)])
+            with self.assertRaisesRegex(gobuyme.TrackerChoiceRequired, "already linked"):
+                self.submit([gobuyme.TrackingItem(OTHER_UPC, 2)])
+            request.assert_not_called()
+
+    def test_existing_box_falls_back_to_order_number_only_without_conflicting_product_data(self):
+        with (
+            patch.object(self.tracker, "_shipment", return_value={**box("linked"), "order_id": "STORE-ORDER"}),
+            patch.object(self.tracker, "_commitments", return_value=[reservation("linked")]),
+            patch.object(gobuyme, "_json_request") as request,
+        ):
+            self.assertEqual(self.submit([gobuyme.TrackingItem(None, 2)]), "box-id")
+            with self.assertRaises(gobuyme.TrackerChoiceRequired):
+                self.submit([gobuyme.TrackingItem(OTHER_UPC, 2)])
             request.assert_not_called()
 
     def test_success_response_with_wrong_tracker_link_is_rejected(self):
@@ -107,6 +191,24 @@ class GoBuyMeTrackingTests(unittest.TestCase):
                 item.shipment_items = [ShipmentItem(shipment=Shipment(tracking_number=number))]
             db.add_all(items)
             db.commit()
+            choice = gobuyme.TrackerChoiceRequired(
+                "Choose the correct reservation", tracking="1Z12345", units=2, choices=[{"id": "reservation-id"}],
+            )
+            bad_selection = ItemSubmitTrackingRequest(gobuyme_selection=GoBuyMeTrackingSelection(
+                commitment_id="reservation-id", tracking="1Z12345", units=1,
+            ))
+            with (
+                patch.object(gobuyme, "BuyerTracker", return_value=self.tracker),
+                patch.object(self.tracker, "submit_tracking", side_effect=choice) as submit,
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    submit_item_tracking(items[0].id, db=db, _=None)
+                self.assertEqual(caught.exception.status_code, 409)
+                self.assertEqual(caught.exception.detail, choice.detail)
+                with self.assertRaisesRegex(HTTPException, "shipment changed"):
+                    submit_item_tracking(items[0].id, db=db, _=None, body=bad_selection)
+                submit.assert_called_once()
+            self.assertIs(items[0].status, ItemStatus.SHIPPED)
             with (
                 patch.object(gobuyme, "BuyerTracker", return_value=self.tracker),
                 patch.object(self.tracker, "submit_tracking", side_effect=["box-id", "box-id", ValueError("No matching reservation")]) as submit,
@@ -116,6 +218,6 @@ class GoBuyMeTrackingTests(unittest.TestCase):
                 batch = batch_submit_pending_trackings(db, buying_group_id=group.id)
             self.assertEqual(batch.submitted_count, 2)
             self.assertIn("No matching reservation", batch.message)
-            self.assertEqual(submit.call_args_list[1].kwargs["items"], [(UPC, 1), (UPC, 1)])
+            self.assertEqual(submit.call_args_list[1].kwargs["items"], [gobuyme.TrackingItem(UPC, 1, "Test store")] * 2)
             self.assertEqual([item.submission_id for item in items], ["box-id", "box-id", None])
             self.assertEqual(items[2].status, ItemStatus.SHIPPED)

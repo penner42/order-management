@@ -15,6 +15,9 @@ function formatApiErrorDetail(err: unknown, fallback: string): string {
   if (!err || typeof err !== 'object') return fallback
   const detail = (err as { detail?: unknown }).detail
   if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  if (detail && typeof detail === 'object' && 'message' in detail && typeof detail.message === 'string') {
+    return detail.message
+  }
   if (Array.isArray(detail)) {
     const parts = detail
       .map((entry) => {
@@ -43,7 +46,7 @@ function formatApiErrorDetail(err: unknown, fallback: string): string {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) { super(message); this.name = 'ApiError' }
+  constructor(message: string, public status: number, public detail?: unknown) { super(message); this.name = 'ApiError' }
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -74,7 +77,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     } else {
       err = { detail: res.statusText || `HTTP ${res.status}` }
     }
-    throw new ApiError(formatApiErrorDetail(err, `Request failed (${res.status})`), res.status)
+    throw new ApiError(formatApiErrorDetail(err, `Request failed (${res.status})`), res.status, (err as { detail?: unknown } | null)?.detail)
   }
   if (res.status === 204) return undefined as T
   return res.json()

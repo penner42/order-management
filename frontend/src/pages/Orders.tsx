@@ -5,9 +5,11 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { api, getStoredToken } from '../api/client'
+import { api, ApiError, getStoredToken } from '../api/client'
 import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { BfmrOrderNumber } from '../components/BfmrOrderNumber'
+import { GoBuyMeReservationDialog, isGoBuyMeReservationChoice } from '../components/GoBuyMeReservationDialog'
+import type { GoBuyMeReservationChoice, GoBuyMeTrackingSelection } from '../components/GoBuyMeReservationDialog'
 import { AlertDialog } from '../components/AlertDialog'
 import { OrderScreenshotHistory } from '../components/OrderScreenshotHistory'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -291,6 +293,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
   const [savingTrackingId, setSavingTrackingId] = useState<number | null>(null)
   const [submittingTrackingItemId, setSubmittingTrackingItemId] = useState<number | null>(null)
   const [trackingSubmitAlert, setTrackingSubmitAlert] = useState<string | null>(null)
+  const [goBuyMeReview, setGoBuyMeReview] = useState<{ itemId: number; review: GoBuyMeReservationChoice } | null>(null)
   const [shipments, setShipments] = useState<Shipment[]>([])
   const [copyingId, setCopyingId] = useState<number | null>(null)
   const [copiedAllTracking, setCopiedAllTracking] = useState(false)
@@ -1082,7 +1085,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
     return false
   }
 
-  const submitTrackingToApi = async (itemId: number) => {
+  const submitTrackingToApi = async (itemId: number, selection?: GoBuyMeTrackingSelection) => {
     setSubmittingTrackingItemId(itemId)
     try {
       const res = await api.post<{
@@ -1090,12 +1093,17 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
         items?: Item[]
         message: string
         affected: number | null
-      }>(`/items/${itemId}/submit-tracking`, {})
+      }>(`/items/${itemId}/submit-tracking`, { gobuyme_selection: selection })
       const updated = res.items?.length ? res.items : [res.item]
       mergeUpdatedItemsIntoOrders(updated)
+      setGoBuyMeReview(null)
     } catch (e) {
-      console.error(e)
-      setTrackingSubmitAlert(e instanceof Error ? e.message : 'Failed to submit tracking')
+      if (e instanceof ApiError && e.status === 409 && isGoBuyMeReservationChoice(e.detail)) {
+        setGoBuyMeReview({ itemId, review: e.detail })
+      } else {
+        setGoBuyMeReview(null)
+        setTrackingSubmitAlert(e instanceof Error ? e.message : 'Failed to submit tracking')
+      }
     } finally {
       setSubmittingTrackingItemId(null)
     }
@@ -3669,6 +3677,15 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
         message={trackingSubmitAlert ?? ''}
         onClose={() => setTrackingSubmitAlert(null)}
       />
+      {goBuyMeReview && (
+        <GoBuyMeReservationDialog
+          key={goBuyMeReview.itemId}
+          review={goBuyMeReview.review}
+          busy={submittingTrackingItemId === goBuyMeReview.itemId}
+          onSubmit={(selection) => submitTrackingToApi(goBuyMeReview.itemId, selection)}
+          onClose={() => setGoBuyMeReview(null)}
+        />
+      )}
       {bulkStatusModal && (
         <BulkStatusModal
           order={bulkStatusModal.order}
