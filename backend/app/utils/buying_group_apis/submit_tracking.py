@@ -507,6 +507,8 @@ def find_shipped_items_sharing_tracking(
         tn = gobuyme_api.normalize_tracking(tn)
         stored_tracking = func.upper(func.replace(stored_tracking, " ", ""))
 
+    # Each item has at most one shipment link. DISTINCT would compare the
+    # eagerly loaded order's JSON details, which PostgreSQL cannot do.
     rows = (
         db.query(Item)
         .join(Order, Order.id == Item.order_id)
@@ -523,7 +525,6 @@ def find_shipped_items_sharing_tracking(
             selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
             selectinload(Item.payment_line_items),
         )
-        .distinct()
         .all()
     )
     return list(rows)
