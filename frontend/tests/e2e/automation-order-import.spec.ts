@@ -136,3 +136,106 @@ test('progress survives app sign-in and gives a helpful message for an unavailab
   await expect(page).toHaveURL(new RegExp(jobPath))
   await expect(page.getByRole('alert')).toContainText('Start a new import from the retailer order page.')
 })
+
+test('Best Buy URL goes through review before saving and supports a tracking recheck', async ({ context, page }) => {
+  const url = 'https://click.emailinfo2.bestbuy.com/?qs=ExampleToken0123456'
+  const orderNumber = 'BBY03-123456789012'
+  const base = '/api/integrations/stores/orders'
+  let saved = false
+  let trackingSaved = false
+
+  await context.addInitScript(() => localStorage.setItem('auth_token', 'test-user-token'))
+  await context.route(/^https?:\/\/[^/]+\/api\//, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/auth/me') {
+      return route.fulfill({ json: { id: 42, username: 'test-user', role: 'user' } })
+    }
+    if (path === '/api/buying-groups/receiving-review/has-pending') {
+      return route.fulfill({ json: false })
+    }
+    if (path === '/api/buying-groups') {
+      return route.fulfill({ json: [{ id: 7, name: 'Example Buying Group', aliases: ['BG'] }] })
+    }
+    if (path === '/api/orders/paged') {
+      return route.fulfill({
+        json: {
+          items: saved ? [{
+            id: 1, store_id: 1, store_order_number: orderNumber, status: 'imported',
+            has_best_buy_order_link: true, order_payments: [],
+            items: [{ id: 1, order_id: 1, description: 'Example Laptop', price_paid: '100', quantity: 1, status: 'purchased' }],
+          }] : [],
+          total: saved ? 1 : 0, page: 1, per_page: 50, pages: 1, available_buying_group_ids: [],
+        },
+      })
+    }
+    if (path === `${base}/best-buy-preview`) {
+      expect(route.request().postDataJSON()).toEqual({ url })
+      return route.fulfill({ json: { token: 'order-preview' } })
+    }
+    if (path === `${base}/1/best-buy-tracking-preview`) {
+      expect(saved).toBe(true)
+      return route.fulfill({ json: { token: 'tracking-preview' } })
+    }
+    if (path.startsWith(`${base}/bulk-session/`)) {
+      const recheck = path.endsWith('/tracking-preview')
+      return route.fulfill({
+        json: {
+          orders: [{
+            store: 'Best Buy',
+            externalOrder: { id: orderNumber, orderDate: '2026-11-20' },
+            shippingAddress: { fullName: 'Example Customer', addressLine1: '100 Example St #BG123', city: 'Sample City', state: 'WA', postalCode: '98101' },
+            items: [{
+              name: 'Example Laptop', externalSku: '12345678', quantities: { ordered: 1 },
+              pricing: { unitPrice: 100, lineTotal: 100 }, shipments: [{ shipmentId: 'package-1', quantity: 1 }],
+            }],
+            shipments: [{ shipmentId: 'package-1', trackingNumber: recheck ? '1Z1234567890123456' : null }],
+            totals: { subtotal: 100, shipping: 0, tax: 10, grandTotal: 110 },
+            paymentMethods: [{ description: 'Card ending in 1234', last4: '1234' }],
+          }],
+        },
+      })
+    }
+    if (path === `${base}/diff-bulk`) {
+      return route.fulfill({
+        json: { diffs: [saved ? {
+          is_existing_order: true, has_changes: true,
+          shipments: { matched: [], added: [{ tracking_number: '1Z1234567890123456', delivery_date: null, status_message: null }] },
+        } : { is_existing_order: false }] },
+      })
+    }
+    if (path === `${base}/apply`) {
+      const body = route.request().postDataJSON()
+      expect(body.session_token).toBe(saved ? 'tracking-preview' : 'order-preview')
+      expect(body.payload.items[0].name).toBe(saved ? 'Example Laptop' : 'Reviewed Laptop')
+      expect(body.buying_group_id).toBe(7)
+      expect(JSON.stringify(body)).not.toContain(url)
+      if (saved) trackingSaved = true
+      saved = true
+      return route.fulfill({ json: { order_id: 1 } })
+    }
+    return route.fulfill({ json: [] })
+  })
+
+  await page.goto('/')
+  await page.getByRole('link', { name: 'Import Best Buy', exact: true }).click()
+  await page.getByLabel('Best Buy order URL').fill(url)
+  await page.getByRole('button', { name: 'Review order' }).click()
+  await expect(page.getByRole('heading', { name: 'Bulk import review (1 order)' })).toBeVisible()
+  await expect(page.getByText(`Best Buy #${orderNumber}`)).toBeVisible()
+  await expect(page).toHaveURL(/\/import-review\/bulk\?token=order-preview$/)
+  await expect(page.getByText('SKU 12345678')).toBeVisible()
+  await expect(page.getByText('100 Example St #BG123')).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'Buying group' })).toHaveValue('7')
+  await expect(page.getByText('Card ending in 1234')).toBeVisible()
+  expect(saved).toBe(false)
+  await page.getByLabel('Description for item 1').fill('Reviewed Laptop')
+  await page.getByRole('button', { name: 'Import order' }).click()
+  await expect(page.getByRole('button', { name: 'Import Complete' })).toBeVisible()
+  await page.getByRole('link', { name: 'Back to Orders' }).click()
+  await page.getByRole('link', { name: 'Check Best Buy tracking' }).click()
+  await page.getByRole('button', { name: 'Check tracking' }).click()
+  await expect(page.getByRole('table').getByText('1Z1234567890123456', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Update order' }).click()
+  await expect(page.getByRole('button', { name: 'Updated', exact: true })).toBeVisible()
+  expect(trackingSaved).toBe(true)
+})

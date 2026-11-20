@@ -50,6 +50,7 @@ interface OrderDiff {
   is_existing_order: boolean
   has_changes?: boolean
   invoice_to_save?: boolean
+  source_url_to_save?: boolean
   current_order?: {
     buying_group_id: number | null
     store_account_id: number | null
@@ -303,6 +304,7 @@ function existingOrderHasActionableUpdates(
 ): boolean {
   return (
     diff?.invoice_to_save === true ||
+    diff?.source_url_to_save === true ||
     countActionableItemChanges(diff) > 0 ||
     countShipmentChanges(diff) > 0 ||
     selectionDiffersFromCurrent(diff?.current_order?.buying_group_id, selectedBuyingGroupId) ||
@@ -322,6 +324,7 @@ function getBulkImportSortGroup(
   if (
     !isExisting ||
     diff?.invoice_to_save === true ||
+    diff?.source_url_to_save === true ||
     countActionableItemChanges(diff ?? null) > 0 ||
     countShipmentChanges(diff ?? null) > 0 ||
     orderNeedsCancelUpdate(diff ?? null, isCanceled)
@@ -390,6 +393,8 @@ export default function ImportReviewBulk() {
     setLoading(true)
     setError(null)
     setDisplayIndexOrder(null)
+    setAppliedByIndex({})
+    setApplyErrorByIndex({})
     api
       .get<{ orders: NormalizedPayload[]; store_id?: number | null; store_account_id?: number | null }>(`/integrations/stores/orders/bulk-session/${encodeURIComponent(token)}`)
       .then((res) => {
@@ -424,7 +429,7 @@ export default function ImportReviewBulk() {
           api.get<BuyingGroup[]>('/buying-groups'),
           api.get<PaymentMethod[]>('/payment-methods'),
           api.get<IgnoredZipCode[]>('/ignored-zip-codes'),
-          api.post<{ diffs: OrderDiff[] }>('/integrations/stores/orders/diff-bulk', { orders }),
+          api.post<{ diffs: OrderDiff[] }>('/integrations/stores/orders/diff-bulk', { orders, session_token: token }),
         ]).then(async ([storesList, groups, methods, ignoredZips, diffRes]) => {
           setStores(storesList)
           setBuyingGroups(groups)
@@ -497,6 +502,13 @@ export default function ImportReviewBulk() {
             : {}
         quantities.ordered = next.qty == null ? null : next.qty
         updatedItem.quantities = quantities
+        if (
+          updatedItem.shipments?.length === 1 &&
+          updatedItem.shipments[0].quantity === (item.quantities?.ordered ?? 1) &&
+          next.qty != null && next.qty > 0
+        ) {
+          updatedItem.shipments = [{ ...updatedItem.shipments[0], quantity: next.qty }]
+        }
       }
       if ('description' in next) {
         updatedItem.name = next.description == null ? null : next.description
@@ -622,6 +634,10 @@ export default function ImportReviewBulk() {
     })
   }, [payloads, stores, accountsByStore, sourceOwner, diffs])
 
+  if (loading) {
+    return <p role="status" className="text-ink-muted dark:text-gray-400">Loading bulk review…</p>
+  }
+
   if (!token || payloads.length === 0) {
     return (
       <div className="max-w-2xl mx-auto">
@@ -629,7 +645,7 @@ export default function ImportReviewBulk() {
           Bulk import review
         </h1>
         <p className="text-ink-muted dark:text-gray-400 mb-4">
-          No orders were attached to this link. Use the browser extension bulk import from the Walmart orders page.
+          {error ?? 'No orders were attached to this review link.'}
         </p>
         <Link
           to="/"
@@ -637,14 +653,6 @@ export default function ImportReviewBulk() {
         >
           Back to Orders
         </Link>
-      </div>
-    )
-  }
-
-  if (loading) {
-    return (
-      <div>
-        <p className="text-ink-muted dark:text-gray-400">Loading bulk review…</p>
       </div>
     )
   }
@@ -672,6 +680,7 @@ export default function ImportReviewBulk() {
       const orderTotal = getDefaultOrderTotal(payload)
       await api.post('/integrations/stores/orders/apply', {
         payload,
+        session_token: token,
         store_account_id: storeAccountId,
         store_id: sourceOwner?.store_id,
         buying_group_id: buyingGroupId,
@@ -718,7 +727,7 @@ export default function ImportReviewBulk() {
       <div className="flex items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-xl font-semibold text-ink dark:text-gray-100">
-            Bulk import review ({payloads.length} orders)
+            Bulk import review ({payloads.length} {payloads.length === 1 ? 'order' : 'orders'})
           </h1>
           <p className="text-sm text-ink-muted dark:text-gray-400 mt-1">
             Review each order below and apply them individually.
@@ -785,6 +794,8 @@ export default function ImportReviewBulk() {
           const shipmentsById = new Map((shipments as NormalizedShipment[]).map((s) => [s.shipmentId, s]))
           const customer = p.customer
           const address = p.shippingAddress
+          const paymentDescriptions = (p.paymentMethods ?? [])
+            .map((method: { description?: string | null }) => method.description).filter(Boolean).join(', ')
 
           const showUnchangedSeparator = firstUnchangedIndex >= 0 && renderIdx === firstUnchangedIndex
           const showIgnoredSeparator = firstIgnoredIndex >= 0 && renderIdx === firstIgnoredIndex
@@ -903,6 +914,9 @@ export default function ImportReviewBulk() {
                         {diff?.invoice_to_save && (
                           <span className="text-amber-700 dark:text-amber-300">Invoice available</span>
                         )}
+                        {diff?.source_url_to_save && (
+                          <span className="text-amber-700 dark:text-amber-300">Order link available</span>
+                        )}
                         {itemChangesCount > 0 && (
                           <span className="text-amber-700 dark:text-amber-300">
                             {itemChangesCount} item change(s)
@@ -980,6 +994,7 @@ export default function ImportReviewBulk() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-ink-muted shrink-0 w-16">Buying group</span>
                         <select
+                          aria-label="Buying group"
                           value={selectedBuyingGroupIdByIndex[idx] ?? ''}
                           onChange={(e) =>
                             setSelectedBuyingGroupIdByIndex((prev) => ({
@@ -1042,6 +1057,12 @@ export default function ImportReviewBulk() {
                         </select>
                       </div>
                     )}
+                    {paymentDescriptions && (
+                      <div className="flex items-start gap-2">
+                        <span className="w-16 shrink-0 text-xs text-ink-muted">Paid with</span>
+                        <span className="text-sm text-ink dark:text-gray-200">{paymentDescriptions}</span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-ink-muted shrink-0 w-16">Date</span>
                       <span className="text-sm font-mono text-ink dark:text-gray-200">
@@ -1088,6 +1109,7 @@ export default function ImportReviewBulk() {
                               {address.postalCode ? ` ${address.postalCode}` : ''}
                             </span>
                           )}
+                          {address.phoneNumber && <span className="block">{address.phoneNumber}</span>}
                         </div>
                       </div>
                     )}
@@ -1122,7 +1144,7 @@ export default function ImportReviewBulk() {
                   {/* Right: items table & shipments summary */}
                   <div className="flex flex-col gap-3 min-w-0">
                     <div className="overflow-x-auto rounded-lg border border-brand-200/70 dark:border-gray-700 bg-white/70 dark:bg-gray-900/40">
-                      <table className="w-full table-fixed text-xs md:text-sm">
+                      <table className="w-full min-w-[70rem] table-fixed text-xs md:text-sm">
                         <colgroup>
                           <col className="w-16" />
                           <col />
@@ -1306,6 +1328,9 @@ export default function ImportReviewBulk() {
                                             </span>
                                           )}
                                         </div>
+                                        {item.externalSku && (
+                                          <span className="block text-xs text-ink-muted">SKU {item.externalSku}</span>
+                                        )}
                                         {item.variants &&
                                           item.variants.length > 0 && (
                                             <span className="block text-[10px] md:text-xs text-ink-muted dark:text-gray-400 truncate">

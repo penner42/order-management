@@ -95,8 +95,7 @@ export function autoMatchBuyingGroupIdForImport(
   const shippingAddress = payload.shippingAddress ?? null
   const addressFields = shippingAddressMatchFields(shippingAddress)
 
-  // Costco/Walmart/Amazon: name or address line contains buying group name or alias.
-  if (storeName === 'costco' || storeName === 'walmart' || storeName === 'amazon') {
+  if (['costco', 'walmart', 'amazon', 'best buy'].includes(storeName)) {
     return matchBuyingGroupByAddressName(addressFields, groups)
   }
 

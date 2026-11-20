@@ -16,6 +16,7 @@ import Admin from './pages/Admin'
 import Profile from './pages/Profile'
 import ImportPreview from './pages/ImportPreview'
 import ImportReview from './pages/ImportReview'
+import BestBuyImport from './pages/BestBuyImport'
 import ImportReviewBulk from './pages/ImportReviewBulk'
 import AutomationOrderImport from './pages/AutomationOrderImport'
 import ReceivingReview from './pages/ReceivingReview'
@@ -289,6 +290,7 @@ function AppShell() {
           <Route path="/" element={user.role === 'admin' ? <Navigate to="/admin" replace /> : <Orders key="orders" />} />
           <Route path="/duplicate-audit" element={<Orders key="duplicate-audit" duplicateAudit />} />
           <Route path="/import-preview" element={<ImportPreview />} />
+          <Route path="/import/best-buy/:orderId?" element={<BestBuyImport />} />
           <Route path="/import-review" element={<ImportReview />} />
           <Route path="/import-review/bulk" element={<ImportReviewBulk />} />
           <Route path="/import-review/job/:jobId" element={<AutomationOrderImport />} />

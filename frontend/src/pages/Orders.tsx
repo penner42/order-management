@@ -2301,6 +2301,14 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
             </button>
           </div>
         </div>
+        {!duplicateAudit && (
+          <Link
+            to="/import/best-buy"
+            className="shrink-0 rounded-lg border border-brand-200 px-3 py-2 text-sm font-medium text-brand-700 hover:bg-brand-50 dark:border-gray-600 dark:text-brand-400 dark:hover:bg-gray-700"
+          >
+            Import Best Buy
+          </Link>
+        )}
         {!duplicateAudit && <button
           onClick={handleCreateNewOrder}
           disabled={creatingOrder}
@@ -2452,6 +2460,11 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                       className="flex-1 min-w-0 h-6 rounded border border-brand-200 dark:border-gray-600 bg-transparent px-1.5 py-0 text-sm font-medium text-brand-700 dark:text-brand-400 focus:border-brand-300 focus:bg-white dark:focus:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-brand-500 disabled:opacity-60"
                     />
                   </div>
+                  {!duplicateAudit && o.has_best_buy_order_link && (
+                    <Link to={`/import/best-buy/${o.id}`} className="self-start text-xs text-brand-600 hover:underline dark:text-brand-400">
+                      Check Best Buy tracking
+                    </Link>
+                  )}
                   <div className="flex items-center gap-2 min-w-0">
                     <label className="text-xs text-ink-muted shrink-0 w-14">Date</label>
                     <input

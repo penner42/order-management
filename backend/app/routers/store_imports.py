@@ -7,14 +7,20 @@ URL hash.  The frontend calls these endpoints:
   POST /orders/apply  – create/update order, items, shipments in one shot
 """
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict
+from collections import defaultdict
 import secrets
 import math
-from fastapi import APIRouter, Depends, HTTPException
+from threading import Lock
+from time import monotonic
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.auth import get_current_user
+from app.auth import get_current_user, get_current_user_optional
+from app.browser_automation import best_buy_import
 from app.database import get_db
 from app.models import (
     BuyingGroup,
@@ -36,6 +42,7 @@ from app.models.item import (
     item_locked_for_store_reimport,
 )
 from app.schemas.store_import import (
+    BestBuyOrderPreviewRequest,
     DirectApplyBody,
     DirectApplyResponse,
     StoreOrderDiffResponse,
@@ -63,6 +70,19 @@ router = APIRouter(prefix="/integrations/stores", tags=["integrations"])
 # In-memory store for short-lived bulk import sessions.
 _bulk_sessions: Dict[str, list[StoreOrderImportPayload]] = {}
 _bulk_session_owners: dict[str, tuple[int | None, int | None]] = {}
+
+
+@dataclass(frozen=True)
+class _BulkImportSource:
+    user_id: int
+    url: str
+    expires_at: float
+    order_id: int | None
+
+
+_bulk_session_sources: dict[str, _BulkImportSource] = {}
+_bulk_sessions_lock = Lock()
+_best_buy_apply_lock = Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +231,10 @@ def _shipment_statuses_differ_for_diff(
 
 
 def _get_or_create_store(db: Session, store_name: str, user_id: int | None) -> Store:
-    store = db.query(Store).filter(Store.name == store_name).first()
+    match = Store.name == store_name
+    if store_name == best_buy_import.STORE_NAME:
+        match = func.lower(func.trim(Store.name)) == store_name.lower()
+    store = db.query(Store).filter(match).first()
     if store:
         return store
     store = Store(user_id=user_id, name=store_name)
@@ -242,7 +265,16 @@ def _resolve_store_name(store_raw: str) -> str:
         name = "Walmart"
     elif name.lower() == "amazon":
         name = "Amazon"
+    elif name.lower() == "best buy":
+        name = best_buy_import.STORE_NAME
     return name
+
+
+def _find_import_order(db: Session, external_order_id: str, store_name: str) -> Order | None:
+    query = db.query(Order).filter(Order.store_order_number == external_order_id)
+    if _resolve_store_name(store_name) == best_buy_import.STORE_NAME:
+        query = query.join(Store).filter(func.lower(func.trim(Store.name)) == "best buy")
+    return query.first()
 
 
 _WALMART_IGNORED_TRACKING = "sent via email"
@@ -671,6 +703,7 @@ def _apply_canceled_statuses(
     db: Session | None = None,
 ) -> None:
     order_canceled = _normalized_order_is_canceled(normalized)
+    best_buy_statuses = _best_buy_canceled_lines(normalized)
     if incoming_by_name is None:
         incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
 
@@ -680,6 +713,10 @@ def _apply_canceled_statuses(
         desc = (item.description or "").strip()
         incoming = incoming_by_name.get(desc)
         item_incoming_canceled = bool(incoming and incoming.get("is_canceled"))
+        if best_buy_statuses is not None:
+            if item.import_line_key not in best_buy_statuses and not order_canceled:
+                continue
+            item_incoming_canceled = best_buy_statuses.get(item.import_line_key, False)
         if order_canceled or item_incoming_canceled:
             _mark_item_canceled(item)
         elif item.status == ItemStatus.CANCELED:
@@ -687,6 +724,15 @@ def _apply_canceled_statuses(
                 item,
                 has_tracking=tracking_by_id.get(item.id, False),
             )
+
+
+def _best_buy_canceled_lines(normalized: dict[str, Any]) -> dict[str, bool] | None:
+    if _resolve_store_name(normalized.get("store") or "") != best_buy_import.STORE_NAME:
+        return None
+    return {
+        row["logicalItemId"]: _incoming_item_is_canceled(row)
+        for row in normalized.get("items") or [] if row.get("logicalItemId")
+    }
 
 
 def _aggregate_incoming_items_by_name(
@@ -732,6 +778,18 @@ def _match_retitled_items(
     Preserve the local description and all downstream receipt/payment data.
     """
     incoming = normalized.get("items") or []
+    if _resolve_store_name(normalized.get("store") or "") == best_buy_import.STORE_NAME:
+        titles_by_line: dict[str, set[str]] = defaultdict(set)
+        for item in existing_items:
+            if item.import_line_key and item.description:
+                titles_by_line[item.import_line_key].add(item.description)
+        titles = {key: next(iter(names)) for key, names in titles_by_line.items() if len(names) == 1}
+        if titles:
+            incoming = [
+                {**item, "name": titles.get(item.get("logicalItemId"), item.get("name"))}
+                for item in incoming
+            ]
+            normalized = {**normalized, "items": incoming}
     incoming_by_name = _aggregate_incoming_items_by_name(incoming)
     existing_by_name: dict[str, list[Item]] = {}
     existing_names_by_tracking: dict[str, set[str]] = {}
@@ -936,6 +994,7 @@ def _build_order_diff(
 
     incoming_by_name = _aggregate_incoming_items_by_name(normalized.get("items") or [])
     order_is_canceled = _normalized_order_is_canceled(normalized)
+    best_buy_statuses = _best_buy_canceled_lines(normalized)
     incoming_identities: dict[str, list[dict[str, Any]]] = {}
     for index, raw in enumerate(normalized.get("items") or []):
         incoming_identities.setdefault((raw.get("name") or "").strip(), []).append(import_identity(raw, index))
@@ -988,7 +1047,25 @@ def _build_order_diff(
 
             incoming_canceled = order_is_canceled or incoming.get("is_canceled", False)
             non_canceled_statuses = existing["statuses"] - {"canceled"}
-            if incoming_canceled and non_canceled_statuses:
+            if best_buy_statuses is not None:
+                status_changes = [
+                    (item, best_buy_statuses[item.import_line_key])
+                    for item in items_by_desc.get(name, [])
+                    if item.import_line_key in best_buy_statuses
+                    and (item.status == ItemStatus.CANCELED) != best_buy_statuses[item.import_line_key]
+                ]
+                if status_changes:
+                    changes.append("status")
+                    detailed_changes.append({
+                        "field": "status",
+                        "before": sorted({item.status.value for item, _ in status_changes}),
+                        "after": sorted({
+                            ItemStatus.CANCELED.value if canceled else
+                            _status_after_uncancel(item, has_tracking=tracking_by_id.get(item.id, False)).value
+                            for item, canceled in status_changes
+                        }),
+                    })
+            elif incoming_canceled and non_canceled_statuses:
                 changes.append("status")
                 detailed_changes.append(
                     {
@@ -1093,6 +1170,10 @@ def _build_order_diff(
             fulfillment_type=fulfillment_type,
             shipment_status=inc_ship.get("status"),
         )
+        if best_buy_statuses is not None and not tracking_key:
+            # Pending Best Buy groups are available for review but do not
+            # represent a shipment that approval can save.
+            continue
 
         tracking_display = (
             tracking_raw
@@ -1274,11 +1355,7 @@ def _create_or_find_order(
     store_id: int | None = None,
 ) -> Order:
     """Return an existing order matched by store_order_number, or create a new one."""
-    existing = (
-        db.query(Order)
-        .filter(Order.store_order_number == external_order_id)
-        .first()
-    )
+    existing = _find_import_order(db, external_order_id, store_name)
     if existing:
         return existing
 
@@ -1297,6 +1374,8 @@ def _create_or_find_order(
     if isinstance(incoming_discount, (int, float)) and math.isfinite(incoming_discount):
         order_discount = float(incoming_discount)
 
+    is_best_buy = _resolve_store_name(store_name) == best_buy_import.STORE_NAME
+    totals = normalized.get("totals") or {}
     order = Order(
         user_id=current_user.id,
         store_id=store.id,
@@ -1305,8 +1384,10 @@ def _create_or_find_order(
         store_order_number=external_order_id,
         status="imported",
         purchase_date=purchase_date,
-        shipping=None,
-        sales_tax=costco_sales_tax(normalized) if store_name.strip().lower() == "costco" else None,
+        shipping=totals.get("shipping") if is_best_buy else None,
+        sales_tax=totals.get("tax") if is_best_buy else (
+            costco_sales_tax(normalized) if store_name.strip().lower() == "costco" else None
+        ),
         order_discount=order_discount,
         notes="Imported from external store payload.",
     )
@@ -1334,6 +1415,7 @@ def _apply_items_and_shipments(
     items = normalized.get("items") or []
     payouts = item_payouts or []
     shipments = normalized.get("shipments") or []
+    is_best_buy = _resolve_store_name(store_name) == best_buy_import.STORE_NAME
 
     existing_items = (
         db.query(Item)
@@ -1491,7 +1573,10 @@ def _apply_items_and_shipments(
 
 
     def find_existing_item_for_tracking(
-        name: str, db_key: str | None, tracking_key: str | None
+        name: str,
+        db_key: str | None,
+        tracking_key: str | None,
+        item_data: dict[str, Any],
     ) -> Item | None:
         # Shipped/submitted/scanned/return-process lines keep their qty and
         # shipments; store re-imports must not peel or re-attach tracking.
@@ -1505,6 +1590,11 @@ def _apply_items_and_shipments(
         ]
         if not candidates:
             return None
+        if is_best_buy:
+            sku = item_data.get("externalSku")
+            line_key = item_data.get("logicalItemId")
+            candidates = [item for item in candidates if not item.external_sku or item.external_sku == sku]
+            candidates.sort(key=lambda item: item.import_line_key != line_key)
 
         match_keys = {k for k in (db_key, tracking_key) if k}
         if match_keys:
@@ -1799,7 +1889,21 @@ def _apply_items_and_shipments(
 
         pricing = item_data.get("pricing") or {}
         unit_price = pricing.get("unitPrice")
+        quantity = item_data.get("quantities", {}).get("ordered") or 1
+        unit_shipping = None
+        item_tax = item_taxes[item_index]
         shipments_slices = item_data.get("shipments") or []
+        if is_best_buy:
+            # Keep pending groups in review. A later check can split them into
+            # several real packages, so only persist shipments with tracking.
+            shipments_slices = [
+                part for part in shipments_slices
+                if (shipments_by_id.get(part.get("shipmentId")) or {}).get("trackingNumber")
+            ]
+            if pricing.get("shipping") is not None:
+                unit_shipping = pricing["shipping"] / quantity
+            if pricing.get("tax") is not None:
+                item_tax = pricing["tax"] / quantity
 
         has_tracking = False
         for slice_data in shipments_slices:
@@ -1820,10 +1924,7 @@ def _apply_items_and_shipments(
         status = ItemStatus.SHIPPED if has_tracking else ItemStatus.PURCHASED
 
         if not shipments_slices:
-            quantity = item_data.get("quantities", {}).get("ordered") or 1
-            if (name, "") in existing_item_tracking_keys:
-                continue
-            if existing_order:
+            if existing_order or (not is_best_buy and (name, "") in existing_item_tracking_keys):
                 continue
             item = Item(
                 order_id=order.id,
@@ -1833,8 +1934,8 @@ def _apply_items_and_shipments(
                 status=status,
                 quantity=quantity,
                 description=name,
-                shipping=None,
-                sales_tax=item_taxes[item_index],
+                shipping=unit_shipping,
+                sales_tax=item_tax,
             )
             db.add(item)
             existing_items.append(item)
@@ -1888,7 +1989,7 @@ def _apply_items_and_shipments(
 
             while remaining > 0:
                 existing_item = find_existing_item_for_tracking(
-                    name, db_key, tracking_key
+                    name, db_key, tracking_key, item_data
                 )
                 if not existing_item:
                     break
@@ -1970,8 +2071,8 @@ def _apply_items_and_shipments(
                     status=status,
                     quantity=remaining,
                     description=name,
-                    shipping=None,
-                    sales_tax=item_taxes[item_index],
+                    shipping=unit_shipping,
+                    sales_tax=item_tax,
                 )
                 db.add(item)
                 db.flush()
@@ -2041,7 +2142,7 @@ def _apply_items_and_shipments(
             walmart_original=walmart_original,
         )
 
-    if existing_order:
+    if existing_order and not is_best_buy:
         _sync_existing_item_quantities_and_prices(db, normalized, existing_items)
     _apply_canceled_statuses(existing_items, normalized, db=db)
 
@@ -2076,11 +2177,7 @@ def compute_order_diff(
     normalized: dict[str, Any] = _sanitize_store_import_payload_dict(data)
 
 
-    linked_order: Order | None = (
-        db.query(Order)
-        .filter(Order.store_order_number == external_order_id)
-        .first()
-    )
+    linked_order = _find_import_order(db, external_order_id, data.store)
 
     diff = _build_order_diff(db, linked_order, normalized)
     return StoreOrderDiffResponse(diff=diff)
@@ -2090,10 +2187,15 @@ def compute_order_diff(
 def compute_order_diff_bulk(
     body: BulkStoreOrderDiffRequest,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     """Read-only bulk diff: compute diffs for many payloads in one request."""
     orders = body.orders or []
+    source = None
+    if body.session_token:
+        staged_orders, source = _get_bulk_session(body.session_token, user)
+        if source:
+            orders = staged_orders
     if not orders:
         raise HTTPException(status_code=400, detail="At least one order payload is required.")
 
@@ -2156,18 +2258,21 @@ def compute_order_diff_bulk(
 
     diffs: list[dict[str, Any]] = []
     for external_id, normalized in zip(external_ids, normalized_payloads):
-        linked = linked_by_external.get(external_id)
+        is_best_buy = _resolve_store_name(normalized["store"]) == best_buy_import.STORE_NAME
+        linked = _find_import_order(db, external_id, normalized["store"]) if is_best_buy else linked_by_external.get(external_id)
         pre_items = items_by_order_id.get(linked.id, []) if linked else None
         pre_shipments = shipments_by_order_id.get(linked.id, []) if linked else None
-        diffs.append(
-            _build_order_diff(
-                db,
-                linked,
-                normalized,
-                existing_items=pre_items,
-                existing_shipments=pre_shipments,
-            )
+        diff = _build_order_diff(
+            db,
+            linked,
+            normalized,
+            existing_items=pre_items,
+            existing_shipments=pre_shipments,
         )
+        if source and source.order_id is None and linked and linked.best_buy_order_url != source.url:
+            diff["source_url_to_save"] = True
+            diff["has_changes"] = True
+        diffs.append(diff)
 
     return BulkStoreOrderDiffResponse(diffs=diffs)
 
@@ -2192,6 +2297,7 @@ def apply_store_order_payload(
     buying_group_id: int | None = None,
     item_payouts: list[float | None] | None = None,
     payment_methods: list | None = None,
+    best_buy_order_url: str | None = None,
     commit: bool = True,
 ) -> int:
     """Create or update an order from a normalized payload. Returns order id.
@@ -2222,24 +2328,28 @@ def apply_store_order_payload(
         if store_id is not None and store_id != account.store_id:
             raise HTTPException(status_code=400, detail="Account does not belong to this store")
         store_id = account.store_id
-    if store_id is not None and db.get(Store, store_id) is None:
-        raise HTTPException(status_code=400, detail="Store not found")
+    if store_id is not None:
+        selected_store = db.get(Store, store_id)
+        if selected_store is None:
+            raise HTTPException(status_code=400, detail="Store not found")
+        if (
+            _resolve_store_name(payload.store) == best_buy_import.STORE_NAME
+            and _resolve_store_name(selected_store.name) != best_buy_import.STORE_NAME
+        ):
+            raise HTTPException(status_code=400, detail="Select a Best Buy store account.")
 
     if buying_group_id is not None:
         group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()
         if not group:
             raise HTTPException(status_code=400, detail="Buying group not found")
 
-    is_existing_order = (
-        db.query(Order)
-        .filter(Order.store_order_number == external_order_id)
-        .first()
-        is not None
-    )
+    is_existing_order = _find_import_order(db, external_order_id, payload.store) is not None
 
     order = _create_or_find_order(
         db, normalized, external_order_id, payload.store, current_user, store_account_id, store_id
     )
+    if best_buy_order_url:
+        order.best_buy_order_url = best_buy_order_url
 
     if not is_existing_order:
         if buying_group_id is not None:
@@ -2323,18 +2433,114 @@ def apply_store_order_direct(
     current_user: User = Depends(get_current_user),
 ):
     """Create or update an order directly from a normalized payload (no staging row)."""
-    order_id = apply_store_order_payload(
-        db,
-        body.payload,
-        current_user,
-        store_account_id=body.store_account_id,
-        store_id=body.store_id,
-        buying_group_id=body.buying_group_id,
-        item_payouts=body.item_payouts,
-        payment_methods=body.payment_methods,
-        commit=True,
+    def apply(payload: StoreOrderImportPayload, source_url: str | None = None):
+        return DirectApplyResponse(order_id=apply_store_order_payload(
+            db,
+            payload,
+            current_user,
+            store_account_id=body.store_account_id,
+            store_id=body.store_id,
+            buying_group_id=body.buying_group_id,
+            item_payouts=body.item_payouts,
+            payment_methods=body.payment_methods,
+            best_buy_order_url=source_url,
+        ))
+
+    source = None
+    if body.session_token:
+        staged_orders, source = _get_bulk_session(body.session_token, current_user)
+    is_best_buy = _resolve_store_name(body.payload.store) == best_buy_import.STORE_NAME
+    if source is None:
+        if is_best_buy:
+            raise HTTPException(status_code=400, detail="Open a Best Buy link for import review first.")
+        return apply(body.payload)
+
+    order_number, _ = _parse_external_order_fields(body.payload)
+    if not is_best_buy or order_number != staged_orders[0].externalOrder["id"]:
+        raise HTTPException(status_code=409, detail="The order does not match the import session.")
+
+    with _best_buy_apply_lock:
+        # The order and URL are committed together. Serialize approvals across
+        # workers as well so simultaneous reviews cannot create two orders.
+        if db.get_bind().dialect.name == "postgresql":
+            db.execute(select(func.pg_advisory_xact_lock(func.hashtext("best-buy-order-import"), 0)))
+        if source.order_id is not None:
+            order = _find_import_order(db, order_number, body.payload.store)
+            if order is None or order.id != source.order_id:
+                raise HTTPException(status_code=409, detail="The saved order changed. Reopen it before checking tracking.")
+        return apply(body.payload, source.url if source.order_id is None else None)
+
+
+def _remove_bulk_session(token: str) -> None:
+    _bulk_sessions.pop(token, None)
+    _bulk_session_owners.pop(token, None)
+    _bulk_session_sources.pop(token, None)
+
+
+def _get_bulk_session(
+    token: str, user: User | None
+) -> tuple[list[StoreOrderImportPayload], _BulkImportSource | None]:
+    with _bulk_sessions_lock:
+        source = _bulk_session_sources.get(token)
+        if source and source.expires_at <= monotonic():
+            _remove_bulk_session(token)
+        if source and (user is None or user.id != source.user_id):
+            raise HTTPException(status_code=404, detail="Bulk import session not found or expired.")
+        orders = _bulk_sessions.get(token)
+    if not orders:
+        raise HTTPException(status_code=404, detail="Bulk import session not found or expired.")
+    return orders, source
+
+
+async def _stage_best_buy_preview(
+    url: str,
+    user_id: int,
+    *,
+    order_id: int | None = None,
+    expected_order_number: str | None = None,
+) -> BulkImportSessionResponse:
+    try:
+        payload = await best_buy_import.fetch_order(url)
+    except best_buy_import.BestBuyImportError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    if order_id is not None and payload.externalOrder["id"] != expected_order_number:
+        raise HTTPException(status_code=409, detail="The saved Best Buy link opened a different order.")
+
+    return _create_bulk_import_session(
+        BulkImportSessionCreate(orders=[payload]),
+        source=_BulkImportSource(user_id, url, monotonic() + 1800, order_id),
     )
-    return DirectApplyResponse(order_id=order_id)
+
+
+@router.post("/orders/best-buy-preview", response_model=BulkImportSessionResponse)
+async def create_best_buy_preview(
+    body: BestBuyOrderPreviewRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        url = best_buy_import.validate_order_url(body.url)
+    except best_buy_import.BestBuyImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    user_id = user.id
+    db.rollback()
+    return await _stage_best_buy_preview(url, user_id)
+
+
+@router.post("/orders/{order_id}/best-buy-tracking-preview", response_model=BulkImportSessionResponse)
+async def refresh_best_buy_preview(
+    order_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    order = db.get(Order, order_id)
+    if order is None or not order.best_buy_order_url or _resolve_store_name(order.store.name) != best_buy_import.STORE_NAME:
+        raise HTTPException(status_code=404, detail="This order does not have a saved Best Buy link.")
+    url, order_number, user_id = order.best_buy_order_url, order.store_order_number, user.id
+    db.rollback()
+    return await _stage_best_buy_preview(
+        url, user_id, order_id=order_id, expected_order_number=order_number,
+    )
 
 
 @router.post("/orders/bulk-session", response_model=BulkImportSessionResponse)
@@ -2346,11 +2552,15 @@ def create_bulk_import_session(
     The browser extension POSTs the normalized orders here and receives a short token
     that the frontend can use to fetch the payloads without putting them in the URL.
     """
+    return _create_bulk_import_session(body)
+
+
+def _create_bulk_import_session(
+    body: BulkImportSessionCreate, *, source: _BulkImportSource | None = None,
+) -> BulkImportSessionResponse:
     if not body.orders:
         raise HTTPException(status_code=400, detail="At least one order payload is required.")
 
-    # Generate a short, URL-safe token. This is not security-critical; it only
-    # references in-memory data and still requires a logged-in user to consume.
     token = secrets.token_urlsafe(16)
     sanitized: list[StoreOrderImportPayload] = []
     for order in body.orders:
@@ -2376,23 +2586,34 @@ def create_bulk_import_session(
             detail="No importable orders after filtering ignored Walmart email deliveries.",
         )
 
-    _bulk_sessions[token] = sanitized
-    _bulk_session_owners[token] = (body.store_id, body.store_account_id)
+    with _bulk_sessions_lock:
+        now = monotonic()
+        for key, existing_source in list(_bulk_session_sources.items()):
+            if existing_source.expires_at <= now:
+                _remove_bulk_session(key)
+        if source:
+            if len(_bulk_session_sources) >= 64:
+                _remove_bulk_session(next(iter(_bulk_session_sources)))
+            _bulk_session_sources[token] = source
+        _bulk_sessions[token] = sanitized
+        _bulk_session_owners[token] = (body.store_id, body.store_account_id)
     return BulkImportSessionResponse(token=token)
 
 
 @router.get("/orders/bulk-session/{token}", response_model=BulkImportSessionPayloads)
 def get_bulk_import_session(
     token: str,
+    response: Response = None,
+    user: User | None = Depends(get_current_user_optional),
 ):
     """Resolve a bulk import session token into the original payloads.
 
     Also kicks off background PDF rendering for any captured invoices, so the
     files are (usually) ready by the time the user applies each order.
     """
-    payloads = _bulk_sessions.get(token)
-    if not payloads:
-        raise HTTPException(status_code=404, detail="Bulk import session not found or expired.")
+    payloads, source = _get_bulk_session(token, user)
+    if source and response is not None:
+        response.headers["Cache-Control"] = "no-store"
 
     for payload in payloads:
         if payload.invoiceHtml:

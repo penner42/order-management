@@ -1,5 +1,5 @@
 """Order and order-payment junction models."""
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Numeric, Index
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Numeric, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -31,6 +31,7 @@ class Order(Base):
     notes = Column(String(2000), nullable=True)
     invoice_pdf_path = Column(String(500), nullable=True)  # saved store invoice PDF (relative to invoice dir)
     imported_from_store = Column(String(50), nullable=True)
+    best_buy_order_url = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -41,6 +42,10 @@ class Order(Base):
     items = relationship("Item", back_populates="order", cascade="all, delete-orphan")
     order_payments = relationship("OrderPaymentMethod", back_populates="order", cascade="all, delete-orphan")
     bfmr_order_tasks = relationship("BfmrOrderTask", cascade="all, delete-orphan", passive_deletes=True)
+
+    @property
+    def has_best_buy_order_link(self) -> bool:
+        return bool(self.best_buy_order_url)
 
     @property
     def bfmr_submitted_item_ids(self):

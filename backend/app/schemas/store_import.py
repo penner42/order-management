@@ -51,6 +51,7 @@ class BulkStoreOrderDiffRequest(BaseModel):
     """Compute diffs for multiple normalized payloads in one request."""
 
     orders: list[StoreOrderImportPayload]
+    session_token: str | None = None
 
 
 class BulkStoreOrderDiffResponse(BaseModel):
@@ -68,12 +69,17 @@ class DirectApplyBody(BaseModel):
     buying_group_id: int | None = None
     item_payouts: list[float | None] | None = None
     payment_methods: list[OrderPaymentMethodCreate] | None = None
+    session_token: str | None = None
 
 
 class DirectApplyResponse(BaseModel):
     """Response after directly applying an import."""
 
     order_id: int
+
+
+class BestBuyOrderPreviewRequest(BaseModel):
+    url: str
 
 
 class BulkImportSessionCreate(BaseModel):

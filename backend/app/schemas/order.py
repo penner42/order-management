@@ -79,6 +79,7 @@ class OrderRead(OrderBase, TimestampsMixin):
     items: list[ItemRead] = []
     tracking_rewards: list[TrackingRewardRead] = []
     order_payments: list[OrderPaymentMethodRead] = []
+    has_best_buy_order_link: bool = False
     # Internal: read from the ORM object, excluded from responses (has_invoice is exposed instead).
     invoice_pdf_path: str | None = Field(default=None, exclude=True)
     bfmr_order_tasks: list["BfmrOrderTaskRead"] = []
