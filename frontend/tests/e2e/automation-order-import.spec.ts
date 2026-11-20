@@ -161,12 +161,15 @@ test('Best Buy URL goes through review before saving and supports a tracking rec
         json: {
           items: saved ? [{
             id: 1, store_id: 1, store_order_number: orderNumber, status: 'imported',
-            has_best_buy_order_link: true, order_payments: [],
+            has_best_buy_order_link: true, has_best_buy_details: true, order_payments: [],
             items: [{ id: 1, order_id: 1, description: 'Example Laptop', price_paid: '100', quantity: 1, status: 'purchased' }],
           }] : [],
           total: saved ? 1 : 0, page: 1, per_page: 50, pages: 1, available_buying_group_ids: [],
         },
       })
+    }
+    if (path === '/api/orders/1/best-buy-details') {
+      return route.fulfill({ json: { customer: { email: 'order@example.test' }, price: { orderTotal: 110 } } })
     }
     if (path === `${base}/best-buy-preview`) {
       expect(route.request().postDataJSON()).toEqual({ url })
@@ -232,6 +235,8 @@ test('Best Buy URL goes through review before saving and supports a tracking rec
   await page.getByRole('button', { name: 'Import order' }).click()
   await expect(page.getByRole('button', { name: 'Import Complete' })).toBeVisible()
   await page.getByRole('link', { name: 'Back to Orders' }).click()
+  await page.getByText('Best Buy order details', { exact: true }).click()
+  await expect(page.getByText('order@example.test', { exact: true })).toBeVisible()
   await page.getByRole('link', { name: 'Check Best Buy tracking' }).click()
   await page.getByRole('button', { name: 'Check tracking' }).click()
   await expect(page.getByRole('table').getByText('1Z1234567890123456', { exact: true })).toBeVisible()

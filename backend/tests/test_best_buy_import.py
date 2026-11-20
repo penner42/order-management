@@ -13,14 +13,36 @@ from sqlalchemy.pool import StaticPool
 
 from app.auth import get_current_user, get_current_user_optional
 from app.browser_automation import best_buy_import
+from app.browser_automation.best_buy_api import enrich_order
 from app.database import Base, get_db
 from app.models import Order, Shipment, User
 from app.routers.store_imports import router
+from app.routers.orders import router as orders_router
 from app.schemas.order import OrderRead
 
 _SOURCE_URL = "https://click.emailinfo2.bestbuy.com/?qs=ExampleToken0123456"
 _ORDER_NUMBER = "BBY03-123456789012"
 _API = "/integrations/stores/orders"
+
+
+def _api_response():
+    line_ids = [f"{_ORDER_NUMBER}-A-{index}" for index in (1, 2)]
+    return {"order": {
+        "userOrderId": _ORDER_NUMBER,
+        "items": [{"id": line, "sku": "12345678", "quantity": 1, "originalQuantity": 1,
+                   "thirdPartyOrderId": f"seller-{index}", "fulfillment": {"addressId": "ship"},
+                   "metadata": {"catalog": {"manufacturer": {"modelNumber": "EXAMPLE"}}}}
+                  for index, line in enumerate(line_ids)],
+        "groups": {"fulfillmentGroups": [{"groupId": "g1", "members": [{"itemKey": line} for line in line_ids]}]},
+        "price": {"orderTotal": 215.0, "productTotal": 200.0, "shippingTotal": 0, "totalSalesTax": 15},
+        "payments": [{"displayCreditCardNumber": "****1234", "creditCardType": "Visa", "amount": 215,
+                      "secureVaultToken": "private-payment-token", "authorizationCode": "private-auth-code",
+                      "expirationMonth": "11", "expirationYear": "2030"}],
+        "user": {"firstName": "Example", "lastName": "Customer", "emailAddress": "ORDER@example.test",
+                 "visitorToken": "private-visitor-token",
+                 "addresses": [{"id": "ship", "addressLine1": "100 Example St", "phoneNumber": "2065550123"},
+                               {"id": "bill", "addressLine1": "Billing address outside import"}]},
+    }}
 
 
 def _line_item():
@@ -134,6 +156,19 @@ class BestBuyImportTests(unittest.TestCase):
         session = sessionmaker(bind=engine)
         app = FastAPI()
         app.include_router(router)
+        app.include_router(orders_router)
+        same_package = self.pending.model_copy(deep=True)
+        same_package.items[1]["shipments"] = deepcopy(same_package.items[0]["shipments"])
+        api_response = _api_response()
+        mismatch = deepcopy(api_response)
+        mismatch["order"]["userOrderId"] = "BBY03-000000000000"
+        self.assertIs(enrich_order(same_package, mismatch), same_package)
+        enriched = enrich_order(same_package, api_response)
+        self.assertEqual(enriched.customer["email"], "order@example.test")
+        self.assertEqual(enriched.shippingAddress["phoneNumber"], "+12065550123")
+        self.assertEqual(enriched.items[1]["logicalItemId"], f"{_ORDER_NUMBER}-A-2")
+        for secret in ("private-payment-token", "private-auth-code", "private-visitor-token", "Billing address outside import", "expirationMonth"):
+            self.assertNotIn(secret, enriched.model_dump_json())
 
         def override_db():
             with session() as db:
@@ -146,7 +181,7 @@ class BestBuyImportTests(unittest.TestCase):
         app.dependency_overrides[get_current_user] = override_user
         app.dependency_overrides[get_current_user_optional] = override_user
         with TestClient(app) as client, patch.object(
-            best_buy_import, "fetch_order", side_effect=[self.pending, self.tracked],
+            best_buy_import, "fetch_order", side_effect=[self.pending, enriched, enrich_order(self.tracked, api_response), self.tracked],
         ) as browser:
             self.assertEqual(client.post(f"{_API}/best-buy-preview", json={
                 "url": "https://click.emailinfo2.bestbuy.com@other.example/orders",
@@ -198,6 +233,24 @@ class BestBuyImportTests(unittest.TestCase):
             self.assertTrue(diff["source_url_to_save"])
             self.assertEqual(client.post(f"{_API}/apply", json=approve).status_code, 200)
 
+            backfill = client.post(f"{_API}/{order_id}/best-buy-tracking-preview")
+            backfill_token = backfill.json()["token"]
+            newer, = client.get(f"{_API}/bulk-session/{backfill_token}").json()["orders"]
+            diff = client.post(f"{_API}/diff-bulk", json={
+                "orders": [newer], "session_token": backfill_token,
+            }).json()["diffs"][0]
+            self.assertTrue(diff["source_details_to_save"])
+            newer["bestBuyDetails"] = {"injected": "untrusted client data"}
+            updated = client.post(f"{_API}/apply", json={"payload": newer, "session_token": backfill_token})
+            self.assertEqual(updated.status_code, 200, updated.text)
+            details = client.get(f"/orders/{order_id}/best-buy-details").json()
+            self.assertEqual(details["customer"]["email"], "order@example.test")
+            self.assertEqual(details["payments"][0]["last4"], "1234")
+            self.assertNotIn("injected", details)
+            listing = client.get(f"/orders/{order_id}").json()
+            self.assertTrue(listing["has_best_buy_details"])
+            self.assertNotIn("best_buy_details", listing)
+
             refresh = client.post(f"{_API}/{order_id}/best-buy-tracking-preview")
             self.assertEqual(refresh.status_code, 200, refresh.text)
             refresh_token = refresh.json()["token"]
@@ -216,14 +269,26 @@ class BestBuyImportTests(unittest.TestCase):
                 self.assertEqual(db.query(Order).count(), 1)
                 order = db.get(Order, order_id)
                 self.assertEqual(len(order.items), 2)
+                self.assertTrue(order.best_buy_details)
+                self.assertEqual(order.best_buy_details["items"][1]["legacyLogicalItemId"], "12345678:2")
+                self.assertEqual(order.best_buy_details["shipments"][1]["lineIds"], [f"{_ORDER_NUMBER}-A-2"])
                 shipment, = db.query(Shipment).all()
                 self.assertEqual(shipment.tracking_number, "1Z1234567890123456")
                 self.assertEqual(len(shipment.shipment_items), 1)
                 item = shipment.shipment_items[0].item
                 self.assertEqual(item.description, "Renamed laptop")
+                self.assertEqual(item.import_line_key, f"{_ORDER_NUMBER}-A-2")
                 self.assertEqual(item.price_sold, Decimal("90.00"))
                 self.assertEqual(item.price_paid, Decimal("99.00"))
-            self.assertEqual([call.args[0] for call in browser.await_args_list], [_SOURCE_URL, _SOURCE_URL])
+            fallback = client.post(f"{_API}/{order_id}/best-buy-tracking-preview")
+            fallback_token = fallback.json()["token"]
+            fallback_orders = client.get(f"{_API}/bulk-session/{fallback_token}").json()["orders"]
+            self.assertEqual(client.post(f"{_API}/apply", json={
+                "payload": fallback_orders[0], "session_token": fallback_token,
+            }).status_code, 200)
+            with session() as db:
+                self.assertEqual(len(db.get(Order, order_id).items), 2)
+            self.assertEqual([call.args[0] for call in browser.await_args_list], [_SOURCE_URL] * 4)
 
 
 if __name__ == "__main__":

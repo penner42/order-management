@@ -730,9 +730,44 @@ def _best_buy_canceled_lines(normalized: dict[str, Any]) -> dict[str, bool] | No
     if _resolve_store_name(normalized.get("store") or "") != best_buy_import.STORE_NAME:
         return None
     return {
-        row["logicalItemId"]: _incoming_item_is_canceled(row)
-        for row in normalized.get("items") or [] if row.get("logicalItemId")
+        key: _incoming_item_is_canceled(row)
+        for row in normalized.get("items") or []
+        for key in (row.get("logicalItemId"), row.get("legacyLogicalItemId")) if key
     }
+
+
+def _restore_best_buy_line_ids(normalized: dict, order: Order) -> dict:
+    """Keep known retailer line ids across incomplete API or page captures."""
+    saved = (order.best_buy_details or {}).get("items", [])
+    if not saved:
+        return normalized
+    legacy_by_key = {row["id"]: row["legacyLogicalItemId"] for row in saved if row.get("legacyLogicalItemId")}
+    details = normalized.get("bestBuyDetails")
+    current_items = (details or {}).get("items") or []
+    current_by_key = {row["id"]: row for row in current_items}
+    items = normalized.get("items") or []
+    active_keys = {row.get("logicalItemId") for row in items}
+    key_by_legacy = {
+        legacy: key for key, legacy in legacy_by_key.items()
+        if key not in active_keys and (not current_by_key or key in current_by_key)
+    }
+    result = {**normalized, "items": [
+        {**row, "logicalItemId": key_by_legacy.get(row.get("logicalItemId"), row.get("logicalItemId"))}
+        for row in items
+    ]}
+    if details and current_items:
+        result["bestBuyDetails"] = {
+            **details, "items": [
+                {"legacyLogicalItemId": legacy_by_key.get(row["id"]), **row}
+                if row["id"] in legacy_by_key else row
+                for row in current_items
+            ],
+            "shipments": [
+                {**shipment, "lineIds": [key_by_legacy.get(key, key) for key in shipment["lineIds"]]}
+                for shipment in details.get("shipments", [])
+            ],
+        }
+    return result
 
 
 def _aggregate_incoming_items_by_name(
@@ -786,7 +821,8 @@ def _match_retitled_items(
         titles = {key: next(iter(names)) for key, names in titles_by_line.items() if len(names) == 1}
         if titles:
             incoming = [
-                {**item, "name": titles.get(item.get("logicalItemId"), item.get("name"))}
+                {**item, "name": titles.get(item.get("logicalItemId")) or
+                 titles.get(item.get("legacyLogicalItemId")) or item.get("name")}
                 for item in incoming
             ]
             normalized = {**normalized, "items": incoming}
@@ -954,6 +990,7 @@ def _build_order_diff(
     """
     if not linked_order:
         return {"is_existing_order": False}
+    normalized = _restore_best_buy_line_ids(normalized, linked_order)
 
     if existing_items is None:
         existing_items = (
@@ -1426,6 +1463,14 @@ def _apply_items_and_shipments(
 
     if existing_items:
         existing_order = True
+        if is_best_buy:
+            upgraded_keys = {
+                row["legacyLogicalItemId"]: row["logicalItemId"] for row in items
+                if row.get("legacyLogicalItemId") and row.get("logicalItemId")
+            }
+            for item in existing_items:
+                if item.import_line_key in upgraded_keys:
+                    item.import_line_key = upgraded_keys[item.import_line_key]
 
     if not existing_order and store_name.strip().lower() == "costco":
         defaults = default_costco_payouts(normalized)
@@ -2272,6 +2317,11 @@ def compute_order_diff_bulk(
         if source and source.order_id is None and linked and linked.best_buy_order_url != source.url:
             diff["source_url_to_save"] = True
             diff["has_changes"] = True
+        if source and linked and normalized.get("bestBuyDetails"):
+            details = _restore_best_buy_line_ids(normalized, linked)["bestBuyDetails"]
+            if linked.best_buy_details != details:
+                diff["source_details_to_save"] = True
+                diff["has_changes"] = True
         diffs.append(diff)
 
     return BulkStoreOrderDiffResponse(diffs=diffs)
@@ -2350,6 +2400,7 @@ def apply_store_order_payload(
     )
     if best_buy_order_url:
         order.best_buy_order_url = best_buy_order_url
+    normalized = _restore_best_buy_line_ids(normalized, order)
 
     if not is_existing_order:
         if buying_group_id is not None:
@@ -2416,6 +2467,8 @@ def apply_store_order_payload(
         order.invoice_pdf_path = filename
 
     capture_import_metadata(db, order, normalized, payload.store)
+    if _resolve_store_name(payload.store) == best_buy_import.STORE_NAME and normalized.get("bestBuyDetails"):
+        order.best_buy_details = normalized["bestBuyDetails"]
     from app.utils.order_screenshots import attach_screenshot
     attach_screenshot(db, order, payload)
     enqueue_order(db, order)
@@ -2468,7 +2521,8 @@ def apply_store_order_direct(
             order = _find_import_order(db, order_number, body.payload.store)
             if order is None or order.id != source.order_id:
                 raise HTTPException(status_code=409, detail="The saved order changed. Reopen it before checking tracking.")
-        return apply(body.payload, source.url if source.order_id is None else None)
+        reviewed = body.payload.model_copy(update={"bestBuyDetails": staged_orders[0].bestBuyDetails})
+        return apply(reviewed, source.url if source.order_id is None else None)
 
 
 def _remove_bulk_session(token: str) -> None:

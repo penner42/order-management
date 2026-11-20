@@ -12,6 +12,7 @@ import { GoBuyMeReservationDialog, isGoBuyMeReservationChoice } from '../compone
 import type { GoBuyMeReservationChoice, GoBuyMeTrackingSelection } from '../components/GoBuyMeReservationDialog'
 import { AlertDialog } from '../components/AlertDialog'
 import { OrderScreenshotHistory } from '../components/OrderScreenshotHistory'
+import { BestBuyOrderDetails } from '../components/BestBuyOrderDetails'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableCombobox } from '../components/SearchableCombobox'
 import { DuplicateAuditDetails } from '../components/DuplicateAuditDetails'
@@ -2465,6 +2466,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                       Check Best Buy tracking
                     </Link>
                   )}
+                  {!duplicateAudit && o.has_best_buy_details && <BestBuyOrderDetails orderId={o.id} />}
                   <div className="flex items-center gap-2 min-w-0">
                     <label className="text-xs text-ink-muted shrink-0 w-14">Date</label>
                     <input

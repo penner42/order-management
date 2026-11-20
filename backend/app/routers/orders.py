@@ -2,7 +2,7 @@
 from datetime import date, datetime, timezone
 import math
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -520,6 +520,18 @@ def get_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(ge
     from app.tracking_rewards import order_reward_summaries
     order_reward_summaries([order])
     return order
+
+
+@router.get("/{order_id}/best-buy-details")
+def get_best_buy_details(
+    order_id: int, response: Response, db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    order = db.get(Order, order_id)
+    if order is None or not order.best_buy_details:
+        raise HTTPException(status_code=404, detail="Best Buy order details are unavailable.")
+    response.headers["Cache-Control"] = "no-store"
+    return order.best_buy_details
 
 
 @router.get("/{order_id}/screenshots")

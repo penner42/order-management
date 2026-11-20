@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
 from app.config import settings
+from app.browser_automation.best_buy_api import enrich_order
 from app.schemas.store_import import StoreOrderImportPayload
 
 STORE_NAME = "Best Buy"
@@ -241,7 +242,7 @@ async def fetch_order(source_url: str) -> StoreOrderImportPayload:
     except TimeoutError:
         raise BestBuyImportError("Another Best Buy order check is running. Try again shortly.") from None
     try:
-        async with asyncio.timeout(65):
+        async with asyncio.timeout(75):
             async with AsyncCamoufox(headless=settings.browser_headless, locale="en-US") as browser:
                 context = await browser.new_context(service_workers="block")
 
@@ -268,7 +269,15 @@ async def fetch_order(source_url: str) -> StoreOrderImportPayload:
                 if await button.count():
                     await button.first.click(timeout=5000)
                     await page.get_by_text("Order Summary", exact=True).first.wait_for(timeout=7000)
-                return normalize_order(await page.evaluate(_EXTRACT_DETAILS))
+                payload = normalize_order(await page.evaluate(_EXTRACT_DETAILS))
+                api_url = f"https://{_STORE_HOST}/profile/ss/api/v1/orders/{payload.externalOrder['id']}"
+                try:
+                    response = await page.goto(api_url, wait_until="commit", timeout=10000)
+                    if response and response.ok and response.url == api_url:
+                        return enrich_order(payload, await asyncio.wait_for(response.json(), timeout=5))
+                except (PlaywrightError, TimeoutError, ValueError):
+                    pass
+                return payload
     except (TimeoutError, PlaywrightTimeoutError):
         raise BestBuyImportError("Best Buy did not load the order in time. Try again or check the link in your browser.") from None
     except PlaywrightError:

@@ -39,6 +39,7 @@ class StoreOrderImportPayload(BaseModel):
         default=None,
         description="Base64-encoded PDF supplied directly by the store.",
     )
+    bestBuyDetails: dict[str, Any] | None = None
 
 
 class StoreOrderDiffResponse(BaseModel):

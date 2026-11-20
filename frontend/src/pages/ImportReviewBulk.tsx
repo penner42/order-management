@@ -51,6 +51,7 @@ interface OrderDiff {
   has_changes?: boolean
   invoice_to_save?: boolean
   source_url_to_save?: boolean
+  source_details_to_save?: boolean
   current_order?: {
     buying_group_id: number | null
     store_account_id: number | null
@@ -305,6 +306,7 @@ function existingOrderHasActionableUpdates(
   return (
     diff?.invoice_to_save === true ||
     diff?.source_url_to_save === true ||
+    diff?.source_details_to_save === true ||
     countActionableItemChanges(diff) > 0 ||
     countShipmentChanges(diff) > 0 ||
     selectionDiffersFromCurrent(diff?.current_order?.buying_group_id, selectedBuyingGroupId) ||
@@ -325,6 +327,7 @@ function getBulkImportSortGroup(
     !isExisting ||
     diff?.invoice_to_save === true ||
     diff?.source_url_to_save === true ||
+    diff?.source_details_to_save === true ||
     countActionableItemChanges(diff ?? null) > 0 ||
     countShipmentChanges(diff ?? null) > 0 ||
     orderNeedsCancelUpdate(diff ?? null, isCanceled)
@@ -916,6 +919,9 @@ export default function ImportReviewBulk() {
                         )}
                         {diff?.source_url_to_save && (
                           <span className="text-amber-700 dark:text-amber-300">Order link available</span>
+                        )}
+                        {diff?.source_details_to_save && (
+                          <span className="text-amber-700 dark:text-amber-300">Best Buy details available</span>
                         )}
                         {itemChangesCount > 0 && (
                           <span className="text-amber-700 dark:text-amber-300">

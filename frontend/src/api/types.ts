@@ -170,6 +170,7 @@ export interface Order {
   notes: string | null
   has_invoice: boolean
   has_best_buy_order_link?: boolean
+  has_best_buy_details?: boolean
   created_at: string
   updated_at?: string
   store?: Store
