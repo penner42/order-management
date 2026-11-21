@@ -149,6 +149,39 @@ class BestBuyImportTests(unittest.TestCase):
         })
         self.assertEqual(payload.items[1]["pricing"]["tax"], 5.0)
 
+    def test_api_tracking_matches_repeated_sku_to_packages_by_group_contents(self):
+        details = deepcopy(self.details)
+        details["rows"].insert(0, deepcopy(details["rows"][0]))
+        details["groups"][1].update(tracking="1Z9999999999999999", trackingUrl="https://example.test/old")
+        payload = best_buy_import.normalize_order(details)
+        response = _api_response()
+        api = response["order"]
+        first, second = api["items"]
+        third = {**deepcopy(first), "id": f"{_ORDER_NUMBER}-A-3"}
+        first["fulfillment"]["tracking"] = second["fulfillment"]["tracking"] = {
+            "trackingNumber": "123456789012", "carrierDisplayName": "FedEx",
+        }
+        third["fulfillment"]["tracking"] = {
+            "trackingNumber": "123456789013", "trackingUrl": "https://www.fedex.com/track",
+        }
+        api["items"] = [third, first, second]
+        api["groups"]["fulfillmentGroups"].insert(0, {"groupId": "g2", "members": [{"itemKey": third["id"]}]})
+
+        enriched = enrich_order(payload, response)
+
+        packages = {shipment["trackingNumber"]: shipment for shipment in enriched.bestBuyDetails["shipments"]}
+        self.assertEqual({number: shipment["lineIds"] for number, shipment in packages.items()}, {
+            "123456789012": [first["id"], second["id"]],
+            "123456789013": [third["id"]],
+        })
+        self.assertEqual(packages["123456789012"]["carrier"], "FedEx")
+        self.assertEqual([row["legacyLogicalItemId"] for row in enriched.items], [
+            "12345678:1", "12345678:2", "12345678:3",
+        ])
+        self.assertEqual(
+            enriched.shipments[1]["trackingUrl"], "https://www.fedex.com/track",
+        )
+
     def test_preview_approval_and_tracking_refresh(self):
         engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
         self.addCleanup(engine.dispose)
@@ -170,6 +203,10 @@ class BestBuyImportTests(unittest.TestCase):
         for secret in ("private-payment-token", "private-auth-code", "private-visitor-token", "Billing address outside import", "expirationMonth"):
             self.assertNotIn(secret, enriched.model_dump_json())
 
+        shipped_response = deepcopy(api_response)
+        shipped_response["order"]["items"][1]["fulfillment"]["tracking"] = {"trackingNumber": "1Z1234567890123456"}
+        api_refresh = enrich_order(same_package, shipped_response)
+
         def override_db():
             with session() as db:
                 yield db
@@ -181,7 +218,7 @@ class BestBuyImportTests(unittest.TestCase):
         app.dependency_overrides[get_current_user] = override_user
         app.dependency_overrides[get_current_user_optional] = override_user
         with TestClient(app) as client, patch.object(
-            best_buy_import, "fetch_order", side_effect=[self.pending, enriched, enrich_order(self.tracked, api_response), self.tracked],
+            best_buy_import, "fetch_order", side_effect=[self.pending, enriched, api_refresh, self.tracked],
         ) as browser:
             self.assertEqual(client.post(f"{_API}/best-buy-preview", json={
                 "url": "https://click.emailinfo2.bestbuy.com@other.example/orders",

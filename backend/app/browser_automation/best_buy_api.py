@@ -2,6 +2,7 @@
 from collections import Counter, defaultdict, deque
 from math import isfinite
 import re
+from urllib.parse import urlsplit
 
 from app.schemas.store_import import StoreOrderImportPayload
 
@@ -49,6 +50,95 @@ def _address(raw):
     if phone:
         address["phoneNumber"] = phone
     return address
+
+
+def normalize_tracking_number(value):
+    number = _text(value)
+    if number and re.fullmatch(r"[A-Z0-9-]{6,45}", number, re.I) and re.search(r"[0-9]", number):
+        return number.upper()
+    return None
+
+
+def _line_matches(rows, item_info):
+    def key(line):
+        if "externalSku" in line:
+            return line["externalSku"], line["quantities"]["ordered"]
+        return line["sku"], line.get("quantity")
+
+    # A partial API response can shift the identities of repeated items.
+    if (
+        len({line["id"] for line in item_info}) != len(item_info)
+        or Counter(map(key, rows)) != Counter(map(key, item_info))
+    ):
+        return {}
+
+    page_groups = defaultdict(list)
+    for row in rows:
+        parts = row.get("shipments") or []
+        if len(parts) == 1:
+            page_groups[parts[0]["shipmentId"]].append(row)
+    api_groups = defaultdict(list)
+    for line in item_info:
+        if group_id := line.get("fulfillmentGroupId"):
+            api_groups[group_id].append(line)
+
+    def by_contents(groups):
+        signatures = defaultdict(list)
+        for lines in groups.values():
+            signatures[frozenset(Counter(map(key, lines)).items())].append(lines)
+        return signatures
+
+    matches = {}
+    # A unique group composition pairs repeat SKUs even if group order differs.
+    api_by_contents = by_contents(api_groups)
+    for signature, page in by_contents(page_groups).items():
+        api = api_by_contents.get(signature, [])
+        if len(page) == len(api) == 1:
+            candidates = defaultdict(deque)
+            for line in api[0]:
+                candidates[key(line)].append(line)
+            for row in page[0]:
+                matches[row["logicalItemId"]] = candidates[key(row)].popleft()
+
+    used = {line["id"] for line in matches.values()}
+    remaining_page = defaultdict(list)
+    remaining_api = defaultdict(list)
+    for row in rows:
+        if row["logicalItemId"] not in matches:
+            remaining_page[key(row)].append(row)
+    for line in item_info:
+        if line["id"] not in used:
+            remaining_api[key(line)].append(line)
+    for line_key, page in remaining_page.items():
+        api = remaining_api[line_key]
+        page_ids = {part["shipmentId"] for row in page for part in row.get("shipments") or []}
+        api_ids = {line.get("fulfillmentGroupId") for line in api}
+        if len(page) == 1 or (len(page_ids) <= 1 and len(api_ids) <= 1):
+            matches.update((row["logicalItemId"], line) for row, line in zip(page, api))
+    return matches
+
+
+def _tracking_shipment(tracking, group):
+    number = normalize_tracking_number(tracking.get("trackingNumber"))
+    if not number:
+        number = normalize_tracking_number(group.get("trackingNumber"))
+        tracking = {}
+    if not number:
+        return None
+
+    shipment = {"trackingNumber": number, "fulfillmentType": "shipping"}
+    if carrier := (_text(tracking.get("carrierDisplayName")) or _text(tracking.get("carrierName")) or group.get("carrier")):
+        shipment["carrier"] = carrier
+    if status := (_text(tracking.get("statusDesc")) or group.get("status")):
+        shipment["status"] = {"message": status}
+    if url := _text(tracking.get("trackingUrl")):
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme == "https" and parsed.hostname and parsed.username is None:
+                shipment["trackingUrl"] = url
+        except ValueError:
+            pass
+    return shipment
 
 
 def enrich_order(payload: StoreOrderImportPayload, response: object) -> StoreOrderImportPayload:
@@ -109,7 +199,7 @@ def enrich_order(payload: StoreOrderImportPayload, response: object) -> StoreOrd
             by_line.update({key: group for key in group["lineIds"]})
 
     item_info = []
-    candidates = defaultdict(deque)
+    api_shipments = {}
     for raw in raw_items:
         info = _fields(raw, ("id", "sku", "manufacturerName", "thirdPartyOrderId"))
         info.update(_fields(raw, ("quantity", "originalQuantity"), _number))
@@ -121,53 +211,49 @@ def enrich_order(payload: StoreOrderImportPayload, response: object) -> StoreOrd
         ), _number)
         fulfillment = _object(raw.get("fulfillment"))
         info["fulfillment"] = _fields(fulfillment, ("type", "levelOfService", "minArrivalDate", "maxArrivalDate", "receivedDateTime"))
-        if group := by_line.get(info.get("id")):
+        group = by_line.get(info.get("id"), {})
+        if group:
             info["fulfillmentGroupId"] = group["groupId"]
         if info.get("id") and info.get("sku"):
             item_info.append(info)
-            candidates[(info["sku"], info.get("quantity"))].append(info)
+            if shipment := _tracking_shipment(_object(fulfillment.get("tracking")), group):
+                api_shipments[info["id"]] = shipment
 
     rows = payload.items or []
-    # A partial API order must not shift the identities of repeated items.
-    items = rows
-    if (
-        len({info["id"] for info in item_info}) == len(item_info)
-        and Counter((row["externalSku"], row["quantities"]["ordered"]) for row in rows)
-        == Counter({key: len(values) for key, values in candidates.items()})
-    ):
-        dom_groups = defaultdict(set)
-        for row in rows:
-            key = (row["externalSku"], row["quantities"]["ordered"])
-            dom_groups[key].update(part["shipmentId"] for part in row.get("shipments") or [])
-        ambiguous = {
-            key for key, values in candidates.items() if len(values) > 1 and (
-                len(dom_groups[key]) > 1 or len({line.get("fulfillmentGroupId") for line in values}) > 1
-            )
-        }
-        items = []
-        for row in rows:
-            key = (row["externalSku"], row["quantities"]["ordered"])
-            if key in ambiguous:
-                items.append(row)
-                continue
-            info = candidates[key].popleft()
-            info["legacyLogicalItemId"] = row["logicalItemId"]
-            pricing = dict(row["pricing"])
-            for source, target in (("totalShippingPrice", "shipping"), ("salesTaxFeesSurcharges", "tax")):
-                if source in info["price"]:
-                    pricing[target] = info["price"][source]
-            items.append({
-                **row, "logicalItemId": info["id"], "legacyLogicalItemId": row["logicalItemId"], "pricing": pricing,
-            })
+    matches = _line_matches(rows, item_info)
+    page_shipments = {raw["shipmentId"]: raw for raw in payload.shipments or []}
+    ids_by_tracking = {raw["trackingNumber"]: sid for sid, raw in page_shipments.items() if raw.get("trackingNumber")}
+    normalized_shipments = dict(page_shipments)
+    items = []
+    for row in rows:
+        legacy_id = row["logicalItemId"]
+        info = matches.get(legacy_id)
+        if not info:
+            items.append(row)
+            continue
+        info["legacyLogicalItemId"] = legacy_id
+        pricing = dict(row["pricing"])
+        for source, target in (("totalShippingPrice", "shipping"), ("salesTaxFeesSurcharges", "tax")):
+            if source in info["price"]:
+                pricing[target] = info["price"][source]
+        item = {**row, "logicalItemId": info["id"], "legacyLogicalItemId": legacy_id, "pricing": pricing}
+        if shipment := api_shipments.get(info["id"]):
+            number = shipment["trackingNumber"]
+            sid = ids_by_tracking.setdefault(number, f"best-buy-{number}")
+            normalized_shipments[sid] = {**normalized_shipments.get(sid, {}), **shipment, "shipmentId": sid}
+            item["shipments"] = [{"shipmentId": sid, "quantity": row["quantities"]["ordered"]}]
+        items.append(item)
 
     shipments = []
-    for raw in payload.shipments or []:
-        shipment = _fields(raw, ("shipmentId", "trackingNumber", "deliveryDate"))
+    line_ids_by_shipment = defaultdict(list)
+    for item in items:
+        for part in item.get("shipments") or []:
+            line_ids_by_shipment[part["shipmentId"]].append(item["logicalItemId"])
+    final_shipments = [raw for sid, raw in normalized_shipments.items() if sid in line_ids_by_shipment]
+    for raw in final_shipments:
+        shipment = _fields(raw, ("shipmentId", "trackingNumber", "deliveryDate", "carrier"))
         shipment.update(_fields(_object(raw.get("status")), ("message",)))
-        shipment["lineIds"] = [
-            row["logicalItemId"] for row in items
-            if any(part["shipmentId"] == raw["shipmentId"] for part in row.get("shipments") or [])
-        ]
+        shipment["lineIds"] = line_ids_by_shipment[raw["shipmentId"]]
         shipments.append(shipment)
 
     details = {
@@ -190,6 +276,7 @@ def enrich_order(payload: StoreOrderImportPayload, response: object) -> StoreOrd
         "customer": {**(payload.customer or {}), **customer} or None,
         "shippingAddress": shipping,
         "items": items,
+        "shipments": final_shipments,
         "totals": totals,
         "paymentMethods": [method for method in methods if method.get("last4")] or payload.paymentMethods,
         "bestBuyDetails": details,

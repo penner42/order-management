@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
 from app.config import settings
-from app.browser_automation.best_buy_api import enrich_order
+from app.browser_automation.best_buy_api import enrich_order, normalize_tracking_number
 from app.schemas.store_import import StoreOrderImportPayload
 
 STORE_NAME = "Best Buy"
@@ -92,15 +92,6 @@ def _shipping_address(lines: list[str]) -> dict[str, str] | None:
     return address
 
 
-def _tracking_number(value: str | None) -> str | None:
-    if not value:
-        return None
-    number = value.strip()
-    if re.fullmatch(r"[A-Z0-9-]{6,45}", number, re.I) and re.search(r"\d", number):
-        return number.upper()
-    return None
-
-
 def normalize_order(details: dict) -> StoreOrderImportPayload:
     order_number = details.get("orderNumber")
     purchase_date = _date(details.get("purchaseDate"))
@@ -114,7 +105,7 @@ def normalize_order(details: dict) -> StoreOrderImportPayload:
     emails: set[str] = set()
     phones: set[str] = set()
     for index, group in enumerate(details["groups"]):
-        tracking = _tracking_number(group["tracking"])
+        tracking = normalize_tracking_number(group["tracking"])
         status = group["status"]
         shipments.append({
             "shipmentId": f"shipment-{index + 1}",
