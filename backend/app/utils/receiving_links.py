@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from fastapi import HTTPException
-from sqlalchemy import or_, func
+from sqlalchemy import case, or_, func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, ShipmentItem
@@ -110,7 +110,6 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int, include_
                                  Item.description.ilike(term, escape="\\"),
                                  Item.receipt_id.ilike(term, escape="\\")))
     total = query.count()
-    items = _candidate_items(query).offset((page - 1) * 25).limit(25).all()
     suggestions = []
     if receipt_key_value:
         row = db.get(ReceivingReviewPending, group_id)
@@ -122,11 +121,14 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int, include_
         if trackings:
             tracking_items = db.query(ShipmentItem.item_id).join(Shipment).filter(
                 func.lower(func.trim(Shipment.tracking_number)).in_(trackings))
+            tracking_match = or_(Item.id.in_(tracking_items),
+                                 func.lower(func.trim(Item.receipt_tracking_number)).in_(trackings))
+            query = query.order_by(case((tracking_match, 0), else_=1))
             other_lines = db.query(Item).join(Order).filter(
                 or_(Order.buying_group_id != group_id, Order.buying_group_id.is_(None)),
-                or_(Item.id.in_(tracking_items),
-                    func.lower(func.trim(Item.receipt_tracking_number)).in_(trackings)))
+                tracking_match)
             suggestions = [_candidate_data(i) for i in _candidate_items(other_lines).all()]
+    items = _candidate_items(query).offset((page - 1) * 25).limit(25).all()
     return {"total": total, "page": page, "items": [_candidate_data(i) for i in items],
             "suggestions": suggestions}
 

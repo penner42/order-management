@@ -293,6 +293,26 @@ class ReceiptLinkTests(unittest.TestCase):
         result = candidate_lines(self.db, self.group.id, "", 1, receipt_key_value=receipt_key(self.receipt))
         self.assertNotIn(self.item.id, [i["item_id"] for i in result["suggestions"]])
 
+    def test_tracking_matches_rank_first_before_pagination(self):
+        self.shipment.tracking_number = " alt "
+        received = Item(order_id=self.order.id, description="Received headphones",
+                        receipt_tracking_number=" incorrect ")
+        recent = [Item(order_id=self.order.id, description="Newer headphones") for _ in range(25)]
+        recent[-1].shipment_items.append(ShipmentItem(shipment=Shipment(tracking_number="ALT-extra")))
+        self.db.add_all([received, *recent])
+        self.db.commit()
+        key = receipt_key(self.receipt)
+
+        first = candidate_lines(self.db, self.group.id, "", 1, receipt_key_value=key)
+        self.assertEqual(first["total"], 26)
+        self.assertEqual([i["item_id"] for i in first["items"][:2]], [self.item.id, recent[-1].id])
+        second = candidate_lines(self.db, self.group.id, "", 2, receipt_key_value=key)
+        self.assertEqual([i["item_id"] for i in second["items"]], [recent[0].id])
+        included = candidate_lines(self.db, self.group.id, "", 1, include_received=True, receipt_key_value=key)
+        self.assertEqual([i["item_id"] for i in included["items"][:2]], [received.id, self.item.id])
+        searched = candidate_lines(self.db, self.group.id, "Newer", 1, receipt_key_value=key)
+        self.assertEqual([i["item_id"] for i in searched["items"]], [i.id for i in reversed(recent)])
+
     def test_group_change_after_candidate_selection_or_staging_is_rejected(self):
         self.assertEqual(candidate_lines(self.db, self.group.id, "", 1)["total"], 1)
         self.order.buying_group_id = self.other_group.id

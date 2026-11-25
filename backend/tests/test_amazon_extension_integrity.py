@@ -3,6 +3,7 @@ import unittest
 
 from playwright.async_api import async_playwright
 
+from app.browser_automation.amazon_import import _normalize_order
 from app.browser_automation.paths import amazon_script_paths
 
 
@@ -56,6 +57,36 @@ class AmazonExtensionIntegrityTests(unittest.IsolatedAsyncioTestCase):
                                     '<div class="a-row"><a href="https://www.amazon.com/dp/B000000001">'
                                     'Purchased item</a></div></div></main>')
         self.assertEqual([i['name'] for i in (await self.parse())['items']], ['Purchased item'])
+
+    async def test_packages_with_shared_shipment_id_keep_their_own_tracking(self):
+        packages = ''.join(
+            f'<div class="shipment"><a href="https://www.amazon.com/progress-tracker/package'
+            f'?shipmentId=shared&amp;packageIndex={index}">Track package</a>'
+            f'<div class="yohtmlc-item"><a href="https://www.amazon.com/dp/B00000000{index}">'
+            f'Package item {index}</a></div></div>'
+            for index in range(2)
+        )
+        await self.page.set_content(
+            f'<div id="orderDetails"><span data-component="orderId">{ORDER_ID}</span>{packages}</div>')
+        raw = await self.page.evaluate('''async url => {
+            globalThis.fetch = async url => {
+                const index = new URL(url).searchParams.get('packageIndex')
+                return {ok: true, text: async () => JSON.stringify({trackingId: 'TBA1234567890' + index})}
+            }
+            const d = OrderManagerAmazonDom
+            const order = d.parseOrderDetailPage(document, url)
+            await d.enrichShipmentsWithTracking(order.shipments, new URL(url).origin)
+            return order
+        }''', URL)
+        extension_payload = await self.page.evaluate(
+            '([raw, url]) => OrderManagerAmazon.normalizeAmazonOrderPayload(raw, url, null)', [raw, URL])
+        for payload in (_normalize_order(raw, URL, None), extension_payload):
+            shipments = {s['shipmentId']: s['trackingNumber'] for s in payload['shipments']}
+            self.assertEqual(len(shipments), 2)
+            self.assertEqual(
+                {item['name']: shipments[item['shipments'][0]['shipmentId']] for item in payload['items']},
+                {'Package item 0': 'TBA12345678900', 'Package item 1': 'TBA12345678901'},
+            )
 
     async def test_grouped_usd_prices_keep_all_digits_and_cents(self):
         for price in ('$1,234.56', 'USD 1,234.56', '1,234.56 USD'):

@@ -1265,8 +1265,12 @@
 
   function extractShipmentIdFromUrl(url) {
     if (!url) return null
-    const m = /[?&]shipmentId=([^&]+)/i.exec(String(url))
-    return m && m[1] ? decodeURIComponent(m[1]) : null
+    const shipment = /[?&]shipmentId=([^&#]+)/i.exec(url)
+    if (!shipment) return null
+    const shipmentId = decodeURIComponent(shipment[1])
+    // Amazon can show separate package cards with the same shipment ID.
+    const packageIndex = /[?&]packageIndex=(\d+)(?=[&#]|$)/i.exec(url)
+    return packageIndex ? `${shipmentId}:package:${packageIndex[1]}` : shipmentId
   }
 
   function buildShipmentId(entry, index) {
