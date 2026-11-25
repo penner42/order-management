@@ -30,6 +30,7 @@ import type {
   EffectiveItemStatus,
 } from '../api/types'
 import { getTrackingInfoBulk } from '../utils/tracking'
+import { walmartFulfillmentStatusLabel } from '../utils/walmartTracking'
 import type { TrackingInfo } from '../utils/tracking'
 
 function toYyyyMmDd(d: Date): string {
@@ -2421,6 +2422,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
             const totalPaid = orderTotals(o.items ?? [], discount)
             const totalPayout = orderPayout(o.items ?? [], insurance)
             const itemCount = o.items?.length ?? 0
+            const isWalmart = (o.imported_from_store ?? o.store?.name)?.trim().toLowerCase().replace(/\.com$/, '') === 'walmart'
 
             return (
               <div key={o.id} className="space-y-2">
@@ -2891,6 +2893,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                             const hideAdvanceButton = isPaymentStatus(lowestNext)
                             const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
                             const trackingInfo = trackingInfoByItemId[item.id] ?? null
+                            const walmartStatus = isWalmart ? walmartFulfillmentStatusLabel(group.shipment?.status) : null
 
                             return (
                               <div key={item.id} className={`rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 p-2 ${getStatusRowClass(effectiveStatus)}`}>
@@ -2955,7 +2958,12 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                         disabled={savingItemId === item.id}
                                         className={`w-full h-9 rounded border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       />
-                                      {item.upc && <div className="mt-1 text-xs text-ink-muted select-text">UPC: {item.upc}</div>}
+                                      {(item.upc || walmartStatus) && (
+                                        <div className="mt-1 flex flex-wrap gap-x-2 text-xs">
+                                          {item.upc && <span className="text-ink-muted select-text">UPC: {item.upc}</span>}
+                                          {walmartStatus && <span className="font-medium text-ink">Status: {walmartStatus}</span>}
+                                        </div>
+                                      )}
                                     </div>
 
                                     <div className="mt-2 flex items-center gap-2 min-w-0">
@@ -3196,6 +3204,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                 const hideAdvanceButton = isPaymentStatus(lowestNext)
                                 const trackingRaw = trackingEdits[item.id] ?? getTracking(item.id)
                                 const trackingInfo = trackingInfoByItemId[item.id] ?? null
+                                const walmartStatus = isWalmart ? walmartFulfillmentStatusLabel(group.shipment?.status) : null
                                 const scanRewards = (o.tracking_rewards ?? []).filter((reward) =>
                                   o.items.find((line) => reward.item_ids.includes(line.id))?.id === item.id)
                                 return (
@@ -3242,7 +3251,12 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
                                         disabled={savingItemId === item.id}
                                         className={`w-full min-w-[7rem] h-5 rounded border border-brand-200 dark:border-gray-600 px-2 py-0 text-sm focus:border-brand-500 focus:outline-none disabled:opacity-60 ${getStatusInputClass(effectiveStatus)}`}
                                       />
-                                      {item.upc && <div className="mt-1 text-xs text-ink-muted select-text">UPC: {item.upc}</div>}
+                                      {(item.upc || walmartStatus) && (
+                                        <div className="mt-1 flex flex-wrap gap-x-2 text-xs">
+                                          {item.upc && <span className="text-ink-muted select-text">UPC: {item.upc}</span>}
+                                          {walmartStatus && <span className="font-medium text-ink">Status: {walmartStatus}</span>}
+                                        </div>
+                                      )}
                                     </td>
                                     <td className="py-1 px-2">
                                       <div className="flex items-center gap-1.5 min-w-0">

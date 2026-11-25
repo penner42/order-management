@@ -75,6 +75,8 @@ interface OrderDiff {
   }
   shipments?: {
     matched: Array<{
+      shipment_id?: string | null
+      fulfillment_status?: string | null
       tracking_number: string
       current: { delivered_at: string | null }
       incoming: {
@@ -86,6 +88,8 @@ interface OrderDiff {
       detailed_changes?: { field: string; before: unknown; after: unknown }[]
     }>
     added: Array<{
+      shipment_id?: string | null
+      fulfillment_status?: string | null
       tracking_number: string
       delivery_date: string | null
       status_message: string | null
@@ -268,7 +272,7 @@ function countNewTrackingNumbers(diff: OrderDiff | null): number {
 
 function countShipmentChanges(diff: OrderDiff | null): number {
   if (!diff?.shipments) return 0
-  const added = diff.shipments.added.filter((a) => a.tracking_number).length
+  const added = diff.shipments.added.filter((a) => a.tracking_number || a.fulfillment_status).length
   const changed = diff.shipments.matched.filter((m) => (m.changes?.length ?? 0) > 0).length
   return added + changed
 }
@@ -833,7 +837,7 @@ export default function ImportReviewBulk() {
               const payloadShipment = shipments.find(
                 (s) => (s.trackingNumber ?? '') && s.trackingNumber === m.tracking_number
               )
-              const hasDeliveryDate = !!payloadShipment?.deliveryDate
+              const hasDeliveryDate = !!payloadShipment?.deliveryDate && !m.fulfillment_status
 
               const rawDetailed = m.detailed_changes ?? []
               const rawChanges = m.changes ?? []
@@ -848,15 +852,15 @@ export default function ImportReviewBulk() {
               const status: 'new' | 'unchanged' | 'changed' =
                 effectiveChanges.length > 0 || effectiveDetailed.length > 0 ? 'changed' : 'unchanged'
 
-              shipmentDiffMap.set(m.tracking_number, {
+              shipmentDiffMap.set(m.shipment_id ?? m.tracking_number, {
                 status,
                 changes: effectiveChanges,
                 detailedChanges: effectiveDetailed,
               })
             }
             for (const a of diff.shipments.added) {
-              if (a.tracking_number) {
-                shipmentDiffMap.set(a.tracking_number, { status: 'new', changes: [] })
+              if (a.tracking_number || (a.shipment_id && a.fulfillment_status)) {
+                shipmentDiffMap.set(a.shipment_id ?? a.tracking_number, { status: 'new', changes: [] })
               }
             }
           }
@@ -1549,8 +1553,8 @@ export default function ImportReviewBulk() {
                               s.status
                             )
                             const shipDiff =
-                              s.trackingNumber && isExisting
-                                ? shipmentDiffMap.get(s.trackingNumber)
+                              isExisting
+                                ? shipmentDiffMap.get(s.shipmentId ?? '') ?? shipmentDiffMap.get(s.trackingNumber ?? '')
                                 : undefined
                             return (
                               <div

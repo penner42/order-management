@@ -207,12 +207,32 @@ def _delivery_string_to_utc_datetime(value: str | None) -> datetime | None:
     return datetime.strptime(key, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
-def _incoming_shipment_status(status_info: dict[str, Any] | None) -> str | None:
+_WALMART_FULFILLMENT_STATUSES = {
+    "placed": "Placed",
+    "order_placed": "Placed",
+    "preparing": "Preparing",
+    "processing": "Preparing",
+    "shipped": "On the way",
+    "on_the_way": "On the way",
+    "in_transit": "On the way",
+    "out_for_delivery": "On the way",
+    "delivered": "Delivered",
+}
+
+
+def _incoming_shipment_status(
+    status_info: dict[str, Any] | None, *, is_walmart: bool = False
+) -> str | None:
     """Extract the status string we would persist from a normalized shipment slice."""
     if not status_info:
         return None
     status_message = status_info.get("message")
     status_type = status_info.get("statusType") or status_info.get("rawStatusType")
+    if is_walmart:
+        for value in (status_type, status_info.get("normalizedStatus"), status_message):
+            status = _WALMART_FULFILLMENT_STATUSES.get(_normalize_fulfillment_token(value))
+            if status:
+                return status
     if isinstance(status_message, str) and status_message.strip():
         return status_message.strip()
     if isinstance(status_type, str) and status_type.strip():
@@ -1194,6 +1214,25 @@ def _build_order_diff(
     store_name = (normalized.get("store") or "").strip()
     incoming_ext = normalized.get("externalOrder") or {}
     external_order_id = str(incoming_ext.get("id") or "").strip()
+    is_walmart = store_name.lower() == "walmart"
+    pending_shipments = {
+        shipment.id: shipment for shipment in existing_shipments
+        if is_walmart and not _shipment_db_keys(shipment)
+    }
+    pending_ids_by_payload_id: dict[str, set[int]] = {}
+    for index, item_data in enumerate((normalized.get("items") or []) if pending_shipments else []):
+        candidates = items_by_desc.get((item_data.get("name") or "").strip(), [])
+        line_key = import_identity(item_data, index)["import_line_key"]
+        matching = [item for item in candidates if item.import_line_key == line_key]
+        pending_ids = {
+            link.shipment_id for item in matching or candidates
+            for link in item.shipment_items if link.shipment_id in pending_shipments
+        }
+        if pending_ids:
+            for part in item_data.get("shipments") or []:
+                shipment_id = part.get("shipmentId")
+                if isinstance(shipment_id, str) and shipment_id:
+                    pending_ids_by_payload_id.setdefault(shipment_id, set()).update(pending_ids)
 
     for inc_ship in incoming_shipments:
         if not isinstance(inc_ship, dict):
@@ -1219,13 +1258,25 @@ def _build_order_diff(
         )
         delivery = inc_ship.get("deliveryDate")
         status_info = inc_ship.get("status") or {}
-        incoming_status = _incoming_shipment_status(status_info)
+        incoming_status = _incoming_shipment_status(status_info, is_walmart=is_walmart)
+        payload_id = inc_ship.get("shipmentId")
+        fulfillment_status = (
+            incoming_status if is_walmart and incoming_status in _WALMART_FULFILLMENT_STATUSES.values()
+            else None
+        )
+        walmart_diff_fields = (
+            {"shipment_id": payload_id, "fulfillment_status": fulfillment_status} if is_walmart else {}
+        )
 
         existing_s = _find_existing_shipment(
             existing_shipments_by_lookup_key,
             db_key=db_key,
             tracking_key=tracking_key,
         )
+        if existing_s is None and not tracking_key and isinstance(payload_id, str):
+            pending_ids = pending_ids_by_payload_id.get(payload_id, set())
+            if len(pending_ids) == 1:
+                existing_s = pending_shipments[next(iter(pending_ids))]
         if existing_s is not None:
             if existing_s.id in used_existing_shipment_ids:
                 continue
@@ -1265,7 +1316,7 @@ def _build_order_diff(
                 and existing_delivered_date == incoming_delivered_date
             )
             status_changed = (
-                not delivery_dates_locked
+                (not delivery_dates_locked or fulfillment_status is not None)
                 and _shipment_statuses_differ_for_diff(
                     existing_s.status,
                     incoming_status,
@@ -1283,6 +1334,7 @@ def _build_order_diff(
 
             matched_shipments.append(
                 {
+                    **walmart_diff_fields,
                     "tracking_number": tracking_display,
                     "current": {
                         "delivered_at": existing_delivered_raw,
@@ -1301,6 +1353,7 @@ def _build_order_diff(
         else:
             added_shipments.append(
                 {
+                    **walmart_diff_fields,
                     "tracking_number": tracking_display,
                     "delivery_date": delivery,
                     "status_message": status_info.get("message"),
@@ -1453,6 +1506,7 @@ def _apply_items_and_shipments(
     payouts = item_payouts or []
     shipments = normalized.get("shipments") or []
     is_best_buy = _resolve_store_name(store_name) == best_buy_import.STORE_NAME
+    is_walmart = store_name.strip().lower() == "walmart"
 
     existing_items = (
         db.query(Item)
@@ -1622,6 +1676,7 @@ def _apply_items_and_shipments(
         db_key: str | None,
         tracking_key: str | None,
         item_data: dict[str, Any],
+        item_index: int,
     ) -> Item | None:
         # Shipped/submitted/scanned/return-process lines keep their qty and
         # shipments; store re-imports must not peel or re-attach tracking.
@@ -1642,6 +1697,16 @@ def _apply_items_and_shipments(
             candidates.sort(key=lambda item: item.import_line_key != line_key)
 
         match_keys = {k for k in (db_key, tracking_key) if k}
+        if is_walmart:
+            line_key = import_identity(item_data, item_index)["import_line_key"]
+            for item in candidates:
+                if item.import_line_key != line_key:
+                    continue
+                keys = item_tracking_keys(item)
+                if keys == {""} or match_keys.intersection(keys):
+                    used_existing_item_ids.add(item.id)
+                    return item
+
         if match_keys:
             for ei in candidates:
                 if match_keys.intersection(item_tracking_keys(ei)):
@@ -1852,7 +1917,7 @@ def _apply_items_and_shipments(
         )
 
         status_info = src.get("status") or {}
-        normalized_status = _incoming_shipment_status(status_info)
+        normalized_status = _incoming_shipment_status(status_info, is_walmart=is_walmart)
         delivery_str = delivery_raw if isinstance(delivery_raw, str) else None
 
         # Prefer an existing shipment that already has this tracking so split
@@ -2034,7 +2099,7 @@ def _apply_items_and_shipments(
 
             while remaining > 0:
                 existing_item = find_existing_item_for_tracking(
-                    name, db_key, tracking_key, item_data
+                    name, db_key, tracking_key, item_data, item_index
                 )
                 if not existing_item:
                     break
@@ -2176,7 +2241,7 @@ def _apply_items_and_shipments(
         )
 
         status_info = src.get("status") or {}
-        normalized_status = _incoming_shipment_status(status_info)
+        normalized_status = _incoming_shipment_status(status_info, is_walmart=is_walmart)
 
         _apply_shipment_fields(
             existing_shipment,

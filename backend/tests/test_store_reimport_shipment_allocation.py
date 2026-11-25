@@ -367,6 +367,36 @@ class StoreReimportShipmentAllocationTests(unittest.TestCase):
         self.assertEqual(self.session.query(Item).count(), 1)
         self.assertEqual(self.session.query(Shipment).count(), 1)
 
+    def test_walmart_fulfillment_status_refreshes_with_the_same_delivery_date(self) -> None:
+        payload = self._payload([("package", None, 1)])
+        payload.update(store="walmart", externalOrder={"id": "ORDER-1"})
+        shipment = payload["shipments"][0]
+        shipment["deliveryDate"] = "2026-11-25"
+        shipment["status"] = {"rawStatusType": "PLACED", "message": "Arrives Nov 25"}
+        _apply_items_and_shipments(self.session, payload, "walmart", self.order)
+        saved = self.session.query(Shipment).one()
+        self.assertEqual(saved.status, "Placed")
+
+        for code, tracking, expected in (
+            ("PREPARING", None, "Preparing"),
+            ("SHIPPED", "1Z999AA10123456784", "On the way"),
+            ("DELIVERED", "1Z999AA10123456784", "Delivered"),
+        ):
+            with self.subTest(code=code):
+                shipment.update(trackingNumber=tracking, status={"rawStatusType": code, "message": "Nov 25"})
+                diff = _build_order_diff(self.session, self.order, payload)["shipments"]
+                row = (diff["matched"] or diff["added"])[0]
+                self.assertEqual(row["fulfillment_status"], expected)
+                if diff["matched"]:
+                    self.assertIn("status", row["changes"])
+
+                _apply_items_and_shipments(self.session, payload, "walmart", self.order, existing_order=True)
+                self.assertEqual(self.session.query(Shipment).one().status, expected)
+                self.assertEqual(self.session.query(Item).one().shipment_items[0].shipment_id, saved.id)
+                unchanged = _build_order_diff(self.session, self.order, payload)["shipments"]
+                self.assertEqual(unchanged["matched"][0]["changes"], [])
+                self.assertEqual(unchanged["added"], [])
+
     def test_walmart_store_delivery_waits_for_shipped_then_upgrades(self) -> None:
         self.session.commit()
         order_id = self.order.id

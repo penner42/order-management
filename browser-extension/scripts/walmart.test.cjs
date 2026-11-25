@@ -55,3 +55,16 @@ test('item cancellation stays scoped within an active group', () => {
 test('an order without groups has no inferred status', () => {
   assert.equal(order([]).externalOrder.statusType, null)
 })
+
+test('pending groups without shipment IDs expose their own progress to their items', () => {
+  const placed = { ...group('PLACED', 'placed'), id: 0, shipment: null }
+  const preparing = { ...group('PREPARING', 'preparing'), shipment: null }
+  const normalized = order([placed, preparing])
+  assert.notEqual(normalized.shipments[0].shipmentId, normalized.shipments[1].shipmentId)
+  for (const [index, status] of ['PLACED', 'PREPARING'].entries()) {
+    const shipment = normalized.shipments[index]
+    assert.equal(shipment.status.rawStatusType, status)
+    assert.equal(shipment.trackingNumber, null)
+    assert.equal(normalized.items[index].shipments[0].shipmentId, shipment.shipmentId)
+  }
+})

@@ -97,6 +97,8 @@ interface OrderDiff {
   }
   shipments?: {
     matched: Array<{
+      shipment_id?: string | null
+      fulfillment_status?: string | null
       tracking_number: string
       current: { delivered_at: string | null }
       incoming: {
@@ -108,6 +110,8 @@ interface OrderDiff {
       detailed_changes?: { field: string; before: unknown; after: unknown }[]
     }>
     added: Array<{
+      shipment_id?: string | null
+      fulfillment_status?: string | null
       tracking_number: string
       delivery_date: string | null
       status_message: string | null
@@ -428,7 +432,7 @@ export default function ImportReview() {
       const payloadShipment = shipments.find(
         (s) => (s.trackingNumber ?? '') && s.trackingNumber === m.tracking_number
       )
-      const hasDeliveryDate = !!payloadShipment?.deliveryDate
+      const hasDeliveryDate = !!payloadShipment?.deliveryDate && !m.fulfillment_status
 
       const rawDetailed = m.detailed_changes ?? []
       const rawChanges = m.changes ?? []
@@ -446,15 +450,15 @@ export default function ImportReview() {
       const status: 'new' | 'unchanged' | 'changed' =
         effectiveChanges.length > 0 || effectiveDetailed.length > 0 ? 'changed' : 'unchanged'
 
-      shipmentDiffMap.set(m.tracking_number, {
+      shipmentDiffMap.set(m.shipment_id ?? m.tracking_number, {
         status,
         changes: effectiveChanges,
         detailedChanges: effectiveDetailed,
       })
     }
     for (const a of diff.shipments.added) {
-      if (a.tracking_number) {
-        shipmentDiffMap.set(a.tracking_number, { status: 'new', changes: [] })
+      if (a.tracking_number || (a.shipment_id && a.fulfillment_status)) {
+        shipmentDiffMap.set(a.shipment_id ?? a.tracking_number, { status: 'new', changes: [] })
       }
     }
   }
@@ -991,7 +995,7 @@ export default function ImportReview() {
                 s.fulfillmentType ?? s.detailedGroupType,
                 s.status
               )
-              const shipDiff = s.trackingNumber ? shipmentDiffMap.get(s.trackingNumber) : undefined
+              const shipDiff = shipmentDiffMap.get(s.shipmentId ?? '') ?? shipmentDiffMap.get(s.trackingNumber ?? '')
               return (
               <div
                 key={s.shipmentId ?? idx}

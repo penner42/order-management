@@ -11,6 +11,16 @@ function normalizeFulfillmentToken(value: string | null | undefined): string {
   return (value || '').trim().toLowerCase().replace(/-/g, '_').replace(/\s+/g, '_')
 }
 
+// Older imports may hold the retailer's message instead of its status code.
+export function walmartFulfillmentStatusLabel(value: string | null | undefined): string | null {
+  const status = normalizeFulfillmentToken(value)
+  if (/^(?:order_)?placed(?:_|$)/.test(status)) return 'Placed'
+  if (/^(?:preparing|processing)(?:_|$)/.test(status)) return 'Preparing'
+  if (/^(?:shipped|on_the_way|in_transit|out_for_delivery)(?:_|$)/.test(status)) return 'On the way'
+  if (/^delivered(?:_|$)/.test(status)) return 'Delivered'
+  return null
+}
+
 export function isWalmart555Tracking(trackingNumber: string | null | undefined): boolean {
   if (!trackingNumber) return false
   const compact = trackingNumber.replace(/[\s-]+/g, '')

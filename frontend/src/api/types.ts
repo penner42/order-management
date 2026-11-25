@@ -169,6 +169,7 @@ export interface Order {
   insurance_cost: string
   notes: string | null
   has_invoice: boolean
+  imported_from_store?: string | null
   has_best_buy_order_link?: boolean
   has_best_buy_details?: boolean
   created_at: string

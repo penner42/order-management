@@ -73,6 +73,7 @@ class OrderRead(OrderBase, TimestampsMixin):
     store_id: int
     store_account_id: int | None = None
     store_order_number: str | None = None
+    imported_from_store: str | None = None
     store: StoreRead | None = None
     store_account: StoreAccountRead | None = None
     buying_group: BuyingGroupSummary | None = None

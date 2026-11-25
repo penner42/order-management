@@ -130,6 +130,10 @@
           : groupStatuses.find(Boolean) || null
     const paymentMethodsRaw = Array.isArray(order.paymentMethods) ? order.paymentMethods : []
 
+    // Walmart can report group progress before assigning a shipment ID.
+    const shipmentIdForGroup = (group, index) =>
+      group.shipment?.id || (group.id == null ? `walmart-group-index:${index}` : `walmart-group:${group.id}`)
+
     const shipments = []
     for (let i = 0; i < groups.length; i++) {
       const g = groups[i] || {}
@@ -142,7 +146,7 @@
       }
 
       shipments.push({
-        shipmentId: shipment.id || null,
+        shipmentId: shipmentIdForGroup(g, i),
         groupId: g.id || null,
         trackingNumber: shipment.trackingNumber || null,
         trackingUrl: shipment.trackingUrl || null,
@@ -190,7 +194,7 @@
       if (isIgnoredWalmartTracking(shipment.trackingNumber)) {
         continue
       }
-      const shipmentId = shipment.id || null
+      const shipmentId = shipmentIdForGroup(g, gi)
 
       let groupItems = []
       if (Array.isArray(g.categories) && g.categories.length > 0) {
