@@ -163,6 +163,43 @@ def _check_receipt(item: Item, rid: str | None) -> None:
         raise HTTPException(409, "This line already has a different receipt. Split it or correct its receipt on Orders.")
 
 
+def manual_source_receipts(match: dict) -> list[dict]:
+    receipt = match["manual_receipt"]
+    return receipt.get("source_receipts") or [receipt]
+
+
+def _combine_receipts(receipts: list[dict]) -> dict:
+    quantities = [r.get("quantity") for r in receipts]
+    if any(qty is None or qty <= 0 for qty in quantities):
+        raise HTTPException(400, "Each selected receipt must have a known quantity.")
+    quantity = sum(quantities)
+    ids = {(r.get("receipt_id") or "").strip() for r in receipts} - {""}
+    descriptions = list(dict.fromkeys(r["description"] for r in receipts if r.get("description")))
+    upcs = {r["receipt_upc"] for r in receipts if r.get("receipt_upc")}
+    if len(upcs) > 1:
+        raise HTTPException(400, "Receipts with different product UPCs cannot share one order line.")
+    dates = [r["scanned_at"] for r in receipts if r.get("scanned_at")]
+    amounts = [r.get("received_ext_total") for r in receipts]
+    try:
+        total = sum(Decimal(str(amount)) for amount in amounts) if all(amount is not None for amount in amounts) else None
+        rewards = [Decimal(str(r["reward"])) for r in receipts if r.get("reward") is not None]
+        if (total is not None and not total.is_finite()) or any(not value.is_finite() for value in rewards):
+            raise InvalidOperation
+    except InvalidOperation:
+        raise HTTPException(409, "One of these receipts has an invalid payout or reward.")
+    return {
+        "source_receipts": receipts,
+        "receipt_id": ", ".join(sorted(ids)) or None,
+        "description": ", ".join(descriptions) or None,
+        "receipt_upc": upcs.pop() if len(upcs) == 1 else None,
+        "quantity": quantity,
+        "received_ext_total": str(total) if total is not None else None,
+        "received_price": str((total / quantity).quantize(Decimal("0.01"))) if total is not None else None,
+        "scanned_at": max(dates, default=None),
+        "reward": str(sum(rewards)) if rewards else None,
+    }
+
+
 def manual_allocations(items, receipt, tracking, key):
     qty = sum(item.quantity for item in items)
     for item in items:
@@ -197,7 +234,9 @@ def manual_allocations(items, receipt, tracking, key):
             "received_price": receipt.get("received_price"), "received_ext_total": str(amount) if amount is not None else None,
             "received_status": receipt.get("received_status"),
             "reward": str(line_reward) if line_reward is not None else None,
-            "amount_discrepancy": amount is not None and abs(amount - expected) > Decimal("0.01"),
+            "amount_discrepancy": amount is not None and (
+                abs(amount - expected) > Decimal("0.01") or bool(receipt.get("source_receipts") and amount < expected)
+            ),
             "selected": True, "row_id": f"manual:{key}:{item.id}", "manual_receipt_key": key,
             "manual_receipt": receipt, "match_kind": "received",
             "update_receipt_only": bool(item.payment_line_items) or item.status not in OPEN_STATUSES,
@@ -224,7 +263,7 @@ def refresh_manual_assignments(db: Session, group_id: int, previous: dict) -> tu
                 raise HTTPException(409)
             valid.extend(manual_allocations(items, receipt, matches[0]["tracking_number"], key))
         except HTTPException:
-            released.append({**receipt, "manual_link_invalid": True})
+            released.extend({**source, "manual_link_invalid": True} for source in manual_source_receipts(matches[0]))
     return valid, released
 
 
@@ -232,14 +271,20 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
     row = pending_row(db, body.buying_group_id)
     payload = dict(row.payload)
     receipts = list(payload.get("unknown_receipts") or [])
-    receipt = next((r for r in receipts if receipt_key(r) == body.receipt_key), None)
-    if receipt is None:
+    keys = body.receipt_keys or ([body.receipt_key] if body.receipt_key else [])
+    if not keys or len(set(keys)) != len(keys) or (body.receipt_keys and body.receipt_key):
+        raise HTTPException(400, "Select each receipt once.")
+    receipts_by_key = {receipt_key(r): r for r in receipts}
+    if any(key not in receipts_by_key for key in keys):
         raise HTTPException(409, "Receipt is no longer unknown. Refresh receiving review.")
-    if receipt.get("linkable") is False:
+    sources = [receipts_by_key[key] for key in sorted(keys)]
+    if any(receipt.get("linkable") is False for receipt in sources):
         raise HTTPException(409, "Receipt product is not confirmed or its details are unavailable.")
     ids = body.item_ids or ([body.item_id] if body.item_id is not None else [])
     if not ids or len(set(ids)) != len(ids) or (body.item_ids and body.item_id is not None):
         raise HTTPException(400, "Select each order line once.")
+    if len(sources) > 1 and len(ids) != 1:
+        raise HTTPException(400, "Select one order line for the combined receipts.")
     if body.split_quantity is not None:
         raise HTTPException(400, "Split order lines manually on Orders before linking a receipt.")
     items = db.query(Item).filter(Item.id.in_(ids)).order_by(Item.id).with_for_update(of=Item).all()
@@ -249,9 +294,12 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
     if any(m.get("item_id") in ids and m.get("manual_receipt") for m in matches):
         raise HTTPException(409, "This line already has a pending manual receipt. Apply or unlink it first.")
     tracking = body.receipt_tracking_number.strip()
-    allowed = [receipt.get("tracking_number") or "", *(receipt.get("tracking_numbers") or [])]
-    if tracking not in [tn.strip() for tn in allowed] or not tracking:
-        raise HTTPException(400, "Choose a tracking number reported on this receipt.")
+    for source in sources:
+        allowed = [source.get("tracking_number") or "", *(source.get("tracking_numbers") or [])]
+        if not tracking or tracking.casefold() not in {tn.strip().casefold() for tn in allowed}:
+            raise HTTPException(400, "Choose a tracking number shared by each selected receipt.")
+    receipt = _combine_receipts(sources) if len(sources) > 1 else sources[0]
+    key = hashlib.sha256(json.dumps(sorted(keys)).encode()).hexdigest() if len(sources) > 1 else keys[0]
     selected_qty = sum(i.quantity for i in items)
     qty = receipt.get("quantity")
     if qty is None or qty <= 0:
@@ -260,9 +308,12 @@ def link_receipt(db: Session, body: ReceivingReceiptLinkRequest) -> dict:
         qty = selected_qty
     if selected_qty != qty:
         raise HTTPException(409, "Selected quantities must equal the receipt quantity. Split larger lines manually on Orders first.")
-    allocations = manual_allocations(items, receipt, tracking, body.receipt_key)
-    payload["matches"] = [m for m in matches if m.get("item_id") not in ids] + allocations
-    payload["unknown_receipts"] = [r for r in receipts if receipt_key(r) != body.receipt_key]
+    allocations = manual_allocations(items, receipt, tracking, key)
+    payload["matches"] = [
+        m for m in matches if m.get("item_id") not in ids
+        and (len(sources) == 1 or not any(match_includes_receipt(m, source) for source in sources))
+    ] + allocations
+    payload["unknown_receipts"] = [r for r in receipts if receipt_key(r) not in keys]
     store_payload(db, row, payload)
     db.commit()
     return with_receipt_keys(payload)
@@ -276,7 +327,7 @@ def unlink_receipt(db: Session, group_id: int, key: str) -> dict:
     if match is None:
         raise HTTPException(409, "Manual link no longer exists. Refresh receiving review.")
     receipts = {receipt_key(r): r for r in payload.get("unknown_receipts") or []}
-    receipts[key] = match["manual_receipt"]
+    receipts.update((receipt_key(source), source) for source in manual_source_receipts(match))
     payload["unknown_receipts"] = list(receipts.values())
     payload["matches"] = [m for m in matches if m.get("manual_receipt_key") != key]
     store_payload(db, row, payload)

@@ -165,7 +165,8 @@ function ReceivingGroupSection({
   appliedIds: Set<string>
   setAppliedIds: React.Dispatch<React.SetStateAction<Set<string>>>
 }) {
-  const [linkReceipt, setLinkReceipt] = useState<ReceivingUnknownReceipt | null>(null)
+  const [linkReceipts, setLinkReceipts] = useState<ReceivingUnknownReceipt[] | null>(null)
+  const [selectedReceiptKeys, setSelectedReceiptKeys] = useState<Set<string>>(() => new Set())
   const [applying, setApplying] = useState(false)
   const [applyError, setApplyError] = useState<string | null>(null)
   const [showExtra, setShowExtra] = useState(false)
@@ -177,9 +178,9 @@ function ReceivingGroupSection({
   } | null>(null)
 
   useEffect(() => {
-    onBusyChange(session.buying_group_id, applying || linkReceipt !== null)
+    onBusyChange(session.buying_group_id, applying || linkReceipts !== null)
     return () => onBusyChange(session.buying_group_id, false)
-  }, [applying, linkReceipt, session.buying_group_id, onBusyChange])
+  }, [applying, linkReceipts, session.buying_group_id, onBusyChange])
 
   const matches = session.matches ?? []
   const receivableMatches = matches.filter((m) => m.match_kind !== 'not_received')
@@ -369,6 +370,8 @@ function ReceivingGroupSection({
     receivableMatches.length > 0 && receivableMatches.every((m) => appliedIds.has(rowKey(m)))
   const unmatched = session.unmatched ?? []
   const unknownReceipts = session.unknown_receipts ?? []
+  const selectedReceipts = unknownReceipts.filter(receipt => receipt.receipt_key &&
+    selectedReceiptKeys.has(receipt.receipt_key) && receipt.linkable !== false)
 
   return (
     <section
@@ -413,9 +416,10 @@ function ReceivingGroupSection({
         </button>
       </div>
 
-      {linkReceipt && <ReceiptLinkDialog<ReceivingSession>
-        receipt={linkReceipt} groupId={session.buying_group_id}
-        onLinked={onSessionChange} onClose={() => setLinkReceipt(null)}
+      {linkReceipts && <ReceiptLinkDialog<ReceivingSession>
+        receipts={linkReceipts} groupId={session.buying_group_id}
+        onLinked={next => { setSelectedReceiptKeys(new Set()); onSessionChange(next) }}
+        onClose={() => setLinkReceipts(null)}
       />}
       {!collapsed && (
         <div className="p-4">
@@ -619,11 +623,18 @@ function ReceivingGroupSection({
               <p className="text-sm text-ink-muted dark:text-gray-400 mb-3">
                 Unmatched warehouse receipt items appear here. Confirmed items can be linked to order lines; unconfirmed items and unavailable details remain for review.
               </p>
+              {selectedReceipts.length > 0 && <div className="flex items-center gap-3 text-sm mb-3">
+                <span aria-live="polite">{selectedReceipts.length} selected</span>
+                <button type="button" disabled={applying} className="text-brand-600 hover:underline"
+                  onClick={() => setLinkReceipts(selectedReceipts)}>Link selected receipts</button>
+                <button type="button" disabled={applying} className="text-ink-muted hover:underline"
+                  onClick={() => setSelectedReceiptKeys(new Set())}>Clear selection</button>
+              </div>}
               <div className="overflow-x-auto rounded-xl border border-brand-200/80 dark:border-gray-700">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-left border-b border-brand-200 dark:border-gray-600 bg-brand-50/40 dark:bg-gray-800/60">
-                      {['Tracking', 'Item', 'Quantity', 'Unit price', 'Total', 'Reward', 'Receipt / group order', 'Status', 'Dates', 'Delivery / notes', 'Details', 'Link'].map((label) => (
+                      {['Select', 'Tracking', 'Item', 'Quantity', 'Unit price', 'Total', 'Reward', 'Receipt / group order', 'Status', 'Dates', 'Delivery / notes', 'Details', 'Link'].map((label) => (
                         <th key={label} className="py-2 px-3 font-medium text-ink-muted whitespace-nowrap">{label}</th>
                       ))}
                     </tr>
@@ -631,6 +642,22 @@ function ReceivingGroupSection({
                   <tbody>
                     {unknownReceipts.map((receipt, index) => (
                       <tr key={`${receipt.receipt_id}:${receipt.tracking_number}:${index}`} className="border-b border-brand-100 dark:border-gray-700 last:border-0 text-ink dark:text-gray-100">
+                        <td className="py-2 px-3 align-top">
+                          <input type="checkbox" aria-label={`Select receipt ${receipt.receipt_id || receipt.description || index + 1}`}
+                            checked={!!receipt.receipt_key && selectedReceiptKeys.has(receipt.receipt_key)}
+                            disabled={applying || !receipt.receipt_key || receipt.linkable === false}
+                            onChange={e => {
+                              const key = receipt.receipt_key
+                              const checked = e.target.checked
+                              if (!key) return
+                              setSelectedReceiptKeys(previous => {
+                                const next = new Set(previous)
+                                if (checked) next.add(key)
+                                else next.delete(key)
+                                return next
+                              })
+                            }} />
+                        </td>
                         <td className="py-2 px-3 align-top font-mono text-xs">
                           {(receipt.tracking_numbers?.length ? receipt.tracking_numbers : [receipt.tracking_number]).map((tn) => <div key={tn}>{tn}</div>)}
                         </td>
@@ -661,7 +688,7 @@ function ReceivingGroupSection({
                           ) : '—'}
                         </td>
                         <td className="py-2 px-3 align-top">
-                          <button type="button" disabled={applying || !receipt.receipt_key || receipt.linkable === false} onClick={() => setLinkReceipt(receipt)} className="text-brand-600 hover:underline text-sm whitespace-nowrap disabled:opacity-50">Link to order item</button>
+                          <button type="button" disabled={applying || !receipt.receipt_key || receipt.linkable === false} onClick={() => setLinkReceipts([receipt])} className="text-brand-600 hover:underline text-sm whitespace-nowrap disabled:opacity-50">Link to order item</button>
                         </td>
                       </tr>
                     ))}

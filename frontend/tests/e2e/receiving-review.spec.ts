@@ -1,6 +1,53 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('links two unresolved receipts to one line using the lower payout', async ({ app }) => {
+  const tracking = 'SHARED-TRACKING'
+  const receipts = ['R-1', 'R-2'].map(id => ({
+    receipt_key: id, receipt_id: id, tracking_number: tracking, quantity: 1,
+    description: 'Headphones', received_ext_total: '19.00',
+  }))
+  const line = {
+    item_id: 1, order_id: 1, buying_group_id: 1, store_order_number: 'ORDER-1',
+    description: 'Headphones', quantity: 2, status: 'submitted', price_sold: '20.00',
+    expected_amount: '40.00', tracking_numbers: [tracking],
+  }
+  const session = { buying_group_id: 1, buying_group_name: 'Deal & Runner' }
+  await app.route('**/api/buying-groups/receiving-review', route =>
+    route.fulfill({ json: [{ ...session, matches: [], unknown_receipts: receipts }] }))
+  await app.route('**/api/buying-groups/receiving-review/candidates?*', route =>
+    route.fulfill({ json: { total: 1, items: [line] } }))
+  await app.route('**/api/buying-groups/receiving-review/link', route => {
+    expect(route.request().postDataJSON()).toMatchObject({
+      receipt_keys: ['R-1', 'R-2'], item_ids: [1], receipt_tracking_number: tracking,
+    })
+    return route.fulfill({ json: { ...session, unknown_receipts: [], matches: [{
+      ...line, tracking_number: tracking, receipt_tracking_number: tracking,
+      receipt_id: 'R-1, R-2', received_ext_total: '38.00', amount_discrepancy: true,
+      scanned_at: '2026-11-24', row_id: 'manual:combined:1', manual_receipt_key: 'combined',
+    }] } })
+  })
+  await app.route('**/api/items/bulk-update', route => {
+    expect(route.request().postDataJSON().updates).toMatchObject([{
+      item_id: 1, receipt_id: 'R-1, R-2', price_sold: '19.00', receiving_row_id: 'manual:combined:1',
+    }])
+    return route.fulfill({ json: {} })
+  })
+  await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
+  await app.goto('/receiving-review')
+  await app.getByText('Unresolved receipt items (2 receipts)', { exact: true }).click()
+  await app.getByRole('checkbox', { name: 'Select receipt R-1' }).check()
+  await app.getByRole('checkbox', { name: 'Select receipt R-2' }).check()
+  await app.getByRole('button', { name: 'Link selected receipts' }).click()
+  const dialog = app.getByRole('dialog', { name: 'Link receipts to one order line' })
+  await expect(dialog.getByText('2 receipts · 2 units · Received total $38.00')).toBeVisible()
+  await dialog.getByRole('checkbox', { name: /2 × Headphones/ }).check()
+  await dialog.getByRole('button', { name: 'Add to review' }).click()
+  await app.getByRole('checkbox', { name: 'Use received' }).check()
+  await app.getByRole('button', { name: 'Apply 1 selected' }).click()
+  await expect(app.getByText('All listed rows were applied.')).toBeVisible()
+})
+
 for (const reloadBetweenBatches of [false, true]) {
   test(`receiving two items then the third preserves exactly three lines (reload: ${reloadBetweenBatches})`, async ({ app, data }) => {
     const store = await data.create('/stores', { name: data.name('batch-store') })

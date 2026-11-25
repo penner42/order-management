@@ -40,7 +40,7 @@ from app.utils.dates import to_date_only
 from app.utils.receipt_upc import receipt_upc, absorb_upc
 from app.utils.receiving_cache import ReceiptSource, fetch_receipt_source, provider_identity
 from app.utils.receiving_links import (
-    applied_receipt_pairs, match_includes_receipt, receipt_is_applied, receipt_key, with_receipt_keys,
+    applied_receipt_pairs, manual_source_receipts, match_includes_receipt, receipt_is_applied, receipt_key, with_receipt_keys,
     refresh_manual_assignments,
 )
 
@@ -309,13 +309,14 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commi
     previous = existing.payload if existing and isinstance(existing.payload, dict) else {}
     manual, released = refresh_manual_assignments(db, buying_group_id, previous)
     released = [r for r in previous.get("unknown_receipts", []) if r.get("manual_link_invalid")] + released
-    manual_keys = {m["manual_receipt_key"] for m in manual}
+    manual_sources = [source for match in manual for source in manual_source_receipts(match)]
+    manual_keys = {receipt_key(source) for source in manual_sources}
     manual_items = {m["item_id"] for m in manual}
     payload = {**payload, "matches": [
         m for m in payload.get("matches", [])
         if m.get("item_id") not in manual_items
         and not any(match_includes_receipt(m, receipt)
-                    for receipt in [*(staged["manual_receipt"] for staged in manual), *released])
+                    for receipt in [*manual_sources, *released])
     ] + manual}
     received_items = {m["item_id"] for m in payload["matches"] if _is_actionable_match_dict(m)}
     payload["matches"] = [m for m in payload["matches"]

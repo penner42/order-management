@@ -8,6 +8,7 @@ interface Receipt {
   tracking_numbers?: string[]
   description: string | null
   quantity: number | null
+  received_ext_total?: string | null
 }
 
 interface Candidate {
@@ -31,12 +32,18 @@ interface Candidate {
   tracking_numbers: (string | null)[]
 }
 
-export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClose }: {
-  receipt: Receipt
+export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onClose }: {
+  receipts: Receipt[]
   groupId: number
   onLinked: (session: T) => void
   onClose: () => void
 }) {
+  const receipt = receipts[0]
+  const multiple = receipts.length > 1
+  const trackingOptions = [...new Set([receipt.tracking_number, ...(receipt.tracking_numbers ?? [])]
+    .map(tn => tn.trim()).filter(Boolean))].filter(tn => receipts.every(source =>
+      [source.tracking_number, ...(source.tracking_numbers ?? [])].some(
+        candidate => candidate.trim().toLowerCase() === tn.toLowerCase())))
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const [includeReceived, setIncludeReceived] = useState(false)
@@ -44,7 +51,7 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
   const [refreshVersion, setRefreshVersion] = useState(0)
   const [result, setResult] = useState<{ items: Candidate[]; total: number; suggestions?: Candidate[] }>({ items: [], total: 0 })
   const [selected, setSelected] = useState<Candidate[]>([])
-  const [tracking, setTracking] = useState(receipt.tracking_number)
+  const [tracking, setTracking] = useState(trackingOptions[0] ?? '')
   const [confirmFull, setConfirmFull] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -62,15 +69,22 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
     return () => { active = false; window.clearTimeout(timer) }
   }, [groupId, page, search, includeReceived, includeAllGroups, receipt.receipt_key, refreshVersion])
 
-  const quantity = receipt.quantity != null && receipt.quantity > 0 ? receipt.quantity : null
+  const quantity = receipts.every(source => source.quantity != null && source.quantity > 0)
+    ? receipts.reduce((sum, source) => sum + (source.quantity ?? 0), 0) : null
+  const receivedAmounts = receipts.map(source => source.received_ext_total)
+  const receivedTotal = receivedAmounts.every(value => value?.trim() && Number.isFinite(Number(value)))
+    ? receivedAmounts.reduce((sum, value) => sum + Math.round(Number(value) * 100), 0) / 100 : null
+  const combinedIds = [...new Set(receipts.map(source => source.receipt_id?.trim()).filter(Boolean))].sort()
   const selectedQuantity = selected.reduce((sum, item) => sum + item.quantity, 0)
   const wrongGroup = (item: Candidate) => item.buying_group_id !== groupId
-  const conflict = (item: Candidate) => !!item.receipt_id?.trim() && item.receipt_id.trim() !== (receipt.receipt_id ?? '').trim()
+  const targetReceiptId = multiple ? combinedIds.join(', ') : (receipt.receipt_id ?? '').trim()
+  const conflict = (item: Candidate) => !!item.receipt_id?.trim() && item.receipt_id.trim() !== targetReceiptId
   const invalid = !selected.length || loading || saving || (quantity != null && selectedQuantity !== quantity) ||
-    (!quantity && !confirmFull) || selected.some(item => conflict(item) || wrongGroup(item)) || !receipt.receipt_key
+    (!quantity && !confirmFull) || selected.some(item => conflict(item) || wrongGroup(item)) ||
+    !tracking || receipts.some(source => !source.receipt_key) || (multiple && (quantity == null || selected.length !== 1))
   const inputClass = 'w-full rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm'
   const date = (value: string | null) => value ? value.slice(0, 10) : '—'
-  const money = (value: string) => value != null && Number.isFinite(Number(value))
+  const money = (value: string | number | null) => value != null && Number.isFinite(Number(value))
     ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value)) : '—'
   const correction = (item: Candidate) => <span className="block text-xs mt-1">
     <a href={`/?order_id=${item.order_id}`} target="_blank" rel="noopener noreferrer" className="text-brand-600 underline">Open order to correct group</a>
@@ -83,7 +97,9 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
     setError(null)
     try {
       const next = await api.post<T>('/buying-groups/receiving-review/link', {
-        buying_group_id: groupId, receipt_key: receipt.receipt_key, item_ids: selected.map(item => item.item_id),
+        buying_group_id: groupId,
+        ...(multiple ? { receipt_keys: receipts.map(source => source.receipt_key) } : { receipt_key: receipt.receipt_key }),
+        item_ids: selected.map(item => item.item_id),
         receipt_tracking_number: tracking, confirm_full_quantity: confirmFull,
       })
       onLinked(next)
@@ -96,13 +112,17 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
       <div role="dialog" aria-modal="true" aria-labelledby="receipt-link-title" className="bg-white dark:bg-gray-800 text-ink dark:text-gray-100 rounded-xl shadow-xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto">
-        <h2 id="receipt-link-title" className="text-lg font-semibold mb-2">Link receipt to order items</h2>
-        <p className="text-sm mb-3">Receipt {receipt.receipt_id || '—'} · {quantity ?? 'Unknown quantity'} × {receipt.description || 'Item'}</p>
+        <h2 id="receipt-link-title" className="text-lg font-semibold mb-2">{multiple ? 'Link receipts to one order line' : 'Link receipt to order items'}</h2>
+        <p className="text-sm mb-3">{multiple
+          ? `${receipts.length} receipts · ${quantity ?? 'Unknown quantity'} units · Received total ${money(receivedTotal)}`
+          : `Receipt ${receipt.receipt_id || '—'} · ${quantity ?? 'Unknown quantity'} × ${receipt.description || 'Item'}`}</p>
         <label className="block text-sm mb-4">Receipt tracking number
           <select className={inputClass} value={tracking} onChange={e => setTracking(e.target.value)} disabled={saving}>
-            {[...new Set([receipt.tracking_number, ...(receipt.tracking_numbers ?? [])])].filter(Boolean).map(tn => <option key={tn}>{tn}</option>)}
+            {trackingOptions.map(tn => <option key={tn}>{tn}</option>)}
           </select>
         </label>
+        {multiple && !trackingOptions.length && <p role="alert" className="text-sm text-red-600 mb-3">Select receipts that share a tracking number.</p>}
+        {multiple && quantity == null && <p role="alert" className="text-sm text-red-600 mb-3">Each selected receipt needs a known quantity.</p>}
         <label className="block text-sm mb-3">Search order number, description, or receipt ID
           <input autoFocus className={inputClass} value={search} disabled={saving} onChange={e => { setSearch(e.target.value); setPage(1) }} />
         </label>
@@ -138,9 +158,10 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
             <label key={item.item_id} className={`flex gap-3 rounded border p-3 ${selected.some(i => i.item_id === item.item_id) ? 'border-brand-600' : 'border-brand-200 dark:border-gray-600'}`}>
               <input type="checkbox" checked={selected.some(i => i.item_id === item.item_id)}
                 disabled={saving || (!selected.some(i => i.item_id === item.item_id) &&
-                  (wrongGroup(item) || conflict(item) || (quantity != null && selectedQuantity + item.quantity > quantity)))}
+                  (wrongGroup(item) || conflict(item) || (quantity != null && (!multiple
+                    ? selectedQuantity + item.quantity > quantity : item.quantity !== quantity))))}
                 onChange={e => {
-                  setSelected(prev => e.target.checked ? [...prev, item] : prev.filter(i => i.item_id !== item.item_id))
+                  setSelected(prev => e.target.checked ? (multiple ? [item] : [...prev, item]) : prev.filter(i => i.item_id !== item.item_id))
                   setConfirmFull(false)
                 }} />
               <span className="text-sm">
@@ -153,7 +174,7 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
                 <span className="block font-mono text-xs">Original tracking: {item.tracking_numbers.filter(Boolean).join(', ') || '—'}</span>
                 <span className="block text-xs">Receipt: {item.receipt_id || '—'} · Receipt tracking: {item.receipt_tracking_number || '—'}</span>
                 {conflict(item) && <span className="block text-xs text-amber-700">Already has a different receipt.</span>}
-                {quantity != null && item.quantity > quantity - selectedQuantity && !selected.some(i => i.item_id === item.item_id) &&
+                {!multiple && quantity != null && item.quantity > quantity - selectedQuantity && !selected.some(i => i.item_id === item.item_id) &&
                   <span className="block text-xs text-amber-700">Exceeds the remaining receipt quantity. Split this line manually on Orders first.</span>}
               </span>
             </label>
@@ -171,8 +192,10 @@ export default function ReceiptLinkDialog<T>({ receipt, groupId, onLinked, onClo
             setSelected(prev => prev.filter(i => i.item_id !== item.item_id)); setConfirmFull(false)
           }} aria-label={`Remove ${item.description || item.item_id}`}>Remove</button>
         </li>)}</ul>}
-        {selected.length > 0 && !quantity && <label className="block text-sm mb-3"><input type="checkbox" checked={confirmFull} disabled={saving} onChange={e => setConfirmFull(e.target.checked)} /> Confirm this receipt covers all {selectedQuantity} units on the selected lines.</label>}
-        <p className="text-sm mb-3">Select whole lines totaling the receipt quantity. Split larger lines manually on Orders first. Linked items apply and unlink together.</p>
+        {!multiple && selected.length > 0 && !quantity && <label className="block text-sm mb-3"><input type="checkbox" checked={confirmFull} disabled={saving} onChange={e => setConfirmFull(e.target.checked)} /> Confirm this receipt covers all {selectedQuantity} units on the selected lines.</label>}
+        <p className="text-sm mb-3">{multiple
+          ? 'Select a line with the same quantity as the selected receipts. Split a larger line on Orders first.'
+          : 'Select whole lines totaling the receipt quantity. Split larger lines manually on Orders first. Linked items apply and unlink together.'}</p>
         <p className="text-sm text-ink-muted mb-3">Next, review the scan date and payout in Receiving Review, then apply the receipt.</p>
         {error && <p role="alert" className="text-sm text-red-600 mb-3">{error}</p>}
         <div className="flex justify-end gap-3">

@@ -413,6 +413,36 @@ class ReceiptLinkTests(unittest.TestCase):
         self.assertEqual(result["unknown_receipts"][0]["quantity"], 3)
         self.assertEqual(result["unknown_receipts"][0]["received_ext_total"], "75.00")
 
+    def test_multiple_receipts_combine_on_one_line_and_unlink_individually(self):
+        self.receipt.update(quantity=1, received_ext_total="18.50")
+        second = {**self.receipt, "receipt_id": "R-2", "tracking_number": "ALT",
+                  "received_ext_total": "19.50", "scanned_at": "2026-10-16T12:00:00Z"}
+        sources = [self.receipt, second]
+        self.save(receipts=sources)
+        link = dict(receipt_key=None, receipt_keys=[receipt_key(r) for r in sources], receipt_tracking_number="ALT")
+        match, = self.link(**link)["matches"]
+        self.assertEqual(match["receipt_id"], "R-1, R-2")
+        self.assertEqual(match["quantity"], 2)
+        self.assertEqual(match["expected_amount"], "40.00")
+        self.assertEqual(match["received_ext_total"], "38.00")
+        self.assertEqual(match["scanned_at"], second["scanned_at"])
+        self.assertTrue(match["amount_discrepancy"])
+
+        self.save(receipts=sources)
+        pending = self.db.get(ReceivingReviewPending, self.group.id).payload
+        self.assertEqual(pending["unknown_receipts"], [])
+        self.assertEqual(pending["matches"][0]["received_ext_total"], "38.00")
+        result = unlink_receipt(self.db, self.group.id, match["manual_receipt_key"])
+        self.assertCountEqual([r["receipt_key"] for r in result["unknown_receipts"]], link["receipt_keys"])
+        self.assertEqual(result["matches"], [])
+        self.apply(self.link(**link)["matches"][0], price_sold="19.00")
+        self.assertEqual(self.item.receipt_id, "R-1, R-2")
+        self.assertEqual(self.item.receipt_tracking_number, "ALT")
+        self.assertEqual(self.item.price_sold, Decimal("19.00"))
+        self.assertEqual(self.item.status, ItemStatus.SCANNED)
+        self.save(receipts=sources)
+        self.assertIsNone(self.db.get(ReceivingReviewPending, self.group.id))
+
     def test_stale_second_allocation_rolls_back_entire_receipt(self):
         second, matches = self.multi_link()
         second.quantity = 2

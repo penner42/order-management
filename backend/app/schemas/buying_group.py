@@ -279,7 +279,8 @@ class ReceivingReviewPruneResponse(BaseModel):
 
 class ReceivingReceiptLinkRequest(BaseModel):
     buying_group_id: int
-    receipt_key: str
+    receipt_key: str | None = None
+    receipt_keys: list[str] = Field(default_factory=list)
     item_ids: list[int] = Field(default_factory=list)
     item_id: int | None = None  # Older clients may still select one whole line.
     receipt_tracking_number: str
