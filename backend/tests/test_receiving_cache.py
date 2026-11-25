@@ -184,10 +184,10 @@ class ReceivingCacheTests(unittest.TestCase):
         self.assertEqual(self.db.get(ReceivingReceiptCache, self.group.id).payload, cached)
         self.assertTrue(self.rematch())
 
-    def test_buyinggroup_http_429_prevents_another_request_during_retry_window(self):
+    def test_buyinggroup_http_429_blocks_retries_and_lengthens_repeated_waits(self):
         origin = "https://rate-limit.example.com"
         with (
-            patch.dict(buyinggroup._rate_limited_until, clear=True),
+            patch.dict(buyinggroup._rate_limits, clear=True),
             patch.object(buyinggroup.time, "monotonic", return_value=100) as clock,
             patch.object(buyinggroup.http.client, "HTTPSConnection") as connection,
             patch.object(buyinggroup, "_log_failed_response"),
@@ -205,10 +205,24 @@ class ReceivingCacheTests(unittest.TestCase):
             connection.assert_called_once()
             response.read.assert_not_called()
             clock.return_value = 145
+            response.getheader.return_value = None
+            with self.assertRaises(buyinggroup.RateLimited) as repeated:
+                buyinggroup._json_request(url=origin + buyinggroup.TOKEN_GET_PATH, payload={})
+            self.assertEqual(repeated.exception.retry_after, 120)
+            clock.return_value = 205
+            with self.assertRaises(buyinggroup.RateLimited) as still_waiting:
+                buyinggroup._json_request(url=origin + buyinggroup.TOKEN_GET_PATH, payload={})
+            self.assertEqual(still_waiting.exception.retry_after, 60)
+            self.assertEqual(connection.call_count, 2)
+            clock.return_value = 265
             response.status = 200
             response.read.return_value = b'{}'
             buyinggroup._json_request(url=origin + buyinggroup.TOKEN_GET_PATH, payload={})
-            self.assertEqual(connection.call_count, 2)
+            self.assertEqual(connection.call_count, 3)
+            response.status = 429
+            with self.assertRaises(buyinggroup.RateLimited) as reset:
+                buyinggroup._json_request(url=origin + buyinggroup.TOKEN_GET_PATH, payload={})
+            self.assertEqual(reset.exception.retry_after, 60)
 
     def test_buyinggroup_refresh_rate_limit_keeps_refresh_token_for_next_check(self):
         credentials = dict(base_url="https://refresh.example.com", username="test",

@@ -60,8 +60,15 @@ _token_cache: dict[tuple[str, str, str], "_AuthTokens"] = {}
 _token_lock = threading.Lock()
 _auth_locks: dict[tuple[str, str, str], threading.Lock] = {}
 _rate_limit_lock = threading.Lock()
-_rate_limited_until: dict[tuple[str, str, int], float] = {}
-_DEFAULT_RETRY_AFTER = 60
+_rate_limits: dict[tuple[str, str, int], "_RateLimitWindow"] = {}
+_RATE_LIMIT_BACKOFF_SECONDS = (60, 120, 240, 480, 900)
+
+
+@dataclass(frozen=True)
+class _RateLimitWindow:
+    deadline: float
+    consecutive: int
+    path: str
 
 
 @dataclass
@@ -149,10 +156,13 @@ class _SessionExpired(RuntimeError):
 class RateLimited(RuntimeError):
     def __init__(self, retry_after: int):
         self.retry_after = retry_after
-        super().__init__(f"BuyingGroup.com is rate limiting requests (HTTP 429). Try again in {retry_after} seconds.")
+        super().__init__(
+            f"BuyingGroup.com is rate limiting requests (HTTP 429). "
+            f"The app can try again in {retry_after} seconds. BuyingGroup.com may still be throttling at that point."
+        )
 
 
-def _retry_after_seconds(value: str | None) -> int:
+def _retry_after_seconds(value: str | None) -> int | None:
     if value:
         try:
             return max(1, int(value))
@@ -161,7 +171,24 @@ def _retry_after_seconds(value: str | None) -> int:
                 return max(1, math.ceil(parsedate_to_datetime(value).timestamp() - time.time()))
             except (ValueError, OverflowError, OSError):
                 pass
-    return _DEFAULT_RETRY_AFTER
+    return None
+
+
+def _record_rate_limit(
+    origin: tuple[str, str, int], path: str, started_at: float, advertised: int | None,
+) -> int:
+    with _rate_limit_lock:
+        now = time.monotonic()
+        previous = _rate_limits.get(origin)
+        consecutive = 1
+        if previous:
+            # Requests already in flight belong to the same throttling event.
+            consecutive = previous.consecutive + (started_at >= previous.deadline)
+        fallback = _RATE_LIMIT_BACKOFF_SECONDS[min(consecutive - 1, len(_RATE_LIMIT_BACKOFF_SECONDS) - 1)]
+        delay = advertised if advertised is not None and consecutive == 1 else max(advertised or 0, fallback)
+        deadline = max(previous.deadline if previous else 0, now + delay)
+        _rate_limits[origin] = _RateLimitWindow(deadline, consecutive, path)
+        return math.ceil(deadline - now)
 
 
 def _cache_key(base_url: str, username: str, password: str) -> tuple[str, str, str]:
@@ -396,10 +423,10 @@ def _http_post(
         path = f"{path}?{parsed.query}"
     origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
     with _rate_limit_lock:
-        remaining = _rate_limited_until.get(origin, 0) - time.monotonic()
-        if remaining > 0:
-            raise RateLimited(math.ceil(remaining))
-        _rate_limited_until.pop(origin, None)
+        started_at = time.monotonic()
+        window = _rate_limits.get(origin)
+        if window and window.deadline > started_at:
+            raise RateLimited(math.ceil(window.deadline - started_at))
 
     try:
         if parsed.scheme == "https":
@@ -420,12 +447,10 @@ def _http_post(
             resp = conn.getresponse()
             status = int(resp.status)
             if status == 429:
-                delay = _retry_after_seconds(resp.getheader("Retry-After"))
-                with _rate_limit_lock:
-                    deadline = max(_rate_limited_until.get(origin, 0), time.monotonic() + delay)
-                    _rate_limited_until[origin] = deadline
-                _log_failed_response(url, status, {"retry_after": delay})
-                raise RateLimited(max(1, math.ceil(deadline - time.monotonic())))
+                advertised_delay = _retry_after_seconds(resp.getheader("Retry-After"))
+                delay = _record_rate_limit(origin, parsed.path, started_at, advertised_delay)
+                _log_failed_response(url, status, None, retry_after=delay, provider_retry_after=advertised_delay)
+                raise RateLimited(delay)
             raw_text = resp.read().decode("utf-8", errors="replace")
         finally:
             conn.close()
@@ -442,10 +467,14 @@ def _http_post(
             raise RuntimeError(f"BuyingGroup API error {status} at {url}: {detail}")
         raise
 
-    if status >= 400 or (
-        isinstance(raw, dict) and str(raw.get("status", "")).strip().upper() == "FAIL"
-    ):
+    failed = isinstance(raw, dict) and str(raw.get("status", "")).strip().upper() == "FAIL"
+    if status >= 400 or failed:
         _log_failed_response(url, status, raw)
+    elif 200 <= status < 300:
+        with _rate_limit_lock:
+            window = _rate_limits.get(origin)
+            if window and window.path == parsed.path and started_at >= window.deadline:
+                _rate_limits.pop(origin, None)
 
     if status >= 400:
         if authed and _is_auth_failure(status, raw, raw_text):
@@ -455,7 +484,7 @@ def _http_post(
     return status, raw_text, raw
 
 
-def _log_failed_response(url: str, status: int, response: Any) -> None:
+def _log_failed_response(url: str, status: int, response: Any, **rate_limit: int | None) -> None:
     parsed = urlparse(url)
     # Auth responses can include session credentials; retain only their HTTP status.
     auth_endpoint = parsed.path in (TOKEN_GET_PATH, TOKEN_REFRESH_PATH)
@@ -466,6 +495,7 @@ def _log_failed_response(url: str, status: int, response: Any) -> None:
             "method": "POST",
             "url": f"{parsed.scheme}://{parsed.hostname}{parsed.path}",
             "http_status": status,
+            **rate_limit,
             "response": "[auth response omitted]" if auth_endpoint else sanitized[:16384],
             "response_truncated": not auth_endpoint and len(sanitized) > 16384,
         }},
