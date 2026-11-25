@@ -32,13 +32,15 @@ interface Candidate {
   tracking_numbers: (string | null)[]
 }
 
-export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onClose }: {
+export default function ReceiptLinkDialog<T>({ receipts, groupId, damagedWarehouseId, onLinked, onClose }: {
   receipts: Receipt[]
   groupId: number
+  damagedWarehouseId?: string
   onLinked: (session: T) => void
   onClose: () => void
 }) {
   const receipt = receipts[0]
+  const matchingDamage = damagedWarehouseId !== undefined
   const multiple = receipts.length > 1
   const trackingOptions = [...new Set([receipt.tracking_number, ...(receipt.tracking_numbers ?? [])]
     .map(tn => tn.trim()).filter(Boolean))].filter(tn => receipts.every(source =>
@@ -61,13 +63,13 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onCl
     setLoading(true)
     const timer = window.setTimeout(() => {
       api.get<typeof result>(
-        `/buying-groups/receiving-review/candidates?buying_group_id=${groupId}&page=${page}&q=${encodeURIComponent(search)}&include_received=${includeReceived}&include_all_groups=${includeAllGroups}&receipt_key=${encodeURIComponent(receipt.receipt_key ?? '')}`
+        `/buying-groups/receiving-review/candidates?buying_group_id=${groupId}&page=${page}&q=${encodeURIComponent(search)}&include_received=${includeReceived}&include_all_groups=${includeAllGroups}&receipt_key=${encodeURIComponent(receipt.receipt_key ?? '')}${damagedWarehouseId === undefined ? '' : `&damaged_warehouse_id=${encodeURIComponent(damagedWarehouseId)}`}`
       ).then(data => { if (active) { setResult(data); setError(null) } })
         .catch(e => { if (active) setError(e instanceof Error ? e.message : 'Could not load order lines') })
         .finally(() => { if (active) setLoading(false) })
     }, 250)
     return () => { active = false; window.clearTimeout(timer) }
-  }, [groupId, page, search, includeReceived, includeAllGroups, receipt.receipt_key, refreshVersion])
+  }, [groupId, page, search, includeReceived, includeAllGroups, receipt.receipt_key, refreshVersion, damagedWarehouseId])
 
   const quantity = receipts.every(source => source.quantity != null && source.quantity > 0)
     ? receipts.reduce((sum, source) => sum + (source.quantity ?? 0), 0) : null
@@ -79,9 +81,11 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onCl
   const wrongGroup = (item: Candidate) => item.buying_group_id !== groupId
   const targetReceiptId = multiple ? combinedIds.join(', ') : (receipt.receipt_id ?? '').trim()
   const conflict = (item: Candidate) => !!item.receipt_id?.trim() && item.receipt_id.trim() !== targetReceiptId
-  const invalid = !selected.length || loading || saving || (quantity != null && selectedQuantity !== quantity) ||
-    (!quantity && !confirmFull) || selected.some(item => conflict(item) || wrongGroup(item)) ||
-    !tracking || receipts.some(source => !source.receipt_key) || (multiple && (quantity == null || selected.length !== 1))
+  const invalid = loading || saving || (matchingDamage
+    ? selected.length !== 1
+    : !selected.length || (quantity != null && selectedQuantity !== quantity) ||
+      (!quantity && !confirmFull) || selected.some(item => conflict(item) || wrongGroup(item)) ||
+      !tracking || receipts.some(source => !source.receipt_key) || (multiple && (quantity == null || selected.length !== 1)))
   const inputClass = 'w-full rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm'
   const date = (value: string | null) => value ? value.slice(0, 10) : '—'
   const money = (value: string | number | null) => value != null && Number.isFinite(Number(value))
@@ -96,37 +100,46 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onCl
     setSaving(true)
     setError(null)
     try {
-      const next = await api.post<T>('/buying-groups/receiving-review/link', {
-        buying_group_id: groupId,
-        ...(multiple ? { receipt_keys: receipts.map(source => source.receipt_key) } : { receipt_key: receipt.receipt_key }),
-        item_ids: selected.map(item => item.item_id),
-        receipt_tracking_number: tracking, confirm_full_quantity: confirmFull,
-      })
+      const next = matchingDamage
+        ? await api.post<T>('/buying-groups/receiving-review/match-damage', {
+          buying_group_id: groupId, warehouse_id: damagedWarehouseId,
+          item_id: selected[0].item_id, expected_quantity: selected[0].quantity,
+        })
+        : await api.post<T>('/buying-groups/receiving-review/link', {
+          buying_group_id: groupId,
+          ...(multiple ? { receipt_keys: receipts.map(source => source.receipt_key) } : { receipt_key: receipt.receipt_key }),
+          item_ids: selected.map(item => item.item_id),
+          receipt_tracking_number: tracking, confirm_full_quantity: confirmFull,
+        })
       onLinked(next)
       onClose()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not link receipt')
+      setError(e instanceof Error ? e.message : matchingDamage ? 'Could not match damaged item' : 'Could not link receipt')
     } finally { setSaving(false) }
   }
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
       <div role="dialog" aria-modal="true" aria-labelledby="receipt-link-title" className="bg-white dark:bg-gray-800 text-ink dark:text-gray-100 rounded-xl shadow-xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto">
-        <h2 id="receipt-link-title" className="text-lg font-semibold mb-2">{multiple ? 'Link receipts to one order line' : 'Link receipt to order items'}</h2>
-        <p className="text-sm mb-3">{multiple
+        <h2 id="receipt-link-title" className="text-lg font-semibold mb-2">{matchingDamage
+          ? 'Match damaged item' : multiple ? 'Link receipts to one order line' : 'Link receipt to order items'}</h2>
+        <p className="text-sm mb-3">{matchingDamage ? (receipt.description || 'Damaged warehouse item') : multiple
           ? `${receipts.length} receipts · ${quantity ?? 'Unknown quantity'} units · Received total ${money(receivedTotal)}`
           : `Receipt ${receipt.receipt_id || '—'} · ${quantity ?? 'Unknown quantity'} × ${receipt.description || 'Item'}`}</p>
-        <label className="block text-sm mb-4">Receipt tracking number
+        {matchingDamage ? (
+          <p className="mb-4 text-sm">Warehouse tracking <span className="font-mono">{trackingOptions.join(', ') || '—'}</span></p>
+        ) : <label className="block text-sm mb-4">Receipt tracking number
           <select className={inputClass} value={tracking} onChange={e => setTracking(e.target.value)} disabled={saving}>
             {trackingOptions.map(tn => <option key={tn}>{tn}</option>)}
           </select>
-        </label>
+        </label>}
         {multiple && !trackingOptions.length && <p role="alert" className="text-sm text-red-600 mb-3">Select receipts that share a tracking number.</p>}
         {multiple && quantity == null && <p role="alert" className="text-sm text-red-600 mb-3">Each selected receipt needs a known quantity.</p>}
-        <label className="block text-sm mb-3">Search order number, description, or receipt ID
+        <label className="block text-sm mb-3">{matchingDamage
+          ? 'Search order number, description, or tracking' : 'Search order number, description, or receipt ID'}
           <input autoFocus className={inputClass} value={search} disabled={saving} onChange={e => { setSearch(e.target.value); setPage(1) }} />
         </label>
-        <label className="flex items-center gap-2 text-sm mb-3">
+        {!matchingDamage && <><label className="flex items-center gap-2 text-sm mb-3">
           <input type="checkbox" checked={includeAllGroups} disabled={saving} onChange={e => {
             setIncludeAllGroups(e.target.checked); setPage(1)
           }} />
@@ -137,7 +150,7 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onCl
             setIncludeReceived(e.target.checked); setPage(1)
           }} />
           Show lines with receipts
-        </label>
+        </label></>}
         <button type="button" disabled={saving || loading} className="text-sm text-brand-600 underline mb-3" onClick={() => {
           setSelected([]); setConfirmFull(false); setPage(1); setLoading(true); setRefreshVersion(v => v + 1)
         }}>Refresh order lines</button>
@@ -156,12 +169,13 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onCl
         <div className="space-y-2 max-h-64 overflow-y-auto mb-3">
           {!loading && result.items.map(item => (
             <label key={item.item_id} className={`flex gap-3 rounded border p-3 ${selected.some(i => i.item_id === item.item_id) ? 'border-brand-600' : 'border-brand-200 dark:border-gray-600'}`}>
-              <input type="checkbox" checked={selected.some(i => i.item_id === item.item_id)}
-                disabled={saving || (!selected.some(i => i.item_id === item.item_id) &&
+              <input type={matchingDamage ? 'radio' : 'checkbox'} name={matchingDamage ? 'damage-order-line' : undefined}
+                checked={selected.some(i => i.item_id === item.item_id)}
+                disabled={saving || (!matchingDamage && !selected.some(i => i.item_id === item.item_id) &&
                   (wrongGroup(item) || conflict(item) || (quantity != null && (!multiple
                     ? selectedQuantity + item.quantity > quantity : item.quantity !== quantity))))}
                 onChange={e => {
-                  setSelected(prev => e.target.checked ? (multiple ? [item] : [...prev, item]) : prev.filter(i => i.item_id !== item.item_id))
+                  setSelected(prev => e.target.checked ? (multiple || matchingDamage ? [item] : [...prev, item]) : prev.filter(i => i.item_id !== item.item_id))
                   setConfirmFull(false)
                 }} />
               <span className="text-sm">
@@ -172,9 +186,12 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onCl
                 <span className="block">Expected payout: {money(item.expected_amount)} total · {money(item.price_sold)} per unit</span>
                 <span className="block text-xs">Purchased: {date(item.purchase_date)} · Submitted: {date(item.submitted_at)} · Received: {date(item.scanned_at)}</span>
                 <span className="block font-mono text-xs">Original tracking: {item.tracking_numbers.filter(Boolean).join(', ') || '—'}</span>
+                {matchingDamage && item.tracking_numbers.some(tn => tn && trackingOptions.some(
+                  option => option.toLowerCase() === tn.trim().toLowerCase()
+                )) && <span className="block text-xs text-brand-600">Tracking match</span>}
                 <span className="block text-xs">Receipt: {item.receipt_id || '—'} · Receipt tracking: {item.receipt_tracking_number || '—'}</span>
-                {conflict(item) && <span className="block text-xs text-amber-700">Already has a different receipt.</span>}
-                {!multiple && quantity != null && item.quantity > quantity - selectedQuantity && !selected.some(i => i.item_id === item.item_id) &&
+                {!matchingDamage && conflict(item) && <span className="block text-xs text-amber-700">Already has a different receipt.</span>}
+                {!matchingDamage && !multiple && quantity != null && item.quantity > quantity - selectedQuantity && !selected.some(i => i.item_id === item.item_id) &&
                   <span className="block text-xs text-amber-700">Exceeds the remaining receipt quantity. Split this line manually on Orders first.</span>}
               </span>
             </label>
@@ -185,6 +202,13 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onCl
           <span>Page {page} of {Math.max(1, Math.ceil(result.total / 25))}</span>
           <button type="button" disabled={loading || saving || page * 25 >= result.total} onClick={() => setPage(p => p + 1)}>Next</button>
         </div>
+        {matchingDamage ? (
+          <p className="text-sm mb-3">
+            {selectedQuantity > 1
+              ? `One unit will be split off and marked Needs return. The other ${selectedQuantity - 1} will keep their current status.`
+              : 'Select the order line to mark one unit as Needs return.'}
+          </p>
+        ) : <>
         <p aria-live="polite" className="text-sm mb-2">Selected {selectedQuantity}{quantity != null ? ` of ${quantity}` : ''} units across {selected.length} order items.</p>
         {selected.length > 0 && <ul className="text-sm mb-3">{selected.map(item => <li key={item.item_id}>
           {item.store_order_number || `Order ${item.order_id}`} · {item.quantity} × {item.description || 'Item'} · Expected payout: {money(item.expected_amount)}{' '}
@@ -197,10 +221,11 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, onLinked, onCl
           ? 'Select a line with the same quantity as the selected receipts. Split a larger line on Orders first.'
           : 'Select whole lines totaling the receipt quantity. Split larger lines manually on Orders first. Linked items apply and unlink together.'}</p>
         <p className="text-sm text-ink-muted mb-3">Next, review the scan date and payout in Receiving Review, then apply the receipt.</p>
+        </>}
         {error && <p role="alert" className="text-sm text-red-600 mb-3">{error}</p>}
         <div className="flex justify-end gap-3">
           <button type="button" onClick={onClose} disabled={saving} className="px-3 py-2 border rounded">Cancel</button>
-          <button type="button" onClick={stage} disabled={invalid} className="px-3 py-2 rounded bg-brand-600 text-white disabled:opacity-50">{saving ? 'Saving…' : 'Add to review'}</button>
+          <button type="button" onClick={stage} disabled={invalid} className="px-3 py-2 rounded bg-brand-600 text-white disabled:opacity-50">{saving ? 'Saving…' : matchingDamage ? 'Mark Needs return' : 'Add to review'}</button>
         </div>
       </div>
     </div>

@@ -69,6 +69,14 @@ interface ReceivingUnknownReceipt {
   delivery: string | null
 }
 
+interface ReceivingDamagedItem {
+  warehouse_id: string
+  description: string | null
+  tracking_numbers: string[]
+  received_at: string | null
+  note: string | null
+}
+
 interface ReceivingSession {
   rematched_at?: string | null
   buying_group_id: number
@@ -81,6 +89,8 @@ interface ReceivingSession {
   csv_row_count: number
   unmatched: ReceivingUnmatched[]
   unknown_receipts?: ReceivingUnknownReceipt[]
+  damaged_items?: ReceivingDamagedItem[] | null
+  damaged_items_error?: boolean
   matches: ReceivingMatch[]
 }
 
@@ -158,7 +168,7 @@ function ReceivingGroupSection({
 }: {
   session: ReceivingSession
   onBusyChange: (groupId: number, busy: boolean) => void
-  onSessionChange: (session: ReceivingSession) => void
+  onSessionChange: (session: ReceivingSession, rematched?: boolean) => void
   highlighted: boolean
   edits: Record<string, RowEdit>
   setEdits: React.Dispatch<React.SetStateAction<Record<string, RowEdit>>>
@@ -166,6 +176,8 @@ function ReceivingGroupSection({
   setAppliedIds: React.Dispatch<React.SetStateAction<Set<string>>>
 }) {
   const [linkReceipts, setLinkReceipts] = useState<ReceivingUnknownReceipt[] | null>(null)
+  const [matchingDamage, setMatchingDamage] = useState<ReceivingDamagedItem | null>(null)
+  const [damageApplied, setDamageApplied] = useState(false)
   const [selectedReceiptKeys, setSelectedReceiptKeys] = useState<Set<string>>(() => new Set())
   const [applying, setApplying] = useState(false)
   const [applyError, setApplyError] = useState<string | null>(null)
@@ -178,9 +190,9 @@ function ReceivingGroupSection({
   } | null>(null)
 
   useEffect(() => {
-    onBusyChange(session.buying_group_id, applying || linkReceipts !== null)
+    onBusyChange(session.buying_group_id, applying || linkReceipts !== null || matchingDamage !== null)
     return () => onBusyChange(session.buying_group_id, false)
-  }, [applying, linkReceipts, session.buying_group_id, onBusyChange])
+  }, [applying, linkReceipts, matchingDamage, session.buying_group_id, onBusyChange])
 
   const matches = session.matches ?? []
   const receivableMatches = matches.filter((m) => m.match_kind !== 'not_received')
@@ -273,7 +285,8 @@ function ReceivingGroupSection({
         const previous = previousRemainders.get(m.item_id)
         const expectedQuantity = remainingQuantities.get(m.item_id) ?? previous?.quantity ?? m.original_quantity
         const usesAllocation = !m.update_receipt_only && !m.manual_receipt_key &&
-          expectedQuantity != null && (remainingQuantities.has(m.item_id) || previous != null || m.quantity < expectedQuantity)
+          expectedQuantity != null && (session.damaged_items != null ||
+            remainingQuantities.has(m.item_id) || previous != null || m.quantity < expectedQuantity)
         const itemId = previous?.id ?? liveItemId.get(m.item_id) ?? m.item_id
 
         if (!usesAllocation && m.split_keep_quantity != null && m.split_keep_quantity > 0) {
@@ -370,6 +383,7 @@ function ReceivingGroupSection({
     receivableMatches.length > 0 && receivableMatches.every((m) => appliedIds.has(rowKey(m)))
   const unmatched = session.unmatched ?? []
   const unknownReceipts = session.unknown_receipts ?? []
+  const damagedItems = session.damaged_items ?? []
   const selectedReceipts = unknownReceipts.filter(receipt => receipt.receipt_key &&
     selectedReceiptKeys.has(receipt.receipt_key) && receipt.linkable !== false)
 
@@ -392,6 +406,7 @@ function ReceivingGroupSection({
             <span className="ml-2 text-sm font-normal text-ink-muted">
               ({remainingToApply} to apply
               {unknownReceipts.length > 0 ? ` · ${unknownReceipts.length} unknown receipts to review` : ''}
+              {damagedItems.length > 0 ? ` · ${damagedItems.length} damaged` : ''}
               {appliedCount > 0 ? ` · ${appliedCount} applied` : ''})
             </span>
           </button>
@@ -421,9 +436,51 @@ function ReceivingGroupSection({
         onLinked={next => { setSelectedReceiptKeys(new Set()); onSessionChange(next) }}
         onClose={() => setLinkReceipts(null)}
       />}
+      {matchingDamage && <ReceiptLinkDialog<ReceivingSession>
+        groupId={session.buying_group_id}
+        damagedWarehouseId={matchingDamage.warehouse_id}
+        receipts={[{
+          receipt_id: null,
+          tracking_number: matchingDamage.tracking_numbers[0] ?? '',
+          tracking_numbers: matchingDamage.tracking_numbers,
+          description: matchingDamage.description,
+          quantity: 1,
+        }]}
+        onLinked={next => { setDamageApplied(true); onSessionChange(next, true) }}
+        onClose={() => setMatchingDamage(null)}
+      />}
       {!collapsed && (
         <div className="p-4">
           {applyError && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{applyError}</p>}
+          {damageApplied && <p role="status" className="mb-3 text-sm text-emerald-700 dark:text-emerald-400">
+            Damaged unit marked Needs return.
+          </p>}
+          {(damagedItems.length > 0 || session.damaged_items_error) && (
+            <div className="mb-4 rounded-xl border border-brand-200/80 p-4 dark:border-gray-700">
+              <h2 className="font-medium text-ink">Damaged warehouse items</h2>
+              {session.damaged_items_error && <p role="status" className="mt-2 text-sm text-amber-700 dark:text-amber-400">
+                Could not load damaged items. Run Check receiving for this buying group to try again.
+              </p>}
+              {damagedItems.length > 0 && (
+                <ul className="mt-2 divide-y divide-brand-100 dark:divide-gray-700">
+                  {damagedItems.map(item => (
+                    <li key={item.warehouse_id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                      <div>
+                        <p className="font-medium text-ink">{item.description || 'Damaged item'}</p>
+                        {!!item.tracking_numbers.length && <p className="font-mono text-xs text-ink-muted">{item.tracking_numbers.join(', ')}</p>}
+                        {item.received_at && <p className="text-xs text-ink-muted">Warehouse date {toYyyyMmDd(item.received_at)}</p>}
+                        {item.note && <p className="text-xs text-ink-muted">{item.note}</p>}
+                      </div>
+                      <button type="button" disabled={applying} onClick={() => { setDamageApplied(false); setMatchingDamage(item) }}
+                        className="rounded-md border border-brand-200 px-3 py-1.5 text-brand-600 hover:bg-brand-50 disabled:opacity-50 dark:border-gray-600 dark:text-brand-400 dark:hover:bg-gray-700">
+                        Match damaged item
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
 
           {matches.length > 0 && (
             <>
@@ -868,7 +925,7 @@ export default function ReceivingReview({ onPendingMatchesChange }: { onPendingM
         <div>
           <h1 className="text-xl font-semibold text-ink dark:text-gray-100">Receiving</h1>
           <p className="text-sm text-ink-muted dark:text-gray-400 mt-1">
-            Warehouse matches and unknown tracking numbers grouped by buying group. Apply matches to mark items scanned with receipt IDs.
+            Review warehouse receipts, unknown tracking numbers, and damaged items by buying group.
           </p>
         </div>
         <Link to="/receiving-audit" className="text-sm text-brand-600 dark:text-brand-400 hover:underline whitespace-nowrap">
@@ -893,7 +950,7 @@ export default function ReceivingReview({ onPendingMatchesChange }: { onPendingM
 
       {sessions.length === 0 ? (
         <div className="rounded-xl border border-brand-200/80 dark:border-gray-700 px-4 py-8 text-center">
-          <p className="text-ink-muted dark:text-gray-400 mb-3">No pending received updates or unknown tracking numbers.</p>
+          <p className="text-ink-muted dark:text-gray-400 mb-3">No pending warehouse items to review.</p>
           <p className="text-sm text-ink-muted dark:text-gray-500 mb-4">
             Run <span className="font-medium">Check receiving</span> on a buying group or enable auto-check
             on a schedule.
@@ -913,7 +970,7 @@ export default function ReceivingReview({ onPendingMatchesChange }: { onPendingM
             <ReceivingGroupSection
               onBusyChange={onBusyChange}
               session={session}
-              onSessionChange={(next) => {
+              onSessionChange={(next, rematched) => {
                 onPendingMatchesChange()
                 editRevision.current++
                 setAppliedByGroup(prev => ({ ...prev, [next.buying_group_id]: new Set() }))
@@ -921,7 +978,13 @@ export default function ReceivingReview({ onPendingMatchesChange }: { onPendingM
                 setEditsByGroup(prev => {
                   const fresh = buildEdits(next.matches)
                   const old = prev[next.buying_group_id] ?? {}
-                  for (const key of Object.keys(fresh)) if (old[key]) fresh[key] = old[key]
+                  const previousMatches = new Map(session.matches.map(match => [rowKey(match), match]))
+                  for (const match of next.matches) {
+                    const key = rowKey(match)
+                    if (old[key] && (!rematched || JSON.stringify(previousMatches.get(key)) === JSON.stringify(match))) {
+                      fresh[key] = old[key]
+                    }
+                  }
                   return { ...prev, [next.buying_group_id]: fresh }
                 })
               }}

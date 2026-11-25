@@ -251,6 +251,21 @@ class ReceivingReviewUnknownReceipt(BaseModel):
     delivery: str | None = None
 
 
+class ReceivingDamagedItem(BaseModel):
+    warehouse_id: str
+    description: str | None = None
+    tracking_numbers: list[str] = Field(default_factory=list)
+    received_at: str | None = None
+    note: str | None = None
+
+
+class ReceivingDamageMatchRequest(BaseModel):
+    buying_group_id: int
+    warehouse_id: str = Field(min_length=1, max_length=255)
+    item_id: int
+    expected_quantity: int = Field(ge=1)
+
+
 class ReceivingReviewSession(BaseModel):
     rematched_at: str | None = None
     buying_group_id: int
@@ -263,6 +278,8 @@ class ReceivingReviewSession(BaseModel):
     csv_row_count: int = 0
     unmatched: list[ReceivingReviewUnmatched] = []
     unknown_receipts: list[ReceivingReviewUnknownReceipt] = []
+    damaged_items: list[ReceivingDamagedItem] | None = None
+    damaged_items_error: bool = False
     matches: list[ReceivingReviewMatch] = []
 
 

@@ -25,6 +25,7 @@ from app.schemas.buying_group import (
     ReceivingReviewPruneRequest,
     ReceivingReviewPruneResponse,
     ReceivingReviewSession,
+    ReceivingDamageMatchRequest,
     ReceivingReceiptLinkRequest,
     ReceivingReceiptUnlinkRequest,
 )
@@ -32,6 +33,7 @@ from app.utils.buying_group_apis.check_receiving import (
     CheckReceivingResult,
     check_receiving_for_group,
     list_receiving_review_pending_payloads,
+    match_dnr_damaged_item,
     prune_receiving_review_pending,
     receiving_check_group_ready,
     save_receiving_review_pending,
@@ -135,10 +137,19 @@ def receiving_candidates(
     buying_group_id: int, q: str = "", page: int = Query(default=1, ge=1),
     include_received: bool = False,
     include_all_groups: bool = False, receipt_key: str | None = None,
+    damaged_warehouse_id: str | None = None,
     db: Session = Depends(get_db), _: User = Depends(get_current_user),
 ):
     return candidate_lines(db, buying_group_id, q, page, include_received=include_received,
-                           include_all_groups=include_all_groups, receipt_key_value=receipt_key)
+                           include_all_groups=include_all_groups, receipt_key_value=receipt_key,
+                           damaged_warehouse_id=damaged_warehouse_id)
+
+
+@router.post("/receiving-review/match-damage", response_model=ReceivingReviewSession)
+def match_damaged_warehouse_item(
+    body: ReceivingDamageMatchRequest, db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    return match_dnr_damaged_item(db, body)
 
 
 @router.post("/receiving-review/link", response_model=ReceivingReviewSession)
@@ -613,6 +624,8 @@ def _execute_received_check(
         pending = db.get(ReceivingReviewPending, group_id)
         saved_payload = pending.payload if pending is not None else {}
         unknown_count = len(saved_payload.get("unknown_receipts") or [])
+        damaged_count = len(saved_payload.get("damaged_items") or [])
+        received_count = actionable - damaged_count
         reported_unknowns = (result.session_payload or {}).get("unknown_receipts") or []
         if reported_unknowns:
             applied_pairs = applied_receipt_pairs(db, group_id)
@@ -630,9 +643,11 @@ def _execute_received_check(
                     f" and excluded from unknown review: {details}."
                 )
         summary += (
-            f" Receiving review: {actionable} matched item(s) ready to apply;"
+            f" Receiving review: {received_count} matched item(s) ready to apply;"
             f" {unknown_count} unknown receipt(s) to review."
         )
+        if damaged_count:
+            summary += f" {damaged_count} damaged warehouse unit(s) to match."
         result.message = summary
         write_group_tracking_log(
             group=group,
@@ -650,7 +665,7 @@ def _execute_received_check(
             group_id,
             actionable,
         )
-        return result, actionable
+        return result, received_count
     except Exception as exc:
         logger.exception(
             "Received check (%s) failed for buying group %s", source, group_id

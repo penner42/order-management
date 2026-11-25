@@ -28,6 +28,7 @@ LOGIN_PATH = "/account/login"
 TRACKING_PATH = "/tracking"
 # Upstream path is misspelled ("balanace"); do not "fix" it.
 RUNNER_TRANSACTIONS_PATH = "/balanace-reports/runner-transactions"
+DAMAGED_INVENTORY_PATH = "/warehouses/product-items-inventory"
 
 _SITE_ORIGIN = "https://portal.dealandrunner.com"
 _BROWSER_USER_AGENT = (
@@ -847,6 +848,49 @@ def _pagination_meta(raw: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, i
 
 # Receiving / warehouse-credit ledger entries (payments and other types differ).
 RECEIVING_ENTRY_TYPE_ID = 1
+
+
+def list_damaged_items(
+    *, base_url: str | None, email: str, password: str, timeout_seconds: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Read the runner portal's Warehouse → Rejected items → Damaged inventory."""
+    base = resolve_base_url(base_url)
+    token = _ensure_token(base_url=base, email=email, password=password, timeout_seconds=timeout_seconds)
+    damaged = {}
+    for page in range(1, _MAX_TX_PAGES + 1):
+        query = urllib.parse.urlencode({
+            "pageNumber": page, "pageSize": 100, "stateIds": "3,1,4", "isDamaged": "true",
+        })
+        url = f"{base}{DAMAGED_INVENTORY_PATH}?{query}"
+
+        def fetch(tok: str) -> tuple[int, dict[str, Any]]:
+            return _get_json(url=url, bearer_token=tok, timeout_seconds=timeout_seconds)
+
+        (status, raw), token = _with_relogin(
+            base_url=base, email=email, password=password, token=token,
+            timeout_seconds=timeout_seconds, call=fetch,
+        )
+        result = raw.get("result")
+        if (status != 200 or _envelope_error_items(raw) or not isinstance(result, dict)
+                or not isinstance(result.get("items"), list) or not isinstance(result.get("hasNextPage"), bool)):
+            raise RuntimeError("Could not read Deal & Runner damaged inventory.")
+        items, has_next, _, _ = _pagination_meta(raw)
+        for item in items:
+            if item.get("isDamaged") is not True or not item.get("id"):
+                continue
+            warehouse_id = str(item["id"])
+            damaged[warehouse_id] = {
+                "warehouse_id": warehouse_id,
+                "description": item.get("productName"),
+                "tracking_numbers": _tracking_numbers_from_tx(item),
+                "received_at": item.get("dateItemReceived") or item.get("datePackageReceived"),
+                "note": item.get("note"),
+            }
+        if not has_next:
+            return list(damaged.values())
+        if not items:
+            break
+    raise RuntimeError("Deal & Runner damaged inventory pagination was incomplete.")
 
 
 def list_runner_transactions(

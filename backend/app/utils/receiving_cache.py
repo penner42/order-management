@@ -96,6 +96,11 @@ def fetch_receipt_source(group, *, usabg_details=None):
     elif framework == "dealandrunner":
         source.request("rows", dealandrunner.list_runner_transactions,
                        base_url=base_url, email=username, password=password)
+        try:
+            source.request("damaged", dealandrunner.list_damaged_items,
+                           base_url=base_url, email=username, password=password)
+        except Exception:
+            pass  # Report the damage feed error without blocking receipt review.
     elif framework == "buyinggroup":
         credentials = {"base_url": base_url, "username": username, "password": password}
         receipts = source.request("rows", buyinggroup.list_receipts, **credentials)

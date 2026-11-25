@@ -1,6 +1,39 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('matches one damaged D&R unit from Receiving', async ({ app }) => {
+  const tracking = 'DAMAGED-TRACKING'
+  const damage = { warehouse_id: 'WH-DAMAGE-1', description: 'Headphones', tracking_numbers: [tracking] }
+  const match = { item_id: 5, order_id: 10, description: 'Headphones', quantity: 2, original_quantity: 2,
+    receipt_id: 'R-1, R-2', tracking_number: tracking, row_id: '5:received', selected: true }
+  const session = { buying_group_id: 1, buying_group_name: 'Deal & Runner', matches: [match], damaged_items: [damage] }
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [session] }))
+  await app.route('**/api/buying-groups/receiving-review/candidates?*', route => {
+    expect(new URL(route.request().url()).searchParams.get('damaged_warehouse_id')).toBe(damage.warehouse_id)
+    return route.fulfill({ json: { total: 1, items: [{
+      item_id: 5, order_id: 10, buying_group_id: 1, store_order_number: 'ORDER-1', description: 'Headphones',
+      quantity: 2, status: 'submitted', price_sold: '20.00', expected_amount: '40.00', tracking_numbers: [tracking],
+    }] } })
+  })
+  await app.route('**/api/buying-groups/receiving-review/match-damage', route => {
+    expect(route.request().postDataJSON()).toEqual({
+      buying_group_id: 1, warehouse_id: damage.warehouse_id, item_id: 5, expected_quantity: 2,
+    })
+    return route.fulfill({ json: { ...session, damaged_items: [],
+      matches: [{ ...match, quantity: 1, original_quantity: 1, receipt_id: 'R-1' }] } })
+  })
+  await app.goto('/receiving-review')
+  await app.getByRole('button', { name: 'Match damaged item' }).click()
+  const dialog = app.getByRole('dialog', { name: 'Match damaged item' })
+  await expect(dialog.getByText('Tracking match', { exact: true })).toBeVisible()
+  await dialog.getByRole('radio', { name: /ORDER-1/ }).check()
+  await expect(dialog.getByText('One unit will be split off', { exact: false })).toBeVisible()
+  await dialog.getByRole('button', { name: 'Mark Needs return' }).click()
+  await expect(app.getByText('Damaged unit marked Needs return.')).toBeVisible()
+  await expect(app.getByRole('button', { name: 'Match damaged item' })).toHaveCount(0)
+  await expect(app.getByRole('textbox', { name: 'Receipt ID' })).toHaveValue('R-1')
+})
+
 test('links two unresolved receipts to one line using the lower payout', async ({ app }) => {
   const tracking = 'SHARED-TRACKING'
   const receipts = ['R-1', 'R-2'].map(id => ({

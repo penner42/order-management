@@ -10,6 +10,7 @@ from unittest.mock import patch
 from uuid import uuid4
 from threading import Event
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
@@ -24,8 +25,8 @@ from app.utils.buying_group_apis import check_receiving as receiving
 from app.utils.buying_group_apis import bfmr, buyinggroup, dealandrunner, parsefile, usabg
 from app.utils.item_split import split_item_record
 from app.utils.receiving_cache import ReceiptSource, decode, encode
-from app.utils.receiving_links import link_receipt, receipt_key
-from app.schemas.buying_group import ReceivingReceiptLinkRequest
+from app.utils.receiving_links import candidate_lines, link_receipt, receipt_key
+from app.schemas.buying_group import ReceivingDamageMatchRequest, ReceivingReceiptLinkRequest
 
 
 def row(cls, **values):
@@ -79,12 +80,13 @@ class ReceivingCacheTests(unittest.TestCase):
             "usabg": (usabg, "list_received_po_rows", usabg.UsabgReceivedListResult([us] * count, 1, 1)),
         }
 
-    def check(self, provider, *, count=1, error=None, details=None):
+    def check(self, provider, *, count=1, error=None, details=None, damaged=None):
         self.group.api_framework = provider
         self.db.commit()
         module, method, value = self.responses(count=count)[provider]
         with ExitStack() as stack:
             stack.enter_context(patch.object(module, method, return_value=value, side_effect=error))
+            stack.enter_context(patch.object(dealandrunner, "list_damaged_items", return_value=damaged or []))
             stack.enter_context(patch.object(buyinggroup, "list_tracking_rewards", return_value={"new": Decimal("1.23")}))
             stack.enter_context(patch.object(buyinggroup, "get_receipt_details", side_effect=details,
                 return_value={"receipt_id": "R1", "received_items": [
@@ -100,7 +102,37 @@ class ReceivingCacheTests(unittest.TestCase):
                 stack.enter_context(patch.object(module, method, side_effect=AssertionError("Network forbidden")))
             for method in ("list_tracking_rewards", "get_receipt_details"):
                 stack.enter_context(patch.object(buyinggroup, method, side_effect=AssertionError("Network forbidden")))
+            stack.enter_context(patch.object(dealandrunner, "list_damaged_items", side_effect=AssertionError("Network forbidden")))
             return receiving.list_receiving_review_pending_payloads(self.db)
+
+    def test_dnr_damage_match_splits_one_unit_and_keeps_receipt_for_remainder(self):
+        self.item.quantity = 2
+        self.shipment.tracking_number = "NEW"
+        other_item = Item(order_id=self.order.id, description="Other product", status=ItemStatus.SUBMITTED)
+        self.db.add(other_item)
+        damage = {"warehouse_id": "DAMAGED-1", "description": "Headphones", "tracking_numbers": ["new", "LPN"]}
+        self.check("dealandrunner", damaged=[damage])
+        group_id = self.group.id
+        self.assertEqual(self.rematch()[0]["damaged_items"], [damage])
+        self.assertTrue(has_pending_receiving_matches(db=self.db, _=None))
+        candidates = candidate_lines(self.db, group_id, "", 1, damaged_warehouse_id="DAMAGED-1")
+        self.assertEqual(candidates["items"][0]["item_id"], self.item.id)
+        body = ReceivingDamageMatchRequest(buying_group_id=group_id, warehouse_id="DAMAGED-1",
+                                           item_id=self.item.id, expected_quantity=2)
+        with patch.object(dealandrunner, "list_damaged_items", side_effect=AssertionError("Network forbidden")):
+            result = receiving.match_dnr_damaged_item(self.db, body)
+        returned = self.db.query(Item).filter_by(dnr_damaged_warehouse_id="DAMAGED-1").one()
+        self.assertEqual((returned.status, returned.quantity), (ItemStatus.NEEDS_RETURN, 1))
+        self.assertIsNotNone(returned.needs_return_at)
+        self.assertIsNone(returned.receipt_id)
+        self.assertIsNone(returned.scanned_at)
+        self.assertEqual(returned.shipment_items[0].shipment.tracking_number, "NEW")
+        self.assertEqual((self.item.status, self.item.quantity), (ItemStatus.SUBMITTED, 1))
+        self.assertEqual([(m["item_id"], m["receipt_id"]) for m in result["matches"]], [(self.item.id, "R1")])
+        self.assertEqual(self.rematch()[0]["damaged_items"], [])
+        with self.assertRaises(HTTPException) as repeated:
+            receiving.match_dnr_damaged_item(self.db, body)
+        self.assertEqual(repeated.exception.status_code, 409)
 
     def test_all_providers_rematch_local_tracking_and_price_without_network(self):
         for provider in self.responses():

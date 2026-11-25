@@ -96,6 +96,7 @@ class Item(Base):
     receipt_id = Column(Text, nullable=True)
     receipt_tracking_number = Column(Text, nullable=True)
     receipt_upc = Column(String(64), nullable=True)
+    dnr_damaged_warehouse_id = Column(String(255), nullable=True, unique=True)
     duplicate_audit_ignored = Column(Boolean, nullable=False, default=False, server_default=false())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

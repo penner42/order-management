@@ -12,12 +12,15 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, ShipmentItem
 from app.models.item import ItemStatus
-from app.schemas.item import ItemBulkUpdateEntry
-from app.schemas.buying_group import ReceivingReceiptLinkRequest
+from app.schemas.item import ItemBulkUpdateEntry, ItemSplitRequest
+from app.schemas.buying_group import ReceivingDamageMatchRequest, ReceivingReceiptLinkRequest
 from app.bg_reward_math import reward_share
+from app.utils.dates import to_date_only
+from app.utils.item_split import split_item_record
 
 
 OPEN_STATUSES = {ItemStatus.PURCHASED, ItemStatus.SHIPPED, ItemStatus.SUBMITTED, ItemStatus.NEEDS_REVIEW}
+DAMAGE_MATCH_STATUSES = OPEN_STATUSES | {ItemStatus.SCANNED}
 
 
 def receipt_key(receipt: dict) -> str:
@@ -71,7 +74,8 @@ def match_includes_receipt(match: dict, receipt: dict) -> bool:
 
 
 def pending_row(db: Session, group_id: int) -> ReceivingReviewPending:
-    db.query(BuyingGroup).filter_by(id=group_id).with_for_update().one()
+    if db.query(BuyingGroup).filter_by(id=group_id).with_for_update().first() is None:
+        raise HTTPException(404, "Buying group not found.")
     row = db.query(ReceivingReviewPending).filter_by(buying_group_id=group_id).with_for_update().first()
     if row is None:
         raise HTTPException(409, "Receiving review changed. Refresh and select the receipt again.")
@@ -84,9 +88,9 @@ def with_receipt_keys(payload: dict) -> dict:
 
 
 def store_payload(db: Session, row: ReceivingReviewPending, payload: dict) -> None:
-    count = sum(m.get("match_kind") != "not_received" for m in payload.get("matches", []))
+    count = sum(m.get("match_kind") != "not_received" for m in payload.get("matches", [])) + len(payload.get("damaged_items") or [])
     row.payload = payload
-    if not count and not payload.get("unknown_receipts"):
+    if not (count or payload.get("unknown_receipts") or payload.get("damaged_items_error")):
         db.delete(row)
     else:
         row.matched_count = count
@@ -94,8 +98,25 @@ def store_payload(db: Session, row: ReceivingReviewPending, payload: dict) -> No
 
 
 def candidate_lines(db: Session, group_id: int, search: str, page: int, include_received: bool = False,
-                    include_all_groups: bool = False, receipt_key_value: str | None = None) -> dict:
+                    include_all_groups: bool = False, receipt_key_value: str | None = None,
+                    damaged_warehouse_id: str | None = None) -> dict:
     query = db.query(Item).join(Order)
+    damage = None
+    if damaged_warehouse_id is not None:
+        row = db.get(ReceivingReviewPending, group_id)
+        damage = _pending_damage(row, damaged_warehouse_id)
+        include_all_groups = False
+        include_received = True
+        query = query.filter(
+            Item.status.in_(DAMAGE_MATCH_STATUSES),
+            Item.dnr_damaged_warehouse_id.is_(None),
+            ~Item.payment_line_items.any(),
+            Order.status != "personal",
+            or_(Item.quantity == 1,
+                (func.trim(func.coalesce(Item.receipt_id, "")) == "")
+                & (func.trim(func.coalesce(Item.receipt_tracking_number, "")) == "")
+                & (func.coalesce(Item.reward, 0) == 0)),
+        )
     if not include_all_groups:
         query = query.filter(Order.buying_group_id == group_id)
     if not include_received:
@@ -106,12 +127,24 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int, include_
     if search.strip():
         escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         term = f"%{escaped}%"
-        query = query.filter(or_(Order.store_order_number.ilike(term, escape="\\"),
-                                 Item.description.ilike(term, escape="\\"),
-                                 Item.receipt_id.ilike(term, escape="\\")))
+        filters = [Order.store_order_number.ilike(term, escape="\\"),
+                   Item.description.ilike(term, escape="\\"),
+                   Item.receipt_id.ilike(term, escape="\\")]
+        if damage:
+            filters.append(Item.id.in_(db.query(ShipmentItem.item_id).join(Shipment).filter(
+                Shipment.tracking_number.ilike(term, escape="\\"))))
+        query = query.filter(or_(*filters))
     total = query.count()
     suggestions = []
-    if receipt_key_value:
+    if damage:
+        trackings = {tn.strip().casefold() for tn in damage["tracking_numbers"]}
+        if trackings:
+            tracking_items = db.query(ShipmentItem.item_id).join(Shipment).filter(
+                func.lower(func.trim(Shipment.tracking_number)).in_(trackings))
+            tracking_match = or_(Item.id.in_(tracking_items),
+                                 func.lower(func.trim(Item.receipt_tracking_number)).in_(trackings))
+            query = query.order_by(case((tracking_match, 0), else_=1))
+    elif receipt_key_value:
         row = db.get(ReceivingReviewPending, group_id)
         receipt = next((r for r in (row.payload.get("unknown_receipts", []) if row else [])
                         if receipt_key(r) == receipt_key_value), None)
@@ -156,6 +189,40 @@ def _candidate_data(i: Item) -> dict:
         "payment_linked": bool(i.payment_line_items),
         "tracking_numbers": [si.shipment.tracking_number for si in i.shipment_items if si.shipment],
     }
+
+
+def _pending_damage(row: ReceivingReviewPending | None, warehouse_id: str) -> dict:
+    for damage in (row.payload.get("damaged_items") or []) if row else []:
+        if damage["warehouse_id"] == warehouse_id:
+            return damage
+    raise HTTPException(409, "Damaged inventory changed. Refresh Receiving and select the item again.")
+
+
+def apply_damage_match(db: Session, row: ReceivingReviewPending, body: ReceivingDamageMatchRequest) -> None:
+    _pending_damage(row, body.warehouse_id)
+    if db.query(Item.id).filter_by(dnr_damaged_warehouse_id=body.warehouse_id).first():
+        raise HTTPException(409, "This warehouse unit already has a return match.")
+    item = (db.query(Item).join(Order).filter(
+        Item.id == body.item_id, Order.buying_group_id == body.buying_group_id,
+        Order.status != "personal",
+    ).with_for_update(of=Item).first())
+    if item is None:
+        raise HTTPException(404, "Order line not found in this buying group.")
+    if (item.quantity != body.expected_quantity or item.dnr_damaged_warehouse_id
+            or item.status not in DAMAGE_MATCH_STATUSES or item.payment_line_items):
+        raise HTTPException(409, "The order line changed or is ineligible for a return match. Refresh Receiving.")
+    if any(m.get("item_id") == item.id and m.get("manual_receipt")
+           for m in row.payload.get("matches", [])):
+        raise HTTPException(409, "Apply or unlink the pending manual receipt before matching damage.")
+    if item.quantity > 1:
+        if (item.receipt_id or "").strip() or (item.receipt_tracking_number or "").strip() or item.reward:
+            raise HTTPException(409, "Resolve the receipt or reward on Orders before splitting this line.")
+        item = split_item_record(db, item, ItemSplitRequest(
+            keep_quantity=item.quantity - 1, copy_tracking=True, split_off_status=ItemStatus.NEEDS_RETURN,
+        ))
+    item.status = ItemStatus.NEEDS_RETURN
+    item.needs_return_at = to_date_only(datetime.now(timezone.utc))
+    item.dnr_damaged_warehouse_id = body.warehouse_id
 
 
 def _check_receipt(item: Item, rid: str | None) -> None:
