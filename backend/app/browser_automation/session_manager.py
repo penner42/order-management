@@ -168,24 +168,24 @@ class SessionManager:
         headless: bool,
         width: int,
         height: int,
+        standard_options: bool = False,
     ) -> tuple[BrowserContext, Any]:
         """Launch Chromium persistent context (Costco Azure B2C / Amazon automations)."""
         from playwright.async_api import async_playwright
 
         pw = await async_playwright().start()
         try:
+            launch_options = {} if standard_options else {
+                "ignore_default_args": ["--enable-automation"],
+                "args": ["--disable-blink-features=AutomationControlled", f"--window-size={width},{height}"],
+            }
             context = await pw.chromium.launch_persistent_context(
                 user_data,
                 headless=bool(headless),
                 viewport={"width": width, "height": height},
                 locale="en-US",
                 timezone_id="America/Los_Angeles",
-                # Soften the default automation banner; Costco still sees a real Chrome TLS stack.
-                ignore_default_args=["--enable-automation"],
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    f"--window-size={width},{height}",
-                ],
+                **launch_options,
             )
         except Exception:
             await pw.stop()
@@ -268,11 +268,13 @@ class SessionManager:
                 camoufox = None
                 playwright = None
                 if engine == "chromium":
+                    options = {"standard_options": True} if retailer == "buyinggroup" else {}
                     context, playwright = await self._launch_chromium_context(
                         user_data,
                         headless=headless,
                         width=width,
                         height=height,
+                        **options,
                     )
                 else:
                     context, camoufox = await self._launch_camoufox_context(
@@ -985,6 +987,9 @@ def login_warm_url_for_retailer(retailer: str) -> str:
 
 
 def login_home_url_for_retailer(retailer: str) -> str:
+    if retailer == "buyinggroup":
+        from app.browser_automation.buyinggroup_session import LOGIN_URL
+        return LOGIN_URL
     if retailer == "monarch":
         return "https://app.monarch.com"
     if retailer == "walmart":
@@ -995,6 +1000,9 @@ def login_home_url_for_retailer(retailer: str) -> str:
 
 
 async def retailer_session_logged_in(page: Page, retailer: str) -> bool:
+    if retailer == "buyinggroup":
+        from app.browser_automation.buyinggroup_session import session_logged_in
+        return await session_logged_in(page)
     if retailer == "monarch":
         from app.browser_automation.monarch import monarch_session_logged_in
         return await monarch_session_logged_in(page)

@@ -1,4 +1,5 @@
 """Receipt matching follows local edits without fetching warehouse data again."""
+import asyncio
 from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import fields, MISSING, replace
@@ -6,7 +7,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 from threading import Event
 
@@ -15,16 +16,18 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
+from app.browser_automation.buyinggroup_session import BrowserAccess
 from app.config import settings
-from app.models import BuyingGroup, Item, Order, ReceivingReceiptCache, ReceivingReviewPending, Shipment, ShipmentItem, Store
+from app.models import BrowserProfile, BuyingGroup, Item, Order, ReceivingReceiptCache, ReceivingReviewPending, Shipment, ShipmentItem, Store
 from app.models.item import ItemStatus
+from app.routers import buying_groups
 from app.routers.buying_groups import check_buying_group_receiving, has_pending_receiving_matches
 from app.routers.items import bulk_update_items
 from app.schemas.item import ItemBulkUpdateEntry, ItemBulkUpdateRequest, ItemSplitRequest
 from app.utils.buying_group_apis import check_receiving as receiving
 from app.utils.buying_group_apis import bfmr, buyinggroup, dealandrunner, parsefile, usabg
 from app.utils.item_split import split_item_record
-from app.utils.receiving_cache import ReceiptSource, decode, encode
+from app.utils.receiving_cache import ReceiptSource, decode, encode, provider_identity
 from app.utils.receiving_links import candidate_lines, link_receipt, receipt_key
 from app.schemas.buying_group import ReceivingDamageMatchRequest, ReceivingReceiptLinkRequest
 
@@ -240,6 +243,188 @@ class ReceivingCacheTests(unittest.TestCase):
             self.assertEqual(buyinggroup._ensure_tokens(**credentials), stale)
             self.assertEqual(buyinggroup._reauth_tokens(**credentials, stale=stale), fresh)
             login.assert_not_called()
+
+    def test_buyinggroup_receiving_uses_browser_session_for_all_reads(self):
+        self.group.api_framework = "buyinggroup"
+        self.group.base_url = buyinggroup.DEFAULT_BASE_URL
+        self.group.api_username = self.group.api_password = None
+        self.db.commit()
+        access = BrowserAccess("synthetic-browser-token", provider_identity(self.group))
+        receipts = self.responses()["buyinggroup"][2]
+
+        with (
+            patch.object(buyinggroup, "list_receipts", return_value=receipts) as list_receipts,
+            patch.object(buyinggroup, "list_returns", return_value=[]) as list_returns,
+            patch.object(buyinggroup, "list_tracking_rewards", return_value={}) as list_rewards,
+            patch.object(buyinggroup, "get_receipt_details", return_value={"received_items": []}) as get_details,
+        ):
+            result = receiving.check_receiving_for_group(self.db, buying_group_id=self.group.id, browser_access=access)
+        self.assertIsNone(result.error)
+        for request in (list_receipts, list_returns, list_rewards, get_details):
+            self.assertEqual(request.call_args.kwargs["browser_token"], access.token)
+        cache = self.db.get(ReceivingReceiptCache, self.group.id)
+        self.assertNotIn(access.token, json.dumps(cache.payload))
+
+    def test_buyinggroup_expired_browser_session_does_not_fall_back_to_password_login(self):
+        with (
+            patch.object(buyinggroup, "_fetch_receipts_page", side_effect=buyinggroup._SessionExpired()),
+            patch.object(buyinggroup, "_ensure_tokens") as login,
+            patch.object(buyinggroup, "_reauth_tokens") as reauthenticate,
+            self.assertRaises(buyinggroup.BrowserSessionExpired),
+        ):
+            buyinggroup.list_receipts(
+                base_url=None, username="test", password="test", browser_token="synthetic",
+            )
+        login.assert_not_called()
+        reauthenticate.assert_not_called()
+
+    def test_buyinggroup_resumes_the_throttled_page_and_paces_successive_requests(self):
+        started = []
+        waits = []
+        completed = []
+        now = 100.0
+
+        def wait(delay, throttled):
+            nonlocal now
+            waits.append((delay, throttled))
+            now += delay
+
+        def fetch(**kwargs):
+            started.append((kwargs["page"], now))
+            if len(started) == 2:
+                raise buyinggroup.RateLimited(30)
+            return ([kwargs["page"]], 2, None)
+
+        with (
+            patch.object(buyinggroup.time, "monotonic", side_effect=lambda: now),
+            patch.object(buyinggroup, "_fetch_receipts_page", side_effect=fetch),
+            buyinggroup.resumable_browser_reads(wait, lambda _: self.fail("Unexpected refresh"), lambda: completed.append(1)),
+        ):
+            result = buyinggroup.list_receipts(base_url=None, username="", password="", browser_token="synthetic")
+        self.assertEqual(result, [1, 2])
+        self.assertEqual(started, [(1, 100.0), (2, 100.5), (2, 130.5)])
+        self.assertIn((30, True), waits)
+        self.assertEqual(len(completed), 2)
+
+    def test_buyinggroup_long_check_reuses_refreshed_browser_access(self):
+        old = buyinggroup._AuthTokens("old-access", browser_session=True)
+        seen = []
+
+        def read(tokens):
+            seen.append(tokens.access)
+            if tokens == old:
+                raise buyinggroup._SessionExpired()
+            return tokens.access
+
+        with (
+            patch.object(buyinggroup, "_reauth_tokens") as password_auth,
+            patch.object(buyinggroup, "_ensure_tokens") as login,
+            buyinggroup.resumable_browser_reads(lambda *_: None, lambda _: "fresh-access", lambda: None),
+        ):
+            credentials = dict(base_url=buyinggroup.DEFAULT_BASE_URL, username="", password="", timeout_seconds=1)
+            first, _ = buyinggroup._with_reauth(**credentials, call=read, tokens=old)
+            second, _ = buyinggroup._with_reauth(**credentials, call=read, tokens=old)
+        self.assertEqual((first, second), ("fresh-access", "fresh-access"))
+        self.assertEqual(seen, ["old-access", "fresh-access", "fresh-access"])
+        password_auth.assert_not_called()
+        login.assert_not_called()
+
+    def test_buyinggroup_reuses_complete_scanned_and_paid_receipts_until_they_change(self):
+        self.group.api_framework = "buyinggroup"
+        self.item.status = ItemStatus.SCANNED
+        self.item.receipt_id = "R-scanned"
+        self.db.commit()
+        base = self.responses()["buyinggroup"][2][0]
+
+        def receipt(key, paid):
+            return replace(base, receipt_id="R-" + key,
+                           raw={"key": key, "modified_dt": "2026-11-01T12:00:00Z", "paid": paid})
+
+        receipts = [receipt("scanned", False), receipt("paid", True),
+                    receipt("open", False), receipt("incomplete", True)]
+
+        def details(receipt_key, **_):
+            return {"receipt_id": "R-" + receipt_key, "received_items": [{
+                "qty": 1, "verified": receipt_key != "incomplete", "item_id": "Headphones",
+                "price": "20.00", "total": "20.00",
+            }]}
+
+        with (
+            patch.object(buyinggroup, "list_receipts", return_value=receipts) as list_receipts,
+            patch.object(buyinggroup, "list_returns", return_value=[]) as list_returns,
+            patch.object(buyinggroup, "list_tracking_rewards", return_value={}),
+            patch.object(buyinggroup, "get_receipt_details", side_effect=details) as get_details,
+        ):
+            def check():
+                result = receiving.check_receiving_for_group(self.db, buying_group_id=self.group.id)
+                self.assertIsNone(result.error)
+                receiving.save_receiving_review_pending(self.db, result.session_payload)
+
+            check()
+            self.assertEqual(get_details.call_count, 4)
+            get_details.reset_mock()
+            check()
+            self.assertCountEqual([call.kwargs["receipt_key"] for call in get_details.call_args_list],
+                                  ["open", "incomplete"])
+            saved = ReceiptSource(self.db.get(ReceivingReceiptCache, self.group.id).payload)
+            self.assertEqual(saved.request("detail:scanned", None)["receipt_id"], "R-scanned")
+            self.assertEqual(saved.request("detail:paid", None)["receipt_id"], "R-paid")
+            receipts[1] = replace(receipts[1], raw={**receipts[1].raw, "modified_dt": "2026-11-02T12:00:00Z"})
+            get_details.reset_mock()
+            check()
+            self.assertCountEqual([call.kwargs["receipt_key"] for call in get_details.call_args_list],
+                                  ["paid", "open", "incomplete"])
+            self.assertEqual(list_receipts.call_count, 3)
+            self.assertEqual(list_returns.call_count, 3)
+
+    def test_buyinggroup_scheduled_receiving_queues_the_browser_job(self):
+        self.group.api_framework = "buyinggroup"
+        self.group.base_url = buyinggroup.DEFAULT_BASE_URL
+        self.group.received_check_enabled = True
+        self.db.commit()
+        group = self.group
+        group_id = group.id
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = group
+
+        async def check():
+            with (
+                patch.object(settings, "scheduled_jobs_enabled", True),
+                patch.object(buying_groups, "SessionLocal", return_value=db),
+                patch.object(buying_groups, "_queue_scheduled_browser_receiving", return_value=True) as queue,
+                patch.object(buying_groups, "_execute_received_check") as direct_check,
+            ):
+                started = await asyncio.to_thread(buying_groups.run_scheduled_received_check, group_id,
+                                                  browser_loop=asyncio.get_running_loop())
+                self.assertTrue(started)
+                queue.assert_awaited_once_with(group_id)
+                direct_check.assert_not_called()
+
+        asyncio.run(check())
+
+    def test_buyinggroup_background_checks_reuse_the_active_job(self):
+        self.group.api_framework = "buyinggroup"
+        self.group.base_url = buyinggroup.DEFAULT_BASE_URL
+        self.db.add(BrowserProfile(
+            buying_group_id=self.group.id, retailer="buyinggroup", integration=f"buyinggroup_receiving:{self.group.id}",
+        ))
+        self.db.commit()
+
+        async def check():
+            with (
+                patch.dict(buying_groups._receiving_jobs, clear=True),
+                patch.dict(buying_groups._receiving_tasks, clear=True),
+                patch.object(buying_groups, "_run_browser_receiving") as run,
+            ):
+                first = buying_groups._queue_browser_receiving(self.db, self.group.id)
+                second = buying_groups._queue_browser_receiving(self.db, self.group.id, scheduled=True)
+                self.assertEqual(first.id, second.id)
+                status = buying_groups.receiving_check_job(self.group.id, db=self.db, _=None)
+                self.assertEqual(status["id"], first.id)
+                await asyncio.gather(*buying_groups._receiving_tasks.values())
+                run.assert_awaited_once()
+
+        asyncio.run(check())
 
     def test_all_providers_rematch_local_tracking_and_price_without_network(self):
         for provider in self.responses():

@@ -96,6 +96,7 @@ async def on_shutdown():
     from app.browser_automation.scheduler import stop_scheduler
 
     await stop_scheduler()
+    await buying_groups.stop_browser_receiving_checks()
     await monarch.stop_checks()
 
 app.include_router(admin.router, prefix="/api")

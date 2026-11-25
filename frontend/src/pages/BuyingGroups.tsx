@@ -3,7 +3,8 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import type { BuyingGroup, BuyingGroupApiFramework } from '../api/types'
+import BuyingGroupBrowserConnection from '../components/BuyingGroupBrowserConnection'
+import type { BrowserJob, BuyingGroup, BuyingGroupApiFramework } from '../api/types'
 import type { PaymentCapability } from './PaymentReview'
 
 const API_FRAMEWORK_OPTIONS: { value: '' | BuyingGroupApiFramework; label: string }[] = [
@@ -25,6 +26,29 @@ const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH = '/v1/order/add_trackings'
 const DEALANDRUNNER_DEFAULT_BASE_URL = 'https://api.dealandrunner.com'
 const BFMR_DEFAULT_BASE_URL = 'https://api.bfmr.com'
 const DEFAULT_INTERVAL_MINUTES = 360
+
+function receivingJobActive(job: BrowserJob | undefined): boolean {
+  return job?.status === 'queued' || job?.status === 'running'
+}
+
+function ReceivingJobStatus({ job }: { job: BrowserJob }) {
+  const retryAt = job.progress?.retry_at
+  const completed = job.progress?.completed_requests
+  const active = receivingJobActive(job)
+  return (
+    <div className="space-y-1 text-sm">
+      <p className={job.error ? 'text-red-600 dark:text-red-400' : 'text-ink-muted'}>
+        {job.error || job.message}
+      </p>
+      {active && typeof retryAt === 'string' &&
+        <p className="text-ink-muted">Next attempt {new Date(retryAt).toLocaleTimeString()}</p>}
+      {active && typeof completed === 'number' &&
+        <p className="text-ink-muted">{completed} requests completed</p>}
+      {job.review_url &&
+        <Link className="text-brand-600 underline" to={job.review_url}>Open receiving review</Link>}
+    </div>
+  )
+}
 
 function usesUsernamePassword(framework: string | null | undefined): boolean {
   return (
@@ -87,10 +111,16 @@ function canSubmitTrackings(g: BuyingGroup): boolean {
 
 function canCheckReceiving(g: BuyingGroup): boolean {
   if (!supportsCheckReceiving(g.api_framework)) return false
+  if (supportsBuyingGroupBrowser(g)) return true
   if (g.api_framework === 'bfmr') {
     return Boolean(g.api_username?.trim()) && Boolean(g.api_password?.trim())
   }
   return canSubmitTrackings(g)
+}
+
+function supportsBuyingGroupBrowser(g: BuyingGroup): boolean {
+  const base = (g.base_url?.trim() || BUYINGGROUP_DEFAULT_BASE_URL).replace(/\/+$/, '').replace(/\/v1$/, '')
+  return g.api_framework === 'buyinggroup' && base === BUYINGGROUP_DEFAULT_BASE_URL
 }
 
 function effectiveBaseUrl(g: BuyingGroup): string {
@@ -289,6 +319,47 @@ export default function BuyingGroups() {
   const [saving, setSaving] = useState(false)
   const [submittingGroupId, setSubmittingGroupId] = useState<number | null>(null)
   const [checkingReceivingGroupId, setCheckingReceivingGroupId] = useState<number | null>(null)
+  const [receivingJobs, setReceivingJobs] = useState<Record<number, BrowserJob>>({})
+  const browserGroupIds = groups.filter(supportsBuyingGroupBrowser).map(g => g.id).join(',')
+  const runningReceivingJobs = Object.entries(receivingJobs)
+    .filter(([, job]) => receivingJobActive(job)).map(([id, job]) => `${id}:${job.id}`).join(',')
+
+  useEffect(() => {
+    if (!browserGroupIds) return
+    let active = true
+    for (const id of browserGroupIds.split(',')) {
+      api.get<BrowserJob | null>(`/buying-groups/${id}/receiving-check-job`)
+        .then(job => {
+          if (active && job) setReceivingJobs(prev => prev[Number(id)] ? prev : { ...prev, [id]: job })
+        })
+        .catch(() => {})
+    }
+    return () => { active = false }
+  }, [browserGroupIds])
+
+  useEffect(() => {
+    if (!runningReceivingJobs) return
+    let active = true
+    let timer: number
+    async function poll() {
+      await Promise.all(runningReceivingJobs.split(',').map(async key => {
+        const [id, expectedJobId] = key.split(':')
+        try {
+          const job = await api.get<BrowserJob | null>(`/buying-groups/${id}/receiving-check-job`)
+          if (active) setReceivingJobs(prev => {
+            const current = prev[Number(id)]
+            if (current?.id !== expectedJobId) return prev
+            return { ...prev, [id]: job ?? { ...current, status: 'failed', error: 'The check was interrupted. Start Check receiving again.' } }
+          })
+        } catch {
+          // Keep showing the last status if a local poll fails.
+        }
+      }))
+      if (active) timer = window.setTimeout(poll, 2000)
+    }
+    timer = window.setTimeout(poll, 2000)
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [runningReceivingJobs])
   const [submitAlert, setSubmitAlert] = useState<string | null>(null)
   const [paymentCapabilities, setPaymentCapabilities] = useState<PaymentCapability[]>([])
   const [checkingPayments, setCheckingPayments] = useState<number | null>(null)
@@ -415,7 +486,16 @@ export default function BuyingGroups() {
         matched_count: number
         message: string | null
         review_path: string | null
+        job_id?: string | null
       }>(`/buying-groups/${groupId}/check-receiving`, {})
+      const jobId = res.job_id
+      if (jobId) {
+        setReceivingJobs(prev => ({ ...prev, [groupId]: {
+          id: jobId, profile_id: 0, kind: 'buyinggroup_receiving', status: 'queued',
+          message: 'Starting receiving check…',
+        } }))
+        return
+      }
       if (res.review_path) {
         navigate(res.review_path)
         return
@@ -924,14 +1004,16 @@ export default function BuyingGroups() {
                           <button
                             type="button"
                             onClick={() => runCheckReceiving(g.id)}
-                            disabled={!canCheckReceiving(g) || checkingReceivingGroupId === g.id}
+                            disabled={!canCheckReceiving(g) || checkingReceivingGroupId === g.id || receivingJobActive(receivingJobs[g.id])}
                             className="rounded-md border border-brand-200 dark:border-gray-600 px-2 py-1 text-xs text-ink hover:bg-brand-50 dark:hover:bg-gray-700 disabled:opacity-50"
                           >
-                            {checkingReceivingGroupId === g.id ? 'Checking…' : 'Check receiving'}
+                            {checkingReceivingGroupId === g.id || receivingJobActive(receivingJobs[g.id]) ? 'Checking…' : 'Check receiving'}
                           </button>
                         )}
+                        {supportsBuyingGroupBrowser(g) && <BuyingGroupBrowserConnection groupId={g.id} />}
                       </div>
                     )}
+                    {receivingJobs[g.id] && <ReceivingJobStatus job={receivingJobs[g.id]} />}
                     {supportsCheckReceiving(g.api_framework) && !supportsTrackingSubmit(g.api_framework) && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
                         <span>Last receiving check: {formatLastRun(g.received_check_last_run_at)}</span>

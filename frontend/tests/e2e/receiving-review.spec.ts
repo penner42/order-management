@@ -1,6 +1,62 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('shows a waiting BuyingGroup.com check after reloading and links its completed review', async ({ app, data }) => {
+  const groupName = data.name('buyinggroup-background')
+  const group = await data.create('/buying-groups', {
+    name: groupName, api_framework: 'buyinggroup', payment_sync_enabled: false,
+  })
+  const jobId = 'receiving-job'
+  let starts = 0
+  let finished = false
+  await app.route(`**/api/buying-groups/${group.id}/check-receiving`, route => {
+    starts += 1
+    return route.fulfill({ json: { job_id: jobId } })
+  })
+  await app.route(`**/api/buying-groups/${group.id}/receiving-check-job`, route => route.fulfill({ json: starts ? {
+    id: jobId, profile_id: 1, kind: 'buyinggroup_receiving', status: finished ? 'succeeded' : 'running',
+    message: finished ? 'Receiving check complete.' : 'BuyingGroup.com is throttling requests. The check will resume automatically.',
+    review_url: finished ? `/receiving-review?highlight=${group.id}` : null,
+    progress: { completed_requests: 42, retry_at: new Date(Date.now() + 60000).toISOString() },
+  } : null }))
+  await app.goto('/settings/buying-groups')
+  const row = app.getByRole('listitem').filter({ hasText: groupName })
+  await row.getByRole('button', { name: 'Check receiving' }).click()
+  await expect(row.getByText('42 requests completed')).toBeVisible()
+  await app.reload()
+  await expect(row.getByText(/the check will resume automatically/i)).toBeVisible()
+  finished = true
+  await expect(row.getByRole('link', { name: 'Open receiving review' })).toHaveAttribute('href', `/receiving-review?highlight=${group.id}`)
+  expect(starts).toBe(1)
+})
+
+test('connects the BuyingGroup.com browser from Buying Groups', async ({ app, data }) => {
+  const groupName = data.name('buyinggroup-browser')
+  const group = await data.create('/buying-groups', {
+    name: groupName, api_framework: 'buyinggroup', payment_sync_enabled: false,
+  })
+  const profileId = 999899
+  const loginUrl = 'https://buyinggroup.com/login'
+  await app.route(`**/api/buying-groups/${group.id}/browser-connection`, route => route.fulfill({
+    json: { profile_id: route.request().method() === 'POST' ? profileId : null, status: 'logged_out', login_url: loginUrl },
+  }))
+  await app.route(`**/api/browser-profiles/${profileId}/login/start`, route =>
+    route.fulfill({ json: { profile_id: profileId, login_url: loginUrl } }))
+  await app.route(`**/api/browser-profiles/${profileId}/login/done`, route =>
+    route.fulfill({ json: { id: profileId, status: 'ready' } }))
+  await app.routeWebSocket(url => url.pathname === `/api/browser-profiles/${profileId}/live`, socket => {
+    socket.onMessage(() => {})
+    socket.send(JSON.stringify({ type: 'status', url: loginUrl }))
+  })
+  await app.goto('/settings/buying-groups')
+  const row = app.getByRole('listitem').filter({ hasText: groupName })
+  await row.getByRole('button', { name: 'Sign in with browser' }).click()
+  await expect(app.getByLabel('Address bar')).toHaveValue(loginUrl)
+  await app.getByRole('button', { name: 'Done', exact: true }).click()
+  await expect(row.getByText('Browser connected', { exact: true })).toBeVisible()
+  await expect(row.getByRole('button', { name: 'Check receiving' })).toBeEnabled()
+})
+
 test('Check receiving loads BuyingGroup.com returns and can mark an item Needs return', async ({ app, data }) => {
   const groupName = data.name('buyinggroup-returns')
   const group = await data.create('/buying-groups', {

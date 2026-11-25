@@ -11,7 +11,13 @@ class BrowserProfile(Base):
 
     __tablename__ = "browser_profiles"
     __table_args__ = (
-        CheckConstraint("(integration IS NOT NULL AND integration = 'monarch' AND retailer = 'monarch' AND store_id IS NULL AND store_account_id IS NULL) OR (integration IS NULL AND store_id IS NOT NULL AND retailer <> 'monarch')", name="ck_browser_profile_owner"),
+        CheckConstraint(
+            "(buying_group_id IS NULL AND ((integration IS NOT NULL AND integration = 'monarch' "
+            "AND retailer = 'monarch' AND store_id IS NULL AND store_account_id IS NULL) OR "
+            "(integration IS NULL AND store_id IS NOT NULL AND retailer <> 'monarch'))) OR "
+            "(buying_group_id IS NOT NULL AND integration IS NOT NULL AND retailer = 'buyinggroup' "
+            "AND store_id IS NULL AND store_account_id IS NULL)", name="ck_browser_profile_owner",
+        ),
         UniqueConstraint("store_account_id", name="uq_browser_profiles_store_account_id"),
         CheckConstraint("unshipped_check_interval_minutes BETWEEN 1 AND 525600", name="ck_store_unshipped_interval"),
         Index("uq_browser_profiles_direct_store", "store_id", unique=True,
@@ -22,6 +28,7 @@ class BrowserProfile(Base):
     id = Column(Integer, primary_key=True, index=True)
     store_id = Column(Integer, ForeignKey("stores.id", ondelete="CASCADE"), nullable=True, index=True)
     integration = Column(String(64), nullable=True, unique=True)
+    buying_group_id = Column(Integer, ForeignKey("buying_groups.id", ondelete="CASCADE"), unique=True)
     store_account_id = Column(
         Integer,
         ForeignKey("store_accounts.id", ondelete="CASCADE"),

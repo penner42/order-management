@@ -20,6 +20,8 @@ import ssl
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
@@ -145,10 +147,72 @@ class BuyinggroupAnalyticsRow:
 class _AuthTokens:
     access: str
     refresh: str | None = None
+    browser_session: bool = False
 
 
 class _SessionExpired(RuntimeError):
     pass
+
+
+class BrowserSessionExpired(_SessionExpired):
+    pass
+
+
+class ReceivingCheckStopped(RuntimeError):
+    pass
+
+
+@dataclass
+class _ReceivingRequestControl:
+    wait: Callable[[float, bool], None]
+    refresh_browser: Callable[[str], str]
+    completed: Callable[[], None]
+    next_request: float = 0
+    refreshed: _AuthTokens | None = None
+
+    def request(self, call: Callable[[_AuthTokens], _T], tokens: _AuthTokens) -> tuple[_T, _AuthTokens]:
+        tokens = self.refreshed or tokens
+        refreshed = False
+        while True:
+            self.wait(max(0, self.next_request - time.monotonic()), False)
+            self.next_request = time.monotonic() + 0.5
+            try:
+                result = call(tokens)
+            except RateLimited as exc:
+                self.wait(exc.retry_after, True)
+            except _SessionExpired:
+                if refreshed:
+                    raise BrowserSessionExpired(
+                        "BuyingGroup.com browser session expired. Reconnect from Settings → Buying Groups."
+                    ) from None
+                access = self.refresh_browser(tokens.access)
+                if access == tokens.access:
+                    raise BrowserSessionExpired(
+                        "BuyingGroup.com browser session expired. Reconnect from Settings → Buying Groups."
+                    ) from None
+                tokens = self.refreshed = _AuthTokens(access, browser_session=True)
+                refreshed = True
+            else:
+                self.completed()
+                return result, tokens
+
+
+_receiving_request_control: ContextVar[_ReceivingRequestControl | None] = ContextVar(
+    "buyinggroup_receiving_request_control", default=None,
+)
+
+
+@contextmanager
+def resumable_browser_reads(wait, refresh_browser, completed):
+    context = _receiving_request_control.set(_ReceivingRequestControl(wait, refresh_browser, completed))
+    try:
+        yield
+    finally:
+        _receiving_request_control.reset(context)
+
+
+def has_resumable_browser_reads() -> bool:
+    return _receiving_request_control.get() is not None
 
 
 class RateLimited(RuntimeError):
@@ -187,6 +251,29 @@ def _record_rate_limit(
         deadline = max(previous.deadline if previous else 0, now + delay)
         _rate_limits[origin] = _RateLimitWindow(deadline, consecutive, path)
         return math.ceil(deadline - now)
+
+
+def _check_rate_limit(origin: tuple[str, str, int]) -> float:
+    with _rate_limit_lock:
+        started_at = time.monotonic()
+        window = _rate_limits.get(origin)
+        if window and window.deadline > started_at:
+            raise RateLimited(math.ceil(window.deadline - started_at))
+        return started_at
+
+
+def check_request_cooldown(base_url: str) -> None:
+    parsed = urlparse(base_url)
+    if parsed.hostname:
+        _check_rate_limit((parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)))
+
+
+def _receiving_tokens(*, browser_token: str | None, base_url: str, **auth) -> _AuthTokens:
+    if browser_token:
+        if base_url != DEFAULT_BASE_URL:
+            raise ValueError("A BuyingGroup.com browser session requires the official API host.")
+        return _AuthTokens(browser_token, browser_session=True)
+    return _ensure_tokens(base_url=base_url, **auth)
 
 
 def _cache_key(base_url: str, username: str, password: str) -> tuple[str, str, str]:
@@ -420,11 +507,7 @@ def _http_post(
     if parsed.query:
         path = f"{path}?{parsed.query}"
     origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
-    with _rate_limit_lock:
-        started_at = time.monotonic()
-        window = _rate_limits.get(origin)
-        if window and window.deadline > started_at:
-            raise RateLimited(math.ceil(window.deadline - started_at))
+    started_at = _check_rate_limit(origin)
 
     try:
         if parsed.scheme == "https":
@@ -660,9 +743,16 @@ def _with_reauth(
     call: Callable[[_AuthTokens], _T],
 ) -> tuple[_T, _AuthTokens]:
     """Run ``call(tokens)``; on auth failure, refresh/re-login, cache, and retry."""
+    control = _receiving_request_control.get()
+    if tokens.browser_session and control is not None:
+        return control.request(call, tokens)
     try:
         return call(tokens), tokens
     except _SessionExpired:
+        if tokens.browser_session:
+            raise BrowserSessionExpired(
+                "BuyingGroup.com browser session expired. Reconnect from Settings → Buying Groups."
+            ) from None
         tokens = _reauth_tokens(
             base_url=base_url,
             username=username,
@@ -1089,7 +1179,7 @@ def _fetch_receipts_page(
 
 def get_receipt_details(
     *, base_url: str | None, username: str, password: str, receipt_key: str,
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float = 30.0, browser_token: str | None = None,
 ) -> dict[str, Any]:
     """Read product quantities and confirmation flags using the internal receipt key."""
     if not receipt_key:
@@ -1097,7 +1187,7 @@ def get_receipt_details(
     base = resolve_base_url(base_url)
     auth = dict(base_url=base, username=username, password=password,
                 timeout_seconds=timeout_seconds)
-    tokens = _ensure_tokens(**auth)
+    tokens = _receiving_tokens(browser_token=browser_token, **auth)
 
     def load(toks: _AuthTokens) -> dict[str, Any]:
         url = f"{base}{GET_RECEIPT_DETAILS_PATH}"
@@ -1128,6 +1218,7 @@ def list_tracking_rewards(
     password: str,
     page_size: int = _DEFAULT_PAGE_SIZE,
     timeout_seconds: float = 30.0,
+    browser_token: str | None = None,
 ) -> dict[str, Decimal]:
     """Read rewards from Tracking Management's get_orders, not get_receipts.
 
@@ -1135,8 +1226,8 @@ def list_tracking_rewards(
     Keep absent values distinct from explicit zero rewards.
     """
     base = resolve_base_url(base_url)
-    tokens = _ensure_tokens(base_url=base, username=username, password=password,
-                            timeout_seconds=timeout_seconds)
+    tokens = _receiving_tokens(browser_token=browser_token, base_url=base, username=username,
+                               password=password, timeout_seconds=timeout_seconds)
     rewards: dict[str, Decimal] = {}
     page = 1
     while page <= _MAX_LIST_PAGES:
@@ -1211,13 +1302,13 @@ def _parse_return_page(raw: Any) -> tuple[int, int, dict[str, dict[str, Any] | N
 
 def list_returns(
     *, base_url: str | None, username: str, password: str,
-    page_size: int = _DEFAULT_PAGE_SIZE, timeout_seconds: float = 30.0,
+    page_size: int = _DEFAULT_PAGE_SIZE, timeout_seconds: float = 30.0, browser_token: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read the open returns from the same list the portal displays."""
     base = resolve_base_url(base_url)
     url = f"{base}{GET_RETURNS_PATH}"
     auth = dict(base_url=base, username=username, password=password, timeout_seconds=timeout_seconds)
-    tokens = _ensure_tokens(**auth)
+    tokens = _receiving_tokens(browser_token=browser_token, **auth)
     records = {}
     pagination = None
     for page in range(1, _MAX_LIST_PAGES + 1):
@@ -1253,10 +1344,12 @@ def list_receipts(
     page_size: int = _DEFAULT_PAGE_SIZE,
     timeout_seconds: float = 30.0,
     require_complete: bool = False,
+    browser_token: str | None = None,
 ) -> list[BuyinggroupReceipt]:
     """Paginate get_receipts with no filters; return all receipt rows."""
     base = resolve_base_url(base_url)
-    tokens = _ensure_tokens(
+    tokens = _receiving_tokens(
+        browser_token=browser_token,
         base_url=base,
         username=username,
         password=password,

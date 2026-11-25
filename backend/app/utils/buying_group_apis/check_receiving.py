@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, TypeVar
+from types import SimpleNamespace
 
 from fastapi import HTTPException
 from sqlalchemy import func
@@ -26,6 +27,7 @@ from app.models import (
     UsabgPoCache,
 )
 from app.models.item import ItemStatus
+from app.browser_automation.buyinggroup_session import BrowserAccess, supports_browser_session
 from app.schemas.buying_group import ReceivingDamageMatchRequest
 from app.utils.buying_group_apis import bfmr as bfmr_api
 from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
@@ -152,6 +154,7 @@ class CheckReceivingResult:
     error: str | None = None
     matches: list[ReceivingMatch] = field(default_factory=list)
     retry_after: int | None = None
+    browser_sign_in_required: bool = False
 
 
 def _money(value: Decimal | float | int | None) -> Decimal | None:
@@ -1853,7 +1856,24 @@ def _build_unmatched(
     return unmatched
 
 
-def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckReceivingResult:
+def _buyinggroup_detail_reuse_inputs(db: Session, group_id: int, identity: str) -> dict[str, Any]:
+    cache = db.get(ReceivingReceiptCache, group_id)
+    if cache is None or cache.provider_identity != identity:
+        return {}
+    scanned = Counter()
+    rows = (db.query(Item.receipt_id, Item.quantity).join(Order)
+            .filter(Order.buying_group_id == group_id, Order.status != "personal",
+                    Item.status.in_(_SCANNED_OR_LATER_STATUSES), Item.receipt_id.isnot(None)))
+    for receipt_id, qty in rows:
+        # A line with multiple receipts does not say how many units each receipt covered.
+        if "," not in receipt_id and ";" not in receipt_id:
+            scanned[receipt_id.strip().casefold()] += qty
+    return {"buyinggroup_previous": cache.payload, "buyinggroup_scanned_quantity": scanned}
+
+
+def check_receiving_for_group(
+    db: Session, *, buying_group_id: int, browser_access: BrowserAccess | None = None,
+) -> CheckReceivingResult:
     """Search buying-group received items for unscanned trackings; build a review session."""
     group = db.query(BuyingGroup).filter(BuyingGroup.id == buying_group_id).first()
     if not group:
@@ -1871,15 +1891,31 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         "dealandrunner": _check_receiving_dealandrunner,
     }
     if framework in matchers:
-        ready, reason = receiving_check_group_ready(group)
-        if not ready:
-            return CheckReceivingResult(buying_group_id, group_name, error=reason)
         identity = provider_identity(group)
+        if browser_access:
+            if not supports_browser_session(group) or browser_access.identity != identity:
+                return CheckReceivingResult(buying_group_id, group_name,
+                                            error="Buying group configuration changed. Check receiving again.")
+        else:
+            ready, reason = receiving_check_group_ready(group)
+            if not ready:
+                return CheckReceivingResult(buying_group_id, group_name, error=reason)
         try:
-            source = fetch_receipt_source(group, usabg_details=(
-                _load_usabg_po_detail_cache(db, buying_group_id) if framework == "usabg" else None))
+            browser_kwargs = {"browser_token": browser_access.token} if browser_access else {}
+            reuse_kwargs = _buyinggroup_detail_reuse_inputs(db, buying_group_id, identity) if framework == "buyinggroup" else {}
+            source_group = group
+            if browser_access and buyinggroup_api.has_resumable_browser_reads():
+                source_group = SimpleNamespace(api_framework=framework, base_url=group.base_url,
+                                               api_username=None, api_password=None)
+                # The read can spend several minutes waiting for the provider.
+                db.rollback()
+            source = fetch_receipt_source(source_group, usabg_details=(
+                _load_usabg_po_detail_cache(db, buying_group_id) if framework == "usabg" else None),
+                **browser_kwargs, **reuse_kwargs)
         except buyinggroup_api.RateLimited as exc:
             return CheckReceivingResult(buying_group_id, group_name, error=str(exc), retry_after=exc.retry_after)
+        except buyinggroup_api.BrowserSessionExpired as exc:
+            return CheckReceivingResult(buying_group_id, group_name, error=str(exc), browser_sign_in_required=True)
         except Exception as exc:
             items, _, _ = _collect_pending(db, buying_group_id=buying_group_id)
             return CheckReceivingResult(buying_group_id, group_name, submitted_count=len(items),

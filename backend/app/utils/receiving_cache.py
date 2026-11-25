@@ -1,4 +1,5 @@
 """Record provider inputs once; replay them without network access for local matching."""
+from collections import Counter
 from dataclasses import fields, is_dataclass
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -75,7 +76,64 @@ class ReceiptSource:
         return result
 
 
-def fetch_receipt_source(group, *, usabg_details=None):
+def _reusable_buyinggroup_details(receipts, previous_snapshot, scanned_quantity):
+    if previous_snapshot is None:
+        return {}
+    previous = previous_snapshot.get("requests", {})
+    try:
+        previous_receipts = decode(previous["rows"]["value"])
+    except (KeyError, TypeError, ValueError):
+        return {}
+
+    key_counts = Counter(str(row.raw.get("key") or "") for row in receipts)
+    prior_key_counts = Counter(str(row.raw.get("key") or "") for row in previous_receipts)
+    prior_by_key = {str(row.raw.get("key") or ""): row for row in previous_receipts}
+    receipt_counts = Counter((row.receipt_id or "").strip().casefold() for row in receipts)
+    reusable = {}
+    for row in receipts:
+        key = str(row.raw.get("key") or "")
+        receipt_id = (row.receipt_id or "").strip().casefold()
+        revision = row.raw.get("modified_dt")
+        if (not key or not receipt_id or row.void or not row.quantity or row.quantity <= 0
+                or not isinstance(revision, str) or revision.strip().casefold() in ("", "---", "null", "none")
+                or key_counts[key] != 1 or prior_key_counts[key] != 1 or prior_by_key[key] != row):
+            continue
+        scanned = receipt_counts[receipt_id] == 1 and scanned_quantity.get(receipt_id, 0) >= row.quantity
+        if row.raw.get("paid") is not True and not scanned:
+            continue
+
+        request_key = "detail:" + key
+        try:
+            details = decode(previous[request_key]["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _buyinggroup_details_cover_receipt(details, row):
+            reusable[request_key] = previous[request_key]
+    return reusable
+
+
+def _buyinggroup_details_cover_receipt(details, row):
+    if not isinstance(details, dict) or details.get("receipt_id") != row.receipt_id:
+        return False
+    items = details.get("received_items")
+    if not isinstance(items, list) or not items:
+        return False
+    quantity = 0
+    for item in items:
+        if not isinstance(item, dict) or item.get("verified") is not True:
+            return False
+        qty = item.get("qty")
+        price = buyinggroup._parse_money_field(item.get("price"))
+        total = buyinggroup._parse_money_field(item.get("total"))
+        if (type(qty) is not int or qty <= 0 or price is None or total is None
+                or not price.is_finite() or not total.is_finite()):
+            return False
+        quantity += qty
+    return quantity == row.quantity
+
+
+def fetch_receipt_source(group, *, usabg_details=None, browser_token=None,
+                         buyinggroup_previous=None, buyinggroup_scanned_quantity=None):
     """Collect complete inputs before taking the short review-publication lock."""
     source = ReceiptSource()
     framework = (group.api_framework or "").strip().casefold()
@@ -103,17 +161,23 @@ def fetch_receipt_source(group, *, usabg_details=None):
             pass  # Report the damage feed error without blocking receipt review.
     elif framework == "buyinggroup":
         credentials = {"base_url": base_url, "username": username, "password": password}
+        if browser_token is not None:
+            credentials["browser_token"] = browser_token
         receipts = source.request("rows", buyinggroup.list_receipts, **credentials)
+        reusable = _reusable_buyinggroup_details(
+            receipts, buyinggroup_previous, buyinggroup_scanned_quantity or {},
+        )
+        source.payload["requests"].update(reusable)
         try:
             source.request("returns", buyinggroup.list_returns, **credentials)
-        except buyinggroup.RateLimited:
+        except (buyinggroup.RateLimited, buyinggroup.BrowserSessionExpired, buyinggroup.ReceivingCheckStopped):
             raise
         except Exception:
             pass  # Receipt review remains available if only the Returns list fails.
         if receipts:
             try:
                 source.request("rewards", buyinggroup.list_tracking_rewards, **credentials)
-            except buyinggroup.RateLimited:
+            except (buyinggroup.RateLimited, buyinggroup.BrowserSessionExpired, buyinggroup.ReceivingCheckStopped):
                 raise
             except Exception:
                 pass  # Optional rewards never prevent receipt review.
@@ -122,16 +186,21 @@ def fetch_receipt_source(group, *, usabg_details=None):
             try:
                 source.request("detail:" + key, buyinggroup.get_receipt_details,
                                receipt_key=key, **credentials)
-            except buyinggroup.RateLimited:
+            except (buyinggroup.RateLimited, buyinggroup.BrowserSessionExpired, buyinggroup.ReceivingCheckStopped):
                 raise
             except Exception:
                 pass  # Matching retains unavailable details as unresolved receipts.
 
         keys = list(dict.fromkeys(str(r.raw.get("key") or "") for r in receipts
                                   if not r.void and (r.quantity or 0) > 0))
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            for start in range(0, len(keys), 2):
-                list(pool.map(details, keys[start:start + 2]))
+        keys = [key for key in keys if "detail:" + key not in reusable]
+        if buyinggroup.has_resumable_browser_reads():
+            for key in keys:
+                details(key)
+        else:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                for start in range(0, len(keys), 2):
+                    list(pool.map(details, keys[start:start + 2]))
     else:
         raise ValueError("Unsupported receiving provider")
     return source

@@ -181,6 +181,7 @@ class BuyingGroupCheckReceivingResponse(BaseModel):
     submitted_count: int = 0
     message: str | None = None
     review_path: str | None = None
+    job_id: str | None = None
 
 
 class ReceivingReviewMatch(BaseModel):

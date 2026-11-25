@@ -705,7 +705,7 @@ async def start_login(
     profile = db.query(BrowserProfile).filter_by(id=profile_id).with_for_update().populate_existing().one()
     if profile.status in ("importing", "login_in_progress") or profile_id in _import_tasks:
         raise HTTPException(status_code=409, detail="A check or login is already active.")
-    if profile.retailer not in SUPPORTED_RETAILERS | {"monarch"}:
+    if profile.retailer not in SUPPORTED_RETAILERS | {"buyinggroup", "monarch"}:
         raise HTTPException(status_code=400, detail=f"Unsupported retailer: {profile.retailer}")
 
     # Suggested first URL for the live-view address bar. We intentionally do NOT
@@ -716,12 +716,16 @@ async def start_login(
     db.commit()
 
     try:
-        await session_manager.ensure_session(
+        session = await session_manager.ensure_session(
             profile_id,
             mode="login",
             retailer=profile.retailer,
         )
+        if profile.retailer == "buyinggroup":
+            await session.page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
     except Exception as exc:
+        if profile.retailer == "buyinggroup":
+            await session_manager.close_session(profile_id)
         profile.status = "error"
         profile.last_error = str(exc)
         db.commit()
@@ -770,9 +774,9 @@ async def finish_login(
                 f"Still on {retailer_label} sign-in. Complete login in the live view, then click Done."
             )
 
-    db.commit()
-    # Persist cookies on disk; free the browser slot until the next import/login.
+    # Persist the browser session before making it available to checks.
     await session_manager.close_session(profile_id)
+    db.commit()
     return _profile_read(_get_profile_or_404(db, profile_id))
 
 

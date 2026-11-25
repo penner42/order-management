@@ -1,11 +1,14 @@
 """Buying groups API."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from threading import Event
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -13,8 +16,13 @@ from app.config import settings
 from app.buying_group_schedules import SCHEDULE_FIELDS, rebuild_schedules, claim_group_job
 from app.submission_policy import require_group_submissions_enabled
 from app.auth import get_current_user
+from app.browser_automation.buyinggroup_session import (
+    BrowserAccess, LOGIN_URL, browser_access_for_receiving, supports_browser_session,
+)
+from app.browser_automation.jobs import create_job, get_job, update_job
+from app.schemas.browser_profile import BrowserJobRead
 from app.database import SessionLocal, get_db
-from app.models import BrowserImportLog, BuyingGroup, ReceivingReceiptCache, ReceivingReviewPending, User
+from app.models import BrowserImportLog, BrowserProfile, BuyingGroup, ReceivingReceiptCache, ReceivingReviewPending, User
 from app.models.user import get_default_app_user_id
 from app.schemas.buying_group import (
     BuyingGroupCheckReceivingResponse,
@@ -49,10 +57,13 @@ from app.utils.receiving_links import (
 )
 from app.utils.receiving_audit import build_receiving_audit
 from app.utils.receiving_cache import provider_identity
+from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/buying-groups", tags=["buying-groups"])
+_receiving_tasks: dict[int, asyncio.Task] = {}
+_receiving_jobs: dict[int, str] = {}
 GOBUYME_AUTOMATION_DISABLED = {
     "received_check_enabled": False,
     "payment_sync_enabled": False,
@@ -416,26 +427,43 @@ def submit_buying_group_trackings(
 
 
 @router.post("/{group_id}/check-receiving", response_model=BuyingGroupCheckReceivingResponse)
+async def check_buying_group_receiving_route(
+    group_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    job = _queue_browser_receiving(db, group_id)
+    if job:
+        group = db.get(BuyingGroup, group_id)
+        return BuyingGroupCheckReceivingResponse(
+            buying_group_id=group_id, buying_group_name=group.name, job_id=job.id,
+        )
+    return await run_in_threadpool(check_buying_group_receiving, group_id, db, current_user)
+
+
 def check_buying_group_receiving(
     group_id: int,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    *,
+    browser_access: BrowserAccess | None = None,
+    scheduled: bool = False,
 ):
     """Search warehouse receipts and open review for matches or unknown trackings."""
     group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Buying group not found")
     ready, reason = receiving_check_group_ready(group)
-    if not ready:
+    if not ready and browser_access is None:
         raise HTTPException(
             status_code=400,
             detail=reason
             or "Receiving check is only available for Parsefile, BuyingGroup.com, BFMR, or USABG buying groups",
         )
 
-    result, actionable = _execute_received_check(db, group, scheduled=False)
+    result, actionable = _execute_received_check(db, group, scheduled=scheduled, browser_access=browser_access)
     if result.retry_after is not None:
         raise HTTPException(status_code=429, detail=result.error, headers={"Retry-After": str(result.retry_after)})
+    if result.browser_sign_in_required:
+        raise HTTPException(409, result.error)
     if result.error:
         raise HTTPException(status_code=502, detail=result.error)
 
@@ -454,6 +482,144 @@ def check_buying_group_receiving(
         message=result.message,
         review_path=review_path,
     )
+
+
+@router.get("/{group_id}/receiving-check-job", response_model=BrowserJobRead | None)
+def receiving_check_job(
+    group_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    profile = db.query(BrowserProfile).filter_by(buying_group_id=group_id).first()
+    job = get_job(_receiving_jobs.get(group_id, ""))
+    return job.to_dict() if profile and job and job.profile_id == profile.id else None
+
+
+def _queue_browser_receiving(db: Session, group_id: int, *, scheduled: bool = False):
+    group = db.get(BuyingGroup, group_id)
+    if group is None or not supports_browser_session(group):
+        return None
+    profile = db.query(BrowserProfile).filter_by(buying_group_id=group_id).first()
+    if profile is None:
+        return None
+    if group_id in _receiving_tasks:
+        return get_job(_receiving_jobs[group_id])
+    job = create_job(profile.id, "buyinggroup_receiving")
+    _receiving_jobs[group_id] = job.id
+    task = asyncio.create_task(_run_browser_receiving(group_id, job.id, scheduled=scheduled))
+    _receiving_tasks[group_id] = task
+    task.add_done_callback(lambda _: _receiving_tasks.pop(group_id, None))
+    return job
+
+
+async def _run_browser_receiving(group_id: int, job_id: str, *, scheduled: bool):
+    loop = asyncio.get_running_loop()
+    stopped = Event()
+    completed = 0
+
+    def show_wait(delay: int):
+        update_job(job_id, message="BuyingGroup.com is throttling requests. The check will resume automatically.",
+                   progress={"completed_requests": completed,
+                             "retry_at": (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()})
+
+    async def read_access(previous_access: str | None = None):
+        while True:
+            try:
+                access = await browser_access_for_receiving(group_id, previous_access=previous_access)
+            except HTTPException as exc:
+                if exc.status_code != 429:
+                    raise
+                delay = int((exc.headers or {}).get("Retry-After", "60"))
+                show_wait(delay)
+                await asyncio.sleep(delay)
+                continue
+            if access is None:
+                raise HTTPException(409, "Connect the BuyingGroup.com browser before checking receiving.")
+            update_job(job_id, message="Checking BuyingGroup.com receipts and returns.",
+                       progress={"completed_requests": completed})
+            return access
+
+    def run_check(access: BrowserAccess):
+        def wait(delay: float, throttled: bool):
+            if throttled:
+                show_wait(int(delay))
+            if stopped.wait(delay):
+                raise buyinggroup_api.ReceivingCheckStopped("BuyingGroup.com receiving check stopped.")
+
+        def refresh(previous_access: str):
+            future = asyncio.run_coroutine_threadsafe(read_access(previous_access), loop)
+            try:
+                while not stopped.is_set():
+                    try:
+                        fresh = future.result(timeout=1)
+                        if access.identity != fresh.identity:
+                            raise buyinggroup_api.ReceivingCheckStopped("Buying group configuration changed. Check again.")
+                        return fresh.token
+                    except TimeoutError:
+                        if future.done():
+                            raise
+                        continue
+            except HTTPException as exc:
+                raise buyinggroup_api.BrowserSessionExpired(str(exc.detail)) from None
+            finally:
+                if stopped.is_set():
+                    future.cancel()
+            raise buyinggroup_api.ReceivingCheckStopped("BuyingGroup.com receiving check stopped.")
+
+        def request_completed():
+            nonlocal completed
+            completed += 1
+            update_job(job_id, message="Checking BuyingGroup.com receipts and returns.",
+                       progress={"completed_requests": completed})
+
+        with SessionLocal() as db, buyinggroup_api.resumable_browser_reads(wait, refresh, request_completed):
+            return check_buying_group_receiving(group_id, db, None, browser_access=access, scheduled=scheduled)
+
+    update_job(job_id, status="running", message="Opening the BuyingGroup.com browser session.")
+    try:
+        access = await read_access()
+        result = await asyncio.to_thread(run_check, access)
+        update_job(job_id, status="succeeded", message=result.message, review_url=result.review_path,
+                   progress={"completed_requests": completed})
+    except HTTPException as exc:
+        update_job(job_id, status="failed", error=str(exc.detail))
+    except asyncio.CancelledError:
+        update_job(job_id, status="cancelled", message="Receiving check interrupted by server shutdown.")
+        raise
+    except Exception:
+        logger.exception("BuyingGroup.com receiving job failed (group=%s)", group_id)
+        update_job(job_id, status="failed", error="BuyingGroup.com receiving check failed. Check the application log.")
+    finally:
+        stopped.set()
+
+
+async def stop_browser_receiving_checks() -> None:
+    tasks = list(_receiving_tasks.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _queue_scheduled_browser_receiving(group_id: int) -> bool:
+    with SessionLocal() as db:
+        return _queue_browser_receiving(db, group_id, scheduled=True) is not None
+
+
+@router.get("/{group_id}/browser-connection")
+@router.post("/{group_id}/browser-connection")
+def buyinggroup_browser_connection(
+    group_id: int, request: Request, db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    group = db.query(BuyingGroup).filter_by(id=group_id).with_for_update().first()
+    if group is None or not supports_browser_session(group):
+        raise HTTPException(404, "BuyingGroup.com browser connection is unavailable for this group.")
+    profile = db.query(BrowserProfile).filter_by(buying_group_id=group_id).first()
+    if profile is None and request.method == "POST":
+        profile = BrowserProfile(
+            buying_group_id=group_id, retailer="buyinggroup", integration=f"buyinggroup_receiving:{group_id}",
+        )
+        db.add(profile)
+        db.commit()
+    return {"profile_id": profile.id if profile else None,
+            "status": profile.status if profile else "logged_out", "login_url": LOGIN_URL}
 
 
 def run_scheduled_tracking_submit(group_id: int) -> bool:
@@ -570,6 +736,7 @@ def _execute_received_check(
     group: BuyingGroup,
     *,
     scheduled: bool,
+    browser_access: BrowserAccess | None = None,
 ) -> tuple[CheckReceivingResult, int]:
     """Run warehouse received check, persist review pending, stamp last_run, and log.
 
@@ -591,7 +758,8 @@ def _execute_received_check(
     )
 
     try:
-        result = check_receiving_for_group(db, buying_group_id=group_id)
+        access_kwargs = {"browser_access": browser_access} if browser_access else {}
+        result = check_receiving_for_group(db, buying_group_id=group_id, **access_kwargs)
         actionable = 0
         if result.session_payload and not result.error:
             actionable = save_receiving_review_pending(db, result.session_payload)
@@ -600,6 +768,11 @@ def _execute_received_check(
         trackings = _matched_trackings_from_result(result)
 
         if result.error:
+            if result.browser_sign_in_required:
+                db.query(BrowserProfile).filter_by(buying_group_id=group_id, status="ready").update(
+                    {"status": "login_required", "last_error": result.error},
+                )
+                db.commit()
             write_group_tracking_log(
                 group=group,
                 group_name=group_name,
@@ -697,7 +870,7 @@ def _execute_received_check(
         raise
 
 
-def run_scheduled_received_check(group_id: int) -> bool:
+def run_scheduled_received_check(group_id: int, *, browser_loop=None) -> bool:
     if not settings.scheduled_jobs_enabled:
         return False
     db = SessionLocal()
@@ -705,6 +878,19 @@ def run_scheduled_received_check(group_id: int) -> bool:
         group = db.query(BuyingGroup).filter(BuyingGroup.id == group_id).first()
         if not group or not group.received_check_enabled:
             return False
+        if browser_loop is not None and supports_browser_session(group):
+            future = asyncio.run_coroutine_threadsafe(_queue_scheduled_browser_receiving(group_id), browser_loop)
+            try:
+                if future.result(timeout=15):
+                    return True
+            except TimeoutError:
+                future.cancel()
+                write_group_tracking_log(
+                    group=group, scheduled=True, level="error", event_type="received_check_error",
+                    mode="received_check", message="Timed out starting the BuyingGroup.com receiving check.",
+                )
+                _stamp_received_check_last_run(db, group_id)
+                return False
         ready, reason = receiving_check_group_ready(group)
         if not ready:
             write_group_tracking_log(
@@ -723,7 +909,7 @@ def run_scheduled_received_check(group_id: int) -> bool:
         db.close()
 
 
-def run_scheduled_group(group_id: int) -> bool:
+def run_scheduled_group(group_id: int, *, browser_loop=None) -> bool:
     """One interval per group: submit first, then receive, when each is enabled."""
     if not settings.scheduled_jobs_enabled:
         return False
@@ -741,7 +927,10 @@ def run_scheduled_group(group_id: int) -> bool:
     if submit:
         run_scheduled_tracking_submit(group_id)
     if receive:
-        run_scheduled_received_check(group_id)
+        if browser_loop is None:
+            run_scheduled_received_check(group_id)
+        else:
+            run_scheduled_received_check(group_id, browser_loop=browser_loop)
     if payments:
         from app.payment_ledger import sync_group
         with SessionLocal() as payment_db:

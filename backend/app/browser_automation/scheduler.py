@@ -57,7 +57,7 @@ async def _tick() -> None:
 
     for group_id in due_groups:
         try:
-            started = await asyncio.to_thread(run_scheduled_group, group_id)
+            started = await asyncio.to_thread(run_scheduled_group, group_id, browser_loop=asyncio.get_running_loop())
             if started:
                 logger.info(
                     "Ran scheduled jobs for buying group %s",
