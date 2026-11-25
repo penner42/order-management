@@ -8,7 +8,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, Store
+from app.models import BuyingGroup, Item, Order, ReceivingReviewPending, Shipment, ShipmentItem, Store
+from app.models.item import ItemStatus
 from app.routers.buying_groups import _execute_received_check, check_buying_group_receiving, has_pending_receiving_matches
 from app.schemas.buying_group import ReceivingReviewSession
 from app.utils.buying_group_apis import check_receiving as receiving
@@ -160,6 +161,7 @@ class UnknownReceivingReviewTests(unittest.TestCase):
             tracking_numbers=["UNKNOWN", "ALTERNATE"], amount=Decimal("20.00"),
             product_name="Headphones", system_transaction_id="receipt-1",
             timestamp="2026-10-15T10:00:00Z", reference_warehouse_item_id="warehouse-1",
+            entry_type_id=1,
             raw={"additionalField": "additional detail"},
         )
         group = SimpleNamespace(id=self.group.id, api_username="test", api_password="test", base_url=None)
@@ -180,3 +182,46 @@ class UnknownReceivingReviewTests(unittest.TestCase):
         self.assertEqual(receipt.received_ext_total, "20.00")
         self.assertEqual(receipt.source_data["reference_warehouse_item_id"], "warehouse-1")
         self.assertEqual(receipt.source_data["raw"]["additionalField"], "additional detail")
+
+    def test_dnr_keeps_only_unallocated_scans_on_shared_tracking(self):
+        self.group.api_framework = "dealandrunner"
+        store = Store(name="Amazon")
+        shipment = Shipment(tracking_number="TBA123456789012")
+        self.db.add_all([store, shipment])
+        self.db.flush()
+        for index, status in enumerate((ItemStatus.SCANNED, ItemStatus.SUBMITTED)):
+            order = Order(store_id=store.id, buying_group_id=self.group.id)
+            self.db.add(order)
+            self.db.flush()
+            item = Item(order_id=order.id, status=status, description="Headphones", price_sold=20,
+                        receipt_id="scan-0" if index == 0 else None)
+            self.db.add(item)
+            self.db.flush()
+            self.db.add(ShipmentItem(item_id=item.id, shipment_id=shipment.id))
+        self.db.commit()
+        rows = [DealandrunnerReceivedRow(
+            tracking_numbers=[shipment.tracking_number], amount=Decimal("20"),
+            product_name="Headphones", system_transaction_id=f"scan-{index}",
+            timestamp=None, entry_type_id=1,
+        ) for index in range(3)]
+        stale = self.receipt(receipt_id="scan-1", tracking_number=shipment.tracking_number,
+                             tracking_numbers=[shipment.tracking_number])
+        receiving.save_receiving_review_pending(self.db, self.payload(receipts=[stale]))
+        fetched = DealandrunnerRunnerTransactionsResult(rows=rows, total_records=len(rows))
+        with (
+            patch.object(receiving, "dealandrunner_group_ready", return_value=(True, None)),
+            patch.object(receiving.dealandrunner_api, "list_runner_transactions", return_value=fetched),
+        ):
+            result = receiving._check_receiving_dealandrunner(self.db, group=self.group, group_name=self.group.name)
+            self.assertEqual([match.receipt_id for match in result.matches], ["scan-1"])
+            receiving.save_receiving_review_pending(self.db, result.session_payload)
+            saved = receiving.list_receiving_review_pending_payloads(self.db)[0]
+            self.assertEqual([receipt["receipt_id"] for receipt in saved["unknown_receipts"]], ["scan-2"])
+
+            # When the last warehouse unit can also be matched, discard its old queue entry.
+            item.quantity = 2
+            self.db.commit()
+            result = receiving._check_receiving_dealandrunner(self.db, group=self.group, group_name=self.group.name)
+            receiving.save_receiving_review_pending(self.db, result.session_payload)
+            saved = receiving.list_receiving_review_pending_payloads(self.db)[0]
+            self.assertEqual(saved["unknown_receipts"], [])

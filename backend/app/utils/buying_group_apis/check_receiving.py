@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import re
 from dataclasses import asdict, dataclass, field, replace
@@ -322,9 +322,13 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commi
                           if _is_actionable_match_dict(m) or m["item_id"] in received_items]
     count = actionable_count_from_payload(payload)
     applied_pairs = applied_receipt_pairs(db, buying_group_id)
-    known_trackings = _known_shipment_trackings(db)
-    is_buyinggroup = (group.api_framework or "").strip().casefold() == "buyinggroup"
+    framework = (group.api_framework or "").strip().casefold()
+    is_buyinggroup = framework == "buyinggroup"
+    is_dnr = framework == "dealandrunner"
+    known_trackings = _known_shipment_trackings(db) if not (is_buyinggroup or is_dnr) else set()
+    accounted_dnr_keys = set(payload.pop("_accounted_dnr_receipt_keys", [])) if is_dnr else set()
     current_unknown_keys = {receipt_key(r) for r in payload.get("unknown_receipts", [])}
+    accounted_dnr_keys.difference_update(current_unknown_keys)
     unknown_by_key = {}
     for receipt in [*(r for r in (previous.get("unknown_receipts") or []) if r.get("linkable") is not False), *(payload.get("unknown_receipts") or []), *released]:
         # Older BG snapshots used an empty tracking number. Normalize before
@@ -338,6 +342,8 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commi
                 receipt = {**receipt, "tracking_number": rid, "tracking_numbers": [rid]}
         if receipt_key(receipt) in manual_keys or receipt_is_applied(receipt, applied_pairs):
             continue
+        if receipt_key(receipt) in accounted_dnr_keys and not receipt.get("manual_link_invalid"):
+            continue
         # A formerly unresolved BG product may now have an automatic match.
         # Keep any current leftover quantity, but discard its stale queue copy.
         if (is_buyinggroup and receipt_key(receipt) not in current_unknown_keys
@@ -345,10 +351,8 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commi
                     for m in payload["matches"])):
             continue
         trackings = receipt.get("tracking_numbers") or [receipt["tracking_number"]]
-        # BG emits remaining product quantities after allocation, including
-        # products that could not be matched on an otherwise known tracking.
-        # Knowing the shipment does not mean those products were received locally.
-        if (not is_buyinggroup
+        # BG and D&R already exclude allocated quantities when building this queue.
+        if (known_trackings
             and not receipt.get("manual_link_invalid")
             and any(tn.strip().casefold() in known_trackings for tn in trackings)):
             continue
@@ -722,11 +726,13 @@ def _dnr_lots_from_receipts(
                 "sku": None,
                 "receipt_upc": receipt_upc(row),
                 "receipt_ids": [],
+                "rows": [],
                 "statuses": [],
                 "scanned_at": None,
             }
             merged[key] = lot
         lot["qty"] += 1
+        lot["rows"].append(row)
         if row.system_transaction_id:
             lot["receipt_ids"].append(row.system_transaction_id)
         for alias in tns[1:]:
@@ -1577,6 +1583,7 @@ def _merge_fungible_orphan_lots(lots: list[dict[str, Any]]) -> list[dict[str, An
             soft["lot_id"] = f"soft:{key[0]}:{abs(hash(key[1])) % 10**10}:{len(order)}"
             soft["qty"] = int(lot.get("qty") or 0)
             soft["receipt_ids"] = list(lot.get("receipt_ids") or [])
+            soft["rows"] = list(lot.get("rows") or [])
             soft["source_tns"] = list(dict.fromkeys(source_tns))
             soft["alias_tns"] = list(lot.get("alias_tns") or [])
             if display:
@@ -1586,6 +1593,7 @@ def _merge_fungible_orphan_lots(lots: list[dict[str, Any]]) -> list[dict[str, An
             continue
         existing["qty"] = int(existing.get("qty") or 0) + int(lot.get("qty") or 0)
         existing["receipt_ids"].extend(list(lot.get("receipt_ids") or []))
+        existing["rows"].extend(lot.get("rows") or [])
         for tn in source_tns:
             if tn and tn not in existing["source_tns"]:
                 existing["source_tns"].append(tn)
@@ -2292,23 +2300,32 @@ def _check_receiving_dealandrunner(
 
     matches: list[ReceivingMatch] = []
     lots_used_qty: dict[str, int] = {}
+    available_by_id = {lot["lot_id"]: lot for lot in available_lots}
+    matched_row_ids = set()
+
+    def allocate_meta(pairs, lots_by_id, meta_by_id):
+        item_meta = {}
+        for lot_id, qty in pairs:
+            used = lots_used_qty.get(lot_id, 0)
+            rows = lots_by_id[lot_id]["rows"][used:used + qty]
+            matched_row_ids.update(map(id, rows))
+            item_meta[lot_id] = {**meta_by_id[lot_id], "receipt_ids": [
+                row.system_transaction_id for row in rows if row.system_transaction_id
+            ]}
+            lots_used_qty[lot_id] = used + qty
+        return item_meta
+
     for item, order, trackings in eligible:
         pairs = allocated_by_lot.get(item.id)
         if not pairs:
             continue
-        item_meta = {}
-        for lot_id, qty in pairs:
-            used = lots_used_qty.get(lot_id, 0)
-            meta = meta_by_lot[lot_id]
-            item_meta[lot_id] = {**meta, "receipt_ids": meta["receipt_ids"][used:used + qty]}
-            lots_used_qty[lot_id] = used + qty
         matches.extend(
             _matches_for_tn_allocations(
                 item=item,
                 order=order,
                 trackings=trackings,
                 tn_allocations=pairs,
-                meta_by_tn=item_meta,
+                meta_by_tn=allocate_meta(pairs, available_by_id, meta_by_lot),
             )
         )
 
@@ -2348,8 +2365,7 @@ def _check_receiving_dealandrunner(
             continue
         soft_lot = dict(lot)
         soft_lot["qty"] = remaining_qty
-        soft_lot["receipt_ids"] = lot["receipt_ids"][used:]
-        soft_lot["source_tns"] = [tn_key]
+        soft_lot["rows"] = lot["rows"][used:]
         orphan_lots_for_soft.append(soft_lot)
 
     # Same product under different store LPNs → one pooled lot (avoids false ambiguity).
@@ -2379,7 +2395,6 @@ def _check_receiving_dealandrunner(
     soft_meta_by_lot = {
         lot_id: _lot_as_match_meta(lot) for lot_id, lot in soft_lots_by_id.items()
     }
-    soft_matched_tn_keys: set[str] = set()
     for item_id, pairs in soft_allocated_by_lot.items():
         got = int(soft_allocated.get(item_id, 0))
         if got <= 0:
@@ -2391,26 +2406,10 @@ def _check_receiving_dealandrunner(
                 order=order,
                 trackings=trackings,
                 tn_allocations=pairs,
-                meta_by_tn=soft_meta_by_lot,
+                meta_by_tn=allocate_meta(pairs, soft_lots_by_id, soft_meta_by_lot),
             )
         )
         received_item_ids.add(item_id)
-        for lot_id, qty in pairs:
-            if qty <= 0:
-                continue
-            lot = soft_lots_by_id.get(lot_id)
-            if not lot:
-                continue
-            # Each source TN is typically one warehouse unit; only mark consumed ones.
-            sources = [
-                str(src).casefold()
-                for src in (lot.get("source_tns") or [lot.get("tn_key")])
-                if src
-            ]
-            for src in sources[: int(qty)]:
-                soft_matched_tn_keys.add(src)
-            for alias in lot.get("alias_tns") or []:
-                soft_matched_tn_keys.add(str(alias).casefold())
 
     not_found = sum(
         1
@@ -2434,39 +2433,63 @@ def _check_receiving_dealandrunner(
 
     matches = _exclude_claimed_receipt_updates(matches, scanned_pending)
 
+    # Preserve receipt-ID corrections when each new ID identifies one available
+    # unit. Aggregate updates must not absorb extra scans on a shared shipment.
+    scanned_ids = {item.id: _receipt_ids_on_item(item) for item, _, _ in scanned_pending}
+    available_rows_by_receipt = defaultdict(list)
+    for row in unapplied:
+        if row.system_transaction_id and id(row) not in matched_row_ids:
+            available_rows_by_receipt[row.system_transaction_id].append(row)
+    correction_claims = Counter(
+        rid for match in matches if match.update_receipt_only
+        for rid in _receipt_ids_on_item(match) - scanned_ids[match.item_id]
+    )
+    reviewed_matches = []
+    for match in matches:
+        if match.update_receipt_only:
+            receipt_ids = _receipt_ids_on_item(match)
+            new_ids = receipt_ids - scanned_ids[match.item_id]
+            if new_ids:
+                if len(receipt_ids) != match.quantity or any(
+                    correction_claims[rid] != 1 or len(available_rows_by_receipt[rid]) != 1
+                    for rid in new_ids
+                ):
+                    continue
+                matched_row_ids.update(id(available_rows_by_receipt[rid][0]) for rid in new_ids)
+        reviewed_matches.append(match)
+    matches = reviewed_matches
+
     unknown_receipts: list[dict[str, Any]] = []
-    orphan_seen: set[int] = set()
+    accounted_receipt_keys = set()
+    unapplied_row_ids = {id(row) for row in unapplied}
     for row in receipts:
+        if row.entry_type_id != dealandrunner_api.RECEIVING_ENTRY_TYPE_ID:
+            continue
         tns = [tn.strip() for tn in (row.tracking_numbers or []) if (tn or "").strip()]
         if not tns:
             continue
-        if any(tn.casefold() in known_trackings for tn in tns):
-            continue
-        if any(tn.casefold() in soft_matched_tn_keys for tn in tns):
-            continue
-        if id(row) in orphan_seen:
-            continue
-        orphan_seen.add(id(row))
         scanned_dt = _parse_created_date(row.timestamp)
-        unknown_receipts.append(
-            {
-                "receipt_id": row.system_transaction_id,
-                "tracking_number": tns[0],
-                "tracking_numbers": tns,
-                "source_data": _receipt_details(row),
-                "receipt_upc": receipt_upc(row),
-                "bg_order_id": None,
-                "description": row.product_name,
-                "quantity": 1,
-                "received_price": str(row.amount) if row.amount is not None else None,
-                "received_ext_total": str(row.amount) if row.amount is not None else None,
-                "received_status": None,
-                "note": None,
-                "created_dt": row.timestamp,
-                "scanned_at": _iso_date(scanned_dt),
-                "delivery": None,
-            }
-        )
+        receipt = {
+            "receipt_id": row.system_transaction_id,
+            "tracking_number": tns[0],
+            "tracking_numbers": tns,
+            "source_data": _receipt_details(row),
+            "receipt_upc": receipt_upc(row),
+            "bg_order_id": None,
+            "description": row.product_name,
+            "quantity": 1,
+            "received_price": str(row.amount) if row.amount is not None else None,
+            "received_ext_total": str(row.amount) if row.amount is not None else None,
+            "received_status": None,
+            "note": None,
+            "created_dt": row.timestamp,
+            "scanned_at": _iso_date(scanned_dt),
+            "delivery": None,
+        }
+        if id(row) not in unapplied_row_ids or id(row) in matched_row_ids:
+            accounted_receipt_keys.add(receipt_key(receipt))
+        else:
+            unknown_receipts.append(receipt)
 
     discrepancy_count = sum(1 for m in matches if m.amount_discrepancy)
     received_count = _received_match_count(matches)
@@ -2490,7 +2513,7 @@ def _check_receiving_dealandrunner(
         parts.append(part)
     if unknown_receipts:
         parts.append(
-            f"{len(unknown_receipts)} D&R transaction(s) with tracking not in Order Manager"
+            f"{len(unknown_receipts)} unresolved D&R receiving transaction(s)"
         )
     if not matches and not unknown_receipts:
         bits = [checked_summary]
@@ -2519,6 +2542,7 @@ def _check_receiving_dealandrunner(
             "csv_row_count": len(receipts),
             "unmatched": [],
             "unknown_receipts": [],
+            "_accounted_dnr_receipt_keys": sorted(accounted_receipt_keys),
             "matches": [],
         }
         return CheckReceivingResult(
@@ -2559,6 +2583,7 @@ def _check_receiving_dealandrunner(
         "csv_row_count": len(receipts),
         "unmatched": unmatched,
         "unknown_receipts": unknown_receipts,
+        "_accounted_dnr_receipt_keys": sorted(accounted_receipt_keys),
         "matches": [match_to_dict(m) for m in matches],
     }
     return CheckReceivingResult(
