@@ -76,7 +76,7 @@ class ReceiptSource:
         return result
 
 
-def _reusable_buyinggroup_details(receipts, previous_snapshot, scanned_quantity):
+def _reusable_buyinggroup_details(receipts, previous_snapshot):
     if previous_snapshot is None:
         return {}
     previous = previous_snapshot.get("requests", {})
@@ -88,18 +88,13 @@ def _reusable_buyinggroup_details(receipts, previous_snapshot, scanned_quantity)
     key_counts = Counter(str(row.raw.get("key") or "") for row in receipts)
     prior_key_counts = Counter(str(row.raw.get("key") or "") for row in previous_receipts)
     prior_by_key = {str(row.raw.get("key") or ""): row for row in previous_receipts}
-    receipt_counts = Counter((row.receipt_id or "").strip().casefold() for row in receipts)
     reusable = {}
     for row in receipts:
         key = str(row.raw.get("key") or "")
-        receipt_id = (row.receipt_id or "").strip().casefold()
         revision = row.raw.get("modified_dt")
-        if (not key or not receipt_id or row.void or not row.quantity or row.quantity <= 0
+        if (not key or not (row.receipt_id or "").strip() or row.void or not row.quantity or row.quantity <= 0
                 or not isinstance(revision, str) or revision.strip().casefold() in ("", "---", "null", "none")
                 or key_counts[key] != 1 or prior_key_counts[key] != 1 or prior_by_key[key] != row):
-            continue
-        scanned = receipt_counts[receipt_id] == 1 and scanned_quantity.get(receipt_id, 0) >= row.quantity
-        if row.raw.get("paid") is not True and not scanned:
             continue
 
         request_key = "detail:" + key
@@ -132,8 +127,7 @@ def _buyinggroup_details_cover_receipt(details, row):
     return quantity == row.quantity
 
 
-def fetch_receipt_source(group, *, usabg_details=None, browser_token=None,
-                         buyinggroup_previous=None, buyinggroup_scanned_quantity=None):
+def fetch_receipt_source(group, *, usabg_details=None, browser_token=None, buyinggroup_previous=None):
     """Collect complete inputs before taking the short review-publication lock."""
     source = ReceiptSource()
     framework = (group.api_framework or "").strip().casefold()
@@ -164,9 +158,7 @@ def fetch_receipt_source(group, *, usabg_details=None, browser_token=None,
         if browser_token is not None:
             credentials["browser_token"] = browser_token
         receipts = source.request("rows", buyinggroup.list_receipts, **credentials)
-        reusable = _reusable_buyinggroup_details(
-            receipts, buyinggroup_previous, buyinggroup_scanned_quantity or {},
-        )
+        reusable = _reusable_buyinggroup_details(receipts, buyinggroup_previous)
         source.payload["requests"].update(reusable)
         try:
             source.request("returns", buyinggroup.list_returns, **credentials)

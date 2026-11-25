@@ -1856,19 +1856,11 @@ def _build_unmatched(
     return unmatched
 
 
-def _buyinggroup_detail_reuse_inputs(db: Session, group_id: int, identity: str) -> dict[str, Any]:
+def _buyinggroup_previous_snapshot(db: Session, group_id: int, identity: str) -> dict[str, Any] | None:
     cache = db.get(ReceivingReceiptCache, group_id)
     if cache is None or cache.provider_identity != identity:
-        return {}
-    scanned = Counter()
-    rows = (db.query(Item.receipt_id, Item.quantity).join(Order)
-            .filter(Order.buying_group_id == group_id, Order.status != "personal",
-                    Item.status.in_(_SCANNED_OR_LATER_STATUSES), Item.receipt_id.isnot(None)))
-    for receipt_id, qty in rows:
-        # A line with multiple receipts does not say how many units each receipt covered.
-        if "," not in receipt_id and ";" not in receipt_id:
-            scanned[receipt_id.strip().casefold()] += qty
-    return {"buyinggroup_previous": cache.payload, "buyinggroup_scanned_quantity": scanned}
+        return None
+    return cache.payload
 
 
 def check_receiving_for_group(
@@ -1902,7 +1894,7 @@ def check_receiving_for_group(
                 return CheckReceivingResult(buying_group_id, group_name, error=reason)
         try:
             browser_kwargs = {"browser_token": browser_access.token} if browser_access else {}
-            reuse_kwargs = _buyinggroup_detail_reuse_inputs(db, buying_group_id, identity) if framework == "buyinggroup" else {}
+            previous = _buyinggroup_previous_snapshot(db, buying_group_id, identity) if framework == "buyinggroup" else None
             source_group = group
             if browser_access and buyinggroup_api.has_resumable_browser_reads():
                 source_group = SimpleNamespace(api_framework=framework, base_url=group.base_url,
@@ -1911,7 +1903,7 @@ def check_receiving_for_group(
                 db.rollback()
             source = fetch_receipt_source(source_group, usabg_details=(
                 _load_usabg_po_detail_cache(db, buying_group_id) if framework == "usabg" else None),
-                **browser_kwargs, **reuse_kwargs)
+                buyinggroup_previous=previous, **browser_kwargs)
         except buyinggroup_api.RateLimited as exc:
             return CheckReceivingResult(buying_group_id, group_name, error=str(exc), retry_after=exc.retry_after)
         except buyinggroup_api.BrowserSessionExpired as exc:

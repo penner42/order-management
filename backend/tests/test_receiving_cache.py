@@ -329,7 +329,7 @@ class ReceivingCacheTests(unittest.TestCase):
         password_auth.assert_not_called()
         login.assert_not_called()
 
-    def test_buyinggroup_reuses_complete_scanned_and_paid_receipts_until_they_change(self):
+    def test_buyinggroup_reuses_complete_unchanged_receipts_regardless_of_status(self):
         self.group.api_framework = "buyinggroup"
         self.item.status = ItemStatus.SCANNED
         self.item.receipt_id = "R-scanned"
@@ -365,15 +365,16 @@ class ReceivingCacheTests(unittest.TestCase):
             get_details.reset_mock()
             check()
             self.assertCountEqual([call.kwargs["receipt_key"] for call in get_details.call_args_list],
-                                  ["open", "incomplete"])
+                                  ["incomplete"])
             saved = ReceiptSource(self.db.get(ReceivingReceiptCache, self.group.id).payload)
             self.assertEqual(saved.request("detail:scanned", None)["receipt_id"], "R-scanned")
             self.assertEqual(saved.request("detail:paid", None)["receipt_id"], "R-paid")
-            receipts[1] = replace(receipts[1], raw={**receipts[1].raw, "modified_dt": "2026-11-02T12:00:00Z"})
+            self.assertEqual(saved.request("detail:open", None)["receipt_id"], "R-open")
+            receipts[2] = replace(receipts[2], raw={**receipts[2].raw, "modified_dt": "2026-11-02T12:00:00Z"})
             get_details.reset_mock()
             check()
             self.assertCountEqual([call.kwargs["receipt_key"] for call in get_details.call_args_list],
-                                  ["paid", "open", "incomplete"])
+                                  ["open", "incomplete"])
             self.assertEqual(list_receipts.call_count, 3)
             self.assertEqual(list_returns.call_count, 3)
 
