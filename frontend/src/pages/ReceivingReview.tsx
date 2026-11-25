@@ -171,6 +171,10 @@ function ReceivingGroupSection({
   const [showExtra, setShowExtra] = useState(false)
   const [showCsv, setShowCsv] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
+  const receivingRemainders = useRef<{
+    session: ReceivingSession
+    lines: Map<number, { id: number; quantity: number }>
+  } | null>(null)
 
   useEffect(() => {
     onBusyChange(session.buying_group_id, applying || linkReceipt !== null)
@@ -246,6 +250,7 @@ function ReceivingGroupSection({
       receipt_upc?: string | null
       receiving_group_id?: number
       receiving_row_id?: string
+      receiving_allocation?: { quantity: number; expected_quantity: number }
     }> = []
     const appliedKeys: string[] = []
     const appliedItemIds: number[] = []
@@ -254,6 +259,9 @@ function ReceivingGroupSection({
     setApplyError(null)
     try {
       const liveItemId = new Map<number, number>()
+      const previousRemainders = receivingRemainders.current?.session === session
+        ? receivingRemainders.current.lines : new Map<number, { id: number; quantity: number }>()
+      const remainingQuantities = new Map<number, number>()
 
       for (const m of matches) {
         if (m.match_kind === 'not_received') continue
@@ -261,9 +269,13 @@ function ReceivingGroupSection({
         const edit = edits[key]
         if (!edit?.selected || appliedIds.has(key)) continue
 
-        let itemId = liveItemId.get(m.item_id) ?? m.item_id
+        const previous = previousRemainders.get(m.item_id)
+        const expectedQuantity = remainingQuantities.get(m.item_id) ?? previous?.quantity ?? m.original_quantity
+        const usesAllocation = !m.update_receipt_only && !m.manual_receipt_key &&
+          expectedQuantity != null && (remainingQuantities.has(m.item_id) || previous != null || m.quantity < expectedQuantity)
+        const itemId = previous?.id ?? liveItemId.get(m.item_id) ?? m.item_id
 
-        if (m.split_keep_quantity != null && m.split_keep_quantity > 0) {
+        if (!usesAllocation && m.split_keep_quantity != null && m.split_keep_quantity > 0) {
           const { split_off } = await api.post<{
             kept: { id: number }
             split_off: { id: number }
@@ -279,6 +291,10 @@ function ReceivingGroupSection({
         const entry: (typeof updates)[number] = {
           item_id: itemId,
           receipt_id: edit.receipt_id.trim() || null,
+        }
+        if (usesAllocation && expectedQuantity != null) {
+          entry.receiving_allocation = { quantity: m.quantity, expected_quantity: expectedQuantity }
+          remainingQuantities.set(m.item_id, expectedQuantity - m.quantity)
         }
         if (!m.update_receipt_only) {
           entry.status = 'scanned'
@@ -313,12 +329,15 @@ function ReceivingGroupSection({
 
       if (updates.length === 0) return
 
-      await api.post<{ items: unknown }>('/items/bulk-update', { updates })
-      // Prune backend pending snapshot; keep rows visible here as applied/inactive.
-      await api.post<{ deleted: boolean }>('/buying-groups/receiving-review/prune', {
-        buying_group_id: session.buying_group_id,
-        item_ids: [...new Set(appliedItemIds)],
-      })
+      const result = await api.post<{ receiving_remainder_ids?: Record<number, number> }>('/items/bulk-update', { updates })
+      const lines = new Map(previousRemainders)
+      for (const [originalId, quantity] of remainingQuantities) {
+        const sentId = previousRemainders.get(originalId)?.id ?? originalId
+        const id = result.receiving_remainder_ids?.[sentId]
+        if (id != null && quantity > 0) lines.set(originalId, { id, quantity })
+        else lines.delete(originalId)
+      }
+      receivingRemainders.current = { session, lines }
 
       setAppliedIds((prev) => {
         const next = new Set(prev)
@@ -332,6 +351,11 @@ function ReceivingGroupSection({
           }
         }
         return next
+      })
+      // Prune the saved suggestions after the item updates commit.
+      await api.post<{ deleted: boolean }>('/buying-groups/receiving-review/prune', {
+        buying_group_id: session.buying_group_id,
+        item_ids: [...new Set(appliedItemIds)],
       })
     } catch (e) {
       console.error(e)

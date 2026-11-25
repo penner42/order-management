@@ -317,6 +317,48 @@ class ReceivingCacheTests(unittest.TestCase):
             match, = self.check("dealandrunner").matches
         self.assertEqual((match.item_id, match.receipt_id, match.quantity), (remainder.id, "R3", 1))
 
+    def test_dealandrunner_matches_one_product_at_different_payouts(self):
+        self.shipment.tracking_number = "NEW"
+        self.item.description = "Dell DC15255 Laptop AMD Ryzen 5"
+        self.item.price_sold = Decimal("387.99")
+        self.item.quantity = 3
+        acer = Item(order_id=self.order.id, description="Acer Aspire Go 15 Intel Core 3",
+                    quantity=3, price_sold=Decimal("299.99"), status=ItemStatus.SHIPPED)
+        self.shipment.shipment_items.append(ShipmentItem(item=acer))
+        responses = self.responses()
+        rows = responses["dealandrunner"][2].rows
+        rows[0] = replace(rows[0], amount=Decimal("387.99"), product_name=self.item.description,
+                          raw={"referenceProductId": "dell-model"})
+        rows.extend([
+            replace(rows[0], amount=Decimal("411.06"), system_transaction_id="R2"),
+            replace(rows[0], amount=Decimal("411.06"), system_transaction_id="R3"),
+            replace(rows[0], amount=Decimal("500"), system_transaction_id="R4",
+                    raw={"referenceProductId": "different-dell-model"}),
+        ])
+        with patch.object(self, "responses", return_value=responses):
+            matches = self.check("dealandrunner").matches
+            session, = self.rematch()
+        self.assertEqual(session["matches"], [receiving.match_to_dict(m) for m in matches])
+        self.assertEqual(
+            [(m.item_id, m.quantity, m.receipt_id, m.received_ext_total, m.amount_discrepancy) for m in matches],
+            [(self.item.id, 1, "R1", Decimal("387.99"), False),
+             (self.item.id, 2, "R2, R3", Decimal("822.12"), True)],
+        )
+
+        # Either payout group can be applied first, with the other remaining matchable.
+        first = bulk_update_items(ItemBulkUpdateRequest(updates=[ItemBulkUpdateEntry(
+            item_id=self.item.id, status=ItemStatus.SCANNED, receipt_id=matches[1].receipt_id,
+            receipt_tracking_number="NEW", receiving_allocation={"quantity": 2, "expected_quantity": 3},
+        )]), db=self.db, _=None)
+        remainder_id = first.receiving_remainder_ids[self.item.id]
+        with patch.object(self, "responses", return_value=responses):
+            session, = self.rematch()
+        remainder, = [m for m in session["matches"] if not m["update_receipt_only"]]
+        self.assertEqual((remainder["item_id"], remainder["receipt_id"], remainder["quantity"]),
+                         (remainder_id, "R1", 1))
+        self.assertEqual(acer.quantity, 3)
+        self.assertEqual(acer.status, ItemStatus.SHIPPED)
+
     def test_cached_missing_details_never_fetches_on_replay(self):
         source = ReceiptSource()
         with self.assertRaises(ValueError):

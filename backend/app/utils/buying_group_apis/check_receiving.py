@@ -676,12 +676,15 @@ def _usabg_lot_merge_key(row: usabg_api.UsabgReceivedRow) -> tuple[str, str, str
 
 def _dnr_lot_merge_key(
     row: dealandrunner_api.DealandrunnerReceivedRow, tn: str
-) -> tuple[str, str, str, str | None]:
-    """Lot key for D&R: tracking + unit amount + product name (no SKU)."""
+) -> tuple[str, str, str, str | None, str]:
+    """Keep separate payouts and products in the D&R ledger."""
     tn_key = (tn or "").strip().casefold()
     price = str(_money(row.amount) if row.amount is not None else "")
-    name = (row.product_name or "").strip().casefold()[:120]
-    return (tn_key, price, name, receipt_upc(row))
+    name = (row.product_name or "").strip().casefold()
+    product_id = str(row.raw.get("referenceProductId") or row.raw.get("productId") or "").strip().casefold()
+    if product_id == "00000000-0000-0000-0000-000000000000":
+        product_id = ""
+    return (tn_key, price, name, receipt_upc(row), product_id)
 
 
 def _dnr_lots_from_receipts(
@@ -691,8 +694,7 @@ def _dnr_lots_from_receipts(
 
     Each API row is one warehouse unit (qty 1). Supply for a TN is the row count.
     """
-    merged: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
-    order: list[tuple[str, str, str, str | None]] = []
+    merged = {}
     for row in receipts:
         if row.entry_type_id != dealandrunner_api.RECEIVING_ENTRY_TYPE_ID:
             continue
@@ -705,9 +707,13 @@ def _dnr_lots_from_receipts(
         tn_key = primary.casefold()
         lot = merged.get(key)
         if lot is None:
+            _, _, name, upc, product_id = key
             lot = {
-                "lot_id": f"{tn_key}:{len(order)}",
+                "lot_id": f"{tn_key}:{len(merged)}",
                 "tn_key": tn_key,
+                "product_key": (
+                    tn_key, product_id, "" if product_id else name, upc
+                ) if product_id or name else None,
                 "display_tn": primary,
                 "alias_tns": [],
                 "qty": 0,
@@ -720,7 +726,6 @@ def _dnr_lots_from_receipts(
                 "scanned_at": None,
             }
             merged[key] = lot
-            order.append(key)
         lot["qty"] += 1
         if row.system_transaction_id:
             lot["receipt_ids"].append(row.system_transaction_id)
@@ -737,7 +742,7 @@ def _dnr_lots_from_receipts(
             lot["received_item"] = (row.product_name or "").strip() or None
         if lot["unit_price"] is None and row.amount is not None:
             lot["unit_price"] = _money(row.amount)
-    return [merged[k] for k in order]
+    return list(merged.values())
 
 
 def _usabg_lots_from_receipts(
@@ -899,9 +904,11 @@ def _assign_items_to_lots(
     *,
     claimants: list[tuple[Item, list[str]]],
     lots_by_tn: dict[str, list[dict[str, Any]]],
+    group_by_lot_id: dict[str, str] | None = None,
 ) -> dict[int, str]:
     """Map item_id → lot_id. Omits ambiguous or unscored items on multi-lot trackings."""
     assignment: dict[int, str] = {}
+    lot_groups = group_by_lot_id or {}
     for item, trackings in claimants:
         tn_keys = [tn.casefold() for tn in trackings if (tn or "").strip()]
         lots: list[dict[str, Any]] = []
@@ -929,11 +936,76 @@ def _assign_items_to_lots(
             continue
         ranked.sort(key=lambda pair: (pair[0][0], pair[0][1]), reverse=True)
         best_score, best_lot_id = ranked[0]
-        second_score = ranked[1][0] if len(ranked) > 1 else None
+        best_group = lot_groups.get(best_lot_id, best_lot_id)
+        second_score = next(
+            (score for score, lot_id in ranked[1:] if lot_groups.get(lot_id, lot_id) != best_group),
+            None,
+        )
         if _scores_ambiguous(best_score, second_score):
             continue
         assignment[item.id] = best_lot_id
     return assignment
+
+
+def _allocate_dnr_lots(
+    claimants: list[tuple[Item, list[str]]],
+    lots: list[dict[str, Any]],
+    lots_by_tn: dict[str, list[dict[str, Any]]],
+) -> dict[int, list[tuple[str, int]]]:
+    """Allocate preferred payouts first, then fill gaps from the same product."""
+    group_by_product = {}
+    group_by_lot_id = {}
+    lots_by_id = {lot["lot_id"]: lot for lot in lots}
+    for lot in lots:
+        product = lot["product_key"]
+        if product is not None:
+            group_by_lot_id[lot["lot_id"]] = group_by_product.setdefault(product, lot["lot_id"])
+
+    assignment = _assign_items_to_lots(
+        claimants=claimants, lots_by_tn=lots_by_tn, group_by_lot_id=group_by_lot_id,
+    )
+    supply = {lot["lot_id"]: int(lot["qty"]) for lot in lots}
+    allocated, detail = _allocate_received_across_shared_trackings(
+        item_demands=[(item.id, item.quantity or 1, [assignment[item.id]])
+                      for item, _ in claimants if item.id in assignment],
+        supply_by_tn=supply,
+    )
+    for pairs in detail.values():
+        for lot_id, qty in pairs:
+            supply[lot_id] -= qty
+
+    extra_demands = []
+    for item, trackings in claimants:
+        remaining = (item.quantity or 1) - allocated.get(item.id, 0)
+        preferred_id = assignment.get(item.id)
+        group = group_by_lot_id.get(preferred_id) if preferred_id else None
+        if remaining <= 0 or group is None:
+            continue
+        preferred = lots_by_id[preferred_id]
+        local_upc = _item_matching_upc(item)
+        lot_upc = preferred["receipt_upc"]
+        if local_upc and lot_upc:
+            same_product = local_upc == lot_upc
+        else:
+            same_product = _name_similarity(item.description, preferred["received_item"]) >= _LOT_NAME_ONLY_MIN
+        if not same_product:
+            continue
+        alternatives = list(dict.fromkeys(
+            lot["lot_id"]
+            for tn in trackings
+            for lot in lots_by_tn.get(tn.casefold(), [])
+            if lot["lot_id"] != preferred_id and group_by_lot_id.get(lot["lot_id"]) == group
+            and supply[lot["lot_id"]] > 0
+        ))
+        if alternatives:
+            extra_demands.append((item.id, remaining, alternatives))
+
+    _, extra_detail = _allocate_received_across_shared_trackings(
+        item_demands=extra_demands, supply_by_tn=supply,
+    )
+    for item_id, pairs in extra_detail.items():
+        detail[item_id].extend(pairs)
+    return detail
 
 
 def _received_match_count(matches: list[ReceivingMatch]) -> int:
@@ -2212,38 +2284,31 @@ def _check_receiving_dealandrunner(
         if has_hit:
             eligible.append((item, order, trackings))
 
-    lot_assignment = _assign_items_to_lots(
-        claimants=[(item, trackings) for item, _o, trackings in eligible],
-        lots_by_tn=available_by_tn,
-    )
-
-    supply_by_lot = {lot["lot_id"]: int(lot["qty"]) for lot in available_lots}
-    item_demands: list[tuple[int, int, list[str]]] = []
-    for item, _order, _trackings in eligible:
-        lot_id = lot_assignment.get(item.id)
-        if not lot_id:
-            continue
-        item_demands.append((item.id, item.quantity or 1, [lot_id]))
-
-    allocated, allocated_by_lot = _allocate_received_across_shared_trackings(
-        item_demands=item_demands,
-        supply_by_tn=supply_by_lot,
+    allocated_by_lot = _allocate_dnr_lots(
+        [(item, trackings) for item, _order, trackings in eligible],
+        available_lots,
+        available_by_tn,
     )
 
     matches: list[ReceivingMatch] = []
+    lots_used_qty: dict[str, int] = {}
     for item, order, trackings in eligible:
-        if item.id not in lot_assignment:
+        pairs = allocated_by_lot.get(item.id)
+        if not pairs:
             continue
-        got = int(allocated.get(item.id, 0))
-        if got <= 0:
-            continue
+        item_meta = {}
+        for lot_id, qty in pairs:
+            used = lots_used_qty.get(lot_id, 0)
+            meta = meta_by_lot[lot_id]
+            item_meta[lot_id] = {**meta, "receipt_ids": meta["receipt_ids"][used:used + qty]}
+            lots_used_qty[lot_id] = used + qty
         matches.extend(
             _matches_for_tn_allocations(
                 item=item,
                 order=order,
                 trackings=trackings,
-                tn_allocations=allocated_by_lot.get(item.id, []),
-                meta_by_tn=meta_by_lot,
+                tn_allocations=pairs,
+                meta_by_tn=item_meta,
             )
         )
 
@@ -2259,11 +2324,6 @@ def _check_receiving_dealandrunner(
         for tn in tns
         if (tn or "").strip()
     }
-    lots_used_qty: dict[str, int] = {}
-    for _item_id, pairs in allocated_by_lot.items():
-        for lot_id, qty in pairs:
-            lots_used_qty[lot_id] = lots_used_qty.get(lot_id, 0) + int(qty)
-
     unmatched_walmart: list[tuple[Item, Order, list[str]]] = []
     for item, order, trackings in pending:
         if _is_zero_payout(item):
@@ -2282,11 +2342,13 @@ def _check_receiving_dealandrunner(
         tn_key = lot["tn_key"]
         if tn_key in known_trackings or tn_key in pending_tn_keys:
             continue
-        remaining_qty = int(lot["qty"]) - int(lots_used_qty.get(lot["lot_id"], 0))
+        used = lots_used_qty.get(lot["lot_id"], 0)
+        remaining_qty = int(lot["qty"]) - used
         if remaining_qty <= 0:
             continue
         soft_lot = dict(lot)
         soft_lot["qty"] = remaining_qty
+        soft_lot["receipt_ids"] = lot["receipt_ids"][used:]
         soft_lot["source_tns"] = [tn_key]
         orphan_lots_for_soft.append(soft_lot)
 

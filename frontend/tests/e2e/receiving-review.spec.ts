@@ -189,6 +189,52 @@ test('partial BG receipt stores UPC on received unit and splits missing unit for
   expect(linked.shipment_items.map(link => link.item_id).sort()).toEqual(saved.items.map(i => i.id).sort())
 })
 
+test('applying the higher Dell payout first preserves the other receipt on the same tracking', async ({ app, data }) => {
+  const store = await data.create('/stores', { name: data.name('dnr-store') })
+  const groupName = data.name('dnr-group')
+  const group = await data.create('/buying-groups', { name: groupName })
+  const order = await data.create<{ id: number; items: Item[] }>('/orders', {
+    store_id: store.id, buying_group_id: group.id,
+    items: [{ description: 'Dell laptop', quantity: 3, status: 'shipped', price_sold: '387.99' }],
+  })
+  const item = order.items[0]
+  const tracking = data.name('dnr-tracking')
+  await data.create('/shipments', { tracking_number: tracking, item_ids: [item.id] })
+  const common = {
+    item_id: item.id, order_id: order.id, description: item.description,
+    tracking_number: tracking, price_sold: '387.99', original_quantity: 3,
+    match_kind: 'received', selected: true, scanned_at: '2026-11-24T12:00:00Z',
+  }
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: [{
+    buying_group_id: group.id, buying_group_name: groupName, unknown_receipts: [],
+    matches: [
+      { ...common, quantity: 1, split_keep_quantity: 1, row_id: 'original-payout',
+        receipt_id: 'R1', expected_amount: '387.99', received_ext_total: '387.99', amount_discrepancy: false },
+      { ...common, quantity: 2, row_id: 'higher-payout', receipt_id: 'R2, R3',
+        expected_amount: '775.98', received_ext_total: '822.12', amount_discrepancy: true },
+    ],
+  }] }))
+  await app.route('**/api/buying-groups/receiving-review/prune', route => route.fulfill({ json: { deleted: true } }))
+  await app.goto('/receiving-review')
+  const original = app.getByRole('checkbox', { name: 'Select item Dell laptop', exact: true }).first()
+  await original.uncheck()
+  await app.getByLabel('Use received', { exact: true }).check()
+  await app.getByRole('button', { name: 'Apply 1 selected', exact: true }).click()
+  await expect.poll(() => data.get<{ items: Item[] }>(`/orders/${order.id}`).then(saved =>
+    saved.items.find(i => i.id === item.id))).toMatchObject({
+    quantity: 2, status: 'scanned', receipt_id: 'R2, R3', price_sold: '411.06',
+  })
+  await original.check()
+  await app.getByRole('button', { name: 'Apply 1 selected', exact: true }).click()
+  await expect(app.getByText('All listed rows were applied.')).toBeVisible()
+  const saved = await data.get<{ items: Item[] }>(`/orders/${order.id}`)
+  expect(saved.items).toHaveLength(2)
+  expect(saved.items.find(i => i.id !== item.id)).toMatchObject({
+    quantity: 1, status: 'scanned', receipt_id: 'R1', price_sold: '387.99',
+    receipt_tracking_number: tracking,
+  })
+})
+
 test('applying receiving review separates a tracking reward included in an existing scan price', async ({ app, data }) => {
   const store = await data.create('/stores', { name: data.name('bonus-price-store') })
   const group = await data.create('/buying-groups', { name: data.name('bonus-price-group') })

@@ -112,6 +112,11 @@ class ItemSplitRequest(BaseModel):
     split_off_status: ItemStatus | None = None
 
 
+class ReceivingAllocation(BaseModel):
+    quantity: int = Field(gt=0)
+    expected_quantity: int = Field(gt=0)
+
+
 class ItemBulkUpdateEntry(BaseModel):
     """Single item update in a bulk request. delivered_at applies to the item's shipment."""
     item_id: int
@@ -145,6 +150,7 @@ class ItemBulkUpdateEntry(BaseModel):
     receiving_group_id: int | None = None
     receiving_row_id: str | None = None
     apply_tracking_reward_price_correction: bool = False
+    receiving_allocation: ReceivingAllocation | None = None
 
     @field_validator("price_sold", mode="before")
     @classmethod
@@ -162,6 +168,7 @@ class ItemBulkDeleteRequest(BaseModel):
 
 class ItemBulkUpdateResponse(BaseModel):
     items: list[ItemRead]
+    receiving_remainder_ids: dict[int, int] = Field(default_factory=dict)
 
 
 class ItemSplitResponse(BaseModel):

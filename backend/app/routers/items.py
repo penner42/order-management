@@ -95,21 +95,41 @@ def bulk_update_items(
     """Update multiple items in a single request. delivered_at in entry is applied to the item's shipment."""
     updated: list[Item] = []
     newly_submitted: list[Item] = []
+    receiving_remainders: dict[int, int | None] = {}
     validate_manual_link_batch(db, data.updates)
     for entry in data.updates:
+        allocation = entry.receiving_allocation
+        target_id = receiving_remainders.get(entry.item_id, entry.item_id) if allocation else entry.item_id
+        if target_id is None:
+            raise HTTPException(409, "The receiving allocations exceed the order line quantity.")
         query = (
             db.query(Item)
-            .filter(Item.id == entry.item_id)
+            .filter(Item.id == target_id)
             .options(
                 selectinload(Item.shipment_items).joinedload(ShipmentItem.shipment),
                 joinedload(Item.order).joinedload(Order.buying_group),
             )
         )
-        if entry.apply_tracking_reward_price_correction:
+        if entry.apply_tracking_reward_price_correction or allocation:
             query = query.populate_existing().with_for_update(of=Item)
         item = query.first()
         if not item:
             raise HTTPException(status_code=404, detail=f"Item {entry.item_id} not found")
+        if allocation:
+            if (entry.status != ItemStatus.SCANNED or "quantity" in entry.model_fields_set
+                    or entry.receiving_row_id or entry.receiving_group_id is not None):
+                raise HTTPException(400, "A receiving allocation requires a scan update.")
+            if (item.status not in (ItemStatus.SHIPPED, ItemStatus.SUBMITTED, ItemStatus.NEEDS_REVIEW)
+                    or item.quantity != allocation.expected_quantity or allocation.quantity > item.quantity):
+                raise HTTPException(409, "The order line changed. Refresh Receiving Review before applying.")
+            if allocation.quantity < item.quantity:
+                remainder = split_item_record(db, item, ItemSplitRequest(
+                    keep_quantity=allocation.quantity, copy_tracking=True,
+                    split_off_status=ItemStatus.NEEDS_REVIEW,
+                ))
+                receiving_remainders[entry.item_id] = remainder.id
+            else:
+                receiving_remainders[entry.item_id] = None
         if entry.apply_tracking_reward_price_correction:
             if entry.price_sold is None or entry.reward is None or entry.reward <= 0:
                 raise HTTPException(400, "A tracking reward correction requires a payout and a positive reward.")
@@ -121,7 +141,7 @@ def bulk_update_items(
         payload = entry.model_dump(
             exclude_unset=True,
             exclude={"item_id", "delivered_at", "warehouse_tracking", "receiving_group_id",
-                     "receiving_row_id", "apply_tracking_reward_price_correction"},
+                     "receiving_row_id", "apply_tracking_reward_price_correction", "receiving_allocation"},
         )
         if entry.receiving_row_id or entry.receiving_group_id is not None:
             payload = apply_manual_link(db, item, entry, payload)
@@ -154,7 +174,11 @@ def bulk_update_items(
     if newly_submitted:
         _log_manual_submitted_items(newly_submitted)
 
-    return ItemBulkUpdateResponse(items=updated)
+    return ItemBulkUpdateResponse(
+        items=updated,
+        receiving_remainder_ids={item_id: remainder_id for item_id, remainder_id in receiving_remainders.items()
+                                 if remainder_id is not None},
+    )
 
 
 def _log_manual_submitted_items(items: list[Item]) -> None:
