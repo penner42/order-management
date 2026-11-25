@@ -45,10 +45,8 @@ _UNDEFINED = "undefined"
 _MAX_LIST_PAGES = 100
 _DEFAULT_PAGE_SIZE = 50
 
-# Match dealsbot's working BuyingGroup client (WAF rejects non-browser UAs).
 _BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 )
 _SITE_ORIGIN = "https://buyinggroup.com"
 
