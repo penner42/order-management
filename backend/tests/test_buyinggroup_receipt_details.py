@@ -87,6 +87,7 @@ class ReceiptDetailsTests(unittest.TestCase):
             "quantity": 2, "total": "199.00", "status": "Partially Verified",
         })
         with (patch.object(api, "list_receipts", return_value=[receipt]),
+              patch.object(api, "list_returns", return_value=[]),
               patch.object(api, "list_tracking_rewards", return_value={"track": Decimal(reward)}),
               patch.object(api, "get_receipt_details", return_value={"receipt_id": "R1", "received_items": lines},
                            side_effect=error) as fetch):

@@ -53,6 +53,7 @@ class BuyingGroupRewardTests(unittest.TestCase):
         if rewards is None:
             rewards = {api.tracking_reward_key(receipt.tracking_id): Decimal("6.00")}
         with (patch.object(api, "list_receipts", return_value=[receipt, *extra_receipts]),
+              patch.object(api, "list_returns", return_value=[]),
               patch.object(api, "get_receipt_details", side_effect=details),
               patch.object(api, "list_tracking_rewards", return_value=rewards, side_effect=reward_error),
               patch.object(api, "list_receipt_analytics", return_value=[])):

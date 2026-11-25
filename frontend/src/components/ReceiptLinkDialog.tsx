@@ -32,10 +32,11 @@ interface Candidate {
   tracking_numbers: (string | null)[]
 }
 
-export default function ReceiptLinkDialog<T>({ receipts, groupId, damagedWarehouseId, onLinked, onClose }: {
+export default function ReceiptLinkDialog<T>({ receipts, groupId, damagedWarehouseId, buyingGroupReturn, onLinked, onClose }: {
   receipts: Receipt[]
   groupId: number
   damagedWarehouseId?: string
+  buyingGroupReturn?: boolean
   onLinked: (session: T) => void
   onClose: () => void
 }) {
@@ -122,12 +123,15 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, damagedWarehou
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
       <div role="dialog" aria-modal="true" aria-labelledby="receipt-link-title" className="bg-white dark:bg-gray-800 text-ink dark:text-gray-100 rounded-xl shadow-xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto">
         <h2 id="receipt-link-title" className="text-lg font-semibold mb-2">{matchingDamage
-          ? 'Match damaged item' : multiple ? 'Link receipts to one order line' : 'Link receipt to order items'}</h2>
-        <p className="text-sm mb-3">{matchingDamage ? (receipt.description || 'Damaged warehouse item') : multiple
+          ? (buyingGroupReturn ? 'Match return' : 'Match damaged item') : multiple ? 'Link receipts to one order line' : 'Link receipt to order items'}</h2>
+        <p className="text-sm mb-3">{matchingDamage ? (receipt.description || (buyingGroupReturn ? 'Warehouse return' : 'Damaged warehouse item')) : multiple
           ? `${receipts.length} receipts · ${quantity ?? 'Unknown quantity'} units · Received total ${money(receivedTotal)}`
           : `Receipt ${receipt.receipt_id || '—'} · ${quantity ?? 'Unknown quantity'} × ${receipt.description || 'Item'}`}</p>
         {matchingDamage ? (
-          <p className="mb-4 text-sm">Warehouse tracking <span className="font-mono">{trackingOptions.join(', ') || '—'}</span></p>
+          <div className="mb-4 text-sm">
+            <p>Warehouse tracking <span className="font-mono">{trackingOptions.join(', ') || '—'}</span></p>
+            {receipt.receipt_id && <p>Receipt <span className="font-mono">{receipt.receipt_id}</span></p>}
+          </div>
         ) : <label className="block text-sm mb-4">Receipt tracking number
           <select className={inputClass} value={tracking} onChange={e => setTracking(e.target.value)} disabled={saving}>
             {trackingOptions.map(tn => <option key={tn}>{tn}</option>)}
@@ -136,7 +140,7 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, damagedWarehou
         {multiple && !trackingOptions.length && <p role="alert" className="text-sm text-red-600 mb-3">Select receipts that share a tracking number.</p>}
         {multiple && quantity == null && <p role="alert" className="text-sm text-red-600 mb-3">Each selected receipt needs a known quantity.</p>}
         <label className="block text-sm mb-3">{matchingDamage
-          ? 'Search order number, description, or tracking' : 'Search order number, description, or receipt ID'}
+          ? 'Search order number, description, receipt ID, or tracking' : 'Search order number, description, or receipt ID'}
           <input autoFocus className={inputClass} value={search} disabled={saving} onChange={e => { setSearch(e.target.value); setPage(1) }} />
         </label>
         {!matchingDamage && <><label className="flex items-center gap-2 text-sm mb-3">
@@ -189,6 +193,8 @@ export default function ReceiptLinkDialog<T>({ receipts, groupId, damagedWarehou
                 {matchingDamage && item.tracking_numbers.some(tn => tn && trackingOptions.some(
                   option => option.toLowerCase() === tn.trim().toLowerCase()
                 )) && <span className="block text-xs text-brand-600">Tracking match</span>}
+                {buyingGroupReturn && receipt.receipt_id && item.receipt_id?.toLowerCase() === receipt.receipt_id.toLowerCase() &&
+                  <span className="block text-xs text-brand-600">Receipt match</span>}
                 <span className="block text-xs">Receipt: {item.receipt_id || '—'} · Receipt tracking: {item.receipt_tracking_number || '—'}</span>
                 {!matchingDamage && conflict(item) && <span className="block text-xs text-amber-700">Already has a different receipt.</span>}
                 {!matchingDamage && !multiple && quantity != null && item.quantity > quantity - selectedQuantity && !selected.some(i => i.item_id === item.item_id) &&

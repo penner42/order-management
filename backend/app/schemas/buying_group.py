@@ -257,6 +257,8 @@ class ReceivingDamagedItem(BaseModel):
     tracking_numbers: list[str] = Field(default_factory=list)
     received_at: str | None = None
     note: str | None = None
+    source_reference: str | None = None
+    source_status: str | None = None
 
 
 class ReceivingDamageMatchRequest(BaseModel):
@@ -280,6 +282,7 @@ class ReceivingReviewSession(BaseModel):
     unknown_receipts: list[ReceivingReviewUnknownReceipt] = []
     damaged_items: list[ReceivingDamagedItem] | None = None
     damaged_items_error: bool = False
+    buyinggroup_returns: bool = False
     matches: list[ReceivingReviewMatch] = []
 
 

@@ -18,7 +18,7 @@ from app.database import Base
 from app.config import settings
 from app.models import BuyingGroup, Item, Order, ReceivingReceiptCache, ReceivingReviewPending, Shipment, ShipmentItem, Store
 from app.models.item import ItemStatus
-from app.routers.buying_groups import has_pending_receiving_matches
+from app.routers.buying_groups import check_buying_group_receiving, has_pending_receiving_matches
 from app.routers.items import bulk_update_items
 from app.schemas.item import ItemBulkUpdateEntry, ItemBulkUpdateRequest, ItemSplitRequest
 from app.utils.buying_group_apis import check_receiving as receiving
@@ -80,13 +80,14 @@ class ReceivingCacheTests(unittest.TestCase):
             "usabg": (usabg, "list_received_po_rows", usabg.UsabgReceivedListResult([us] * count, 1, 1)),
         }
 
-    def check(self, provider, *, count=1, error=None, details=None, damaged=None):
+    def check(self, provider, *, count=1, error=None, details=None, damaged=None, returns=None):
         self.group.api_framework = provider
         self.db.commit()
         module, method, value = self.responses(count=count)[provider]
         with ExitStack() as stack:
             stack.enter_context(patch.object(module, method, return_value=value, side_effect=error))
             stack.enter_context(patch.object(dealandrunner, "list_damaged_items", return_value=damaged or []))
+            stack.enter_context(patch.object(buyinggroup, "list_returns", return_value=returns or []))
             stack.enter_context(patch.object(buyinggroup, "list_tracking_rewards", return_value={"new": Decimal("1.23")}))
             stack.enter_context(patch.object(buyinggroup, "get_receipt_details", side_effect=details,
                 return_value={"receipt_id": "R1", "received_items": [
@@ -100,7 +101,7 @@ class ReceivingCacheTests(unittest.TestCase):
         with ExitStack() as stack:
             for module, method, _ in self.responses().values():
                 stack.enter_context(patch.object(module, method, side_effect=AssertionError("Network forbidden")))
-            for method in ("list_tracking_rewards", "get_receipt_details"):
+            for method in ("list_tracking_rewards", "get_receipt_details", "list_returns"):
                 stack.enter_context(patch.object(buyinggroup, method, side_effect=AssertionError("Network forbidden")))
             stack.enter_context(patch.object(dealandrunner, "list_damaged_items", side_effect=AssertionError("Network forbidden")))
             return receiving.list_receiving_review_pending_payloads(self.db)
@@ -120,8 +121,8 @@ class ReceivingCacheTests(unittest.TestCase):
         body = ReceivingDamageMatchRequest(buying_group_id=group_id, warehouse_id="DAMAGED-1",
                                            item_id=self.item.id, expected_quantity=2)
         with patch.object(dealandrunner, "list_damaged_items", side_effect=AssertionError("Network forbidden")):
-            result = receiving.match_dnr_damaged_item(self.db, body)
-        returned = self.db.query(Item).filter_by(dnr_damaged_warehouse_id="DAMAGED-1").one()
+            result = receiving.match_receiving_return(self.db, body)
+        returned = self.db.query(Item).filter_by(receiving_return_id="DAMAGED-1").one()
         self.assertEqual((returned.status, returned.quantity), (ItemStatus.NEEDS_RETURN, 1))
         self.assertIsNotNone(returned.needs_return_at)
         self.assertIsNone(returned.receipt_id)
@@ -131,8 +132,100 @@ class ReceivingCacheTests(unittest.TestCase):
         self.assertEqual([(m["item_id"], m["receipt_id"]) for m in result["matches"]], [(self.item.id, "R1")])
         self.assertEqual(self.rematch()[0]["damaged_items"], [])
         with self.assertRaises(HTTPException) as repeated:
-            receiving.match_dnr_damaged_item(self.db, body)
+            receiving.match_receiving_return(self.db, body)
         self.assertEqual(repeated.exception.status_code, 409)
+
+    def test_buyinggroup_return_review_without_receipts(self):
+        self.item.quantity = 2
+        _, _, tasks = buyinggroup._parse_return_page({"status": "SUCCESS", "payload": {"pages": 1, "count": 3, "tasks": [
+            {"key": "open", "task_status": "READY", "item": {"item_id": "Headphones"},
+             "receipt": {"receipt_id": "R-10", "tracking_id": "OLD"}},
+            {"key": "sent", "task_status": "SENT"},
+            {"key": "void", "task_status": "LABEL", "void": True},
+        ]}})
+        returns = [task for task in tasks.values() if task is not None]
+        self.assertEqual(len(returns), 1)
+        self.check("buyinggroup", count=0, returns=returns)
+        session = self.rematch()[0]
+        self.assertTrue(session["buyinggroup_returns"])
+        self.assertEqual(session["damaged_items"][0]["source_reference"], "R-10")
+        body = ReceivingDamageMatchRequest(buying_group_id=self.group.id, warehouse_id="buyinggroup:open",
+                                           item_id=self.item.id, expected_quantity=2)
+        result = receiving.match_receiving_return(self.db, body)
+        self.assertEqual(result["damaged_items"], [])
+        matched = self.db.query(Item).filter_by(receiving_return_id="buyinggroup:open").one()
+        self.assertEqual((matched.status, matched.quantity), (ItemStatus.NEEDS_RETURN, 1))
+        self.assertEqual((self.item.status, self.item.quantity), (ItemStatus.SUBMITTED, 1))
+        self.check("buyinggroup", count=0, returns=returns)
+        self.assertEqual(self.rematch(), [])
+
+    def test_buyinggroup_return_review_survives_receipt_rematch(self):
+        returns = [{"warehouse_id": "buyinggroup:open", "description": "Headphones", "tracking_numbers": ["OLD"]}]
+        self.check("buyinggroup", returns=returns)
+        self.assertEqual(self.rematch()[0]["damaged_items"], returns)
+        self.check("buyinggroup")
+        self.assertEqual(self.rematch()[0]["damaged_items"], [])
+
+    def test_buyinggroup_rate_limit_preserves_cached_review_and_returns_retry_after(self):
+        self.check("buyinggroup")
+        cached = self.db.get(ReceivingReceiptCache, self.group.id).payload
+        receipts = self.responses()["buyinggroup"][2]
+        with (
+            patch.object(buyinggroup, "list_receipts", return_value=receipts),
+            patch.object(buyinggroup, "list_returns", side_effect=buyinggroup.RateLimited(42)),
+            patch.object(buyinggroup, "list_tracking_rewards") as rewards,
+            patch("app.routers.buying_groups.write_group_tracking_log"),
+            self.assertRaises(HTTPException) as result,
+        ):
+            check_buying_group_receiving(self.group.id, db=self.db, _=None)
+        self.assertEqual(result.exception.status_code, 429)
+        self.assertEqual(result.exception.headers["Retry-After"], "42")
+        rewards.assert_not_called()
+        self.assertEqual(self.db.get(ReceivingReceiptCache, self.group.id).payload, cached)
+        self.assertTrue(self.rematch())
+
+    def test_buyinggroup_http_429_prevents_another_request_during_retry_window(self):
+        origin = "https://rate-limit.example.com"
+        with (
+            patch.dict(buyinggroup._rate_limited_until, clear=True),
+            patch.object(buyinggroup.time, "monotonic", return_value=100) as clock,
+            patch.object(buyinggroup.http.client, "HTTPSConnection") as connection,
+            patch.object(buyinggroup, "_log_failed_response"),
+        ):
+            response = connection.return_value.getresponse.return_value
+            response.status = 429
+            response.getheader.return_value = "45"
+            with self.assertRaises(buyinggroup.RateLimited) as limited:
+                buyinggroup._json_request(url=origin + buyinggroup.TOKEN_GET_PATH, payload={})
+            self.assertEqual(limited.exception.retry_after, 45)
+            clock.return_value = 110
+            with self.assertRaises(buyinggroup.RateLimited) as cooldown:
+                buyinggroup._json_request(url=origin + buyinggroup.GET_RECEIPTS_PATH, payload={})
+            self.assertEqual(cooldown.exception.retry_after, 35)
+            connection.assert_called_once()
+            response.read.assert_not_called()
+            clock.return_value = 145
+            response.status = 200
+            response.read.return_value = b'{}'
+            buyinggroup._json_request(url=origin + buyinggroup.TOKEN_GET_PATH, payload={})
+            self.assertEqual(connection.call_count, 2)
+
+    def test_buyinggroup_refresh_rate_limit_keeps_refresh_token_for_next_check(self):
+        credentials = dict(base_url="https://refresh.example.com", username="test",
+                           password="test", timeout_seconds=30)
+        key = buyinggroup._cache_key(credentials["base_url"], credentials["username"], credentials["password"])
+        stale = buyinggroup._AuthTokens("old-access", "old-refresh")
+        fresh = buyinggroup._AuthTokens("new-access", "new-refresh")
+        with (
+            patch.dict(buyinggroup._token_cache, {key: stale}),
+            patch.object(buyinggroup, "refresh_access_token", side_effect=[buyinggroup.RateLimited(42), fresh]),
+            patch.object(buyinggroup, "login") as login,
+        ):
+            with self.assertRaises(buyinggroup.RateLimited):
+                buyinggroup._reauth_tokens(**credentials, stale=stale)
+            self.assertEqual(buyinggroup._ensure_tokens(**credentials), stale)
+            self.assertEqual(buyinggroup._reauth_tokens(**credentials, stale=stale), fresh)
+            login.assert_not_called()
 
     def test_all_providers_rematch_local_tracking_and_price_without_network(self):
         for provider in self.responses():

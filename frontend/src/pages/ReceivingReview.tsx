@@ -75,6 +75,8 @@ interface ReceivingDamagedItem {
   tracking_numbers: string[]
   received_at: string | null
   note: string | null
+  source_reference?: string | null
+  source_status?: string | null
 }
 
 interface ReceivingSession {
@@ -91,6 +93,7 @@ interface ReceivingSession {
   unknown_receipts?: ReceivingUnknownReceipt[]
   damaged_items?: ReceivingDamagedItem[] | null
   damaged_items_error?: boolean
+  buyinggroup_returns?: boolean
   matches: ReceivingMatch[]
 }
 
@@ -384,6 +387,7 @@ function ReceivingGroupSection({
   const unmatched = session.unmatched ?? []
   const unknownReceipts = session.unknown_receipts ?? []
   const damagedItems = session.damaged_items ?? []
+  const buyingGroupReturns = session.buyinggroup_returns === true
   const selectedReceipts = unknownReceipts.filter(receipt => receipt.receipt_key &&
     selectedReceiptKeys.has(receipt.receipt_key) && receipt.linkable !== false)
 
@@ -406,7 +410,7 @@ function ReceivingGroupSection({
             <span className="ml-2 text-sm font-normal text-ink-muted">
               ({remainingToApply} to apply
               {unknownReceipts.length > 0 ? ` · ${unknownReceipts.length} unknown receipts to review` : ''}
-              {damagedItems.length > 0 ? ` · ${damagedItems.length} damaged` : ''}
+              {damagedItems.length > 0 ? ` · ${damagedItems.length} ${buyingGroupReturns ? 'returns' : 'damaged'}` : ''}
               {appliedCount > 0 ? ` · ${appliedCount} applied` : ''})
             </span>
           </button>
@@ -439,8 +443,9 @@ function ReceivingGroupSection({
       {matchingDamage && <ReceiptLinkDialog<ReceivingSession>
         groupId={session.buying_group_id}
         damagedWarehouseId={matchingDamage.warehouse_id}
+        buyingGroupReturn={buyingGroupReturns}
         receipts={[{
-          receipt_id: null,
+          receipt_id: matchingDamage.source_reference ?? null,
           tracking_number: matchingDamage.tracking_numbers[0] ?? '',
           tracking_numbers: matchingDamage.tracking_numbers,
           description: matchingDamage.description,
@@ -453,27 +458,29 @@ function ReceivingGroupSection({
         <div className="p-4">
           {applyError && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{applyError}</p>}
           {damageApplied && <p role="status" className="mb-3 text-sm text-emerald-700 dark:text-emerald-400">
-            Damaged unit marked Needs return.
+            {buyingGroupReturns ? 'Unit marked Needs return.' : 'Damaged unit marked Needs return.'}
           </p>}
           {(damagedItems.length > 0 || session.damaged_items_error) && (
             <div className="mb-4 rounded-xl border border-brand-200/80 p-4 dark:border-gray-700">
-              <h2 className="font-medium text-ink">Damaged warehouse items</h2>
+              <h2 className="font-medium text-ink">{buyingGroupReturns ? 'Warehouse returns' : 'Damaged warehouse items'}</h2>
               {session.damaged_items_error && <p role="status" className="mt-2 text-sm text-amber-700 dark:text-amber-400">
-                Could not load damaged items. Run Check receiving for this buying group to try again.
+                Could not load {buyingGroupReturns ? 'BuyingGroup.com returns' : 'damaged items'}. Run Check receiving for this buying group to try again.
               </p>}
               {damagedItems.length > 0 && (
                 <ul className="mt-2 divide-y divide-brand-100 dark:divide-gray-700">
                   {damagedItems.map(item => (
                     <li key={item.warehouse_id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
                       <div>
-                        <p className="font-medium text-ink">{item.description || 'Damaged item'}</p>
+                        <p className="font-medium text-ink">{item.description || (buyingGroupReturns ? 'Return item' : 'Damaged item')}</p>
+                        {item.source_reference && <p className="font-mono text-xs text-ink-muted">Receipt {item.source_reference}</p>}
+                        {item.source_status && <p className="text-xs text-ink-muted">{item.source_status}</p>}
                         {!!item.tracking_numbers.length && <p className="font-mono text-xs text-ink-muted">{item.tracking_numbers.join(', ')}</p>}
-                        {item.received_at && <p className="text-xs text-ink-muted">Warehouse date {toYyyyMmDd(item.received_at)}</p>}
+                        {item.received_at && <p className="text-xs text-ink-muted">{buyingGroupReturns ? 'Created' : 'Warehouse date'} {toYyyyMmDd(item.received_at)}</p>}
                         {item.note && <p className="text-xs text-ink-muted">{item.note}</p>}
                       </div>
                       <button type="button" disabled={applying} onClick={() => { setDamageApplied(false); setMatchingDamage(item) }}
                         className="rounded-md border border-brand-200 px-3 py-1.5 text-brand-600 hover:bg-brand-50 disabled:opacity-50 dark:border-gray-600 dark:text-brand-400 dark:hover:bg-gray-700">
-                        Match damaged item
+                        {buyingGroupReturns ? 'Match return' : 'Match damaged item'}
                       </button>
                     </li>
                   ))}

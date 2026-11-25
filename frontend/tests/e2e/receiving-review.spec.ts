@@ -1,6 +1,42 @@
 import { test, expect } from './fixtures'
 import type { Item } from '../../src/api/types'
 
+test('Check receiving loads BuyingGroup.com returns and can mark an item Needs return', async ({ app, data }) => {
+  const groupName = data.name('buyinggroup-returns')
+  const group = await data.create('/buying-groups', {
+    name: groupName, api_framework: 'buyinggroup', api_username: 'test', api_password: 'test',
+    payment_sync_enabled: false,
+  })
+  const returned = { warehouse_id: 'buyinggroup:task-1', description: 'Headphones',
+    tracking_numbers: ['BG-TRACK'], source_reference: 'R-901', source_status: 'Ready' }
+  const session = { buying_group_id: group.id, buying_group_name: groupName, buyinggroup_returns: true,
+    matches: [], damaged_items: [returned] }
+  let checked = false
+  await app.route(`**/api/buying-groups/${group.id}/check-receiving`, route => {
+    checked = true
+    return route.fulfill({ json: { review_path: `/receiving-review?highlight=${group.id}` } })
+  })
+  await app.route('**/api/buying-groups/receiving-review', route => route.fulfill({ json: checked ? [session] : [] }))
+  await app.route('**/api/buying-groups/receiving-review/candidates?*', route => route.fulfill({ json: { total: 1, items: [{
+    item_id: 7, order_id: 8, buying_group_id: group.id, store_order_number: 'BG-ORDER', receipt_id: 'R-901',
+    quantity: 1, status: 'scanned', price_sold: '20.00', expected_amount: '20.00', tracking_numbers: ['BG-TRACK'],
+  }] } }))
+  await app.route('**/api/buying-groups/receiving-review/match-damage', route => {
+    expect(route.request().postDataJSON()).toEqual({
+      buying_group_id: group.id, warehouse_id: returned.warehouse_id, item_id: 7, expected_quantity: 1,
+    })
+    return route.fulfill({ json: { ...session, damaged_items: [] } })
+  })
+  await app.goto('/settings/buying-groups')
+  await app.getByRole('listitem').filter({ hasText: groupName }).getByRole('button', { name: 'Check receiving' }).click()
+  await app.getByRole('button', { name: 'Match return' }).click()
+  const dialog = app.getByRole('dialog', { name: 'Match return' })
+  await expect(dialog.getByText('Receipt match')).toBeVisible()
+  await dialog.getByRole('radio', { name: /BG-ORDER/ }).check()
+  await dialog.getByRole('button', { name: 'Mark Needs return' }).click()
+  await expect(app.getByText('Unit marked Needs return.', { exact: true })).toBeVisible()
+})
+
 test('matches one damaged D&R unit from Receiving', async ({ app }) => {
   const tracking = 'DAMAGED-TRACKING'
   const damage = { warehouse_id: 'WH-DAMAGE-1', description: 'Headphones', tracking_numbers: [tracking] }

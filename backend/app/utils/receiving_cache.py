@@ -104,22 +104,34 @@ def fetch_receipt_source(group, *, usabg_details=None):
     elif framework == "buyinggroup":
         credentials = {"base_url": base_url, "username": username, "password": password}
         receipts = source.request("rows", buyinggroup.list_receipts, **credentials)
+        try:
+            source.request("returns", buyinggroup.list_returns, **credentials)
+        except buyinggroup.RateLimited:
+            raise
+        except Exception:
+            pass  # Receipt review remains available if only the Returns list fails.
         if receipts:
             try:
                 source.request("rewards", buyinggroup.list_tracking_rewards, **credentials)
+            except buyinggroup.RateLimited:
+                raise
             except Exception:
                 pass  # Optional rewards never prevent receipt review.
 
-        def details(receipt):
-            key = str(receipt.raw.get("key") or "")
+        def details(key):
             try:
                 source.request("detail:" + key, buyinggroup.get_receipt_details,
                                receipt_key=key, **credentials)
+            except buyinggroup.RateLimited:
+                raise
             except Exception:
                 pass  # Matching retains unavailable details as unresolved receipts.
 
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            list(pool.map(details, (r for r in receipts if not r.void and (r.quantity or 0) > 0)))
+        keys = list(dict.fromkeys(str(r.raw.get("key") or "") for r in receipts
+                                  if not r.void and (r.quantity or 0) > 0))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for start in range(0, len(keys), 2):
+                list(pool.map(details, keys[start:start + 2]))
     else:
         raise ValueError("Unsupported receiving provider")
     return source

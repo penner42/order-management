@@ -109,7 +109,7 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int, include_
         include_received = True
         query = query.filter(
             Item.status.in_(DAMAGE_MATCH_STATUSES),
-            Item.dnr_damaged_warehouse_id.is_(None),
+            Item.receiving_return_id.is_(None),
             ~Item.payment_line_items.any(),
             Order.status != "personal",
             or_(Item.quantity == 1,
@@ -138,12 +138,18 @@ def candidate_lines(db: Session, group_id: int, search: str, page: int, include_
     suggestions = []
     if damage:
         trackings = {tn.strip().casefold() for tn in damage["tracking_numbers"]}
+        receipt_id = damage.get("source_reference")
+        priorities = []
+        if receipt_id:
+            priorities.append((func.lower(func.trim(Item.receipt_id)) == receipt_id.casefold(), 0))
         if trackings:
             tracking_items = db.query(ShipmentItem.item_id).join(Shipment).filter(
                 func.lower(func.trim(Shipment.tracking_number)).in_(trackings))
             tracking_match = or_(Item.id.in_(tracking_items),
                                  func.lower(func.trim(Item.receipt_tracking_number)).in_(trackings))
-            query = query.order_by(case((tracking_match, 0), else_=1))
+            priorities.append((tracking_match, 1))
+        if priorities:
+            query = query.order_by(case(*priorities, else_=2))
     elif receipt_key_value:
         row = db.get(ReceivingReviewPending, group_id)
         receipt = next((r for r in (row.payload.get("unknown_receipts", []) if row else [])
@@ -195,12 +201,12 @@ def _pending_damage(row: ReceivingReviewPending | None, warehouse_id: str) -> di
     for damage in (row.payload.get("damaged_items") or []) if row else []:
         if damage["warehouse_id"] == warehouse_id:
             return damage
-    raise HTTPException(409, "Damaged inventory changed. Refresh Receiving and select the item again.")
+    raise HTTPException(409, "The warehouse returns changed. Refresh Receiving and select the item again.")
 
 
 def apply_damage_match(db: Session, row: ReceivingReviewPending, body: ReceivingDamageMatchRequest) -> None:
     _pending_damage(row, body.warehouse_id)
-    if db.query(Item.id).filter_by(dnr_damaged_warehouse_id=body.warehouse_id).first():
+    if db.query(Item.id).filter_by(receiving_return_id=body.warehouse_id).first():
         raise HTTPException(409, "This warehouse unit already has a return match.")
     item = (db.query(Item).join(Order).filter(
         Item.id == body.item_id, Order.buying_group_id == body.buying_group_id,
@@ -208,12 +214,12 @@ def apply_damage_match(db: Session, row: ReceivingReviewPending, body: Receiving
     ).with_for_update(of=Item).first())
     if item is None:
         raise HTTPException(404, "Order line not found in this buying group.")
-    if (item.quantity != body.expected_quantity or item.dnr_damaged_warehouse_id
+    if (item.quantity != body.expected_quantity or item.receiving_return_id
             or item.status not in DAMAGE_MATCH_STATUSES or item.payment_line_items):
         raise HTTPException(409, "The order line changed or is ineligible for a return match. Refresh Receiving.")
     if any(m.get("item_id") == item.id and m.get("manual_receipt")
            for m in row.payload.get("matches", [])):
-        raise HTTPException(409, "Apply or unlink the pending manual receipt before matching damage.")
+        raise HTTPException(409, "Apply or unlink the pending manual receipt before matching this return.")
     if item.quantity > 1:
         if (item.receipt_id or "").strip() or (item.receipt_tracking_number or "").strip() or item.reward:
             raise HTTPException(409, "Resolve the receipt or reward on Orders before splitting this line.")
@@ -222,7 +228,7 @@ def apply_damage_match(db: Session, row: ReceivingReviewPending, body: Receiving
         ))
     item.status = ItemStatus.NEEDS_RETURN
     item.needs_return_at = to_date_only(datetime.now(timezone.utc))
-    item.dnr_damaged_warehouse_id = body.warehouse_id
+    item.receiving_return_id = body.warehouse_id
 
 
 def _check_receipt(item: Item, rid: str | None) -> None:

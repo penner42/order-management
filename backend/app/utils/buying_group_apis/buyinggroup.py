@@ -15,12 +15,14 @@ import hashlib
 import http.client
 import json
 import logging
+import math
 import ssl
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, TypeVar
 from urllib.parse import urlparse
 
@@ -34,6 +36,8 @@ GET_ORDERS_PATH = "/v1/order/get_orders"
 UPDATE_ORDER_PATH = "/v1/order/update_order"
 GET_RECEIPTS_PATH = "/v1/receipt/get_receipts"
 GET_RECEIPT_DETAILS_PATH = "/v1/receipt/get_details"
+GET_RETURNS_PATH = "/v1/task/get_tasks"
+_OPEN_RETURN_STATUSES = {"READY": "Ready", "LABEL": "Label", "TICKET": "Support"}
 GET_ANALYTICS_PATH = "/v1/receipt/get_analytics"
 
 # Browser FormData sends the literal string for empty filters.
@@ -54,6 +58,10 @@ _T = TypeVar("_T")
 # Reused across submits; refreshed or replaced only on auth failure.
 _token_cache: dict[tuple[str, str, str], "_AuthTokens"] = {}
 _token_lock = threading.Lock()
+_auth_locks: dict[tuple[str, str, str], threading.Lock] = {}
+_rate_limit_lock = threading.Lock()
+_rate_limited_until: dict[tuple[str, str, int], float] = {}
+_DEFAULT_RETRY_AFTER = 60
 
 
 @dataclass
@@ -138,9 +146,32 @@ class _SessionExpired(RuntimeError):
     pass
 
 
+class RateLimited(RuntimeError):
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+        super().__init__(f"BuyingGroup.com is rate limiting requests (HTTP 429). Try again in {retry_after} seconds.")
+
+
+def _retry_after_seconds(value: str | None) -> int:
+    if value:
+        try:
+            return max(1, int(value))
+        except ValueError:
+            try:
+                return max(1, math.ceil(parsedate_to_datetime(value).timestamp() - time.time()))
+            except (ValueError, OverflowError, OSError):
+                pass
+    return _DEFAULT_RETRY_AFTER
+
+
 def _cache_key(base_url: str, username: str, password: str) -> tuple[str, str, str]:
     pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
     return (resolve_base_url(base_url), username.strip().casefold(), pw_hash)
+
+
+def _auth_lock(key: tuple[str, str, str]) -> threading.Lock:
+    with _token_lock:
+        return _auth_locks.setdefault(key, threading.Lock())
 
 
 def _ensure_tokens(
@@ -150,22 +181,18 @@ def _ensure_tokens(
     password: str,
     timeout_seconds: float,
 ) -> _AuthTokens:
-    """Return cached tokens, logging in only when none are cached."""
+    """Share one login across callers using the same credentials."""
     key = _cache_key(base_url, username, password)
-    with _token_lock:
+    with _auth_lock(key):
         cached = _token_cache.get(key)
         if cached and cached.access:
             return cached
-    tokens = login(
-        base_url=base_url,
-        username=username,
-        password=password,
-        timeout_seconds=timeout_seconds,
-    )
-    with _token_lock:
-        cached = _token_cache.get(key)
-        if cached and cached.access:
-            return cached
+        tokens = login(
+            base_url=base_url,
+            username=username,
+            password=password,
+            timeout_seconds=timeout_seconds,
+        )
         _token_cache[key] = tokens
         return tokens
 
@@ -180,41 +207,34 @@ def _reauth_tokens(
 ) -> _AuthTokens:
     """Refresh or re-login after auth failure; prefer a fresher concurrent cache entry."""
     key = _cache_key(base_url, username, password)
-    with _token_lock:
+    with _auth_lock(key):
         cached = _token_cache.get(key)
         if cached and cached.access and cached.access != stale.access:
             return cached
-        _token_cache.pop(key, None)
-
-    if stale.refresh:
-        try:
-            tokens = refresh_access_token(
-                base_url=base_url,
-                refresh_token=stale.refresh,
-                timeout_seconds=timeout_seconds,
-            )
-            with _token_lock:
-                cached = _token_cache.get(key)
-                if cached and cached.access and cached.access != stale.access:
-                    return cached
+        if stale.refresh:
+            try:
+                tokens = refresh_access_token(
+                    base_url=base_url,
+                    refresh_token=stale.refresh,
+                    timeout_seconds=timeout_seconds,
+                )
                 _token_cache[key] = tokens
                 return tokens
-        except Exception:
-            logger.debug(
-                "BuyingGroup refresh failed; falling back to full login",
-                exc_info=True,
-            )
+            except RateLimited:
+                raise
+            except Exception:
+                logger.debug(
+                    "BuyingGroup refresh failed; falling back to full login",
+                    exc_info=True,
+                )
 
-    tokens = login(
-        base_url=base_url,
-        username=username,
-        password=password,
-        timeout_seconds=timeout_seconds,
-    )
-    with _token_lock:
-        cached = _token_cache.get(key)
-        if cached and cached.access and cached.access != stale.access:
-            return cached
+        _token_cache.pop(key, None)
+        tokens = login(
+            base_url=base_url,
+            username=username,
+            password=password,
+            timeout_seconds=timeout_seconds,
+        )
         _token_cache[key] = tokens
         return tokens
 
@@ -374,6 +394,12 @@ def _http_post(
     path = parsed.path or "/"
     if parsed.query:
         path = f"{path}?{parsed.query}"
+    origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    with _rate_limit_lock:
+        remaining = _rate_limited_until.get(origin, 0) - time.monotonic()
+        if remaining > 0:
+            raise RateLimited(math.ceil(remaining))
+        _rate_limited_until.pop(origin, None)
 
     try:
         if parsed.scheme == "https":
@@ -393,6 +419,13 @@ def _http_post(
             conn.request("POST", path, body=body, headers=req_headers)
             resp = conn.getresponse()
             status = int(resp.status)
+            if status == 429:
+                delay = _retry_after_seconds(resp.getheader("Retry-After"))
+                with _rate_limit_lock:
+                    deadline = max(_rate_limited_until.get(origin, 0), time.monotonic() + delay)
+                    _rate_limited_until[origin] = deadline
+                _log_failed_response(url, status, {"retry_after": delay})
+                raise RateLimited(max(1, math.ceil(deadline - time.monotonic())))
             raw_text = resp.read().decode("utf-8", errors="replace")
         finally:
             conn.close()
@@ -1113,6 +1146,75 @@ def list_tracking_rewards(
             return rewards
         page += 1
     raise RuntimeError("BuyingGroup tracking rewards exceeded the pagination limit")
+
+
+def _parse_return_page(raw: Any) -> tuple[int, int, dict[str, dict[str, Any] | None]]:
+    payload = raw.get("payload") if isinstance(raw, dict) and raw.get("status") == "SUCCESS" else None
+    if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
+        raise ValueError("BuyingGroup.com returned an unreadable Returns list.")
+    count, pages = payload.get("count"), payload.get("pages")
+    if type(count) is not int or count < 0 or type(pages) is not int or pages < 0 or pages > _MAX_LIST_PAGES:
+        raise ValueError("BuyingGroup.com returned invalid Returns pagination.")
+    records = {}
+    for task in payload["tasks"]:
+        key = _first_str(task.get("key")) if isinstance(task, dict) else None
+        if not key or len(key) > 240 or key in records:
+            raise ValueError("BuyingGroup.com returned missing or repeated return IDs.")
+        status = _OPEN_RETURN_STATUSES.get(task.get("task_status"))
+        if not status or task.get("void"):
+            records[key] = None
+            continue
+        receipt = task.get("receipt") or {}
+        item = task.get("item") or {}
+        if not isinstance(receipt, dict) or not isinstance(item, dict):
+            raise ValueError("BuyingGroup.com returned unreadable return details.")
+        trackings = [_nested_tracking_id(receipt.get(field)) for field in ("tracking_id", "alt_tracking_id")]
+        records[key] = {
+            "warehouse_id": f"buyinggroup:{key}",
+            "description": _first_str(item.get("item_id"), item.get("name")),
+            "tracking_numbers": list(dict.fromkeys(tracking for tracking in trackings if tracking and tracking != "---")),
+            "received_at": _first_str(task.get("created_dt")),
+            "note": _first_str(task.get("note")),
+            "source_reference": _first_str(receipt.get("receipt_id")),
+            "source_status": status,
+        }
+    return count, max(1, pages), records
+
+
+def list_returns(
+    *, base_url: str | None, username: str, password: str,
+    page_size: int = _DEFAULT_PAGE_SIZE, timeout_seconds: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Read the open returns from the same list the portal displays."""
+    base = resolve_base_url(base_url)
+    url = f"{base}{GET_RETURNS_PATH}"
+    auth = dict(base_url=base, username=username, password=password, timeout_seconds=timeout_seconds)
+    tokens = _ensure_tokens(**auth)
+    records = {}
+    pagination = None
+    for page in range(1, _MAX_LIST_PAGES + 1):
+        def load(toks: _AuthTokens):
+            status, text, raw = _multipart_request(
+                url=url, fields=[("page", str(page)), ("page_size", str(page_size))],
+                headers=_auth_headers(toks.access), timeout_seconds=timeout_seconds,
+            )
+            if _is_auth_failure(status, raw, text):
+                raise _SessionExpired("BuyingGroup.com Returns session expired")
+            return _parse_return_page(raw)
+
+        (count, pages, entries), tokens = _with_reauth(**auth, tokens=tokens, call=load)
+        if pagination is None:
+            pagination = count, pages
+        if pagination != (count, pages) or records.keys() & entries.keys():
+            raise ValueError("The BuyingGroup.com Returns list changed during the check. Try again.")
+        records.update(entries)
+        if page == pages:
+            if len(records) == count:
+                return [record for record in records.values() if record is not None]
+            break
+        if not entries:
+            break
+    raise ValueError("BuyingGroup.com returned an incomplete Returns list. Try again.")
 
 
 def list_receipts(

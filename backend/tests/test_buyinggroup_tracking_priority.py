@@ -39,6 +39,7 @@ class TrackingPriorityTests(unittest.TestCase):
                 'upc': shipment_upc if pink else '199764359186',
             }]}
         with (patch.object(api, 'list_receipts', return_value=receipts),
+              patch.object(api, 'list_returns', return_value=[]),
               patch.object(api, 'get_receipt_details', side_effect=details),
               patch.object(api, 'list_tracking_rewards', return_value={})):
             return receiving.check_receiving_for_group(self.db, buying_group_id=self.group.id)

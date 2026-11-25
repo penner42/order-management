@@ -33,7 +33,7 @@ from app.utils.buying_group_apis.check_receiving import (
     CheckReceivingResult,
     check_receiving_for_group,
     list_receiving_review_pending_payloads,
-    match_dnr_damaged_item,
+    match_receiving_return,
     prune_receiving_review_pending,
     receiving_check_group_ready,
     save_receiving_review_pending,
@@ -149,7 +149,7 @@ def receiving_candidates(
 def match_damaged_warehouse_item(
     body: ReceivingDamageMatchRequest, db: Session = Depends(get_db), _: User = Depends(get_current_user),
 ):
-    return match_dnr_damaged_item(db, body)
+    return match_receiving_return(db, body)
 
 
 @router.post("/receiving-review/link", response_model=ReceivingReviewSession)
@@ -434,6 +434,8 @@ def check_buying_group_receiving(
         )
 
     result, actionable = _execute_received_check(db, group, scheduled=False)
+    if result.retry_after is not None:
+        raise HTTPException(status_code=429, detail=result.error, headers={"Retry-After": str(result.retry_after)})
     if result.error:
         raise HTTPException(status_code=502, detail=result.error)
 
@@ -647,7 +649,10 @@ def _execute_received_check(
             f" {unknown_count} unknown receipt(s) to review."
         )
         if damaged_count:
-            summary += f" {damaged_count} damaged warehouse unit(s) to match."
+            if saved_payload.get("buyinggroup_returns"):
+                summary += f" {damaged_count} open BuyingGroup.com return(s) to match."
+            else:
+                summary += f" {damaged_count} damaged warehouse unit(s) to match."
         result.message = summary
         write_group_tracking_log(
             group=group,

@@ -151,6 +151,7 @@ class CheckReceivingResult:
     message: str | None = None
     error: str | None = None
     matches: list[ReceivingMatch] = field(default_factory=list)
+    retry_after: int | None = None
 
 
 def _money(value: Decimal | float | int | None) -> Decimal | None:
@@ -328,11 +329,11 @@ def save_receiving_review_pending(db: Session, payload: dict[str, Any], *, commi
     received_items = {m["item_id"] for m in payload["matches"] if _is_actionable_match_dict(m)}
     payload["matches"] = [m for m in payload["matches"]
                           if _is_actionable_match_dict(m) or m["item_id"] in received_items]
-    count = actionable_count_from_payload(payload)
     applied_pairs = applied_receipt_pairs(db, buying_group_id)
     framework = (group.api_framework or "").strip().casefold()
     is_buyinggroup = framework == "buyinggroup"
     is_dnr = framework == "dealandrunner"
+    count = actionable_count_from_payload(payload)
     known_trackings = _known_shipment_trackings(db) if not (is_buyinggroup or is_dnr) else set()
     accounted_dnr_keys = set(payload.pop("_accounted_dnr_receipt_keys", [])) if is_dnr else set()
     current_unknown_keys = {receipt_key(r) for r in payload.get("unknown_receipts", [])}
@@ -1877,6 +1878,8 @@ def check_receiving_for_group(db: Session, *, buying_group_id: int) -> CheckRece
         try:
             source = fetch_receipt_source(group, usabg_details=(
                 _load_usabg_po_detail_cache(db, buying_group_id) if framework == "usabg" else None))
+        except buyinggroup_api.RateLimited as exc:
+            return CheckReceivingResult(buying_group_id, group_name, error=str(exc), retry_after=exc.retry_after)
         except Exception as exc:
             items, _, _ = _collect_pending(db, buying_group_id=buying_group_id)
             return CheckReceivingResult(buying_group_id, group_name, submitted_count=len(items),
@@ -2218,35 +2221,42 @@ def _check_receiving_usabg(
     )
 
 
-def _dnr_damage_review(db: Session, source: ReceiptSource) -> dict[str, Any]:
-    # Caches created before the damage feed was added still support receipt review.
-    if not source.cached or "damaged" not in source.payload["requests"]:
+def _unmatched_return_items(db: Session, items: list[dict]) -> list[dict]:
+    if not items:
+        return []
+    applied = {row[0] for row in db.query(Item.receiving_return_id)
+               .filter(Item.receiving_return_id.in_([item["warehouse_id"] for item in items]))}
+    return [item for item in items if item["warehouse_id"] not in applied]
+
+
+def _warehouse_return_review(db: Session, source: ReceiptSource, key: str) -> dict[str, Any]:
+    # Older caches still support receipt review without a warehouse returns feed.
+    if not source.cached or key not in source.payload["requests"]:
         return {"damaged_items": []}
     try:
-        items = source.request("damaged", None)
+        items = source.request(key, None)
     except ValueError:
         return {"damaged_items": [], "damaged_items_error": True}
-    applied = {row[0] for row in db.query(Item.dnr_damaged_warehouse_id)
-               .filter(Item.dnr_damaged_warehouse_id.in_([item["warehouse_id"] for item in items]))}
-    return {"damaged_items": [item for item in items if item["warehouse_id"] not in applied]}
+    return {"damaged_items": _unmatched_return_items(db, items)}
 
 
-def match_dnr_damaged_item(db: Session, body: ReceivingDamageMatchRequest) -> dict[str, Any]:
+def match_receiving_return(db: Session, body: ReceivingDamageMatchRequest) -> dict[str, Any]:
     row = pending_row(db, body.buying_group_id)
     group = db.get(BuyingGroup, body.buying_group_id)
     cache = db.get(ReceivingReceiptCache, body.buying_group_id)
-    if ((group.api_framework or "").strip().casefold() != "dealandrunner"
-            or cache is None or cache.provider_identity != provider_identity(group)):
-        raise HTTPException(409, "Run Check receiving for this Deal & Runner account before matching damage.")
+    framework = (group.api_framework or "").strip().casefold()
+    identity = provider_identity(group)
+    matcher = {"dealandrunner": _check_receiving_dealandrunner,
+               "buyinggroup": _check_receiving_buyinggroup}.get(framework)
+    if matcher is None or cache is None or cache.provider_identity != identity:
+        raise HTTPException(409, "Refresh the warehouse returns for this buying group before matching.")
     apply_damage_match(db, row, body)
     try:
         db.flush()
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, "This warehouse unit could not be matched. Refresh Receiving and try again.")
-    result = _check_receiving_dealandrunner(
-        db, group=group, group_name=group.name, source=ReceiptSource(cache.payload),
-    )
+    result = matcher(db, group=group, group_name=group.name, source=ReceiptSource(cache.payload))
     if result.error or result.session_payload is None:
         raise HTTPException(409, "Could not refresh the cached receiving details. Run Check receiving and try again.")
     payload = result.session_payload
@@ -2300,7 +2310,7 @@ def _check_receiving_dealandrunner(
         )
 
     receipts = _receipts_since_first_order(db, fetched.rows, date_field="timestamp")
-    damage_review = _dnr_damage_review(db, source)
+    damage_review = _warehouse_return_review(db, source, "damaged")
     lots = _dnr_lots_from_receipts(receipts)
     lots_by_tn: dict[str, list[dict[str, Any]]] = {}
     supply_by_tn: dict[str, int] = {}
@@ -2468,7 +2478,7 @@ def _check_receiving_dealandrunner(
     )
 
     for item, order, trackings in scanned_pending:
-        if item.dnr_damaged_warehouse_id or _is_zero_payout(item):
+        if item.receiving_return_id or _is_zero_payout(item):
             continue
         matches.extend(
             _receipt_update_matches_for_item(
@@ -3004,6 +3014,8 @@ def _check_receiving_buyinggroup(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
+    return_review = {**_warehouse_return_review(db, source, "returns"), "buyinggroup_returns": True}
+
     tracking_rewards: dict[str, Decimal] = {}
     reward_error = None
     if receipts:
@@ -3202,7 +3214,8 @@ def _check_receiving_buyinggroup(
         return [lot["lot_id"] for _score, lot in ranked if same_product(lot) == same_product(best)]
 
     received_demands = [(item.id, item.quantity or 1, choices(item, tns, True))
-                        for item, _o, tns in scanned_pending if not _is_zero_payout(item)]
+                        for item, _o, tns in scanned_pending
+                        if not _is_zero_payout(item) and (not item.receiving_return_id or item.receipt_id)]
     _reserved, reserved = _allocate_received_across_shared_trackings(
         item_demands=received_demands, supply_by_tn=supply)
     available = dict(supply)
@@ -3249,7 +3262,7 @@ def _check_receiving_buyinggroup(
     void_matched_ids = set()
     void_skipped = 0
     for item, order, trackings in pending + scanned_pending:
-        if _is_zero_payout(item):
+        if item.receiving_return_id or _is_zero_payout(item):
             continue
         received = item.status not in _UNSCANNED_STATUSES
         item_allocations = (reserved if received else allocations).get(item.id, [])
@@ -3299,7 +3312,11 @@ def _check_receiving_buyinggroup(
         parts.append(f"{len(unknown_receipts)} unresolved BG receipt item(s)")
     if analytics_error:
         parts.append(f"Analytics enrich failed: {analytics_error}")
-    if not matches and not unknown_receipts:
+    if return_review["damaged_items"]:
+        parts.append(f'{len(return_review["damaged_items"])} open BuyingGroup.com return(s) to match')
+    if return_review.get("damaged_items_error"):
+        parts.append("Could not refresh BuyingGroup.com returns")
+    if not matches and not unknown_receipts and not return_review["damaged_items"] and not return_review.get("damaged_items_error"):
         bits = [checked_summary]
         if not_found:
             bits.append(f"{not_found} local item(s) not found as received.")
@@ -3312,7 +3329,7 @@ def _check_receiving_buyinggroup(
         message += f" Tracking rewards unavailable: {reward_error}."
 
     # Even with no pending locals, still open review when there are unknown receipts.
-    if not pending and not unknown_receipts and not matches:
+    if not pending and not unknown_receipts and not matches and not return_review["damaged_items"] and not return_review.get("damaged_items_error"):
         message = (
             "No unscanned items with tracking numbers for this buying group, "
             "and no unknown BG receipts."
@@ -3334,6 +3351,7 @@ def _check_receiving_buyinggroup(
             "unmatched": [],
             "unknown_receipts": [],
             "matches": [],
+            **return_review,
         }
         return CheckReceivingResult(
             buying_group_id=buying_group_id,
@@ -3361,6 +3379,7 @@ def _check_receiving_buyinggroup(
         "unmatched": unmatched,
         "unknown_receipts": unknown_receipts,
         "matches": [match_to_dict(m) for m in matches],
+        **return_review,
     }
     return CheckReceivingResult(
         buying_group_id=buying_group_id,
