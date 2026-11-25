@@ -1921,6 +1921,11 @@ def check_receiving_for_group(
         cache = db.query(ReceivingReceiptCache).populate_existing().filter_by(buying_group_id=buying_group_id).first()
         newer_cache = (cache is not None and cache.provider_identity == identity
                        and cache.payload.get("started_at", "") > source.payload["started_at"])
+        if framework == "buyinggroup" and cache is not None and cache.provider_identity == identity and not newer_cache:
+            prior_returns, _ = _cached_warehouse_returns(ReceiptSource(cache.payload), "returns")
+            prior_returns = _buyinggroup_return_records(cache.payload, prior_returns)
+            matched_ids = _matched_return_ids(db, prior_returns, group_id=buying_group_id)
+            source.payload["matched_returns"] = [record for key, record in prior_returns.items() if key in matched_ids]
         inputs = cache.payload if newer_cache else source.payload
         result = matchers[framework](db, group=group, group_name=group.name, source=ReceiptSource(inputs))
         if not result.error and result.session_payload is not None:
@@ -2249,23 +2254,63 @@ def _check_receiving_usabg(
     )
 
 
-def _unmatched_return_items(db: Session, items: list[dict]) -> list[dict]:
-    if not items:
-        return []
-    applied = {row[0] for row in db.query(Item.receiving_return_id)
-               .filter(Item.receiving_return_id.in_([item["warehouse_id"] for item in items]))}
-    return [item for item in items if item["warehouse_id"] not in applied]
+def _matched_return_ids(db: Session, ids, *, group_id: int | None = None) -> set[str]:
+    if not ids:
+        return set()
+    query = db.query(Item.receiving_return_id).filter(Item.receiving_return_id.in_(list(ids)))
+    if group_id is not None:
+        query = query.join(Order).filter(Order.buying_group_id == group_id)
+    return {return_id for (return_id,) in query}
+
+
+def _cached_warehouse_returns(source: ReceiptSource, key: str) -> tuple[list[dict], bool]:
+    # Older caches still support receipt review without a warehouse returns feed.
+    if not source.cached or key not in source.payload["requests"]:
+        return [], False
+    try:
+        return source.request(key, None), False
+    except ValueError:
+        return [], True
 
 
 def _warehouse_return_review(db: Session, source: ReceiptSource, key: str) -> dict[str, Any]:
-    # Older caches still support receipt review without a warehouse returns feed.
-    if not source.cached or key not in source.payload["requests"]:
-        return {"damaged_items": []}
-    try:
-        items = source.request(key, None)
-    except ValueError:
-        return {"damaged_items": [], "damaged_items_error": True}
-    return {"damaged_items": _unmatched_return_items(db, items)}
+    items, error = _cached_warehouse_returns(source, key)
+    applied = _matched_return_ids(db, [item["warehouse_id"] for item in items])
+    review = {"damaged_items": [item for item in items if item["warehouse_id"] not in applied]}
+    if error:
+        review["damaged_items_error"] = True
+    return review
+
+
+def _buyinggroup_return_records(payload: dict, current: list[dict]) -> dict[str, dict]:
+    return {record["warehouse_id"]: record
+            for record in [*payload.get("matched_returns", []), *current]}
+
+
+def _buyinggroup_receipt_product(receipt_id, product) -> tuple[str, str]:
+    return (str(receipt_id or "").strip().casefold(), str(product or "").strip().casefold())
+
+
+def _deduct_buyinggroup_returns(receipts: list[dict], matched_returns) -> None:
+    returned = Counter(_buyinggroup_receipt_product(record.get("source_reference"), record.get("description"))
+                       for record in matched_returns)
+    unconfirmed = defaultdict(list)
+    for receipt in receipts:
+        if receipt["received_status"] == "Not confirmed":
+            key = _buyinggroup_receipt_product(receipt["receipt_id"], receipt["description"])
+            if all(key) and key in returned:
+                unconfirmed[key].append(receipt)
+    for key, lines in unconfirmed.items():
+        # The feed identifies the product, but cannot distinguish duplicate lines for it.
+        if len(lines) != 1:
+            continue
+        receipt = lines[0]
+        quantity = receipt["quantity"]
+        remaining = max(0, quantity - returned[key])
+        receipt["quantity"] = remaining
+        total = _money(receipt["received_ext_total"])
+        if remaining and total is not None and total.is_finite():
+            receipt["received_ext_total"] = str((total * remaining / quantity).quantize(Decimal("0.01")))
 
 
 def match_receiving_return(db: Session, body: ReceivingDamageMatchRequest) -> dict[str, Any]:
@@ -3042,7 +3087,15 @@ def _check_receiving_buyinggroup(
             error=str(exc).strip() or exc.__class__.__name__,
         )
 
-    return_review = {**_warehouse_return_review(db, source, "returns"), "buyinggroup_returns": True}
+    returns, return_error = _cached_warehouse_returns(source, "returns")
+    open_returns = [record for record in returns if record.get("is_open") is not False]
+    applied = _matched_return_ids(db, [record["warehouse_id"] for record in open_returns])
+    return_review = {"damaged_items": [record for record in open_returns if record["warehouse_id"] not in applied],
+                     "buyinggroup_returns": True}
+    if return_error:
+        return_review["damaged_items_error"] = True
+    return_records = _buyinggroup_return_records(source.payload, returns)
+    matched_return_ids = _matched_return_ids(db, return_records, group_id=buying_group_id)
 
     tracking_rewards: dict[str, Decimal] = {}
     reward_error = None
@@ -3269,9 +3322,12 @@ def _check_receiving_buyinggroup(
     for item_allocations in allocations.values():
         for lid, qty in item_allocations:
             remaining_supply[lid] -= qty
+    _deduct_buyinggroup_returns(unknown_receipts, (return_records[key] for key in matched_return_ids))
     unresolved = []
     for receipt in unknown_receipts:
         lid = receipt.pop("_lot_id")
+        if receipt["quantity"] == 0:
+            continue
         if lid is not None:
             qty = remaining_supply[lid]
             if qty <= 0:

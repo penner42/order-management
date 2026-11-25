@@ -169,6 +169,44 @@ class ReceivingCacheTests(unittest.TestCase):
         self.check("buyinggroup")
         self.assertEqual(self.rematch()[0]["damaged_items"], [])
 
+    def test_buyinggroup_matched_returns_remove_only_their_unconfirmed_units(self):
+        self.item.quantity = 2
+
+        def returns(status):
+            _, _, tasks = buyinggroup._parse_return_page({"status": "SUCCESS", "payload": {
+                "pages": 1, "count": 2, "tasks": [
+                    {"key": key, "task_status": status, "item": {"item_id": "Headphones"},
+                     "receipt": {"receipt_id": "R1", "tracking_id": "OLD"}}
+                    for key in ("first", "second")
+                ],
+            }})
+            return list(tasks.values())
+
+        def details(**_):
+            return {"receipt_id": "R1", "received_items": [
+                {"item_id": "Headphones", "qty": 2, "price": "20.00", "total": "40.00", "verified": False},
+                {"item_id": "Other product", "qty": 1, "verified": False},
+            ]}
+
+        self.check("buyinggroup", details=details, returns=returns("READY"))
+        group_id = self.group.id
+        first = receiving.match_receiving_return(self.db, ReceivingDamageMatchRequest(
+            buying_group_id=group_id, warehouse_id="buyinggroup:first", item_id=self.item.id, expected_quantity=2,
+        ))
+        self.assertEqual([(r["description"], r["quantity"], r["received_ext_total"]) for r in first["unknown_receipts"]],
+                         [("Headphones", 1, "20.00"), ("Other product", 1, None)])
+        self.assertEqual(self.rematch()[0]["unknown_receipts"], first["unknown_receipts"])
+
+        receiving.match_receiving_return(self.db, ReceivingDamageMatchRequest(
+            buying_group_id=group_id, warehouse_id="buyinggroup:second", item_id=self.item.id, expected_quantity=1,
+        ))
+        for feed in (returns("SENT"), []):
+            self.check("buyinggroup", details=details, returns=feed)
+            session, = self.rematch()
+            self.assertEqual(session["damaged_items"], [])
+            self.assertEqual([(r["description"], r["quantity"]) for r in session["unknown_receipts"]],
+                             [("Other product", 1)])
+
     def test_buyinggroup_rate_limit_preserves_cached_review_and_returns_retry_after(self):
         self.check("buyinggroup")
         cached = self.db.get(ReceivingReceiptCache, self.group.id).payload

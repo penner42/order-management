@@ -1280,23 +1280,33 @@ def _parse_return_page(raw: Any) -> tuple[int, int, dict[str, dict[str, Any] | N
         if not key or len(key) > 240 or key in records:
             raise ValueError("BuyingGroup.com returned missing or repeated return IDs.")
         status = _OPEN_RETURN_STATUSES.get(task.get("task_status"))
-        if not status or task.get("void"):
+        if task.get("void"):
             records[key] = None
             continue
         receipt = task.get("receipt") or {}
         item = task.get("item") or {}
         if not isinstance(receipt, dict) or not isinstance(item, dict):
+            if not status:
+                records[key] = None
+                continue
             raise ValueError("BuyingGroup.com returned unreadable return details.")
+        receipt_id = _first_str(receipt.get("receipt_id"))
+        description = _first_str(item.get("item_id"), item.get("name"))
+        if not status and not (receipt_id and description):
+            records[key] = None
+            continue
         trackings = [_nested_tracking_id(receipt.get(field)) for field in ("tracking_id", "alt_tracking_id")]
         records[key] = {
             "warehouse_id": f"buyinggroup:{key}",
-            "description": _first_str(item.get("item_id"), item.get("name")),
+            "description": description,
             "tracking_numbers": list(dict.fromkeys(tracking for tracking in trackings if tracking and tracking != "---")),
             "received_at": _first_str(task.get("created_dt")),
             "note": _first_str(task.get("note")),
-            "source_reference": _first_str(receipt.get("receipt_id")),
+            "source_reference": receipt_id,
             "source_status": status,
         }
+        if not status:
+            records[key]["is_open"] = False
     return count, max(1, pages), records
 
 
@@ -1304,7 +1314,7 @@ def list_returns(
     *, base_url: str | None, username: str, password: str,
     page_size: int = _DEFAULT_PAGE_SIZE, timeout_seconds: float = 30.0, browser_token: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Read the open returns from the same list the portal displays."""
+    """Read portal returns, including closed records that identify receipt products."""
     base = resolve_base_url(base_url)
     url = f"{base}{GET_RETURNS_PATH}"
     auth = dict(base_url=base, username=username, password=password, timeout_seconds=timeout_seconds)
