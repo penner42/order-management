@@ -85,6 +85,12 @@ const MAX_VIEWPORT_HEIGHT = 1440
 /** ~40 Hz pointer moves — responsive without flooding the WS. */
 const MOUSE_MOVE_MIN_MS = 24
 
+type LiveFrame = {
+  data: string
+  viewportWidth: number
+  viewportHeight: number
+}
+
 export function LiveBrowserView({
   profileId,
   suggestedUrl,
@@ -102,11 +108,11 @@ export function LiveBrowserView({
   const viewportRef = useRef<HTMLDivElement>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  const lastSizeRef = useRef({ width: 0, height: 0 })
+  const lastResizeSentRef = useRef({ width: 0, height: 0 })
   const resizeTimerRef = useRef<number | null>(null)
   const openedRef = useRef(false)
   const frameBusyRef = useRef(false)
-  const pendingFrameRef = useRef<string | null>(null)
+  const pendingFrameRef = useRef<LiveFrame | null>(null)
   /**
    * Screencast JPEG size → Playwright CSS px. Kept in sync from frame metadata when
    * the encoder scales the bitmap; otherwise equals the bitmap size (1:1).
@@ -139,8 +145,8 @@ export function LiveBrowserView({
   }, [])
 
   const paintFrame = useCallback(
-    (b64: string) => {
-      pendingFrameRef.current = b64
+    (frame: LiveFrame) => {
+      pendingFrameRef.current = frame
       if (frameBusyRef.current) return
       frameBusyRef.current = true
 
@@ -163,9 +169,13 @@ export function LiveBrowserView({
           if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight
           const ctx = canvas.getContext('2d')
           if (ctx) ctx.drawImage(img, 0, 0)
-          // Default page space to bitmap until metadata says otherwise.
-          if (!remoteViewportRef.current.width || !remoteViewportRef.current.height) {
-            remoteViewportRef.current = { width: img.naturalWidth, height: img.naturalHeight }
+          const hasViewport = next.viewportWidth >= 200 && next.viewportHeight >= 200
+          const width = hasViewport ? next.viewportWidth : img.naturalWidth
+          const height = hasViewport ? next.viewportHeight : img.naturalHeight
+          const previous = remoteViewportRef.current
+          if (width !== previous.width || height !== previous.height) {
+            remoteViewportRef.current = { width, height }
+            setViewportSize({ width, height })
           }
           layoutCanvas()
           if (pendingFrameRef.current) {
@@ -181,7 +191,7 @@ export function LiveBrowserView({
             frameBusyRef.current = false
           }
         }
-        img.src = `data:image/jpeg;base64,${next}`
+        img.src = `data:image/jpeg;base64,${next.data}`
       }
       requestAnimationFrame(pump)
     },
@@ -215,11 +225,13 @@ export function LiveBrowserView({
   const sendResize = useCallback(
     (immediate = false) => {
       const apply = () => {
+        const ws = wsRef.current
+        if (!ws || ws.readyState !== WebSocket.OPEN) return
         const measured = measureViewport()
         // Fall back once so we never stick on a 240px-tall bot-looking viewport.
-        const next = measured ?? (lastSizeRef.current.width > 0 ? null : DEFAULT_VIEWPORT)
+        const prev = lastResizeSentRef.current
+        const next = measured ?? (prev.width > 0 ? null : DEFAULT_VIEWPORT)
         if (!next) return
-        const prev = lastSizeRef.current
         if (prev.width > 0 && prev.height > 0) {
           if (
             Math.abs(next.width - prev.width) < RESIZE_THRESHOLD &&
@@ -228,10 +240,8 @@ export function LiveBrowserView({
             return
           }
         }
-        if (next.width === prev.width && next.height === prev.height) return
-        lastSizeRef.current = next
-        setViewportSize(next)
-        send({ type: 'resize', width: next.width, height: next.height })
+        ws.send(JSON.stringify({ type: 'resize', width: next.width, height: next.height }))
+        lastResizeSentRef.current = next
       }
 
       if (immediate) {
@@ -246,7 +256,7 @@ export function LiveBrowserView({
       if (resizeTimerRef.current != null) window.clearTimeout(resizeTimerRef.current)
       resizeTimerRef.current = window.setTimeout(apply, 250)
     },
-    [measureViewport, send]
+    [measureViewport]
   )
 
   useEffect(() => {
@@ -261,6 +271,7 @@ export function LiveBrowserView({
       `${proto}://${window.location.host}/api/browser-profiles/${profileId}/live?token=${encodeURIComponent(token)}`
     )
     wsRef.current = ws
+    lastResizeSentRef.current = { width: 0, height: 0 }
 
     ws.onopen = () => {
       if (wsRef.current !== ws) return
@@ -293,13 +304,11 @@ export function LiveBrowserView({
         const msg = JSON.parse(ev.data as string)
         if (msg.type === 'frame' && msg.data) {
           const meta = msg.metadata as { viewportWidth?: number; viewportHeight?: number } | undefined
-          const vpW = Number(meta?.viewportWidth) || 0
-          const vpH = Number(meta?.viewportHeight) || 0
-          // Only adopt metadata when it looks like a real page viewport (not 0 / garbage).
-          if (vpW >= 200 && vpH >= 200) {
-            remoteViewportRef.current = { width: vpW, height: vpH }
-          }
-          paintFrame(msg.data as string)
+          paintFrame({
+            data: msg.data,
+            viewportWidth: Number(meta?.viewportWidth) || 0,
+            viewportHeight: Number(meta?.viewportHeight) || 0,
+          })
           if (msg.url) {
             setUrl(msg.url)
             setAddress(msg.url)
