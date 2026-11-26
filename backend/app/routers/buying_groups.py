@@ -21,6 +21,7 @@ from app.browser_automation.buyinggroup_session import (
 )
 from app.browser_automation.jobs import create_job, get_job, update_job
 from app.schemas.browser_profile import BrowserJobRead
+from app.routers.buying_group_addresses import router as addresses_router
 from app.database import SessionLocal, get_db
 from app.models import BrowserImportLog, BrowserProfile, BuyingGroup, ReceivingReceiptCache, ReceivingReviewPending, User
 from app.models.user import get_default_app_user_id
@@ -62,6 +63,7 @@ from app.utils.buying_group_apis import buyinggroup as buyinggroup_api
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/buying-groups", tags=["buying-groups"])
+router.include_router(addresses_router)
 _receiving_tasks: dict[int, asyncio.Task] = {}
 _receiving_jobs: dict[int, str] = {}
 GOBUYME_AUTOMATION_DISABLED = {

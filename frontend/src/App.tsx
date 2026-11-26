@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { api } from './api/client'
 import Orders from './pages/Orders'
 import BuyingGroups from './pages/BuyingGroups'
+import BuyingGroupSettings from './pages/BuyingGroupSettings'
 import BfmrOrderReview from './pages/BfmrOrderReview'
 import Rewards from './pages/Rewards'
 import PaymentMethods from './pages/PaymentMethods'
@@ -314,6 +315,7 @@ function AppShell() {
             <Route index element={<LegacyRedirect to="/settings/account" />} />
             <Route path="account" element={<Profile />} />
             <Route path="buying-groups" element={<BuyingGroups />} />
+            <Route path="buying-groups/:groupId" element={<BuyingGroupSettings />} />
             <Route path="stores" element={<Stores />} />
             <Route path="ignored-zip-codes" element={<IgnoredZipCodes />} />
             <Route path="payment-methods" element={<PaymentMethods />} />

@@ -1,6 +1,7 @@
 """Database models."""
 from app.models.user import User
 from app.models.buying_group import BuyingGroup
+from app.models.buying_group_address import BuyingGroupAddress, BuyingGroupAddressVariant
 from app.models.reward import Reward
 from app.models.payment_method import PaymentMethod
 from app.models.payment_method_store_earnings import PaymentMethodStoreEarnings
@@ -25,6 +26,8 @@ from app.models.payment_import import PaymentSource, PaymentReview, PaymentCover
 __all__ = [
     "User",
     "BuyingGroup",
+    "BuyingGroupAddress",
+    "BuyingGroupAddressVariant",
     "Reward",
     "PaymentMethod",
     "PaymentMethodStoreEarnings",

@@ -38,7 +38,7 @@ export default function Settings() {
         </nav>
         <div className="lg:hidden mb-6">
           <label htmlFor="settings-section" className="block mb-1 text-sm font-medium text-ink dark:text-gray-200">Settings section</label>
-          <select id="settings-section" value={location.pathname} onChange={e => navigate(e.target.value)}
+          <select id="settings-section" value={location.pathname.split('/').slice(0, 3).join('/')} onChange={e => navigate(e.target.value)}
             className="w-full rounded-lg border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-ink dark:text-gray-100 px-3 py-2">
             {groups.map(group => <optgroup key={group.label} label={group.label}>
               {group.sections.map(section => <option key={section.path} value={`/settings/${section.path}`}>{section.label}</option>)}
