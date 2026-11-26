@@ -348,6 +348,8 @@ def submit_item_tracking(
         )
     except TrackerChoiceRequired as e:
         raise HTTPException(status_code=409, detail=e.detail) from e
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=_http_detail(e, fallback="Invalid tracking submit request")) from e
     except RuntimeError as e:

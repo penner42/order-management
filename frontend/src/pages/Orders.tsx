@@ -6,6 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { api, ApiError, getStoredToken } from '../api/client'
+import { supportsBuyingGroupBrowser } from '../utils/buyingGroupBrowser'
 import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { BfmrOrderNumber } from '../components/BfmrOrderNumber'
 import { GoBuyMeReservationDialog, isGoBuyMeReservationChoice } from '../components/GoBuyMeReservationDialog'
@@ -1067,6 +1068,7 @@ export default function Orders({ duplicateAudit = false }: { duplicateAudit?: bo
     if (!tracking.trim()) return false
     const bg = groups.find((g) => g.id === order.buying_group_id)
     if (!bg) return false
+    if (supportsBuyingGroupBrowser(bg)) return true
     if (bg.api_framework === 'gobuyme') {
       return Boolean(bg.api_username?.trim() && bg.api_password?.trim() && bg.bearer_token?.trim())
     }

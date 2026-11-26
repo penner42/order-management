@@ -65,6 +65,8 @@ def buyinggroup_group_ready(group: BuyingGroup | None) -> tuple[bool, str | None
     framework = (group.api_framework or "").strip().casefold()
     if framework != "buyinggroup":
         return False, "Buying group API framework is not configured for submission"
+    if buyinggroup_api.resolve_base_url(group.base_url) == buyinggroup_api.DEFAULT_BASE_URL:
+        return True, None
     if not (group.api_username or "").strip():
         return False, "Buying group is missing API username"
     if not (group.api_password or "").strip():
@@ -330,12 +332,16 @@ def submit_buyinggroup_trackings(
         raise ValueError(reason or "Buying group API is not configured")
     if not entries:
         raise ValueError("At least one tracking entry is required")
+    from app.browser_automation.buyinggroup_session import browser_token_for_group, supports_browser_session
+
+    browser_token = browser_token_for_group(group) if supports_browser_session(group) else None
     return buyinggroup_api.submit_trackings(
         base_url=group.base_url,
         api_url=group.api_url,
-        username=str(group.api_username),
-        password=str(group.api_password),
+        username=group.api_username or "",
+        password=group.api_password or "",
         trackings=list(entries),
+        browser_token=browser_token,
     )
 
 
@@ -1086,19 +1092,9 @@ def batch_submit_pending_trackings(
                 if sid
             }
         elif framework == "buyinggroup":
-            base_url = group.base_url
-            api_url = group.api_url
-            username = str(group.api_username)
-            password = str(group.api_password)
             entries = _aggregate_buyinggroup_entries(pending)
             tracking_numbers = [e.tracking for e in entries]
-            api_result = buyinggroup_api.submit_trackings(
-                base_url=base_url,
-                api_url=api_url,
-                username=username,
-                password=password,
-                trackings=entries,
-            )
+            api_result = submit_buyinggroup_trackings(group, entries)
             message = api_result.message
             submission_ids_by_tracking = _buyinggroup_submission_ids(api_result)
             if api_result.succeeded is not None:

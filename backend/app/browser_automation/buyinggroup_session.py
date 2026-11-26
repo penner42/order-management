@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
+from weakref import WeakValueDictionary
 
+from anyio import from_thread
 from fastapi import HTTPException
 from playwright.async_api import Error as BrowserError
 
@@ -16,7 +18,8 @@ from app.utils.receiving_cache import provider_identity
 
 LOGIN_URL = "https://buyinggroup.com/login"
 HOME_URL = "https://buyinggroup.com/home"
-SIGN_IN_REQUIRED = "Sign in to BuyingGroup.com from Settings → Buying Groups, then run Check receiving again."
+SIGN_IN_REQUIRED = "Sign in to BuyingGroup.com from Settings → Buying Groups, then try again."
+_profile_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
 _SIGNED_IN = """() => {
     if (location.origin !== 'https://buyinggroup.com' || location.pathname.startsWith('/login')) return false;
@@ -34,8 +37,18 @@ class BrowserAccess:
 
 
 def supports_browser_session(group: BuyingGroup) -> bool:
-    return (group.api_framework == "buyinggroup"
+    return ((group.api_framework or "").strip().casefold() == "buyinggroup"
             and buyinggroup.resolve_base_url(group.base_url) == buyinggroup.DEFAULT_BASE_URL)
+
+
+def browser_token_for_group(group: BuyingGroup) -> str:
+    """Read the connected account from a FastAPI or scheduler worker thread."""
+    access = from_thread.run(browser_access_for_group, group.id)
+    if access is None:
+        raise HTTPException(409, SIGN_IN_REQUIRED)
+    if access.identity != provider_identity(group):
+        raise HTTPException(409, "Buying group configuration changed. Try again.")
+    return access.token
 
 
 async def session_logged_in(page) -> bool:
@@ -72,8 +85,15 @@ async def read_signed_in_access(page, expected_account: str, *, previous_access:
     return access
 
 
-async def browser_access_for_receiving(group_id: int, *, previous_access: str | None = None) -> BrowserAccess | None:
+async def browser_access_for_group(group_id: int, *, previous_access: str | None = None) -> BrowserAccess | None:
     """Read a short-lived access token without storing it outside the profile."""
+    # Scheduled receiving and payment sync can request access at the same time.
+    lock = _profile_locks.setdefault(group_id, asyncio.Lock())
+    async with lock:
+        return await _read_browser_access(group_id, previous_access=previous_access)
+
+
+async def _read_browser_access(group_id: int, *, previous_access: str | None) -> BrowserAccess | None:
     with SessionLocal() as db:
         group = db.get(BuyingGroup, group_id)
         if group is None or not supports_browser_session(group):

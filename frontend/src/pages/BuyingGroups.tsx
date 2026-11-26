@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { useGroupSubmissionsEnabled } from '../utils/capabilities'
+import { BUYINGGROUP_DEFAULT_BASE_URL, supportsBuyingGroupBrowser } from '../utils/buyingGroupBrowser'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import BuyingGroupBrowserConnection from '../components/BuyingGroupBrowserConnection'
 import type { BrowserJob, BuyingGroup, BuyingGroupApiFramework } from '../api/types'
@@ -21,7 +22,6 @@ const PARSEFILE_DEFAULT_API_URL = '/p/it@api@order-management'
 const USABG_DEFAULT_BASE_URL = 'https://api.usabuying.group/buyers'
 const GOBUYME_SIGN_IN_URL = 'https://gobuyme.com/auth'
 const GOBUYME_API_KEYS_URL = 'https://gobuyme.com/app/profile?step=api-keys'
-const BUYINGGROUP_DEFAULT_BASE_URL = 'https://api.prod.buyinggroup.com'
 const BUYINGGROUP_DEFAULT_ADD_TRACKINGS_PATH = '/v1/order/add_trackings'
 const DEALANDRUNNER_DEFAULT_BASE_URL = 'https://api.dealandrunner.com'
 const BFMR_DEFAULT_BASE_URL = 'https://api.bfmr.com'
@@ -92,6 +92,7 @@ function formatLastRun(iso: string | null | undefined): string {
 
 function canSubmitTrackings(g: BuyingGroup): boolean {
   if (!supportsTrackingSubmit(g.api_framework)) return false
+  if (supportsBuyingGroupBrowser(g)) return true
   if (g.api_framework === 'parsefile') {
     return (
       Boolean(g.bearer_token?.trim()) &&
@@ -116,11 +117,6 @@ function canCheckReceiving(g: BuyingGroup): boolean {
     return Boolean(g.api_username?.trim()) && Boolean(g.api_password?.trim())
   }
   return canSubmitTrackings(g)
-}
-
-function supportsBuyingGroupBrowser(g: BuyingGroup): boolean {
-  const base = (g.base_url?.trim() || BUYINGGROUP_DEFAULT_BASE_URL).replace(/\/+$/, '').replace(/\/v1$/, '')
-  return g.api_framework === 'buyinggroup' && base === BUYINGGROUP_DEFAULT_BASE_URL
 }
 
 function effectiveBaseUrl(g: BuyingGroup): string {
@@ -807,28 +803,28 @@ export default function BuyingGroups() {
                               autoComplete="off"
                             />
                           </label>
-                          <label className="block">
-                            <span className="text-xs text-ink-muted">
-                              {draft.api_framework === 'bfmr' ? 'API Secret' : 'Password'}
-                            </span>
-                            <input
-                              type="password"
-                              className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
-                              placeholder={
-                                draft.api_framework === 'buyinggroup'
-                                  ? 'BuyingGroup.com password'
-                                  : draft.api_framework === 'dealandrunner'
-                                    ? 'Deal & Runner password'
-                                    : draft.api_framework === 'bfmr'
-                                      ? 'BFMR API-SECRET'
-                                      : `${frameworkLabel(draft.api_framework)} password`
-                              }
-                              value={draft.api_password}
-                              onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}
-                              disabled={saving}
-                              autoComplete="off"
-                            />
-                          </label>
+                          {supportsBuyingGroupBrowser(draft) ? (
+                            <p className="text-xs text-ink-muted">Use the browser sign-in to sync payments, submit tracking, and check receiving.</p>
+                          ) : (
+                            <label className="block">
+                              <span className="text-xs text-ink-muted">
+                                {draft.api_framework === 'bfmr' ? 'API Secret' : 'Password'}
+                              </span>
+                              <input
+                                type="password"
+                                className="mt-0.5 w-full rounded border border-brand-200 px-2 py-1 text-sm"
+                                placeholder={
+                                  draft.api_framework === 'bfmr'
+                                    ? 'BFMR API-SECRET'
+                                    : `${frameworkLabel(draft.api_framework)} password`
+                                }
+                                value={draft.api_password}
+                                onChange={(e) => setDraft((d) => ({ ...d, api_password: e.target.value }))}
+                                disabled={saving}
+                                autoComplete="off"
+                              />
+                            </label>
+                          )}
                         </>
                       )}
                       {supportsTrackingSubmit(draft.api_framework) && (

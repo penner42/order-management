@@ -17,7 +17,7 @@ from app.buying_group_schedules import SCHEDULE_FIELDS, rebuild_schedules, claim
 from app.submission_policy import require_group_submissions_enabled
 from app.auth import get_current_user
 from app.browser_automation.buyinggroup_session import (
-    BrowserAccess, LOGIN_URL, browser_access_for_receiving, supports_browser_session,
+    BrowserAccess, LOGIN_URL, browser_access_for_group, supports_browser_session,
 )
 from app.browser_automation.jobs import create_job, get_job, update_job
 from app.schemas.browser_profile import BrowserJobRead
@@ -523,7 +523,7 @@ async def _run_browser_receiving(group_id: int, job_id: str, *, scheduled: bool)
     async def read_access(previous_access: str | None = None):
         while True:
             try:
-                access = await browser_access_for_receiving(group_id, previous_access=previous_access)
+                access = await browser_access_for_group(group_id, previous_access=previous_access)
             except HTTPException as exc:
                 if exc.status_code != 429:
                     raise

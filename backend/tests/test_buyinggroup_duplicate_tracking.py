@@ -136,6 +136,29 @@ class BuyingGroupDuplicateTests(unittest.TestCase):
         with self.assertRaises(api._SessionExpired):
             api.add_trackings(access_token="old", tracking_list=["EXISTING"], base_url="https://example.test")
 
+    def test_official_browser_submission_does_not_relogin_or_replay_after_auth_failure(self):
+        self.network.side_effect = None
+        self.network.return_value = (401, "", {})
+        with patch.object(api, "_ensure_tokens") as login, patch.object(api, "_reauth_tokens") as reauth:
+            with self.assertRaisesRegex(api.BrowserSessionExpired, "Reconnect"):
+                api.submit_trackings(
+                    base_url=None, api_url=None, username="", password="", browser_token="browser-token",
+                    trackings=[api.BuyinggroupTrackingEntry("EXISTING")],
+                )
+            login.assert_not_called()
+            reauth.assert_not_called()
+        self.network.assert_called_once()
+        self.assertEqual(self.network.call_args.kwargs["headers"]["auth_token"], "browser-token")
+
+    def test_official_submission_does_not_send_browser_token_to_an_override_host(self):
+        with self.assertRaisesRegex(ValueError, "official API host"):
+            api.submit_trackings(
+                base_url=None, api_url="https://example.test/add_trackings",
+                username="", password="", browser_token="browser-token",
+                trackings=[api.BuyinggroupTrackingEntry("EXISTING")],
+            )
+        self.network.assert_not_called()
+
     def test_session_expiry_reauthenticates_before_verifying_duplicate(self):
         original = self.network.side_effect
         expired = True

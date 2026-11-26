@@ -1,12 +1,17 @@
 """Sanitized portal fixtures for cash history, installments, and delayed batches."""
+import asyncio
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi.concurrency import run_in_threadpool
+
+from app.browser_automation.buyinggroup_session import BrowserAccess
 from app.group_payment_providers import (HistoryPages, amount, date, normalize_buyinggroup,
     normalize_usabg, normalize_dealandrunner, BuyinggroupPaymentProvider, UsabgPaymentProvider)
 from app.utils.buying_group_apis import buyinggroup as bg, usabg
+from app.utils.receiving_cache import provider_identity
 
 
 def bg_receipt(rid, total="100", tracking=None, created="01-01-2026 12:00:00", **kw):
@@ -132,6 +137,28 @@ class GroupProviderTests(unittest.TestCase):
             self.assertEqual(BuyinggroupPaymentProvider().fetch(group).payments, [])
             reauth.assert_called_once()
             self.assertEqual(dict(req.call_args_list[0].kwargs["fields"])["page"], dict(req.call_args_list[1].kwargs["fields"])["page"])
+
+    def test_bg_official_payment_history_uses_the_connected_account_without_a_password(self):
+        group = SimpleNamespace(id=23, api_framework="buyinggroup", base_url=None,
+                                api_username="user", api_password=None, api_email=None, api_user_id=None)
+        empty = (200, "", {"status": "SUCCESS", "payload": {
+            "count": 0, "payments": [], "activities": [], "receipts": [], "orders": [],
+        }})
+        provider = BuyinggroupPaymentProvider()
+        self.assertEqual(provider.ready(group), (True, None))
+        with (
+            patch("app.browser_automation.buyinggroup_session.browser_access_for_group",
+                  return_value=BrowserAccess("browser-token", provider_identity(group))) as browser,
+            patch.object(bg, "_ensure_tokens") as login,
+            patch.object(bg, "_multipart_request", return_value=empty) as request,
+        ):
+            result = asyncio.run(run_in_threadpool(provider.fetch, group))
+        browser.assert_awaited_once_with(group.id)
+        login.assert_not_called()
+        self.assertEqual(result.payments, [])
+        self.assertEqual(request.call_count, 4)
+        self.assertTrue(all(call.kwargs["headers"]["auth_token"] == "browser-token"
+                            for call in request.call_args_list))
 
     def test_usabg_split_po_and_signed_shares(self):
         line = usabg.UsabgReceivedRow(po_number="PO", purchase_id=None, tracking_number="track", quantity=1,

@@ -788,6 +788,8 @@ def add_trackings(
         timeout_seconds=timeout_seconds,
     )
     if status >= 400:
+        if base_url == DEFAULT_BASE_URL and _is_auth_failure(status, raw, raw_text):
+            raise _SessionExpired("BuyingGroup add_trackings rejected the access token")
         detail = _error_detail(raw, raw_text)
         raise RuntimeError(f"BuyingGroup add_trackings failed (HTTP {status}): {detail}")
     duplicates = _response_trackings(raw, "duplicate_trackings")
@@ -1580,6 +1582,7 @@ def submit_trackings(
     password: str,
     trackings: list[BuyinggroupTrackingEntry],
     timeout_seconds: float = 30.0,
+    browser_token: str | None = None,
 ) -> BuyinggroupSubmitResult:
     require_group_submissions_enabled()
     if not trackings:
@@ -1591,7 +1594,16 @@ def submit_trackings(
     if not tracking_list:
         raise ValueError("At least one tracking number is required")
 
-    tokens = _ensure_tokens(
+    if base == DEFAULT_BASE_URL:
+        if not browser_token:
+            raise BrowserSessionExpired("Sign in to BuyingGroup.com from Settings → Buying Groups, then try again.")
+        parsed_url = urlparse(add_url)
+        official = urlparse(DEFAULT_BASE_URL)
+        if (parsed_url.scheme, parsed_url.netloc) != (official.scheme, official.netloc):
+            raise ValueError("BuyingGroup.com tracking submission requires the official API host.")
+
+    tokens = _receiving_tokens(
+        browser_token=browser_token,
         base_url=base,
         username=username,
         password=password,

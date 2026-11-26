@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from decimal import Decimal
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,9 @@ class WalmartSubmissionTests(unittest.TestCase):
         stack = ExitStack()
         self.addCleanup(stack.close)
         stack.enter_context(patch("app.config.settings.group_submissions_enabled", True))
+        self.browser_token = stack.enter_context(patch(
+            "app.browser_automation.buyinggroup_session.browser_token_for_group", return_value="browser-token",
+        ))
         self.submit = stack.enter_context(patch.object(api, "submit_trackings", side_effect=self.respond))
         engine = create_engine("sqlite:///:memory:")
         self.addCleanup(engine.dispose)
@@ -28,7 +32,7 @@ class WalmartSubmissionTests(unittest.TestCase):
         self.db = Session(engine)
         self.addCleanup(self.db.close)
         self.group = BuyingGroup(name="BG", api_framework="buyinggroup",
-                                 api_username="user", api_password="password")
+                                 api_username="user")
         self.store = Store(name="Walmart")
         self.order = Order(store=self.store, buying_group=self.group, store_order_number="200015408984219")
         self.db.add(self.order)
@@ -59,6 +63,7 @@ class WalmartSubmissionTests(unittest.TestCase):
     def test_manual_submission_sends_tracking_and_order_with_sibling_total(self):
         items = [self.item("TRACK", "12", 2), self.item("TRACK", "5", 3)]
         result = submit_item_tracking_to_group(self.group, items[0], self.order, "TRACK", sibling_items=items)
+        self.assertEqual(self.submit.call_args.kwargs["browser_token"], "browser-token")
         self.assertEqual(set(self.entries()), {"TRACK", self.order.store_order_number})
         for entry in self.entries().values():
             self.assertEqual(entry.amount, Decimal("39"))
@@ -68,6 +73,7 @@ class WalmartSubmissionTests(unittest.TestCase):
     def test_batch_deduplicates_order_across_shipments_and_keeps_carrier_ids(self):
         items = [self.item("TRACK-1", "12", 2), self.item("TRACK-1", "5", 3), self.item("TRACK-2", "10")]
         result = batch_submit_pending_trackings(self.db, buying_group_id=self.group.id)
+        self.assertEqual(self.submit.call_args.kwargs["browser_token"], "browser-token")
         self.assertIsNone(result.error)
         self.assertEqual(result.submitted_count, 3)
         self.assertEqual({number: entry.amount for number, entry in self.entries().items()},
@@ -76,6 +82,16 @@ class WalmartSubmissionTests(unittest.TestCase):
         for item, tracking in zip(items, ["TRACK-1", "TRACK-1", "TRACK-2"]):
             self.assertEqual(item.status, ItemStatus.SUBMITTED)
             self.assertEqual(item.submission_id, f"id-{tracking}")
+
+    def test_disconnected_browser_leaves_tracking_pending(self):
+        item = self.item("TRACK")
+        self.browser_token.side_effect = HTTPException(409, "Sign in to BuyingGroup.com")
+        with self.assertRaises(HTTPException):
+            submit_item_tracking_to_group(self.group, item, self.order, "TRACK")
+        result = batch_submit_pending_trackings(self.db, buying_group_id=self.group.id)
+        self.assertIn("Sign in to BuyingGroup.com", result.error)
+        self.assertEqual(item.status, ItemStatus.SHIPPED)
+        self.submit.assert_not_called()
 
     def test_store_delivery_and_internal_tracking_still_send_one_entry(self):
         for tracking in [self.order.store_order_number, "55512345678901234567", "WM 55512345678901234567"]:

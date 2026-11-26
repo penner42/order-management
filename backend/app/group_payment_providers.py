@@ -97,10 +97,19 @@ class LoginProvider:
 class BuyinggroupPaymentProvider(LoginProvider):
     key = "buyinggroup"
 
+    def ready(self, group):
+        if bg.resolve_base_url(group.base_url) == bg.DEFAULT_BASE_URL:
+            return True, None
+        return super().ready(group)
+
     def fetch(self, group):
         base = bg.resolve_base_url(group.base_url)
         auth = dict(base_url=base, username=group.api_username, password=group.api_password, timeout_seconds=30)
-        tokens = bg._ensure_tokens(**auth)
+        if base == bg.DEFAULT_BASE_URL:
+            from app.browser_automation.buyinggroup_session import browser_token_for_group
+            tokens = bg._AuthTokens(browser_token_for_group(group), browser_session=True)
+        else:
+            tokens = bg._ensure_tokens(**auth)
 
         def table(path, field):
             nonlocal tokens

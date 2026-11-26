@@ -1,7 +1,7 @@
 {
   "version": "0.1.42",
-  "fingerprint": "321697cc2acd114e7d546815d91aebee560fdb70787986f70bbac92725523e9f",
-  "built_at": "2026-11-25T01:27:06.650328+00:00",
+  "fingerprint": "dec6a5abd316e09c59a5423850e1171aeab065fca6a6a1c2ae39c10bb8b90a77",
+  "built_at": "2026-11-25T21:19:38.901732+00:00",
   "chrome_filename": "order-manager-0.1.42.crx",
   "firefox_filename": "order_manager_browser_integration-0.1.42.xpi"
 }

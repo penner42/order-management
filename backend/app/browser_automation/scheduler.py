@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from fastapi.concurrency import run_in_threadpool
+
 from app.database import SessionLocal
 from app.config import settings
 from app.browser_automation.schedules import list_due_profile_jobs
@@ -57,7 +59,7 @@ async def _tick() -> None:
 
     for group_id in due_groups:
         try:
-            started = await asyncio.to_thread(run_scheduled_group, group_id, browser_loop=asyncio.get_running_loop())
+            started = await run_in_threadpool(run_scheduled_group, group_id, browser_loop=asyncio.get_running_loop())
             if started:
                 logger.info(
                     "Ran scheduled jobs for buying group %s",

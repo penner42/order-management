@@ -429,6 +429,7 @@ def _sync_group(db, group_id):
     """Network reads before locks; every caller uses the same snapshot/ledger transaction."""
     from app.payment_providers import provider_for
     from app.payment_review import refresh, capability
+    from app.utils.buying_group_apis.buyinggroup import BrowserSessionExpired
     group = db.get(BuyingGroup, group_id)
     if not group:
         raise HTTPException(404, "Buying group not found")
@@ -441,11 +442,20 @@ def _sync_group(db, group_id):
     try:
         result = provider.fetch(group)
     except Exception as exc:
+        error = "Could not read complete payment history. Previous evidence was preserved."
+        if isinstance(exc, HTTPException):
+            error = str(exc.detail)
+        elif isinstance(exc, BrowserSessionExpired):
+            error = str(exc)
         db.rollback()
         group = db.get(BuyingGroup, group_id)
         group.payment_sync_last_run_at = datetime.now(timezone.utc)
-        group.payment_sync_error = "Could not read complete payment history. Previous evidence was preserved."
+        group.payment_sync_error = error
         db.commit()
+        if isinstance(exc, HTTPException):
+            raise
+        if isinstance(exc, BrowserSessionExpired):
+            raise HTTPException(409, error) from exc
         raise HTTPException(502, group.payment_sync_error) from exc
     db.rollback()
     from app.payment_review import lock_group
