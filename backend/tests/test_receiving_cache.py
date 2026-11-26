@@ -489,6 +489,61 @@ class ReceivingCacheTests(unittest.TestCase):
                 self.group.api_password = "test-password"
                 self.group.bearer_token = "test-token"
 
+    def test_all_providers_prefer_upc_then_color_on_shared_tracking(self):
+        self.shipment.tracking_number = "NEW"
+        self.item.description = "Acme Sonic 540 Wireless Headphones - Black | Noise Isolating"
+        white = Item(order_id=self.order.id, description="Acme Sonic 540 Wireless Headphones - White",
+                     quantity=1, price_sold=Decimal("20"), status=ItemStatus.SHIPPED)
+        smoke = Item(order_id=self.order.id, description="Acme Sonic 540 Wireless Headphones - Smoke",
+                     quantity=1, price_sold=Decimal("22"), status=ItemStatus.SHIPPED)
+        forest = Item(order_id=self.order.id, description="Acme Sonic 540 Wireless Headphones - Forest",
+                      upc="123456789012", quantity=1, price_sold=Decimal("20"), status=ItemStatus.SHIPPED)
+        self.shipment.shipment_items.extend(ShipmentItem(item=item) for item in (white, smoke, forest))
+        self.db.commit()
+        products = [
+            ("R1", "Acme Sonic 540 - Black", Decimal("20"), None),
+            ("R2", "Acme Sonic 540 White", Decimal("20.01"), None),
+            ("R3", "Acme Sonic 540 - Smoke", Decimal("22"), forest.upc),
+            ("R4", "Acme Sonic 540 - Forest", Decimal("20"), "987654321098"),
+        ]
+        details = {
+            rid: {"receipt_id": rid, "received_items": [
+                {"item_id": name, "qty": 1, "price": str(price), "total": str(price),
+                 "upc": upc, "verified": True}]}
+            for rid, name, price, upc in products
+        }
+        responses = self.responses()
+        for provider, (module, method, value) in list(responses.items()):
+            template = (value if isinstance(value, list) else value.rows)[0]
+            rows = []
+            for rid, name, price, upc in products:
+                raw = {"upc": upc} if upc else {}
+                if provider == "buyinggroup":
+                    rows.append(replace(template, receipt_id=rid, total=price, raw={"key": rid}))
+                elif provider == "parsefile":
+                    rows.append(replace(template, receipt_id=rid, item=name, price=price, ext_total=price, raw=raw))
+                elif provider == "bfmr":
+                    rows.append(replace(template, my_tracker_id=rid, item_name=name, payout_price=price, raw=raw))
+                elif provider == "usabg":
+                    rows.append(replace(template, po_number=rid, received_item=name, unit_price=price,
+                                        ext_total=price, raw=raw))
+                else:
+                    rows.append(replace(template, system_transaction_id=rid, product_name=name, amount=price, raw=raw))
+            responses[provider] = (module, method, rows if isinstance(value, list) else replace(value, rows=rows))
+
+        def get_details(*, receipt_key, **_kwargs):
+            return details[receipt_key]
+
+        expected = {self.item.id: "R1", white.id: "R2", forest.id: "R3"}
+        for provider in responses:
+            with self.subTest(provider=provider), patch.object(self, "responses", return_value=responses):
+                result = self.check(provider, details=get_details)
+                self.assertIsNone(result.error)
+                self.assertEqual({m.item_id: m.receipt_id for m in result.matches}, expected)
+                session, = self.rematch()
+                self.assertEqual({m["item_id"]: m["receipt_id"] for m in session["matches"]}, expected)
+        self.assertTrue(all(i.receipt_id is None for i in (self.item, white, smoke, forest)))
+
     def test_cache_survives_pruning_and_failed_check_but_empty_success_replaces_it(self):
         self.shipment.tracking_number = "NEW"
         self.check("parsefile")

@@ -64,12 +64,16 @@ _SCANNED_OR_LATER_STATUSES = (
 )
 
 AMOUNT_TOLERANCE = Decimal("0.01")
-# When a tracking has multiple warehouse product lines, match local items to
-# lots by unit-price proximity (covers ~$1 BG vs local drift) before names.
 LOT_PRICE_TOLERANCE = Decimal("2.00")
 _LOT_NAME_FALLBACK_MIN = 0.35
 _LOT_NAME_ONLY_MIN = 0.25
 _LOT_AMBIGUITY_NAME_MARGIN = 0.05
+_UPC_MATCH = 3
+_VARIANT_MATCH = 2
+_TITLE_MATCH = 1
+_COLOR_WORDS = frozenset(
+    "black blue brown gold gray green grey orange pink purple red silver white yellow".split()
+)
 _DESC_STOPWORDS = frozenset(
     {
         "the",
@@ -88,8 +92,6 @@ _DESC_STOPWORDS = frozenset(
         "new",
         "latest",
         "model",
-        "white",
-        "black",
         "gps",
     }
 )
@@ -599,6 +601,7 @@ def _allocate_received_across_shared_trackings(
     *,
     item_demands: list[tuple[int, int, list[str]]],
     supply_by_tn: dict[str, int],
+    priority_by_claim: dict[tuple[int, str], int] | None = None,
 ) -> tuple[dict[int, int], dict[int, list[tuple[str, int]]]]:
     """Allocate warehouse qty to items, sharing supply when orders share a TN.
 
@@ -630,38 +633,28 @@ def _allocate_received_across_shared_trackings(
                 return
         detail[item_id].append((tn, give))
 
-    for tn in sorted(remaining.keys()):
+    priorities = priority_by_claim or {}
+    passes = sorted({(tn, priorities.get((item_id, tn), 0))
+                     for item_id, tns in item_tns.items() for tn in tns if tn in remaining},
+                    key=lambda entry: (-entry[1], entry[0]))
+    for tn, priority in passes:
         while remaining.get(tn, 0) > 0:
             claimants = [
                 item_id
                 for item_id, tns in item_tns.items()
                 if tn in tns and allocated[item_id] < demand[item_id]
+                and priorities.get((item_id, tn), 0) == priority
             ]
             if not claimants:
                 break
-            avail = remaining[tn]
-            fully_fillable = [
-                item_id
-                for item_id in claimants
-                if (demand[item_id] - allocated[item_id]) <= avail
-            ]
-            if fully_fillable:
-                # Smallest remaining need first so more orders can be completed.
-                fully_fillable.sort(
-                    key=lambda item_id: (demand[item_id] - allocated[item_id], item_id)
-                )
-                item_id = fully_fillable[0]
-            else:
-                # Nobody can be completed — allocate partial to smallest need.
-                claimants.sort(
-                    key=lambda item_id: (demand[item_id] - allocated[item_id], item_id)
-                )
-                item_id = claimants[0]
+            item_id = min(claimants, key=lambda item_id: (
+                demand[item_id] - allocated[item_id], item_id
+            ))
             need = demand[item_id] - allocated[item_id]
-            give = min(need, avail)
+            give = min(need, remaining[tn])
             allocated[item_id] += give
             _add_detail(item_id, tn, give)
-            remaining[tn] = avail - give
+            remaining[tn] -= give
     return allocated, detail
 
 
@@ -864,58 +857,103 @@ def _item_matching_upc(item: Item) -> str | None:
     return getattr(item, "receipt_upc", None) or getattr(item, "upc", None)
 
 
-def _score_item_to_lot(
-    item: Item, lot: dict[str, Any]
-) -> tuple[float, float] | None:
-    """Return (price_score, name_score) for ranking; higher is better. None = reject."""
+def _product_title_variant(title: str) -> tuple[set[str], set[str]]:
+    parts = re.split(r"\s+[-–—]\s+", title)
+    suffix = _description_tokens(parts[-1])
+    if len(parts) > 1 and 0 < len(suffix) <= 3:
+        return _description_tokens(" ".join(parts[:-1])), suffix
+    # Some feeds append the color without a separator or wrap it in parentheses.
+    color = re.search(r"\b([a-z]+)\)?\s*$", title.casefold())
+    if color and color[1] in _COLOR_WORDS:
+        return _description_tokens(title[:color.start()]), {color[1]}
+    return _description_tokens(title), set()
+
+
+def _product_title_identity(local: str | None, received: str | None) -> int | None:
+    local_title = (local or "").partition("|")[0]
+    receipt_title = (received or "").partition("|")[0]
+    local_base, local_variant = _product_title_variant(local_title)
+    receipt_base, receipt_variant = _product_title_variant(receipt_title)
+    shorter_base, longer_base = sorted((local_base, receipt_base), key=len)
+    if local_variant and receipt_variant and shorter_base and shorter_base <= longer_base:
+        if local_variant == receipt_variant:
+            return _VARIANT_MATCH
+        if not (local_variant <= receipt_variant or receipt_variant <= local_variant):
+            return None
+
+    shorter, longer = sorted(
+        (_description_tokens(local_title), _description_tokens(receipt_title)), key=len
+    )
+    if shorter and (shorter == longer or (len(shorter) >= 3 and shorter <= longer)):
+        return _TITLE_MATCH
+    return 0
+
+
+def _product_identity(item: Item, lot: dict[str, Any]) -> int | None:
+    """Rank UPC and title evidence and reject explicit product conflicts."""
     local_upc = _item_matching_upc(item)
     lot_upc = lot.get("receipt_upc")
     if local_upc and lot_upc:
-        if local_upc != lot_upc:
-            return None
-        return (1000.0, 1.0)
+        return _UPC_MATCH if local_upc == lot_upc else None
+    return _product_title_identity(item.description, lot.get("received_item"))
+
+
+_LotScore = tuple[int, float, float]
+
+
+def _score_item_to_lot(item: Item, lot: dict[str, Any]) -> _LotScore | None:
+    """Rank product evidence, payout proximity, and fuzzy name overlap."""
+    identity = _product_identity(item, lot)
+    if identity is None:
+        return None
     local_price = _money(item.price_sold)
     lot_price = _money(lot.get("unit_price"))
     name_score = _name_similarity(item.description, lot.get("received_item"))
+    if identity:
+        distance = (
+            abs(local_price - lot_price) if local_price is not None and lot_price is not None
+            else Decimal("Infinity")
+        )
+        return (identity, -float(distance), 1.0 if identity == _UPC_MATCH else name_score)
 
     if local_price is not None and lot_price is not None:
         delta = abs(local_price - lot_price)
         if delta <= LOT_PRICE_TOLERANCE:
-            return (float(LOT_PRICE_TOLERANCE - delta), name_score)
+            return (0, float(LOT_PRICE_TOLERANCE - delta), name_score)
         if name_score >= _LOT_NAME_FALLBACK_MIN:
             # Prefer closer prices among name-only fallbacks.
-            return (-1.0 - float(min(delta, Decimal("100"))), name_score)
+            return (0, -1.0 - float(min(delta, Decimal("100"))), name_score)
         return None
 
     if name_score >= _LOT_NAME_ONLY_MIN:
-        return (-0.5, name_score)
+        return (0, -0.5, name_score)
     return None
 
 
 def _scores_ambiguous(
-    best: tuple[float, float],
-    second: tuple[float, float] | None,
+    best: _LotScore,
+    second: _LotScore | None,
 ) -> bool:
     if second is None:
         return False
-    if abs(best[0] - second[0]) > 1e-9:
+    if best[:2] != second[:2]:
         return False
-    return abs(best[1] - second[1]) <= _LOT_AMBIGUITY_NAME_MARGIN
+    return abs(best[2] - second[2]) <= _LOT_AMBIGUITY_NAME_MARGIN
 
 
 def _score_bg_item_to_lot(
     item: Item, lot: dict[str, Any], *, single_line: bool = False,
-) -> tuple[float, float] | None:
+) -> _LotScore | None:
     """BG product identity comes from UPC, then name; payout is reviewed separately."""
-    local_upc = _item_matching_upc(item)
-    if local_upc and lot.get("receipt_upc"):
-        return (1000.0, 1.0) if local_upc == lot["receipt_upc"] else None
-    similarity = _name_similarity(item.description, lot.get("received_item"))
-    if similarity < _LOT_NAME_ONLY_MIN and not (single_line and similarity > 0):
+    identity = _product_identity(item, lot)
+    if identity is None:
         return None
-    # Keep fallback name scores in the second position so the existing
-    # ambiguity margin applies to competing products with similar names.
-    return (0.0, similarity)
+    if identity == _UPC_MATCH:
+        return (_UPC_MATCH, 0.0, 1.0)
+    similarity = _name_similarity(item.description, lot.get("received_item"))
+    if not identity and similarity < _LOT_NAME_ONLY_MIN and not (single_line and similarity > 0):
+        return None
+    return (identity, 0.0, similarity)
 
 
 def _assign_items_to_lots(
@@ -941,10 +979,11 @@ def _assign_items_to_lots(
         if not lots:
             continue
         if len(lots) == 1 and not lots[0].get("require_product_match"):
-            assignment[item.id] = lots[0]["lot_id"]
+            if _product_identity(item, lots[0]) is not None:
+                assignment[item.id] = lots[0]["lot_id"]
             continue
 
-        ranked: list[tuple[tuple[float, float], str]] = []
+        ranked: list[tuple[_LotScore, str]] = []
         for lot in lots:
             score = _score_item_to_lot(item, lot)
             if score is None:
@@ -952,7 +991,7 @@ def _assign_items_to_lots(
             ranked.append((score, lot["lot_id"]))
         if not ranked:
             continue
-        ranked.sort(key=lambda pair: (pair[0][0], pair[0][1]), reverse=True)
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
         best_score, best_lot_id = ranked[0]
         best_group = lot_groups.get(best_lot_id, best_lot_id)
         second_score = next(
@@ -963,6 +1002,88 @@ def _assign_items_to_lots(
             continue
         assignment[item.id] = best_lot_id
     return assignment
+
+
+def _allocate_product_lots(
+    claims: list[tuple[Item, int, list[str]]],
+    supply: dict[str, int],
+    lots_by_id: dict[str, dict[str, Any]],
+) -> tuple[dict[int, int], dict[int, list[tuple[str, int]]]]:
+    return _allocate_received_across_shared_trackings(
+        item_demands=[(item.id, qty, ids) for item, qty, ids in claims],
+        supply_by_tn=supply,
+        priority_by_claim={
+            (item.id, lid): 2 * (_product_identity(item, lots_by_id[lid]) or 0)
+            + int(not lots_by_id[lid].get("order_fallback"))
+            for item, _, ids in claims for lid in ids
+        },
+    )
+
+
+_ReceiptPools = dict[str, dict[tuple[str | None, str], dict[str, Any]]]
+
+
+def _receipt_product_pool(
+    pools: _ReceiptPools, key: str, display: str, name: str | None, upc: str | None,
+) -> dict[str, Any]:
+    """Group a provider's quantity and payout metadata by tracking and product."""
+    products = pools.setdefault(key, {})
+    product = (upc, "" if upc else " ".join((name or "").casefold().split()))
+    if product not in products:
+        products[product] = {
+            "lot_id": f"{key}:{len(products)}",
+            "qty": 0,
+            "display_tn": display,
+            "received_item": name,
+            "receipt_upc": upc,
+            "receipt_ids": [],
+            "statuses": [],
+            "scanned_at": None,
+        }
+    return products[product]
+
+
+def _select_receipt_pools(
+    item: Item, keys: list[str], pools: _ReceiptPools, original_pools: _ReceiptPools,
+    *, received: bool = False,
+) -> dict[str, dict[str, Any]]:
+    selected = {}
+    receipt_ids = _receipt_ids_on_item(item) if received else set()
+    for key in dict.fromkeys(tn.casefold() for tn in keys):
+        lots = list(pools.get(key, {}).values())
+        if received:
+            exact = [lot for lot in lots if receipt_ids.intersection(lot["receipt_ids"])]
+            lots = exact or lots
+            if len(lots) == 1 and item.receipt_upc and (
+                exact or _product_title_identity(item.description, lots[0]["received_item"])
+            ):
+                # A receipt-ID correction keeps the UPC already confirmed on the item.
+                selected[key] = lots[0]
+                continue
+        elif len(lots) == 1 and len(original_pools.get(key, {})) > 1:
+            lots = [{**lots[0], "require_product_match": True}]
+        assignment = _assign_items_to_lots(claimants=[(item, [key])], lots_by_tn={key: lots})
+        if item.id in assignment:
+            selected[key] = next(lot for lot in lots if lot["lot_id"] == assignment[item.id])
+    return selected
+
+
+def _allocate_receipt_pools(
+    claimants: list[tuple[Item, list[str]]],
+    available_pools: _ReceiptPools,
+    original_pools: _ReceiptPools,
+) -> tuple[dict[int, int], dict[int, list[tuple[str, int]]], dict[str, dict[str, Any]]]:
+    lots_by_id = {
+        lot["lot_id"]: lot for products in available_pools.values() for lot in products.values()
+    }
+    claims = []
+    for item, keys in claimants:
+        selected = _select_receipt_pools(item, keys, available_pools, original_pools)
+        claims.append((item, item.quantity or 1, [lot["lot_id"] for lot in selected.values()]))
+    allocated, details = _allocate_product_lots(
+        claims, {lid: lot["qty"] for lid, lot in lots_by_id.items()}, lots_by_id,
+    )
+    return allocated, details, lots_by_id
 
 
 def _allocate_dnr_lots(
@@ -983,10 +1104,10 @@ def _allocate_dnr_lots(
         claimants=claimants, lots_by_tn=lots_by_tn, group_by_lot_id=group_by_lot_id,
     )
     supply = {lot["lot_id"]: int(lot["qty"]) for lot in lots}
-    allocated, detail = _allocate_received_across_shared_trackings(
-        item_demands=[(item.id, item.quantity or 1, [assignment[item.id]])
-                      for item, _ in claimants if item.id in assignment],
-        supply_by_tn=supply,
+    allocated, detail = _allocate_product_lots(
+        [(item, item.quantity or 1, [assignment[item.id]])
+         for item, _ in claimants if item.id in assignment],
+        supply, lots_by_id,
     )
     for pairs in detail.values():
         for lot_id, qty in pairs:
@@ -1005,7 +1126,8 @@ def _allocate_dnr_lots(
         if local_upc and lot_upc:
             same_product = local_upc == lot_upc
         else:
-            same_product = _name_similarity(item.description, preferred["received_item"]) >= _LOT_NAME_ONLY_MIN
+            same_product = (bool(_product_identity(item, preferred))
+                            or _name_similarity(item.description, preferred["received_item"]) >= _LOT_NAME_ONLY_MIN)
         if not same_product:
             continue
         alternatives = list(dict.fromkeys(
@@ -1013,14 +1135,12 @@ def _allocate_dnr_lots(
             for tn in trackings
             for lot in lots_by_tn.get(tn.casefold(), [])
             if lot["lot_id"] != preferred_id and group_by_lot_id.get(lot["lot_id"]) == group
-            and supply[lot["lot_id"]] > 0
+            and supply[lot["lot_id"]] > 0 and _product_identity(item, lot) is not None
         ))
         if alternatives:
-            extra_demands.append((item.id, remaining, alternatives))
+            extra_demands.append((item, remaining, alternatives))
 
-    _, extra_detail = _allocate_received_across_shared_trackings(
-        item_demands=extra_demands, supply_by_tn=supply,
-    )
+    _, extra_detail = _allocate_product_lots(extra_demands, supply, lots_by_id)
     for item_id, pairs in extra_detail.items():
         detail[item_id].extend(pairs)
     return detail
@@ -1552,8 +1672,13 @@ def _is_walmart_order(order: Order) -> bool:
 
 def _score_item_to_lot_soft(
     item: Item, lot: dict[str, Any]
-) -> tuple[float, float] | None:
+) -> _LotScore | None:
     """Stricter score for cross-TN soft-match: require price + name agreement."""
+    identity = _product_identity(item, lot)
+    if identity is None:
+        return None
+    if identity == _UPC_MATCH:
+        return _score_item_to_lot(item, lot)
     local_price = _money(item.price_sold)
     lot_price = _money(lot.get("unit_price"))
     name_score = _name_similarity(item.description, lot.get("received_item"))
@@ -1562,9 +1687,9 @@ def _score_item_to_lot_soft(
     delta = abs(local_price - lot_price)
     if delta > LOT_PRICE_TOLERANCE:
         return None
-    if name_score < _LOT_NAME_FALLBACK_MIN:
+    if not identity and name_score < _LOT_NAME_FALLBACK_MIN:
         return None
-    return (float(LOT_PRICE_TOLERANCE - delta), name_score)
+    return (identity, float(LOT_PRICE_TOLERANCE - delta), name_score)
 
 
 def _soft_lot_product_key(lot: dict[str, Any]) -> tuple[str, str, str | None]:
@@ -1634,7 +1759,7 @@ def _soft_assign_orphan_dnr_lots(
 
     assignment: dict[int, str] = {}
     for item, _order, _trackings in claimants:
-        ranked_for_item: list[tuple[tuple[float, float], str]] = []
+        ranked_for_item: list[tuple[_LotScore, str]] = []
         for lot in lots:
             score = _score_item_to_lot_soft(item, lot)
             if score is None:
@@ -1642,7 +1767,7 @@ def _soft_assign_orphan_dnr_lots(
             ranked_for_item.append((score, lot["lot_id"]))
         if not ranked_for_item:
             continue
-        ranked_for_item.sort(key=lambda pair: (pair[0][0], pair[0][1]), reverse=True)
+        ranked_for_item.sort(key=lambda pair: pair[0], reverse=True)
         best_score, best_lot_id = ranked_for_item[0]
         best_lot = lots_by_id.get(best_lot_id) or {}
         best_key = _soft_lot_product_key(best_lot)
@@ -2056,16 +2181,10 @@ def _check_receiving_usabg(
 
     # Allocate qty from each product lot pool (not the whole tracking pool).
     supply_by_lot = {lot["lot_id"]: int(lot["qty"]) for lot in available_lots}
-    item_demands: list[tuple[int, int, list[str]]] = []
-    for item, _order, _trackings in eligible:
-        lot_id = lot_assignment.get(item.id)
-        if not lot_id:
-            continue
-        item_demands.append((item.id, item.quantity or 1, [lot_id]))
-
-    allocated, allocated_by_lot = _allocate_received_across_shared_trackings(
-        item_demands=item_demands,
-        supply_by_tn=supply_by_lot,
+    allocated, allocated_by_lot = _allocate_product_lots(
+        [(item, item.quantity or 1, [lot_assignment[item.id]])
+         for item, _, _ in eligible if item.id in lot_assignment],
+        supply_by_lot, {lot["lot_id"]: lot for lot in available_lots},
     )
 
     matches: list[ReceivingMatch] = []
@@ -2519,11 +2638,10 @@ def _check_receiving_dealandrunner(
     }
     for item_id, lot_id in soft_assignment.items():
         item, _order, _trackings = soft_claimants_by_id[item_id]
-        soft_demands.append((item_id, item.quantity or 1, [lot_id]))
+        soft_demands.append((item, item.quantity or 1, [lot_id]))
 
-    soft_allocated, soft_allocated_by_lot = _allocate_received_across_shared_trackings(
-        item_demands=soft_demands,
-        supply_by_tn=soft_supply,
+    soft_allocated, soft_allocated_by_lot = _allocate_product_lots(
+        soft_demands, soft_supply, soft_lots_by_id,
     )
     soft_meta_by_lot = {
         lot_id: _lot_as_match_meta(lot) for lot_id, lot in soft_lots_by_id.items()
@@ -2789,8 +2907,7 @@ def _check_receiving_parsefile(
     by_tracking = _index_received_by_tracking(received_rows)
 
     def pools(rows: list[parsefile_api.ParsefileReceivedItem]):
-        supply_by_tn: dict[str, int] = {}
-        meta_by_tn: dict[str, dict[str, Any]] = {}
+        products_by_tracking = {}
         for row in rows:
             if row.void:
                 continue
@@ -2801,19 +2918,10 @@ def _check_receiving_parsefile(
             if not primary_tn:
                 continue
             key = primary_tn.casefold()
-            supply_by_tn[key] = supply_by_tn.get(key, 0) + qty
-            meta = meta_by_tn.setdefault(
-                key,
-                {
-                    "receipt_ids": [],
-                    "statuses": [],
-                    "prices": [],
-                    "ext_totals": [],
-                    "scanned_at": None,
-                    "received_item": None,
-                },
+            meta = _receipt_product_pool(
+                products_by_tracking, key, primary_tn, row.item, receipt_upc(row),
             )
-            absorb_upc(meta, receipt_upc(row))
+            meta["qty"] += qty
             if row.receipt_id:
                 meta["receipt_ids"].append(row.receipt_id)
             if row.status:
@@ -2823,16 +2931,15 @@ def _check_receiving_parsefile(
             if total is None and row.price is not None:
                 total = row.price * Decimal(qty)
             if total is not None:
-                meta["ext_totals"].append(total)
-                meta["prices"].append((total / Decimal(qty)).quantize(Decimal("0.01")))
+                unit = (total / Decimal(qty)).quantize(Decimal("0.01"))
+                meta.setdefault("prices", []).append(unit)
+                meta.setdefault("unit_price", unit)
             row_scanned = _parse_created_date(row.created_date)
             if row_scanned is not None and (
                 meta["scanned_at"] is None or row_scanned > meta["scanned_at"]
             ):
                 meta["scanned_at"] = row_scanned
-            if meta["received_item"] is None and row.item:
-                meta["received_item"] = row.item
-        return supply_by_tn, meta_by_tn
+        return products_by_tracking
 
     unapplied = _unapplied_receipt_rows(
         received_rows, scanned_pending,
@@ -2843,7 +2950,8 @@ def _check_receiving_parsefile(
         ),
         description=lambda row: row.item,
     )
-    supply_by_tn, meta_by_tn = pools(unapplied)
+    available_pools = pools(unapplied)
+    original_pools = pools(received_rows)
 
     eligible: list[tuple[Item, Order, list[str]]] = []
     void_matched_ids: set[int] = set()
@@ -2862,7 +2970,7 @@ def _check_receiving_parsefile(
             any_cand = True
             if any(not r.void for r in rows):
                 all_void = False
-            if tn.casefold() in supply_by_tn:
+            if tn.casefold() in available_pools:
                 has_hit = True
         if has_hit:
             eligible.append((item, order, trackings))
@@ -2872,9 +2980,9 @@ def _check_receiving_parsefile(
         else:
             not_found += 1
 
-    allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
-        item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
-        supply_by_tn=supply_by_tn,
+    allocated, allocated_by_lot, lots_by_id = _allocate_receipt_pools(
+        [(item, trackings) for item, _order, trackings in eligible],
+        available_pools, original_pools,
     )
 
     matches: list[ReceivingMatch] = []
@@ -2888,22 +2996,22 @@ def _check_receiving_parsefile(
                 item=item,
                 order=order,
                 trackings=trackings,
-                tn_allocations=allocated_by_tn.get(item.id, []),
-                meta_by_tn=meta_by_tn,
+                tn_allocations=allocated_by_lot.get(item.id, []),
+                meta_by_tn=lots_by_id,
             )
         )
 
-    supply_by_tn, meta_by_tn = pools(received_rows)
     for item, order, trackings in scanned_pending:
         if _is_zero_payout(item):
             continue
+        selected = _select_receipt_pools(item, trackings, original_pools, original_pools, received=True)
         matches.extend(
             _receipt_update_matches_for_item(
                 item=item,
                 order=order,
                 trackings=trackings,
-                meta_by_tn=meta_by_tn,
-                supply_by_tn=supply_by_tn,
+                meta_by_tn=selected,
+                supply_by_tn={key: lot["qty"] for key, lot in selected.items()},
             )
         )
 
@@ -3278,8 +3386,9 @@ def _check_receiving_buyinggroup(
                 ranked.append((score, lot))
         if not ranked:
             return []
-        # The Walmart order number spans packages/products. Use it only when
-        # no eligible product is found through a shipment tracking identifier.
+        # Prefer shipment evidence when product evidence is equally strong.
+        strongest = max(score[0] for score, _lot in ranked)
+        ranked = [(score, lot) for score, lot in ranked if score[0] == strongest]
         shipment_ranked = [(score, lot) for score, lot in ranked
                            if lot["lot_id"] in shipment_lot_ids]
         if shipment_ranked:
@@ -3294,19 +3403,17 @@ def _check_receiving_buyinggroup(
             return []
         return [lot["lot_id"] for _score, lot in ranked if same_product(lot) == same_product(best)]
 
-    received_demands = [(item.id, item.quantity or 1, choices(item, tns, True))
+    received_demands = [(item, item.quantity or 1, choices(item, tns, True))
                         for item, _o, tns in scanned_pending
                         if not _is_zero_payout(item) and (not item.receiving_return_id or item.receipt_id)]
-    _reserved, reserved = _allocate_received_across_shared_trackings(
-        item_demands=received_demands, supply_by_tn=supply)
+    _reserved, reserved = _allocate_product_lots(received_demands, supply, lots_by_id)
     available = dict(supply)
     for allocations in reserved.values():
         for lid, qty in allocations:
             available[lid] -= qty
-    demands = [(item.id, item.quantity or 1, choices(item, tns))
+    demands = [(item, item.quantity or 1, choices(item, tns))
                for item, _o, tns in pending if not _is_zero_payout(item)]
-    allocated, allocations = _allocate_received_across_shared_trackings(
-        item_demands=demands, supply_by_tn=available)
+    allocated, allocations = _allocate_product_lots(demands, available, lots_by_id)
     # Cumulative rounding preserves each tracking's exact reward across splits.
     reward_allocations = {}
     reward_qty_used = {}
@@ -3532,58 +3639,40 @@ def _check_receiving_bfmr(
         return int(qty) if qty is not None and int(qty) > 0 else 1
 
     def _absorb_meta(meta: dict[str, Any], row: bfmr_api.BfmrTrackerRow) -> None:
-        absorb_upc(meta, receipt_upc(row))
         rid = _bfmr_receipt_id(row)
         if rid:
             meta["receipt_ids"].append(rid)
         if row.status:
             meta["statuses"].append(str(row.status))
         if row.payout_price is not None:
-            meta["unit_prices"].append(row.payout_price)
+            meta.setdefault("unit_prices", []).append(row.payout_price)
+            meta.setdefault("unit_price", row.payout_price)
         row_scanned = _parse_created_date(row.scanned_at)
         if row_scanned is not None and (
             meta["scanned_at"] is None or row_scanned > meta["scanned_at"]
         ):
             meta["scanned_at"] = row_scanned
-        if meta["received_item"] is None:
-            meta["received_item"] = (row.item_name or row.deal_title or "").strip() or None
-
-    empty_meta = lambda: {
-        "receipt_ids": [],
-        "statuses": [],
-        "unit_prices": [],
-        "scanned_at": None,
-        "received_item": None,
-    }
-
     def pools(rows: list[bfmr_api.BfmrTrackerRow]):
-        supply_by_tn: dict[str, int] = {}
-        supply_by_order: dict[str, int] = {}
-        meta_by_tn: dict[str, dict[str, Any]] = {}
-        meta_by_order: dict[str, dict[str, Any]] = {}
-
+        products_by_key = {}
         for row in rows:
             tn = (row.tracking_number or "").strip()
-            qty = _row_qty(row)
             oid = (row.order_id or "").strip()
-            if tn and tn.casefold() in all_pending_trackings:
-                key = tn.casefold()
-                supply_by_tn[key] = supply_by_tn.get(key, 0) + qty
-                meta = meta_by_tn.setdefault(key, empty_meta())
-                _absorb_meta(meta, row)
-            elif oid:
-                # Empty TN, or TN not linked to any pending item — fill by store order
-                # after shared tracking allocation across orders.
-                okey = oid.casefold()
-                supply_by_order[okey] = supply_by_order.get(okey, 0) + qty
-                meta = meta_by_order.setdefault(okey, empty_meta())
-                _absorb_meta(meta, row)
-            elif tn:
-                key = tn.casefold()
-                supply_by_tn[key] = supply_by_tn.get(key, 0) + qty
-                meta = meta_by_tn.setdefault(key, empty_meta())
-                _absorb_meta(meta, row)
-        return supply_by_tn, supply_by_order, meta_by_tn, meta_by_order
+            if not (tn or oid):
+                continue
+            order_fallback = bool(oid and tn.casefold() not in all_pending_trackings)
+            key = f"order:{oid.casefold()}" if order_fallback else tn.casefold()
+            name = (row.item_name or row.deal_title or "").strip() or None
+            meta = _receipt_product_pool(
+                products_by_key, key, oid if order_fallback else tn, name, receipt_upc(row),
+            )
+            meta["order_fallback"] = order_fallback
+            meta["qty"] += _row_qty(row)
+            _absorb_meta(meta, row)
+        return products_by_key
+
+    def pool_keys(order, trackings):
+        oid = (order.store_order_number or "").strip().casefold()
+        return [*trackings, f"order:{oid}"] if oid else trackings
 
     def receipt_identity(row: bfmr_api.BfmrTrackerRow) -> tuple[str | None, list[str]]:
         tn = (row.tracking_number or "").strip()
@@ -3603,7 +3692,8 @@ def _check_receiving_bfmr(
         with_quantity=lambda row, qty: replace(row, qty_received=qty),
         description=lambda row: row.item_name or row.deal_title,
     )
-    supply_by_tn, supply_by_order, meta_by_tn, meta_by_order = pools(unapplied)
+    available_pools = pools(unapplied)
+    original_pools = pools(receipts)
 
     eligible: list[tuple[Item, Order, list[str]]] = []
     not_found = 0
@@ -3611,46 +3701,15 @@ def _check_receiving_bfmr(
     for item, order, trackings in pending:
         if _is_zero_payout(item):
             continue
-        store_order = (order.store_order_number or "").strip().casefold()
-        has_hit = any(tn.casefold() in supply_by_tn for tn in trackings)
-        if not has_hit and store_order and store_order in supply_by_order:
-            has_hit = True
-        if has_hit:
+        if any(key.casefold() in available_pools for key in pool_keys(order, trackings)):
             eligible.append((item, order, trackings))
         else:
             not_found += 1
 
-    allocated, allocated_by_tn = _allocate_received_across_shared_trackings(
-        item_demands=[(item.id, item.quantity or 1, trackings) for item, _o, trackings in eligible],
-        supply_by_tn=supply_by_tn,
+    allocated, allocated_by_lot, lots_by_id = _allocate_receipt_pools(
+        [(item, pool_keys(order, trackings)) for item, order, trackings in eligible],
+        available_pools, original_pools,
     )
-
-    # Second pass: leftover order-level supply fills remaining demand for items
-    # on that store order (after all shared TNs were considered).
-    demand_left = {
-        item.id: max((item.quantity or 1) - int(allocated.get(item.id, 0)), 0)
-        for item, _o, _t in eligible
-    }
-    order_fill_by_item: dict[int, int] = {}
-    order_items: dict[str, list[int]] = {}
-    for item, order, _tns in eligible:
-        okey = (order.store_order_number or "").strip().casefold()
-        if not okey:
-            continue
-        order_items.setdefault(okey, []).append(item.id)
-    for okey in sorted(order_items.keys()):
-        avail = int(supply_by_order.get(okey, 0))
-        if avail <= 0:
-            continue
-        for item_id in sorted(order_items[okey]):
-            need = demand_left.get(item_id, 0)
-            if need <= 0 or avail <= 0:
-                continue
-            give = min(need, avail)
-            allocated[item_id] = int(allocated.get(item_id, 0)) + give
-            order_fill_by_item[item_id] = int(order_fill_by_item.get(item_id, 0)) + give
-            demand_left[item_id] = need - give
-            avail -= give
 
     matches: list[ReceivingMatch] = []
     for item, order, trackings in eligible:
@@ -3658,41 +3717,28 @@ def _check_receiving_bfmr(
         if got <= 0:
             not_found += 1
             continue
-        okey = (order.store_order_number or "").strip().casefold()
-        extra_lines: list[tuple[str, int, dict[str, Any]]] = []
-        order_qty = int(order_fill_by_item.get(item.id, 0))
-        if order_qty > 0 and okey and okey in meta_by_order:
-            display = (order.store_order_number or "").strip() or "order"
-            extra_lines.append((display, order_qty, meta_by_order[okey]))
         matches.extend(
             _matches_for_tn_allocations(
                 item=item,
                 order=order,
                 trackings=trackings,
-                tn_allocations=allocated_by_tn.get(item.id, []),
-                meta_by_tn=meta_by_tn,
-                extra_lines=extra_lines,
+                tn_allocations=allocated_by_lot.get(item.id, []),
+                meta_by_tn=lots_by_id,
             )
         )
 
-    supply_by_tn, supply_by_order, meta_by_tn, meta_by_order = pools(receipts)
     for item, order, trackings in scanned_pending:
         if _is_zero_payout(item):
             continue
-        okey = (order.store_order_number or "").strip().casefold()
-        extra_meta = meta_by_order.get(okey) if okey else None
-        extra_qty = int(supply_by_order.get(okey, 0)) if okey else 0
-        extra_display = (order.store_order_number or "").strip() if okey else ""
+        keys = pool_keys(order, trackings)
+        selected = _select_receipt_pools(item, keys, original_pools, original_pools, received=True)
         matches.extend(
             _receipt_update_matches_for_item(
                 item=item,
                 order=order,
-                trackings=trackings,
-                meta_by_tn=meta_by_tn,
-                supply_by_tn=supply_by_tn,
-                extra_meta=extra_meta,
-                extra_qty=extra_qty,
-                extra_display_tn=extra_display,
+                trackings=keys,
+                meta_by_tn=selected,
+                supply_by_tn={key: lot["qty"] for key, lot in selected.items()},
             )
         )
 

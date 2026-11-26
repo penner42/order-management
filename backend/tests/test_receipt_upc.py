@@ -222,12 +222,8 @@ class ProviderReceiptUpcTests(unittest.TestCase):
         rows.append(other)
         with patch.object(self, 'responses', return_value=responses):
             result = self.check(provider)
-            if provider in ('usabg', 'dealandrunner'):
-                # Same description/price, different UPCs: neither lot is a safe choice.
-                self.assertFalse(result.matches)
-            else:
-                match, = result.matches
-                self.assertIsNone(match.receipt_upc)
+            # Same description and price, with no local UPC to distinguish the lots.
+            self.assertFalse(result.matches)
             self.item.status = ItemStatus.SCANNED
             self.item.receipt_id = 'R1'
             self.db.commit()
@@ -241,11 +237,7 @@ class ProviderReceiptUpcTests(unittest.TestCase):
         rows.append(other)
         with patch.object(self, 'responses', return_value=responses):
             result = self.check(provider)
-            if provider in ('usabg', 'dealandrunner'):
-                self.assertFalse(result.matches)
-            else:
-                match, = result.matches
-                self.assertIsNone(match.receipt_upc)
+            self.assertFalse(result.matches)
 
     def product_backfill(self, provider):
         self.item.status = ItemStatus.SCANNED
