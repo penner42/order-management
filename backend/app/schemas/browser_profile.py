@@ -41,6 +41,7 @@ class BrowserProfileScheduleUpdate(BaseModel):
 class BrowserProfileRead(BaseModel):
     id: int
     integration: str | None = None
+    buying_group_id: int | None = None
     store_account_id: int | None
     retailer: str
     status: str

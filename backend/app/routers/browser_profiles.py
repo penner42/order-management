@@ -108,6 +108,7 @@ def _profile_read(profile: BrowserProfile) -> BrowserProfileRead:
     return BrowserProfileRead(
         id=profile.id,
         integration=profile.integration,
+        buying_group_id=profile.buying_group_id,
         store_account_id=profile.store_account_id,
         retailer=profile.retailer,
         status=profile.status,

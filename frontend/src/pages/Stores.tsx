@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState, Fragment } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import BrowserProfileControls from '../components/BrowserProfileControls'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { NoticeLabel } from '../components/NoticeLabel'
+import { BROWSER_LOGIN_REQUIRED, needsBrowserLogin } from '../utils/browserLogin'
 import type { Store, StoreAccount, BrowserProfile } from '../api/types'
 
-export default function Stores() {
+export default function Stores({ onBrowserStatusChange }: { onBrowserStatusChange: () => void }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const expandedStoreId = Number(searchParams.get('store_id')) || null
   const selectedAccountId = Number(searchParams.get('account_id')) || null
@@ -27,6 +29,11 @@ export default function Stores() {
     await api.get<BrowserProfile[]>('/browser-profiles').then(setProfiles).catch(err => setError(String(err)))
   }, [])
 
+  const reloadProfiles = useCallback(() => {
+    onBrowserStatusChange()
+    return loadProfiles()
+  }, [loadProfiles, onBrowserStatusChange])
+
   function expandStore(storeId: number) {
     const next = new URLSearchParams(searchParams)
     if (expandedStoreId === storeId) next.delete('store_id')
@@ -44,18 +51,25 @@ export default function Stores() {
     loadProfiles()
     api
       .get<Store[]>('/stores')
-      .then((list) => {
+      .then(async (list) => {
         setStores(list)
-        return Promise.all(list.map((s) => api.get<StoreAccount[]>(`/stores/${s.id}/accounts`))).then((accountLists) => ({
-          list,
-          accountLists,
+        const accountLists = await Promise.all(list.map(async (store) => {
+          try {
+            return await api.get<StoreAccount[]>(`/stores/${store.id}/accounts`)
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 404) return null
+            throw err
+          }
         }))
+        return { list, accountLists }
       })
       .then(({ list, accountLists }) => {
         const byStore: Record<number, StoreAccount[]> = {}
         list.forEach((s, i) => {
-          byStore[s.id] = accountLists[i] ?? []
+          const accounts = accountLists[i]
+          if (accounts !== null) byStore[s.id] = accounts
         })
+        if (accountLists.includes(null)) setStores(list.filter(store => store.id in byStore))
         setAccountsByStore(byStore)
       })
       .catch(err => setError(err instanceof Error ? err.message : String(err)))
@@ -131,6 +145,7 @@ export default function Stores() {
         return next
       })
       if (editingStoreId === id) setEditingStoreId(null)
+      void reloadProfiles()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -182,6 +197,7 @@ export default function Stores() {
         ...prev,
         [storeId]: (prev[storeId] ?? []).filter((a) => a.id !== accountId),
       }))
+      void reloadProfiles()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -190,6 +206,10 @@ export default function Stores() {
   }
 
   if (loading) return <div className="text-ink-muted">Loading stores…</div>
+
+  const profilesNeedingLogin = profiles.filter(profile => profile.store_id != null && needsBrowserLogin(profile))
+  const storesNeedingLogin = new Set(profilesNeedingLogin.map(profile => profile.store_id))
+  const accountsNeedingLogin = new Set(profilesNeedingLogin.map(profile => profile.store_account_id))
 
   return (
     <div>
@@ -239,7 +259,11 @@ export default function Stores() {
                           autoFocus
                         />
                       ) : (
-                        <button type="button" onClick={() => expandStore(s.id)} aria-expanded={expandedStoreId === s.id} aria-controls={`store-details-${s.id}`} className="text-left hover:underline">{s.name}</button>
+                        <button type="button" onClick={() => expandStore(s.id)} aria-expanded={expandedStoreId === s.id} aria-controls={`store-details-${s.id}`}
+                          aria-description={storesNeedingLogin.has(s.id) ? BROWSER_LOGIN_REQUIRED : undefined}
+                          className="text-left hover:underline">
+                          <NoticeLabel notice={storesNeedingLogin.has(s.id) ? BROWSER_LOGIN_REQUIRED : undefined}>{s.name}</NoticeLabel>
+                        </button>
                       )}
                     </td>
                     <td className="py-3 px-4 text-sm text-ink-muted dark:text-gray-400">
@@ -297,9 +321,11 @@ export default function Stores() {
                       <td colSpan={3} className="bg-brand-50/50 dark:bg-gray-700/20 p-4">
                         <div className="min-w-0">
                           <section aria-label={`${s.name} store browser profile`} className="mb-6">
-                            <BrowserProfileControls storeId={s.id} accountId={null} profiles={profiles} stores={stores} accounts={Object.values(accountsByStore).flat()} onChange={loadProfiles} />
+                            <BrowserProfileControls storeId={s.id} accountId={null} profiles={profiles} stores={stores} accounts={Object.values(accountsByStore).flat()} onChange={reloadProfiles} />
                           </section>
-                          <h3 className="text-sm font-medium text-ink dark:text-gray-200 mb-3">Store accounts</h3>
+                          <h3 className="text-sm font-medium text-ink dark:text-gray-200 mb-3">
+                            <NoticeLabel notice={(accountsByStore[s.id] ?? []).some(account => accountsNeedingLogin.has(account.id)) ? BROWSER_LOGIN_REQUIRED : undefined}>Store accounts</NoticeLabel>
+                          </h3>
                           <form
                             onSubmit={(e) => addAccount(s.id, e)}
                             className="flex gap-2 mb-4"
@@ -354,7 +380,9 @@ export default function Stores() {
                                     </>
                                   ) : (
                                     <>
-                                      <span className="text-sm text-ink dark:text-gray-200">{a.name}</span>
+                                      <span className="text-sm text-ink dark:text-gray-200">
+                                        <NoticeLabel notice={accountsNeedingLogin.has(a.id) ? BROWSER_LOGIN_REQUIRED : undefined}>{a.name}</NoticeLabel>
+                                      </span>
                                       <div className="flex gap-1">
                                         <button
                                           type="button"
@@ -382,7 +410,7 @@ export default function Stores() {
                                     </>
                                   )}
                                   </div>
-                                  <BrowserProfileControls storeId={s.id} accountId={a.id} profiles={profiles} stores={stores} accounts={Object.values(accountsByStore).flat()} onChange={loadProfiles} />
+                                  <BrowserProfileControls storeId={s.id} accountId={a.id} profiles={profiles} stores={stores} accounts={Object.values(accountsByStore).flat()} onChange={reloadProfiles} />
                                 </li>
                               ))
                             )}

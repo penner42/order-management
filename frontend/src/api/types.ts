@@ -299,6 +299,7 @@ export type BrowserProfileStatus =
 export interface BrowserProfile {
   id: number
   integration?: string | null
+  buying_group_id?: number | null
   store_account_id: number | null
   retailer: string
   status: BrowserProfileStatus | string

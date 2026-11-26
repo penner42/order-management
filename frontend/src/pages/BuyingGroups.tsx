@@ -5,6 +5,8 @@ import { useGroupSubmissionsEnabled } from '../utils/capabilities'
 import { BUYINGGROUP_DEFAULT_BASE_URL, supportsBuyingGroupBrowser } from '../utils/buyingGroupBrowser'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import BuyingGroupBrowserConnection from '../components/BuyingGroupBrowserConnection'
+import { NoticeLabel } from '../components/NoticeLabel'
+import { BROWSER_LOGIN_REQUIRED } from '../utils/browserLogin'
 import type { BrowserJob, BuyingGroup, BuyingGroupApiFramework } from '../api/types'
 import type { PaymentCapability } from './PaymentReview'
 
@@ -303,7 +305,10 @@ function sortGroupsByName(groups: BuyingGroup[]): BuyingGroup[] {
   return [...groups].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
 }
 
-export default function BuyingGroups() {
+export default function BuyingGroups({ groupsNeedingLogin, onBrowserStatusChange }: {
+  groupsNeedingLogin: ReadonlySet<number>
+  onBrowserStatusChange: () => void
+}) {
   const groupSubmissionsEnabled = useGroupSubmissionsEnabled()
   const navigate = useNavigate()
   const [groups, setGroups] = useState<BuyingGroup[]>([])
@@ -520,6 +525,7 @@ export default function BuyingGroups() {
   const remove = async (id: number) => {
     try {
       await api.delete(`/buying-groups/${id}`)
+      onBrowserStatusChange()
       setGroups(sortGroupsByName(await api.get<BuyingGroup[]>('/buying-groups')))
     } catch (e) {
       console.error(e)
@@ -905,7 +911,9 @@ export default function BuyingGroups() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <span className="font-medium text-ink">{g.name}</span>
+                        <span className="font-medium text-ink">
+                          <NoticeLabel notice={groupsNeedingLogin.has(g.id) ? BROWSER_LOGIN_REQUIRED : undefined}>{g.name}</NoticeLabel>
+                        </span>
                         {(g.api_framework || g.base_url || g.bearer_token || g.api_username) && (
                           <p
                             className="text-xs text-ink-muted truncate mt-0.5"
@@ -1006,7 +1014,9 @@ export default function BuyingGroups() {
                             {checkingReceivingGroupId === g.id || receivingJobActive(receivingJobs[g.id]) ? 'Checking…' : 'Check receiving'}
                           </button>
                         )}
-                        {supportsBuyingGroupBrowser(g) && <BuyingGroupBrowserConnection groupId={g.id} />}
+                        {supportsBuyingGroupBrowser(g) && (
+                          <BuyingGroupBrowserConnection groupId={g.id} needsLogin={groupsNeedingLogin.has(g.id)} onStatusChange={onBrowserStatusChange} />
+                        )}
                       </div>
                     )}
                     {receivingJobs[g.id] && <ReceivingJobStatus job={receivingJobs[g.id]} />}

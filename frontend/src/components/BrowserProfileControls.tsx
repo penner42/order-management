@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, getStoredToken } from '../api/client'
+import { NoticeLabel } from './NoticeLabel'
+import { BROWSER_LOGIN_REQUIRED, needsBrowserLogin } from '../utils/browserLogin'
 import type {
   BrowserJob,
   BrowserProfile,
@@ -790,7 +792,9 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-        <h3 className="font-medium text-ink dark:text-gray-100">Browser profile</h3>
+        <h3 className="font-medium text-ink dark:text-gray-100">
+          <NoticeLabel notice={ownerProfiles.some(needsBrowserLogin) ? BROWSER_LOGIN_REQUIRED : undefined}>Browser profile</NoticeLabel>
+        </h3>
         <Link to="/browser-import-log?category=stores" className="text-sm text-brand-600 dark:text-brand-400 hover:underline">View log</Link>
       </div>
       {error && (
@@ -935,9 +939,10 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
                         type="button"
                         onClick={() => startLogin(p.id)}
                         disabled={busy}
+                        aria-description={needsBrowserLogin(p) ? BROWSER_LOGIN_REQUIRED : undefined}
                         className="rounded-lg border border-brand-200 dark:border-gray-600 px-3 py-1.5 text-sm hover:bg-brand-50 dark:hover:bg-gray-800 disabled:opacity-50"
                       >
-                        Log in
+                        <NoticeLabel notice={needsBrowserLogin(p) ? BROWSER_LOGIN_REQUIRED : undefined}>Log in</NoticeLabel>
                       </button>
                       <label className="flex items-center gap-1 text-xs text-ink-muted dark:text-gray-400">
                         Pages

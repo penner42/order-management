@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createBrowserRouter, RouterProvider, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { api } from './api/client'
+import type { BrowserProfile } from './api/types'
+import { NoticeDot, NoticeLabel } from './components/NoticeLabel'
+import { needsBrowserLogin } from './utils/browserLogin'
 import Orders from './pages/Orders'
 import BuyingGroups from './pages/BuyingGroups'
 import BfmrOrderReview from './pages/BfmrOrderReview'
@@ -63,23 +66,31 @@ function DarkToggle() {
   )
 }
 
-function AppShell() {
-  const { user, loading, logout } = useAuth()
-  const location = useLocation()
-  const [mobileNavOpen, setMobileNavOpen] = useState(false)
-  const [hasPendingReceivingMatches, setHasPendingReceivingMatches] = useState(false)
-  const [receivingStatusVersion, setReceivingStatusVersion] = useState(0)
-  const isPublic =
-    location.pathname === '/login' || location.pathname === '/extension-auth'
-  const receivingUserId = !isPublic && user?.role !== 'admin' ? user?.id : undefined
+async function getReceivingNotice() {
+  const pending = await api.get<boolean>('/buying-groups/receiving-review/has-pending')
+  return pending ? 'Pending matches to approve' : null
+}
 
-  const refreshReceivingStatus = useCallback(() => {
-    setReceivingStatusVersion(version => version + 1)
-  }, [])
+async function getProfilesNeedingLogin() {
+  const profiles = await api.get<BrowserProfile[]>('/browser-profiles')
+  return profiles.filter(needsBrowserLogin)
+}
+
+function getBrowserLoginNotice(storeNeedsLogin: boolean, groupNeedsLogin: boolean) {
+  if (storeNeedsLogin && groupNeedsLogin) return 'Store and buying group browser sessions require login'
+  if (storeNeedsLogin) return 'Store browser sessions require login'
+  if (groupNeedsLogin) return 'Buying group browser sessions require login'
+  return null
+}
+
+function useNavStatus<T>(userId: number | undefined, pathname: string, getStatus: () => Promise<T>) {
+  const [status, setStatus] = useState<T | null>(null)
+  const [statusVersion, setStatusVersion] = useState(0)
+  const refreshNotice = useCallback(() => setStatusVersion(version => version + 1), [])
 
   useEffect(() => {
-    if (receivingUserId === undefined) {
-      setHasPendingReceivingMatches(false)
+    if (userId === undefined) {
+      setStatus(null)
       return
     }
     let requestVersion = 0
@@ -87,8 +98,8 @@ function AppShell() {
       if (document.visibilityState !== 'visible') return
       const version = ++requestVersion
       try {
-        const pending = await api.get<boolean>('/buying-groups/receiving-review/has-pending')
-        if (version === requestVersion) setHasPendingReceivingMatches(pending)
+        const nextStatus = await getStatus()
+        if (version === requestVersion) setStatus(nextStatus)
       } catch {
         // Keep the last known state if the status request fails.
       }
@@ -101,7 +112,20 @@ function AppShell() {
       window.removeEventListener('focus', refresh)
       window.clearInterval(timer)
     }
-  }, [receivingUserId, location.pathname, receivingStatusVersion])
+  }, [userId, pathname, getStatus, statusVersion])
+
+  return [status, refreshNotice] as const
+}
+
+function AppShell() {
+  const { user, loading, logout } = useAuth()
+  const location = useLocation()
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const isPublic =
+    location.pathname === '/login' || location.pathname === '/extension-auth'
+  const navUserId = !isPublic && user?.role !== 'admin' ? user?.id : undefined
+  const [receivingNotice, refreshReceivingStatus] = useNavStatus(navUserId, location.pathname, getReceivingNotice)
+  const [loginProfiles, refreshBrowserLoginStatus] = useNavStatus(navUserId, location.pathname, getProfilesNeedingLogin)
 
   useEffect(() => {
     setMobileNavOpen(false)
@@ -159,17 +183,35 @@ function AppShell() {
     return <Navigate to="/login" replace />
   }
 
-  const receivingPendingDescription = hasPendingReceivingMatches ? 'receiving-pending-description' : undefined
-  const receivingLabel = hasPendingReceivingMatches && (
-    <span className="inline-flex items-center gap-1.5">
-      Receiving
-      <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-orange-600 dark:bg-orange-400" />
-    </span>
-  )
+  const storeNeedsLogin = loginProfiles?.some(profile => profile.store_id != null) ?? false
+  const groupsNeedingLogin = new Set(loginProfiles?.map(profile => profile.buying_group_id).filter(id => id != null))
+  const groupNeedsLogin = groupsNeedingLogin.size > 0
+  const browserLoginNotice = getBrowserLoginNotice(storeNeedsLogin, groupNeedsLogin)
+  const notices: Record<string, { id: string; text: string } | undefined> = {}
+  if (receivingNotice) notices['/receiving-review'] = { id: 'receiving-pending-description', text: receivingNotice }
+  if (browserLoginNotice) notices['/settings'] = { id: 'browser-login-description', text: browserLoginNotice }
+  const activeNotices = Object.values(notices).filter(notice => notice !== undefined)
+  const navLinks = navItems.map(item => {
+    const notice = notices[item.to]
+    return (
+      <NavLink
+        key={item.to}
+        reloadDocument
+        end={item.to === '/'}
+        to={item.to}
+        aria-describedby={notice?.id}
+        className={({ isActive }) =>
+          `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
+        }
+      >
+        <NoticeLabel notice={notice?.text}>{item.label}</NoticeLabel>
+      </NavLink>
+    )
+  })
 
   return (
     <div className="min-h-screen flex flex-col">
-      {receivingPendingDescription && <span id={receivingPendingDescription} hidden>Pending matches to approve</span>}
+      {activeNotices.map(({ id, text }) => <span key={id} id={id} hidden>{text}</span>)}
       <header className="bg-white dark:bg-gray-900 border-b border-brand-200/80 dark:border-gray-700 sticky top-0 z-10">
         <div className="max-w-[1920px] mx-auto px-4 h-14 flex items-center gap-3 sm:gap-6 w-full">
           <NavLink
@@ -179,20 +221,7 @@ function AppShell() {
             Order Management
           </NavLink>
           <nav aria-label="Main navigation" className="hidden md:flex flex-1 min-w-0 gap-1 overflow-x-auto">
-            {navItems.map((item) => (
-              <NavLink
-                key={item.to}
-                reloadDocument
-                end={item.to === "/"}
-                to={item.to}
-                aria-describedby={item.to === '/receiving-review' ? receivingPendingDescription : undefined}
-                className={({ isActive }) =>
-                  `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                }
-              >
-                {item.to === '/receiving-review' && receivingLabel ? receivingLabel : item.label}
-              </NavLink>
-            ))}
+            {navLinks}
           </nav>
           <div className="flex items-center gap-1.5 sm:gap-2 ml-auto">
             <DarkToggle />
@@ -213,8 +242,9 @@ function AppShell() {
             </button>
             <button
               type="button"
-              className="md:hidden p-2 rounded-md text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100 transition"
+              className="relative md:hidden p-2 rounded-md text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100 transition"
               aria-label={mobileNavOpen ? 'Close navigation menu' : 'Open navigation menu'}
+              aria-describedby={activeNotices.map(notice => notice.id).join(' ') || undefined}
               aria-expanded={mobileNavOpen}
               onClick={() => setMobileNavOpen((v) => !v)}
             >
@@ -227,6 +257,7 @@ function AppShell() {
                   <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 6h14a1 1 0 010 2H3a1 1 0 010-2zm0 6h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
                 </svg>
               )}
+              {activeNotices.length > 0 && <NoticeDot className="absolute right-1.5 top-1.5 ring-2 ring-white dark:ring-gray-900" />}
             </button>
           </div>
         </div>
@@ -245,20 +276,7 @@ function AppShell() {
             </div>
             <div className="py-2 flex-1 overflow-auto">
               <nav aria-label="Mobile navigation" className="flex flex-col gap-1">
-                {navItems.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    reloadDocument
-                    end={item.to === "/"}
-                    to={item.to}
-                    aria-describedby={item.to === '/receiving-review' ? receivingPendingDescription : undefined}
-                    className={({ isActive }) =>
-                      `px-3 py-2 rounded-md text-sm font-medium transition ${isActive ? 'bg-brand-100 text-brand-800 dark:bg-gray-700 dark:text-gray-100' : 'text-ink-muted hover:bg-brand-100/60 hover:text-ink dark:hover:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100'}`
-                    }
-                  >
-                    {item.to === '/receiving-review' && receivingLabel ? receivingLabel : item.label}
-                  </NavLink>
-                ))}
+                {navLinks}
               </nav>
               {user.role !== 'admin' && (
                 <div className="mt-3 pt-3 border-t border-brand-100/70 dark:border-gray-700">
@@ -310,11 +328,11 @@ function AppShell() {
           <Route path="/browser-automation" element={<LegacyRedirect to="/settings/stores" />} />
           <Route path="/browser-import-log" element={<BrowserImportLog />} />
           <Route path="/profile" element={<LegacyRedirect to="/settings/account" />} />
-          <Route path="/settings" element={<Settings />}>
+          <Route path="/settings" element={<Settings storeNeedsLogin={storeNeedsLogin} groupNeedsLogin={groupNeedsLogin} />}>
             <Route index element={<LegacyRedirect to="/settings/account" />} />
             <Route path="account" element={<Profile />} />
-            <Route path="buying-groups" element={<BuyingGroups />} />
-            <Route path="stores" element={<Stores />} />
+            <Route path="buying-groups" element={<BuyingGroups groupsNeedingLogin={groupsNeedingLogin} onBrowserStatusChange={refreshBrowserLoginStatus} />} />
+            <Route path="stores" element={<Stores onBrowserStatusChange={refreshBrowserLoginStatus} />} />
             <Route path="ignored-zip-codes" element={<IgnoredZipCodes />} />
             <Route path="payment-methods" element={<PaymentMethods />} />
             <Route path="monarch" element={<MonarchSettings />} />
