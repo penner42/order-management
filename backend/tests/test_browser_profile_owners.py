@@ -1,6 +1,8 @@
 """Profile ownership and import regressions without live retailer requests."""
 import asyncio
 import unittest
+from datetime import datetime, timezone
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
@@ -86,6 +88,65 @@ class BrowserProfileOwnerTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             profiles.update_browser_profile_schedule(p.id, BrowserProfileScheduleUpdate(store_account_id=self.account.id), db=self.db, _=self.user)
         self.assertNotEqual(taken.id, p.id)
+
+    def test_reset_erases_all_profile_directories_and_preserves_schedules_and_history(self):
+        profile_id = self.create(store_account_id=self.account.id).id
+        other_id = self.create(store_id=self.store.id).id
+        profile = self.db.get(BrowserProfile, profile_id)
+        run_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        profile.status = 'error'
+        profile.last_error = 'Stale browser state'
+        profile.last_import_at = run_at
+        profile.full_check_enabled = True
+        profile.full_check_max_pages = 7
+        profile.full_check_last_run_at = run_at
+        profile.full_check_next_run_at = run_at
+        profile.unshipped_check_enabled = True
+        profile.unshipped_check_interval_minutes = 15
+        profile.unshipped_check_last_run_at = run_at
+        profile.unshipped_check_next_run_at = run_at
+        self.db.commit()
+        before = profiles.get_browser_profile(profile_id, db=self.db, _=self.user)
+
+        with (
+            TemporaryDirectory() as root,
+            patch.object(profiles.settings, 'browser_profiles_dir', root),
+            patch.object(profiles.session_manager, 'close_session', new_callable=AsyncMock) as close,
+        ):
+            paths = profiles.all_profile_data_dirs(profile_id)
+            other_path = profiles.all_profile_data_dirs(other_id)[0]
+            for path in [*paths, other_path]:
+                storage = path / 'Default' / 'Local Storage'
+                storage.mkdir(parents=True)
+                (storage / 'data').write_text('browser data')
+
+            for _ in range(2):
+                after = asyncio.run(profiles.reset_browser_profile_data(profile_id, db=self.db, _=self.user))
+                self.assertEqual(after.status, 'login_required')
+                self.assertIsNone(after.last_error)
+                self.assertEqual(
+                    after.model_dump(exclude={'status', 'last_error', 'updated_at'}),
+                    before.model_dump(exclude={'status', 'last_error', 'updated_at'}),
+                )
+                self.assertTrue(all(not path.exists() for path in paths))
+                self.assertTrue((other_path / 'Default' / 'Local Storage' / 'data').is_file())
+            self.assertEqual([call.args for call in close.await_args_list], [(profile_id,), (profile_id,)])
+
+    def test_reset_rejects_busy_profiles_before_touching_browser_data(self):
+        profile_id = self.create(store_id=self.store.id).id
+        for status in ('login_in_progress', 'importing'):
+            self.db.get(BrowserProfile, profile_id).status = status
+            self.db.commit()
+            with (
+                self.subTest(status=status),
+                patch.object(profiles.session_manager, 'close_session', new_callable=AsyncMock) as close,
+                patch.object(profiles, 'all_profile_data_dirs') as paths,
+                self.assertRaises(HTTPException) as error,
+            ):
+                asyncio.run(profiles.reset_browser_profile_data(profile_id, db=self.db, _=self.user))
+            self.assertEqual(error.exception.status_code, 409)
+            close.assert_not_awaited()
+            paths.assert_not_called()
 
     def test_unshipped_checks_only_the_exact_owner(self):
         for store_id, account_id, number in [(self.store.id, None, 'direct'),

@@ -67,6 +67,7 @@ SUPPORTED_RETAILERS = {"amazon", "walmart", "costco"}
 
 
 _import_tasks: dict[int, asyncio.Task] = {}
+_closing_profiles_for_reset: set[int] = set()
 
 
 def _resolve_owner(db: Session, store_id: int | None, account_id: int | None) -> tuple[int, int | None]:
@@ -650,6 +651,57 @@ def delete_profile_data_dirs(paths: list[Path]) -> None:
     for path in paths:
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
+
+
+@router.post("/{profile_id}/reset-data", response_model=BrowserProfileRead)
+async def reset_browser_profile_data(
+    profile_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Erase persistent browser data and require sign-in before scheduled checks resume."""
+    profile = _get_profile_or_404(db, profile_id)
+
+    def check_idle(profile: BrowserProfile) -> None:
+        if profile.status in ("importing", "login_in_progress") or profile_id in _import_tasks:
+            raise HTTPException(409, "Finish the active check or cancel the login before resetting browser data.")
+
+    check_idle(profile)
+    if profile_id in _closing_profiles_for_reset:
+        raise HTTPException(409, "Browser data is already being reset.")
+    _closing_profiles_for_reset.add(profile_id)
+    try:
+        await session_manager.close_session(profile_id)
+    finally:
+        _closing_profiles_for_reset.remove(profile_id)
+
+    # Recheck after closing the browser. Login and check claims use this same row lock.
+    profile = (
+        db.query(BrowserProfile)
+        .filter_by(id=profile_id)
+        .with_for_update()
+        .populate_existing()
+        .one_or_none()
+    )
+    if profile is None:
+        raise HTTPException(404, "Browser profile not found.")
+    check_idle(profile)
+    profile.status = "login_required"
+    profile.last_error = None
+    try:
+        for path in all_profile_data_dirs(profile_id):
+            if path.is_symlink() or not path.is_dir():
+                path.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(path)
+    except OSError as exc:
+        logger.exception("Could not fully reset browser data for profile %s", profile_id)
+        profile.last_error = "Could not clear all browser data. Try resetting again before signing in."
+        db.commit()
+        raise HTTPException(500, profile.last_error) from exc
+
+    db.commit()
+    return _profile_read(_get_profile_or_404(db, profile_id))
 
 
 @router.post("/{profile_id}/unlock", response_model=BrowserProfileRead)

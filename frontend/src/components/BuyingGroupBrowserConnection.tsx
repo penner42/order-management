@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
+import type { BrowserProfile } from '../api/types'
 import { LiveBrowserView } from './BrowserProfileControls'
 import { NoticeLabel } from './NoticeLabel'
+import { ResetBrowserDataButton } from './ResetBrowserDataButton'
 import { BROWSER_LOGIN_REQUIRED } from '../utils/browserLogin'
 
 interface Connection {
@@ -20,6 +22,7 @@ export default function BuyingGroupBrowserConnection({ groupId, needsLogin, onSt
   const [loginOpen, setLoginOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [resetComplete, setResetComplete] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -32,10 +35,11 @@ export default function BuyingGroupBrowserConnection({ groupId, needsLogin, onSt
   async function act(work: () => Promise<void>) {
     setBusy(true)
     setError('')
+    setResetComplete(false)
     try {
       await work()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not open the BuyingGroup.com browser.')
+      setError(e instanceof Error ? e.message : 'BuyingGroup.com browser action failed.')
     } finally {
       setBusy(false)
       onStatusChange()
@@ -64,7 +68,14 @@ export default function BuyingGroupBrowserConnection({ groupId, needsLogin, onSt
     }
   }
 
+  async function resetBrowserData(profileId: number) {
+    const result = await api.post<BrowserProfile>(`/browser-profiles/${profileId}/reset-data`, {})
+    setConnection(current => current ? { ...current, status: result.status } : current)
+    setResetComplete(true)
+  }
+
   const connected = connection?.status === 'ready' && !needsLogin
+  const profileId = connection?.profile_id
 
   return (
     <>
@@ -80,7 +91,14 @@ export default function BuyingGroupBrowserConnection({ groupId, needsLogin, onSt
             : connected ? 'Reconnect browser' : 'Sign in with browser'}
         </NoticeLabel>
       </button>
+      {connection && profileId != null && (
+        <ResetBrowserDataButton
+          disabled={busy || connection.status === 'importing' || connection.status === 'login_in_progress'}
+          onReset={() => void act(() => resetBrowserData(profileId))}
+        />
+      )}
       {connected && <span>Browser connected</span>}
+      {resetComplete && <span role="status">Browser data cleared. Sign in again.</span>}
       {error && <span role="alert" className="text-red-600 dark:text-red-400">{error}</span>}
       {loginOpen && connection?.profile_id != null && (
         <LiveBrowserView

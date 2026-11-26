@@ -72,3 +72,31 @@ test('store checks have separate toggles, daily full checks and staggered minute
     full_check_enabled: true, unshipped_check_enabled: false, unshipped_check_next_run_at: null,
   })
 })
+
+test('resetting browser data requires confirmation and keeps the saved schedule', async ({ app, data }) => {
+  const storeName = data.name('browser-reset')
+  const store = await data.create('/stores', { name: storeName })
+  const profile = await data.create<BrowserProfile>('/browser-profiles', { store_id: store.id, retailer: 'amazon' })
+  const path = `/browser-profiles/${profile.id}`
+  const scheduled = { full_check_enabled: true, full_check_max_pages: 7, unshipped_check_enabled: true, unshipped_check_interval_minutes: 15 }
+  const save = await data.request.patch(`/api${path}`, { headers: data.headers, data: scheduled })
+  expect(save.ok()).toBeTruthy()
+
+  await app.goto(`/settings/stores?store_id=${store.id}`)
+  const panel = app.getByRole('region', { name: `${storeName} store browser profile`, exact: true })
+  const reset = panel.getByRole('button', { name: 'Reset browser data', exact: true })
+  const dialog = app.getByRole('dialog', { name: /Clear all data for this browser profile/ })
+  await reset.click()
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  expect((await data.get<BrowserProfile>(path)).status).toBe('logged_out')
+
+  await reset.click()
+  await dialog.getByRole('button', { name: 'Reset browser data', exact: true }).click()
+  await expect(panel.getByRole('status')).toHaveText('Browser data cleared. Log in again to resume scheduled checks.')
+  await expect(panel.getByRole('button', { name: 'Log in', exact: true })).toBeEnabled()
+  await expect(panel.getByRole('checkbox', { name: 'Full check', exact: true })).toBeChecked()
+  await expect(panel.getByLabel('Every (minutes)', { exact: true })).toHaveValue('15')
+  expect(await data.get<BrowserProfile>(path)).toMatchObject({ ...scheduled, status: 'login_required' })
+})

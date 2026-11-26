@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { MONARCH, type MonarchSettings as Settings } from '../api/monarch'
-import type { BrowserJob, BuyingGroup } from '../api/types'
+import type { BrowserJob, BrowserProfile, BuyingGroup } from '../api/types'
 import { LiveBrowserView } from '../components/BrowserProfileControls'
+import { ResetBrowserDataButton } from '../components/ResetBrowserDataButton'
 
 const inputClass = 'rounded border border-brand-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2'
 const buttonClass = 'rounded bg-brand-600 px-3 py-2 text-white disabled:opacity-50'
@@ -77,6 +78,11 @@ export default function MonarchSettings() {
             await api.post(`/browser-profiles/${profile.id}/login/start`, {}); setLogin(true); await refresh()
           })}>Log in to Monarch</button>
           {profile.status === 'login_in_progress' && !login && <button className={buttonClass} onClick={() => setLogin(true)}>Resume login</button>}
+          <ResetBrowserDataButton disabled={disabled || profile.status === 'login_in_progress'} onReset={() => void action(async () => {
+            const updated = await api.post<BrowserProfile>(`/browser-profiles/${profile.id}/reset-data`, {})
+            setSettings(current => current && { ...current, profile: updated })
+            setMessage('Browser data cleared. Log in again to resume scheduled checks.')
+          })} />
           <Link className="underline self-center" to="/payments/monarch">Review deposits</Link>
         </div>
         {login && <LiveBrowserView profileId={profile.id} suggestedUrl="https://app.monarch.com" onDone={() => void action(async () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, getStoredToken } from '../api/client'
 import { NoticeLabel } from './NoticeLabel'
+import { ResetBrowserDataButton } from './ResetBrowserDataButton'
 import { BROWSER_LOGIN_REQUIRED, needsBrowserLogin } from '../utils/browserLogin'
 import type {
   BrowserJob,
@@ -574,6 +575,8 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
   accounts: StoreAccount[]; onChange: () => Promise<void>
 }) {
   const [error, setError] = useState<string | null>(null)
+  const [resetMessage, setResetMessage] = useState<string | null>(null)
+  const [resettingProfileId, setResettingProfileId] = useState<number | null>(null)
   const [selectedRetailer, setSelectedRetailer] = useState<'' | 'amazon' | 'walmart' | 'costco'>('')
   const [loginProfileId, setLoginProfileId] = useState<number | null>(null)
   const [loginSuggestedUrl, setLoginSuggestedUrl] = useState('https://www.walmart.com/')
@@ -634,6 +637,7 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
 
   const startLogin = async (profileId: number) => {
     setError(null)
+    setResetMessage(null)
     try {
       const res = await api.post<{ login_url?: string }>(
         `/browser-profiles/${profileId}/login/start`,
@@ -786,6 +790,22 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
     }
   }
 
+  const resetProfileData = async (profileId: number) => {
+    setResettingProfileId(profileId)
+    setResetMessage(null)
+    setError(null)
+    try {
+      await api.post(`/browser-profiles/${profileId}/reset-data`, {})
+      await load()
+      setResetMessage('Browser data cleared. Log in again to resume scheduled checks.')
+    } catch (err) {
+      await load()
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setResettingProfileId(null)
+    }
+  }
+
   const deleteProfile = async (profileId: number) => {
     if (!confirm('Delete this browser profile? Stored cookies for this store or account will be removed from the server.')) {
       return
@@ -808,6 +828,9 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
       </div>
       {error && (
         <p role="alert" className="mb-4 text-sm text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {resetMessage && (
+        <p role="status" className="mb-4 text-sm text-ink dark:text-gray-100">{resetMessage}</p>
       )}
 
       {ownerProfiles.length === 0 && <section className="mb-4 max-w-xl">
@@ -844,7 +867,8 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
               const job = jobsByProfile[p.id]
               const maxPages = maxPagesByProfile[p.id] ?? p.full_check_max_pages ?? 3
               const schedule = scheduleByProfile[p.id] ?? scheduleDraftFromProfile(p)
-              const busy = p.status === 'importing' || p.status === 'login_in_progress'
+              const resetting = resettingProfileId === p.id
+              const busy = resetting || p.status === 'importing' || p.status === 'login_in_progress'
               const scheduleDirty =
                 schedule.full_check_enabled !== !!p.full_check_enabled ||
                 schedule.full_check_max_pages !== (p.full_check_max_pages ?? 3) ||
@@ -991,10 +1015,15 @@ export default function BrowserProfileControls({ storeId, accountId, profiles, s
                       >
                         Unlock
                       </button>
+                      <ResetBrowserDataButton
+                        disabled={busy}
+                        onReset={() => void resetProfileData(p.id)}
+                      />
                       <button
                         type="button"
                         onClick={() => deleteProfile(p.id)}
-                        className="rounded-lg px-2 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                        disabled={resetting}
+                        className="rounded-lg px-2 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
                         aria-label="Delete profile"
                       >
                         Delete
