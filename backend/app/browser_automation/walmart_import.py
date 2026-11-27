@@ -1,10 +1,11 @@
 """Walmart bulk order capture using Playwright + extension page hooks."""
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, TypeVar
 
-from playwright.async_api import Page
+from playwright.async_api import Error as PlaywrightError, Page
 from app.browser_automation.screenshots import capture_order_screenshot
 
 from app.browser_automation.common import (
@@ -23,6 +24,27 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 OrderCallback = Callable[[dict[str, Any]], None]
+T = TypeVar("T")
+
+
+async def _read_walmart_page(page: Page, url: str, read: Callable[[], Awaitable[T]]) -> T:
+    for attempt in range(2):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            if not looks_like_walmart_signin(page.url):
+                result = await read()
+                if not looks_like_walmart_signin(page.url):
+                    return result
+        except PlaywrightError:
+            # A client-side sign-in redirect can interrupt navigation or evaluation.
+            if not looks_like_walmart_signin(page.url):
+                raise
+
+        if attempt == 0:
+            logger.info("Walmart redirected to sign-in during an order check; retrying once.")
+            await asyncio.sleep(1)
+
+    raise LoginRequiredError("Walmart session requires login.")
 
 
 async def _inject_walmart_scripts(page: Page) -> None:
@@ -96,6 +118,31 @@ async def _collect_order_numbers(page: Page, max_pages: int) -> list[str]:
         seen.add(s)
         numbers.append(s)
     return numbers
+
+
+async def _read_order_numbers(page: Page, max_pages: int) -> list[str]:
+    order_numbers = await _collect_order_numbers(page, max_pages)
+    if order_numbers:
+        return order_numbers
+
+    # Fall back to DOM links on the current page only.
+    order_numbers = await page.evaluate(
+        """() => {
+          const out = [];
+          const seen = new Set();
+          document.querySelectorAll('a[href*="/orders/"]').forEach((a) => {
+            const href = a.getAttribute('href') || '';
+            const m = /\\/orders\\/([^/?#]+)/.exec(href);
+            if (!m) return;
+            const id = String(m[1]);
+            if (seen.has(id)) return;
+            seen.add(id);
+            out.push(id);
+          });
+          return out;
+        }"""
+    )
+    return order_numbers if isinstance(order_numbers, list) else []
 
 
 async def _wait_for_order_detail_payload(page: Page, order_number: str, timeout_ms: int = 35000) -> dict[str, Any]:
@@ -201,6 +248,11 @@ async def _normalize_detail(page: Page, detail_payload: dict[str, Any], source_u
     return normalized
 
 
+async def _read_order_detail(page: Page, order_number: str) -> dict[str, Any]:
+    detail = await _wait_for_order_detail_payload(page, order_number)
+    return await _normalize_detail(page, detail, page.url)
+
+
 async def _try_capture_invoice_html(page: Page, order_number: str, timeout_ms: int = 8000) -> str | None:
     """Capture the document Walmart prepares for its Print Invoice button."""
     try:
@@ -237,14 +289,9 @@ async def _capture_walmart_order_details(
             order_id=order_number,
             captured=len(captured),
         )
-        detail_url = f"https://www.walmart.com/orders/{order_number}"
+        detail_url = f"{WALMART_ORDERS_URL}/{order_number}"
         try:
-            await page.goto(detail_url, wait_until="domcontentloaded", timeout=60_000)
-            if looks_like_walmart_signin(page.url):
-                raise LoginRequiredError("Walmart session requires login.")
-            await _ensure_orders_hook(page)
-            detail = await _wait_for_order_detail_payload(page, str(order_number))
-            body = await _normalize_detail(page, detail, page.url)
+            body = await _read_walmart_page(page, detail_url, lambda: _read_order_detail(page, order_number))
             invoice_html = await _try_capture_invoice_html(page, str(body["externalOrder"]["id"]))
             if invoice_html:
                 body["invoiceHtml"] = invoice_html
@@ -283,27 +330,12 @@ async def run_walmart_import(
         if on_progress:
             on_progress(kwargs)
 
-    start_url = WALMART_ORDERS_URL
-    if order_ids:
-        start_url = f"https://www.walmart.com/orders/{order_ids[0]}"
-
     session = await session_manager.ensure_session(
         profile_id,
         mode="import",
-        start_url=start_url,
         retailer="walmart",
     )
     page = session.page
-
-    if looks_like_walmart_signin(page.url):
-        raise LoginRequiredError("Walmart session requires login.")
-
-    # Give SPA a moment, then inject hooks.
-    try:
-        await page.wait_for_load_state("domcontentloaded", timeout=30_000)
-    except Exception:
-        pass
-    await _ensure_orders_hook(page)
 
     if order_ids is not None:
         # Preserve caller order; drop empties / dupes.
@@ -322,30 +354,9 @@ async def run_walmart_import(
         )
     else:
         progress(phase="list", message="Collecting order numbers from Walmart…", page=1)
-        order_numbers = await _collect_order_numbers(page, max_pages)
-        if not order_numbers:
-            # Fallback: DOM links on current page only
-            order_numbers = await page.evaluate(
-                """() => {
-                  const out = [];
-                  const seen = new Set();
-                  document.querySelectorAll('a[href*="/orders/"]').forEach((a) => {
-                    const href = a.getAttribute('href') || '';
-                    const m = /\\/orders\\/([^/?#]+)/.exec(href);
-                    if (!m) return;
-                    const id = String(m[1]);
-                    if (seen.has(id)) return;
-                    seen.add(id);
-                    out.push(id);
-                  });
-                  return out;
-                }"""
-            )
-            if not isinstance(order_numbers, list):
-                order_numbers = []
-
-        if looks_like_walmart_signin(page.url):
-            raise LoginRequiredError("Walmart session requires login.")
+        order_numbers = await _read_walmart_page(
+            page, WALMART_ORDERS_URL, lambda: _read_order_numbers(page, max_pages),
+        )
 
         progress(
             phase="list",
